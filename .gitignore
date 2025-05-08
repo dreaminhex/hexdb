@@ -1,0 +1,20 @@
+# HexDB Git Ignore
+
+# Build artifacts
+/target
+**/*.rs.bk
+
+# Logs and temp
+*.log
+*.tmp
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Editor backup
+*~

@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "hexdb_core",
+    "hexdb_node",
+    "hexdb_cli",
+    "hexdb_query"
+]

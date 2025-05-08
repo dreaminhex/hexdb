@@ -1,0 +1,13 @@
+[package]
+name = "hexdb_node"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hexdb_core = { path = "../hexdb_core" }
+tokio = { version = "1.37", features = ["full"] }
+axum = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+hyper = { version = "1", features = ["server"] }

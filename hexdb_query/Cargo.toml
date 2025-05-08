@@ -1,0 +1,10 @@
+[package]
+name = "hexdb_query"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hexdb_core = { path = "../hexdb_core" }
+async-graphql = "7.0"
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"

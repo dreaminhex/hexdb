@@ -1,0 +1,16 @@
+[package]
+name = "hexdb_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+config = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.37", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time", "json"] }
+dashmap = "5.5"
+async-trait = "0.1"
+atty = "0.2"

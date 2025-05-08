@@ -1,0 +1,5 @@
+engine_endpoint = "127.0.0.1:7700"
+query_endpoint = "127.0.0.1:7701"
+discovery_endpoint = "127.0.0.1:7702"
+ram_mb = 1024
+disk_mb = 16384
