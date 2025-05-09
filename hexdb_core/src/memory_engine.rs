@@ -1,18 +1,21 @@
 use std::sync::Arc;
 use dashmap::DashMap;
-use crate::{document::Document, engine::Engine};
+use crate::{document::Document, engine::Engine, hex::HexNode};
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct MemoryEngine {
     store: Arc<DashMap<String, Document>>,
+    pub node: Arc<Mutex<HexNode>>, // Added HexNode as internal engine
 }
 
 impl MemoryEngine {
     pub fn new() -> Self {
         Self {
             store: Arc::new(DashMap::new()),
+            node: Arc::new(Mutex::new(HexNode::new())),
         }
     }
 }
@@ -36,4 +39,4 @@ impl Engine for MemoryEngine {
     async fn count(&self) -> Result<usize> {
         Ok(self.store.len())
     }
-}
+} 

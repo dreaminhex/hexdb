@@ -18,3 +18,6 @@ Thumbs.db
 
 # Editor backup
 *~
+
+# HexDB specific
+*.hexdb.pid

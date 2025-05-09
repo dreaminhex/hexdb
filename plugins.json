@@ -1,0 +1,6 @@
+{
+  "@streams/kafka": {
+    "path": "./plugins/streams/kafka",
+    "type": "stream"
+  }
+}

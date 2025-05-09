@@ -2,19 +2,19 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HexConfig {
-    /// Listening address for document engine
+    // Listening address for document engine
     pub engine_endpoint: String,
 
-    /// Listening address for query interface (GraphQL, etc.)
+    // Listening address for query interface (GraphQL, etc.)
     pub query_endpoint: String,
 
-    /// Listening address for cluster discovery (TCP or WS)
+    // Listening address for cluster discovery (TCP or WS)
     pub discovery_endpoint: String,
 
-    /// How much RAM to allocate (in MiB) for hot document storage
+    // How much RAM to allocate (in MiB) for hot document storage
     pub ram_mb: u32,
 
-    /// How much disk to allocate (in MiB) for persistent storage
+    // How much disk to allocate (in MiB) for persistent storage
     pub disk_mb: u32,
 }
 

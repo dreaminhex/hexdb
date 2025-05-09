@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "hexdb_core",
-    "hexdb_node",
+    "hexdb_api",
     "hexdb_cli",
     "hexdb_query"
 ]
+resolver = "2"

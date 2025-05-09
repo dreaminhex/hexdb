@@ -15,8 +15,8 @@ pub fn init_logging(service_name: &str) {
         .with_max_level(tracing::Level::TRACE)
         .with_writer(std::io::stdout)
         .with_ansi(atty::is(atty::Stream::Stdout))
-        .json()
+        .pretty()
         .init();
 
-    tracing::info!(service = %service_name, "Logging initialized.");
+    tracing::info!(service = %service_name, "🗎 Logging initialized.");
 }

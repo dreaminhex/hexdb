@@ -1,0 +1,7 @@
+# plugins/streams/kafka/plugin.toml
+name = "Kafka Stream Output"
+id = "@streams/kafka"
+type = "stream"
+entry = "main.rs"
+description = "Kafka Stream Output Plugin"
+version = "0.1.0"
