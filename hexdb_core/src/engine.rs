@@ -1,3 +1,8 @@
+// HexDB Core Engine
+// This module defines the `Engine` trait, which represents a storage engine for
+// HexDB. The `Engine` trait provides methods for inserting, retrieving, updating,
+// deleting, and counting documents in a tessellation.
+
 use crate::document::Document;
 use anyhow::Result;
 use async_trait::async_trait;

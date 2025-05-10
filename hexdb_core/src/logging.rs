@@ -1,3 +1,8 @@
+// HexDB Core Logging
+// This module provides a logging utility for the HexDB engine, using the
+// `tracing` and `tracing-subscriber` crates. It initializes a subscriber that
+// formats log messages with timestamps, thread information, and log levels.
+
 use tracing_subscriber::{fmt, EnvFilter};
 
 pub fn init_logging(service_name: &str) {

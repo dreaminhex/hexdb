@@ -1,3 +1,12 @@
+// HexDB Core Hexagonal Storage
+// This module implements a hexagonal storage engine for HexDB, allowing for
+// efficient storage and retrieval of documents in a hexagonal grid structure.
+// Memory is chunked and distributed across six vertices, providing redundancy and
+// fault tolerance. The engine supports operations such as inserting, retrieving,
+// validating, and repairing documents. The engine is designed to be fast and
+// efficient, using a hash map for storage and a cryptographic hash function for
+// integrity checks.
+
 use std::collections::{HashMap, HashSet};
 use blake3; // fast, cryptographic hash
 use tracing::{info, warn};
@@ -93,6 +102,12 @@ impl HexNode {
                 chunks[i % chunks.len()].to_vec() // partial chunk on others
             };
             vertex.store_chunk(tessellation, doc_id, chunk);
+        }
+    }
+
+    pub fn delete_document(&mut self, tessellation: &str, doc_id: &str) {
+        for vertex in self.vertices.iter_mut() {
+        vertex.storage.remove(&(tessellation.to_string(), doc_id.to_string()));
         }
     }
 

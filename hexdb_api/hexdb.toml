@@ -8,4 +8,4 @@ ram_mb = 1024
 
 [storage]
 disk_mb = 16384
-wal_key = "base64:2Ni4Fz...=="  # 256-bit AES key (base64-encoded)
+wal_key = "base64:eTdfrgJPvGOy7tJPI8z7CyO5Z9TT+biDWK+SCVa7OfA="  # 256-bit AES key (base64-encoded)

@@ -14,3 +14,4 @@ serde_json = "1.0.140"
 toml = "0.8.22"
 hexdb_core = { path = "../hexdb_core" }
 windows-sys = { version = "0.59.0", features = ["Win32_System_Threading", "Win32_System_ProcessStatus"] }
+tracing = "0.1"

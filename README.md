@@ -46,7 +46,7 @@ Apply the `-s` argument to run HexDB in the background.
 hexdb start -s
 ```
 
-Or you can run the node directly using `cargo`.
+Or you can run the API directly using `cargo`.
 
 ```bash
 cargo run -p hexdb_api
@@ -107,7 +107,7 @@ Configuration values can be found in the root.
 
 [hexdb.toml](hexdb.toml)
 
-By default, HexDB uses the following values by default:
+By default, HexDB uses the following values:
 
 ```toml
 engine_endpoint = "127.0.0.1:7700"
@@ -135,21 +135,25 @@ A tessellation is a collection of stored documents. Tessellations are used to co
 
 ### Completed
 
-- ✔️ Command-line interface
-- ✔️ REST API
-- ✔️ Data replication
-- ✔️ Collections (Tessellations)
-- ✔️ Plugin Ecosystem
-- ✔️ Horizontal Partitioning
-- ✔️ Configuration (URLs, RAM/DISK usage)
-- ✔️ Strong Typing (string, 32-, 64, 128-bit integer, boolean, datetime, binary)
-- ✔️ Type Introspection
+- ✅ Command-line interface
+- ✅ REST API
+- ✅ Data replication
+- ✅ Collections (Tessellations)
+- ✅ Plugin Ecosystem
+- ✅ Horizontal Partitioning
+- ✅ Configuration (URLs, RAM/DISK usage)
+- ✅ Strong Typing (string, 32-, 64, 128-bit integer, boolean, datetime, binary)
+- ✅ Type Introspection
 
 ### In-Progress
 
 - Write-Ahead Logging
+- Encryption (AES-GCM)
+
+### Planned
+
 - Read/Write Endpoints
-- Encryption
+
 - Compression
 - Network Discovery
 - Open Telemetry
@@ -164,3 +168,6 @@ A tessellation is a collection of stored documents. Tessellations are used to co
 - Recovery
 - Logging
 - Schema Versioning
+
+
+Get-Process hexdb_api | Stop-Process -Force

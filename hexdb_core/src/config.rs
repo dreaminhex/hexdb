@@ -1,34 +1,55 @@
+// HexDB Core Configuration
+// This module provides a configuration structure for the HexDB engine.
+// allowing for easy customization of various parameters such as endpoints,
+// memory allocation, and disk space.
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HexConfig {
-    // Listening address for document engine
-    pub engine_endpoint: String,
-
-    // Listening address for query interface (GraphQL, etc.)
-    pub query_endpoint: String,
-
-    // Listening address for cluster discovery (TCP or WS)
-    pub discovery_endpoint: String,
-
-    // How much RAM to allocate (in MiB) for hot document storage
-    pub ram_mb: u32,
-
-    // How much disk to allocate (in MiB) for persistent storage
-    pub disk_mb: u32,
+    pub network: NetworkConfig,
+    pub memory: MemoryConfig,
+    pub storage: StorageConfig,
 }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct NetworkConfig {
+    pub engine_endpoint: String,
+    pub query_endpoint: String,
+    pub discovery_endpoint: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MemoryConfig {
+    pub ram_mb: u32,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct StorageConfig {
+    pub disk_mb: u32,
+    pub wal_key: String, // base64 encoded 256-bit AES key
+}
+
 
 impl Default for HexConfig {
     fn default() -> Self {
         Self {
-            engine_endpoint: "127.0.0.1:7700".into(),
-            query_endpoint: "127.0.0.1:7701".into(),
-            discovery_endpoint: "127.0.0.1:7702".into(),
-            ram_mb: 512,
-            disk_mb: 8192,
+            network: NetworkConfig {
+                engine_endpoint: "127.0.0.1:7700".into(),
+                query_endpoint: "127.0.0.1:7701".into(),
+                discovery_endpoint: "127.0.0.1:7702".into(),
+            },
+            memory: MemoryConfig {
+                ram_mb: 512,
+            },
+            storage: StorageConfig {
+                disk_mb: 8192,
+                wal_key: "base64:...".into(), // fallback
+            },
         }
     }
 }
+
 
 pub fn load_config() -> Result<HexConfig, config::ConfigError> {
     let cfg = config::Config::builder()

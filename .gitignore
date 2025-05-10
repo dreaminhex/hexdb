@@ -21,3 +21,4 @@ Thumbs.db
 
 # HexDB specific
 *.hexdb.pid
+*.hexdb.dat

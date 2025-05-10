@@ -1,3 +1,11 @@
+// HexDB Core Document Module
+// This module defines the core data structures and functions for handling
+// documents in HexDB. It includes the `Document` struct, which represents a
+// document stored in a tessellation, and the `FieldValue` enum, which defines
+// the possible types of field values. The module also includes functions for
+// inferring field types from JSON values and for serializing and deserializing
+// documents to and from JSON format.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;

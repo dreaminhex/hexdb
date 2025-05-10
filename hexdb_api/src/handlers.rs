@@ -53,9 +53,9 @@ pub async fn count_docs(Path(tess): Path<String>, State(engine): State<Arc<Memor
 pub async fn create_tessellation(Path(name): Path<String>, State(engine): State<Arc<MemoryEngine>>) -> impl IntoResponse {
     let mut node = engine.node.lock().await;
     if node.create_tessellation(&name) {
-        (StatusCode::OK, format!("✔️ Created tessellation '{}'", name))
+        (StatusCode::OK, format!("✅ Created tessellation '{}'", name))
     } else {
-        (StatusCode::CONFLICT, format!("⚠️ Tessellation '{}' already exists", name))
+        (StatusCode::CONFLICT, format!("❗ Tessellation '{}' already exists", name))
     }
 }
 
@@ -64,6 +64,6 @@ pub async fn delete_tessellation(Path(name): Path<String>, State(engine): State<
     if node.drop_tessellation(&name) {
         (StatusCode::OK, format!("🗑️ Deleted tessellation '{}'", name))
     } else {
-        (StatusCode::NOT_FOUND, format!("⚠️ Tessellation '{}' not found", name))
+        (StatusCode::NOT_FOUND, format!("❗ Tessellation '{}' not found", name))
     }
 }

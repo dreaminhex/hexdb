@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command as TokioCommand;
 use hexdb_core::load_config;
 use std::os::windows::process::CommandExt;
+use tracing::{info, warn, error};
+
 #[derive(Parser)]
-#[command(name = "hexdb", about = "⬡ HexDB CLI")]
+#[command(name = "hexdb", about = " ⌬  HexDB CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -72,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
                 // Get the PID from the child process handle
                 let pid = child.id();
                 std::fs::write(".hexdb.pid", pid.to_string())?;
-                println!("⌬ HexDB started in background (PID {}).", pid);
+                info!("⌬  HexDB started in background (PID {}).", pid);
                 return Ok(()); // Return immediately to give control back
             } else {
                 let mut child = TokioCommand::new("cargo")
@@ -106,39 +108,39 @@ async fn main() -> anyhow::Result<()> {
                     if handle != std::ptr::null_mut() {
                         TerminateProcess(handle, 0);
                         CloseHandle(handle);
-                        println!("✔️ Successfully terminated process {}", pid);
+                        info!("✅ Successfully terminated process {}", pid);
                         return Ok(());
                     }
 
                     // If we can't terminate, try to get process info to verify it exists
                     let info_handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
                     if info_handle != std::ptr::null_mut() {
-                        println!("⚠️ Process {} exists but couldn't be terminated", pid);
+                        error!("❗ Process {} exists but couldn't be terminated.", pid);
                         CloseHandle(info_handle);
                     } else {
-                        println!("⚠️ Process {} not found", pid);
+                        error!("❗ Process {} not found", pid);
                     }
                 }
             }
 
             std::fs::remove_file(".hexdb.pid").ok();
-            println!("🛑 HexDB stopped.");
+            warn!("🛑 HexDB stopped.");
         }
 
         Commands::Health { .. } => {
-            let config = load_config().expect("Failed to load config");
-            let url = format!("http://{}/health", config.engine_endpoint);
+            let config = load_config().expect("❌ Failed to load config.");
+            let url = format!("http://{}/health", config.network.engine_endpoint);
             let res = reqwest::get(&url).await?;
             let body = res.text().await?;
-            println!("Health: {}", body);
+            info!("Health: {}", body);
         }
 
         Commands::Status { .. } => {
-            let config = load_config().expect("Failed to load config");
-            let url = format!("http://{}/status", config.engine_endpoint);
+            let config = load_config().expect("❌ Failed to load config.");
+            let url = format!("http://{}/status", config.network.engine_endpoint);
             let res = reqwest::get(&url).await?;
             let body = res.text().await?;
-            println!("Status: {}", body);
+            info!("Status: {}", body);
         }
 
         Commands::Plugins { sub } => match sub {
@@ -200,7 +202,7 @@ fn add_plugin(id: &str) -> anyhow::Result<()> {
         },
     );
     save_registry(&registry)?;
-    println!("📦 Plugin {} added from {}", id, plugin_dir);
+    info!("📦 Plugin {} added from {}", id, plugin_dir);
     Ok(())
 }
 
@@ -208,9 +210,9 @@ fn remove_plugin(id: &str) -> anyhow::Result<()> {
     let mut registry = load_registry()?;
     if registry.remove(id).is_some() {
         save_registry(&registry)?;
-        println!("🗑️ Removed plugin {}", id);
+        info!("🗑️ Removed plugin {}", id);
     } else {
-        println!("⚠️ Plugin {} not found", id);
+        info!("❗ Plugin {} not found", id);
     }
     Ok(())
 }
@@ -218,11 +220,11 @@ fn remove_plugin(id: &str) -> anyhow::Result<()> {
 fn list_plugins() -> anyhow::Result<()> {
     let registry = load_registry()?;
     if registry.is_empty() {
-        println!("(no plugins installed)");
+        info!("(no plugins installed)");
     } else {
-        println!("📦 Installed Plugins:");
+        info!("📦 Installed Plugins:");
         for (id, entry) in registry {
-            println!("  {} [{}] @ {}", id, entry.plugin_type, entry.path);
+            info!("  {} [{}] @ {}", id, entry.plugin_type, entry.path);
         }
     }
     Ok(())
