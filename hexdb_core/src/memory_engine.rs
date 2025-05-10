@@ -44,7 +44,7 @@ impl MemoryEngine {
         let id_str = json
             .get("id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'id' field"))?;
+            .ok_or_else(|| anyhow::anyhow!("❌ Missing 'id' field"))?;
 
         let id = Ulid::from_string(id_str)?;
         let data = infer_fields_from_json(&json);
@@ -64,15 +64,15 @@ impl MemoryEngine {
         let id_str = json
             .get("id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'id' field"))?;
+            .ok_or_else(|| anyhow::anyhow!("❌ Missing 'id' field"))?;
 
         let mut doc = self
             .store
             .get_mut(id_str)
-            .ok_or_else(|| anyhow::anyhow!("Document not found"))?;
+            .ok_or_else(|| anyhow::anyhow!("⚠️ Document not found"))?;
 
         if doc.tessellation != tess {
-            bail!("Document exists, but in a different tessellation: {}", doc.tessellation);
+            bail!("⚠️ Document exists, but in a different tessellation: {}", doc.tessellation);
         }
 
         let patch_fields = infer_fields_from_json(&json);
@@ -108,7 +108,7 @@ impl Engine for MemoryEngine {
     async fn delete_document(&self, tess: &str, id: &str) -> Result<()> {
         if let Some(doc) = self.store.get(id) {
             if doc.tessellation != tess {
-                bail!("Tessellation mismatch");
+                bail!("⚠️ Document exists, but in a different tessellation: {}", doc.tessellation);
             }
         }
         self.store.remove(id);
