@@ -20,7 +20,7 @@ Thumbs.db
 *~
 
 # Rust specific
-Cargo.lock
+/Cargo.lock
 
 # HexDB specific
 *.hexdb.pid
