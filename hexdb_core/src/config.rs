@@ -10,6 +10,7 @@ pub struct HexConfig {
     pub network: NetworkConfig,
     pub memory: MemoryConfig,
     pub storage: StorageConfig,
+    pub compression: CompressionConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -27,9 +28,13 @@ pub struct MemoryConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
     pub disk_mb: u32,
-    pub wal_key: String, // base64 encoded 256-bit AES key
+    pub encryption_key: String, // base64 encoded 256-bit AES key
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct CompressionConfig {
+    pub compression_level: u8,
+}
 
 impl Default for HexConfig {
     fn default() -> Self {
@@ -44,7 +49,10 @@ impl Default for HexConfig {
             },
             storage: StorageConfig {
                 disk_mb: 8192,
-                wal_key: "base64:...".into(), // fallback
+                encryption_key: "base64:...".into(), // fallback
+            },
+            compression: CompressionConfig {
+                compression_level: 0,
             },
         }
     }

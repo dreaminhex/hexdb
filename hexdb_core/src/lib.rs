@@ -5,6 +5,7 @@ pub mod memory_engine;
 pub mod hex;
 pub mod document;
 pub mod wal;
+pub mod sst;
 
 pub use config::{load_config, HexConfig};
 pub use logging::init_logging;

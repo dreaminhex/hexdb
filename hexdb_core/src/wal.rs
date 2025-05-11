@@ -93,8 +93,6 @@ pub async fn recover_from_wal(
     engine: Arc<MemoryEngine>,
 ) -> Result<()> {
 
-    info!("🥁 Recovering data from write-ahead log...");
-
     let file = match File::open(&wal_path).await {
         Ok(f) => f,
         Err(e) if e.kind() == ErrorKind::NotFound => {

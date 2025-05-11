@@ -144,17 +144,19 @@ A tessellation is a collection of stored documents. Tessellations are used to co
 - ✅ Configuration (URLs, RAM/DISK usage)
 - ✅ Strong Typing (string, 32-, 64, 128-bit integer, boolean, datetime, binary)
 - ✅ Type Introspection
+- ✅ Write-Ahead Logging & Recovery
+- ✅ Encryption (AES-GCM)
+- ✅ Compression (zstd, default 0)
 
 ### In-Progress
 
-- Write-Ahead Logging
-- Encryption (AES-GCM)
-
 ### Planned
 
+- SSTables
+- Self-tuning flush heuristics
+- TTL Sweeps
+- Compaction
 - Read/Write Endpoints
-
-- Compression
 - Network Discovery
 - Open Telemetry
 - Ingest Sources
@@ -168,6 +170,3 @@ A tessellation is a collection of stored documents. Tessellations are used to co
 - Recovery
 - Logging
 - Schema Versioning
-
-
-Get-Process hexdb_api | Stop-Process -Force

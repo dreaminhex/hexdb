@@ -5,24 +5,26 @@
 // methods for inserting, updating, deleting, and retrieving documents.
 
 use crate::{
-    document::{Document, infer_fields_from_json},
-    hex::HexNode,
-    engine::Engine,
-    wal::Wal,
+    document::{infer_fields_from_json, Document}, engine::Engine, hex::HexNode, sst::{SstReader, SstWriter}, wal::Wal
 };
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, Context};
+use chrono::Utc;
 use serde_json::Value;
 use tracing::{info, warn};
-use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use dashmap::DashMap;
-use tokio::{sync::Mutex, sync::mpsc::Sender};
+use tokio::{fs, sync::{mpsc::Sender, Mutex}};
 use ulid::Ulid;
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone)]
 pub struct MemoryEngine {
     pub store: Arc<DashMap<String, Document>>,
     pub node: Arc<Mutex<HexNode>>,
+    pub tess_map: Arc<DashMap<String, String>>,
+    pub total_doc_bytes: Arc<AtomicUsize>,
+    pub doc_count: Arc<AtomicUsize>,
     wal_tx: Sender<Wal>,
 }
 
@@ -31,7 +33,28 @@ impl MemoryEngine {
         Self {
             store: Arc::new(DashMap::new()),
             node: Arc::new(Mutex::new(HexNode::new())),
+            tess_map: Arc::new(DashMap::new()),
+            total_doc_bytes: Arc::new(AtomicUsize::new(0)),
+            doc_count: Arc::new(AtomicUsize::new(0)),
             wal_tx,
+        }
+    }
+
+    fn current_avg_doc_size(&self) -> usize {
+        let count = self.doc_count.load(Ordering::Relaxed).max(1);
+        self.total_doc_bytes.load(Ordering::Relaxed) / count
+    }
+
+    pub fn adaptive_max_docs(&self, ram_mb: u32) -> usize {
+        let bytes = ram_mb as usize * 1024 * 1024;
+        let avg = self.current_avg_doc_size().max(512); // Minimum floor
+        bytes / avg
+    }
+
+    fn track_doc_size(&self, doc: &Document) {
+        if let Ok(json) = serde_json::to_vec(doc) {
+            self.total_doc_bytes.fetch_add(json.len(), Ordering::Relaxed);
+            self.doc_count.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -48,8 +71,10 @@ impl MemoryEngine {
 
         info!("📝 Inserting document: {}", doc.id);
 
+        self.track_doc_size(&doc);
+        self.tess_map.insert(id.to_string(), tess.to_string());
         self.store.insert(id.to_string(), doc.clone());
-
+        
         if let Err(e) = self.wal_tx.send(Wal::Insert(doc.clone())).await {
             warn!("❗ Failed to send WAL Insert operation: {}", e);
         }
@@ -63,7 +88,6 @@ impl MemoryEngine {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("❌ Missing 'id' field."))?;
 
-        let id = Ulid::from_string(id_str)?;
         let data = infer_fields_from_json(&json);
 
         let mut doc = self
@@ -76,11 +100,12 @@ impl MemoryEngine {
         }
 
         doc.data = data;
-        // TODO: Update/Handle TTL if needed
 
         info!("📝 Updating document: {}", doc.id);
 
-        self.store.insert(id.to_string(), doc.clone());
+        self.track_doc_size(&doc);
+        self.tess_map.insert(id_str.to_string(), tess.to_string());
+        self.store.insert(id_str.to_string(), doc.clone());
 
         if let Err(e) = self.wal_tx.send(Wal::Insert(doc.clone())).await {
             warn!("❗ Failed to send WAL Update operation: {}", e);
@@ -112,11 +137,59 @@ impl MemoryEngine {
             }
         }
 
+        self.track_doc_size(&doc);
+        self.tess_map.insert(id_str.to_string(), tess.to_string());
+
         if let Err(e) = self.wal_tx.send(Wal::Insert(doc.clone())).await {
             warn!("❗ Failed to send WAL Update operation: {}", e);
         }
 
         Ok(doc.clone())
+    }
+
+    pub async fn flush_to_sstable(&self) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        let mut tess_map: HashMap<String, Vec<(Ulid, Document)>> = HashMap::new();
+
+        for entry in self.store.iter() {
+            let doc = entry.value().clone();
+            if let Some(ttl) = doc.ttl {
+                if ttl < now {
+                    self.store.remove(&entry.key().to_string());
+                    self.tess_map.remove(&entry.key().to_string());
+                    continue;
+                }
+            }
+            tess_map
+                .entry(doc.tessellation.clone())
+                .or_default()
+                .push((doc.id, doc));
+        }
+
+        for (tess, docs) in tess_map.into_iter() {
+            if docs.is_empty() {
+                continue;
+            }
+
+            let dir = PathBuf::from(format!(".hexdb/{}", tess));
+            fs::create_dir_all(&dir).await?;
+
+            let filename = format!("{}.hxs", Ulid::new());
+            let path = dir.join(filename);
+
+            SstWriter::write(&path, docs.clone())
+                .with_context(|| format!("Failed to write SSTable for {}", tess))?;
+
+            for (id, _) in docs {
+                self.store.remove(&id.to_string());
+                self.tess_map.remove(&id.to_string());
+            }
+        }
+
+        self.total_doc_bytes.store(0, Ordering::Relaxed);
+        self.doc_count.store(0, Ordering::Relaxed);
+        info!("✅ Flushed documents to SSTable successfully.");
+        Ok(())
     }
 }
 
@@ -124,9 +197,8 @@ impl MemoryEngine {
 impl Engine for MemoryEngine {
     async fn insert_document(&self, doc: Document) -> Result<()> {
         let id = doc.id.to_string();
-
-        let store_doc = doc.clone();
-        self.store.insert(id, store_doc);
+        self.tess_map.insert(id.clone(), doc.tessellation.clone());
+        self.store.insert(id, doc.clone());
 
         if let Err(e) = self.wal_tx.send(Wal::Insert(doc)).await {
             warn!("❗ Failed to send WAL Insert operation: {}", e);
@@ -136,13 +208,37 @@ impl Engine for MemoryEngine {
     }
 
     async fn get_document(&self, tess: &str, id: &str) -> Result<Option<Document>> {
-        Ok(self.store.get(id).and_then(|doc| {
+        if let Some(doc) = self.store.get(id) {
             if doc.tessellation == tess {
-                Some(doc.clone())
-            } else {
-                None
+                return Ok(Some(doc.clone()));
             }
-        }))
+        }
+
+        let tess_from_map = match self.tess_map.get(id) {
+            Some(t) => t.value().clone(),
+            None => return Ok(None),
+        };
+
+        if tess_from_map != tess {
+            return Ok(None);
+        }
+
+        let dir = PathBuf::from(format!(".hexdb/{}", tess));
+        if !dir.exists() {
+            return Ok(None);
+        }
+
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.extension().map_or(false, |ext| ext == "hxs") {
+                let map = SstReader::load_all(&path)?;
+                if let Some(doc) = map.get(&Ulid::from_string(id)?) {
+                    return Ok(Some(doc.clone()));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     async fn delete_document(&self, tess: &str, id: &str) -> Result<()> {
@@ -151,9 +247,10 @@ impl Engine for MemoryEngine {
                 bail!("❗ Document exists, but in a different tessellation: {}", doc.tessellation);
             }
         }
-        self.store.remove(id);
 
-        // Send delete operation to WAL to persist as a tombstone entry
+        self.store.remove(id);
+        self.tess_map.remove(id);
+
         if let Err(e) = self.wal_tx.send(Wal::Delete {
             tessellation: tess.to_string(),
             id: id.to_string(),

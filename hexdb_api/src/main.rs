@@ -2,7 +2,7 @@ use axum::{serve, Router};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use tokio::{net::TcpListener, sync::mpsc};
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use hexdb_core::{init_logging, load_config, MemoryEngine, Wal, wal_writer_task, recover_from_wal};
 use hexdb_api::routes::app_router;
 use tracing::{info, warn, error};
@@ -11,18 +11,18 @@ use tracing::{info, warn, error};
 async fn main() -> anyhow::Result<()> {
     init_logging("hexdb");
 
-    info!("🏎️ HexDB is starting...");
+    info!("HexDB is starting...");
 
     let config = load_config().expect("❌ Failed to load configuration.");
     info!(?config, "✅ HexDB configuration loaded.");
 
     // Setup the WAL (Write-Ahead Log)
-    if config.storage.wal_key.is_empty() {
+    if config.storage.encryption_key.is_empty() {
         error!("❌ WAL key is not set. Please set the WAL key in the configuration.");
         std::process::exit(1);
     }
 
-    let key_b64 = config.storage.wal_key.strip_prefix("base64:").unwrap();
+    let key_b64 = config.storage.encryption_key.strip_prefix("base64:").unwrap();
     let key = STANDARD.decode(key_b64)
     .map_err(|e| anyhow::anyhow!("❌ Failed to decode WAL key: {}", e))?;
 
@@ -33,25 +33,42 @@ async fn main() -> anyhow::Result<()> {
     let engine = Arc::new(MemoryEngine::new(wal_tx));
 
     // Begin recovering from the WAL if it exists
+    info!("🥁 Recovering data from write-ahead log...");
     recover_from_wal(wal_path.clone(), &key, engine.clone()).await?;
 
     // Start the WAL writer task
+    info!("🥁 Starting the write-ahead log task...");
     let key = Arc::new(key);
     tokio::spawn(wal_writer_task(wal_rx, wal_path.clone(), key.clone()));
 
-    // Start the HTTP server
-    let app: Router = app_router(engine.clone());
+    // Start the SST writer task
+    info!("🥁 Starting the SST writer task...");
+    let ram_mb = config.memory.ram_mb;
+    let engine_flush = engine.clone();
+    tokio::spawn(async move {
+        loop {
+            if engine_flush.store.len() > engine_flush.adaptive_max_docs(ram_mb) {
+                if let Err(e) = engine_flush.flush_to_sstable().await {
+                    warn!("Flush failed: {}", e);
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    });
 
+    // Start the HTTP server
+    info!("🥁 Starting the HTTP server...");
+    let app: Router = app_router(engine.clone());
     let addr: SocketAddr = config.network.engine_endpoint.parse().unwrap_or_else(|err| {
         error!(%err, "❌ Invalid endpoint: {}", config.network.engine_endpoint);
         std::process::exit(1);
     });
 
     let listener = TcpListener::bind(addr).await?;
-    info!("⌬ HexDB is listening on http://{}", addr);
+    info!("🎉 HexDB is listening on http://{}", addr);
     serve(listener, app.into_make_service())
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
 }
