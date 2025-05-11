@@ -19,10 +19,10 @@ pub fn app_router(engine: Arc<MemoryEngine>) -> Router {
         .route("/tessellation/{name}", post(create_tessellation))
         .route("/tessellation/{name}", delete(delete_tessellation))
 
-        // Utility
+        // Utility, Health, Status
         .route("/{tessellation}/count", get(count_docs))
-
-        // TODO: Health, status
+        .route("/flush", get(flush_now))
+        .route("/status", get(status))
 
         .with_state(engine)
 }

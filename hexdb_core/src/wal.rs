@@ -8,13 +8,14 @@
 // is implemented using Tokio's asynchronous I/O capabilities, allowing for
 // non-blocking writes and efficient use of system resources.
 
-use crate::{document::Document, MemoryEngine};
+use crate::{document::Document, HexConfig, MemoryEngine};
 use serde::{Serialize, Deserialize};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     sync::mpsc::Receiver,
 };
+use ulid::Ulid;
 use std::{io::ErrorKind, path::PathBuf, sync::Arc};
 use aes_gcm::{Aes256Gcm, Key, Nonce}; // Orinoco
 use aes_gcm::aead::{Aead, KeyInit};
@@ -30,38 +31,73 @@ pub enum Wal {
         tessellation: String,
         id: String,
     },
+    Rotate,
 }
 
 pub async fn wal_writer_task(
+    config: HexConfig,
     mut rx: Receiver<Wal>,
     wal_path: PathBuf,
     key: Arc<Vec<u8>>,
 ) -> anyhow::Result<()> {
+    use tokio::fs;
 
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&wal_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("❌ Failed to open WAL log at {:?}: {}", wal_path, e))?;
+    // Ensure parent directory exists
+    if let Some(parent) = wal_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
 
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&wal_path)
+            .await?,
+    );
+
+    let current_path = wal_path.clone();
+
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
 
+    info!("WAL writer task started (path: {:?})", wal_path);
+
     while let Some(op) = rx.recv().await {
+        // Rotate WAL on command
+        if matches!(op, Wal::Rotate) {
+            
+            writer.flush().await?;
+            
+            let rotated_path = current_path.with_file_name(format!(".hexdb.{}.dat", Ulid::new()));
+
+            drop(writer);
+
+            fs::rename(&current_path, &rotated_path).await?;
+
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&current_path)
+                .await?;
+            writer = BufWriter::new(file);
+
+            info!("🔄 WAL rotated, previous log saved to {:?}.", rotated_path);
+            continue;
+        }
+
+        // Normal WAL operation (insert/delete)
         let json = match serde_json::to_vec(&op) {
             Ok(data) => data,
             Err(e) => {
-                error!("❌ Failed to serialize WAL op: {:?}", e);
+                error!("❌ Failed to serialize WAL: {:?}.", e);
                 continue;
             }
         };
 
-        let compressed = encode_all(&*json, 0)?; // zstd compress
+        let compressed = encode_all(&*json, config.compression.compression_level)?;
         let mut nonce_bytes = [0u8; 12];
-        fill(&mut nonce_bytes)?; // secure nonce
-
+        fill(&mut nonce_bytes)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
+
         let encrypted = match cipher.encrypt(nonce, compressed.as_ref()) {
             Ok(enc) => enc,
             Err(e) => {
@@ -70,22 +106,14 @@ pub async fn wal_writer_task(
             }
         };
 
-        let mut record = Vec::with_capacity(4 + 12 + encrypted.len());
-        record.extend_from_slice(&nonce_bytes);
-        record.extend_from_slice(&encrypted);
-
-        // Prefix with length
-        writer.write_u32(record.len() as u32).await?;
-        writer.write_all(&record).await?;
-
-        if let Err(e) = writer.flush().await {
-            error!("❌ WAL flush failed: {:?}", e);
-        }
+        writer.write_u32((12 + encrypted.len()) as u32).await?;
+        writer.write_all(&nonce_bytes).await?;
+        writer.write_all(&encrypted).await?;
+        writer.flush().await?;
     }
 
     Ok(())
 }
-
 
 pub async fn recover_from_wal(
     wal_path: PathBuf,
@@ -166,6 +194,9 @@ pub async fn recover_from_wal(
                 hex.delete_document(&tessellation, &id);
                 drop(hex);
                 engine.store.remove(&id);
+            }
+            Wal::Rotate => {
+                info!("🔁 Skipping WAL Rotate marker (not replayed).");
             }
         }
     }

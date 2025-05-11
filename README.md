@@ -58,7 +58,7 @@ cargo run -p hexdb_api
 curl http://localhost:7700/health
 ```
 
-### 5. Access UI
+### 5. Access the UI
 
 Browse to [http://localhost:7700/index.html](http://localhost:7700/index.html)
 
@@ -73,32 +73,41 @@ hexdb stop
 ### 1. Insert a Document
 
 ```bash
-curl -X POST http://localhost:7700/api \
+curl -X POST http://localhost:7700/articles \
   -H "Content-Type: application/json" \
-  -d '{
-    "id": "test123",
-    "body": { "foo": "bar", "count": 42 },
-    "created_at": 1720000000,
-    "ttl_seconds": null
-  }'
+  -d '{ "title": "Quantum Tessellation", "tags": [ "hexdb", "rust", "ai" ], "published": true, "views": 445 }'
 ```
 
 ### 2. Fetch a Document
 
 ```bash
-curl http://localhost:7700/api/test123
+curl http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B
 ```
 
 ### 3. Count Documents
 
 ```bash
-curl http://localhost:7700/count
+curl http://localhost:7700/articles/count
 ```
 
 ### 4. Delete a Document
 
 ```bash
-curl -X DELETE http://localhost:7700/api/test123
+curl -X DELETE http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B
+```
+
+### 5. Create Tessellation
+
+```bash
+curl -X POST http://localhost:7700/tessellation \
+  -H "Content-Type: application/json" \
+  -d '{ "name": "articles" }'
+```
+
+### 6. Delete Tessellation
+
+```bash
+curl -X DELETE http://localhost:7700/tessellation/articles
 ```
 
 ### Configuration
@@ -106,16 +115,6 @@ curl -X DELETE http://localhost:7700/api/test123
 Configuration values can be found in the root.
 
 [hexdb.toml](hexdb.toml)
-
-By default, HexDB uses the following values:
-
-```toml
-engine_endpoint = "127.0.0.1:7700"
-query_endpoint = "127.0.0.1:7701"
-discovery_endpoint = "127.0.0.1:7702"
-ram_mb = 1024
-disk_mb = 16384
-```
 
 ## Terminology
 
@@ -141,24 +140,29 @@ A tessellation is a collection of stored documents. Tessellations are used to co
 - ✅ Collections (Tessellations)
 - ✅ Plugin Ecosystem
 - ✅ Horizontal Partitioning
-- ✅ Configuration (URLs, RAM/DISK usage)
+- ✅ Configuration (URLs, RAM/DISK usage. compression)
 - ✅ Strong Typing (string, 32-, 64, 128-bit integer, boolean, datetime, binary)
 - ✅ Type Introspection
 - ✅ Write-Ahead Logging & Recovery
 - ✅ Encryption (AES-GCM)
 - ✅ Compression (zstd, default 0)
+- ✅ Self-tuning flush heuristics
+- ✅ SSTables integration (long-term storage)
 
 ### In-Progress
 
+- WAL file rotation logic
+- TTL Sweeps
+- Percolation
+- Hot set caching
+
 ### Planned
 
-- SSTables
-- Self-tuning flush heuristics
-- TTL Sweeps
 - Compaction
 - Read/Write Endpoints
 - Network Discovery
 - Open Telemetry
+- Aggregations
 - Ingest Sources
 - Roles & Users
 - Indexes (Primary, Composite)
@@ -169,4 +173,7 @@ A tessellation is a collection of stored documents. Tessellations are used to co
 - ACID Transactions
 - Recovery
 - Logging
-- Schema Versioning
+- Schemas & Versioning
+- User Interface
+- Clients (.NET, Node)
+- Community (wget, brew, chocolatey, apt-get)

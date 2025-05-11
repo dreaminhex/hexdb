@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
-use hexdb_core::{memory_engine::MemoryEngine, engine::Engine, document::Document};
+use hexdb_core::{document::Document, engine::Engine, memory_engine::MemoryEngine, metrics::{collect, HexStatus}};
 use serde_json::Value;
 
 pub async fn get_doc(
@@ -66,4 +66,15 @@ pub async fn delete_tessellation(Path(name): Path<String>, State(engine): State<
     } else {
         (StatusCode::NOT_FOUND, format!("❗ Tessellation '{}' not found", name))
     }
+}
+
+pub async fn flush_now(State(engine): State<Arc<MemoryEngine>>) -> &'static str {
+    match engine.flush_to_sstable(&engine.wal_tx).await {
+        Ok(_) => "💾 Flush complete.",
+        Err(_) => "❌ Flush failed.",
+    }
+}
+
+pub async fn status(State(engine): State<Arc<MemoryEngine>>) -> Json<HexStatus> {
+    Json(collect(&engine))
 }

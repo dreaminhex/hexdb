@@ -27,32 +27,64 @@ async fn main() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("❌ Failed to decode WAL key: {}", e))?;
 
     let (wal_tx, wal_rx) = mpsc::channel::<Wal>(1024);
-    let wal_path = PathBuf::from("./.hexdb.dat");
+    let wal_tx_flush = wal_tx.clone();
+    let wal_path = PathBuf::from("./.hexdb/.hexdb.dat");
 
     // Setup the MemoryEngine
-    let engine = Arc::new(MemoryEngine::new(wal_tx));
+    let engine = Arc::new(MemoryEngine::new(wal_tx, config.clone()).await);
+
+    info!("✅ Hex '{}' (id: {}) initialized.", engine.name.clone(), engine.id.clone());
 
     // Begin recovering from the WAL if it exists
     info!("🥁 Recovering data from write-ahead log...");
     recover_from_wal(wal_path.clone(), &key, engine.clone()).await?;
 
+    info!("🥁 Recovering data from SSTables...");
+    engine.load_sstables().await?;
+
     // Start the WAL writer task
     info!("🥁 Starting the write-ahead log task...");
     let key = Arc::new(key);
-    tokio::spawn(wal_writer_task(wal_rx, wal_path.clone(), key.clone()));
+    tokio::spawn(wal_writer_task(config.clone(), wal_rx, wal_path.clone(), key.clone()));
 
     // Start the SST writer task
     info!("🥁 Starting the SST writer task...");
-    let ram_mb = config.memory.ram_mb;
     let engine_flush = engine.clone();
+
+    // Spawn a task to compact the SSTables
+    let engine_compact = engine.clone();
     tokio::spawn(async move {
         loop {
-            if engine_flush.store.len() > engine_flush.adaptive_max_docs(ram_mb) {
-                if let Err(e) = engine_flush.flush_to_sstable().await {
-                    warn!("Flush failed: {}", e);
-                }
+            if let Err(e) = engine_compact.compact_all().await {
+                warn!("❌ Compaction error: {}", e);
             }
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(config.storage.compaction_frequency)).await;
+        }
+    });
+
+    // Spawn a task to flush the WAL to SSTables
+    tokio::spawn(async move {
+        loop {
+            if engine_flush.store.len() > engine_flush.adaptive_max_docs() {
+                if let Err(e) = engine_flush.flush_to_sstable(&wal_tx_flush).await {
+                    warn!("❌ Flush failed: {}", e);
+                }
+                wal_tx_flush.send(Wal::Rotate).await.ok();
+            }
+            tokio::time::sleep(Duration::from_secs(config.storage.wal_flush_check_frequency)).await;
+        }
+    });
+
+    // Spawn a task to sweep expired documents (ttl)
+    let engine_ttl = engine.clone();
+    let sweep_minutes = config.memory.ttl_scan_frequency;
+
+    tokio::spawn(async move {
+        loop {
+            if let Err(e) = engine_ttl.sweep_expired_documents().await {
+                warn!("❌ TTL sweep failed: {}", e);
+            }
+            tokio::time::sleep(Duration::from_secs((sweep_minutes * 60) as u64)).await;
         }
     });
 
@@ -77,15 +109,15 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigint = signal(SignalKind::interrupt()).expect("Failed to listen for SIGINT");
-        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to listen for SIGTERM");
+        let mut sigint = signal(SignalKind::interrupt()).expect("❌ Failed to listen for SIGINT!");
+        let mut sigterm = signal(SignalKind::terminate()).expect("❌ Failed to listen for SIGTERM!");
 
         tokio::select! {
             _ = sigint.recv() => {
-                warn!("🛑 Received SIGINT (Ctrl+C). Shutting down...");
+                warn!("🛑 Received SIGINT (Ctrl+C). Shutting down gracefully...");
             }
             _ = sigterm.recv() => {
-                warn!("🛑 Received SIGTERM. Shutting down...");
+                warn!("🛑 Received SIGTERM. Shutting down gracefully...");
             }
         }
     }
@@ -97,7 +129,7 @@ async fn shutdown_signal() {
         if let Err(e) = ctrl_c().await {
             error!("❌ Failed to listen for Ctrl+C: {}", e);
         } else {
-            warn!("🛑 Received Ctrl+C. Shutting down...");
+            warn!("🛑 Received Ctrl+C. Shutting down gracefully...");
         }
     }
 }

@@ -6,6 +6,7 @@ pub mod hex;
 pub mod document;
 pub mod wal;
 pub mod sst;
+pub mod metrics;
 
 pub use config::{load_config, HexConfig};
 pub use logging::init_logging;
@@ -14,3 +15,4 @@ pub use memory_engine::MemoryEngine;
 pub use document::Document;
 pub use hex::HexNode;
 pub use wal::{Wal, wal_writer_task, recover_from_wal};
+pub use metrics::{HexMetrics, Vertex, HexMeta, TessMetrics, NetworkStatus, LatticeHex, collect};

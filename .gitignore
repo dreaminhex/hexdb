@@ -19,6 +19,9 @@ Thumbs.db
 # Editor backup
 *~
 
+# Rust specific
+Cargo.lock
+
 # HexDB specific
 *.hexdb.pid
-*.hexdb.dat
+hexdb_api/.hexdb

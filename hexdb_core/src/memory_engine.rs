@@ -5,15 +5,16 @@
 // methods for inserting, updating, deleting, and retrieving documents.
 
 use crate::{
-    document::{infer_fields_from_json, Document}, engine::Engine, hex::HexNode, sst::{SstReader, SstWriter}, wal::Wal
+    document::{infer_fields_from_json, Document}, engine::Engine, hex::HexNode, sst::{SstReader, SstWriter}, wal::Wal, HexConfig
 };
 use anyhow::{Result, bail, Context};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use rand::seq::IndexedRandom;
 use serde_json::Value;
-use tracing::{info, warn};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use tracing::{debug, info, warn};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
 use dashmap::DashMap;
-use tokio::{fs, sync::{mpsc::Sender, Mutex}};
+use tokio::{fs::{self, File}, io::{self, AsyncBufReadExt, BufReader}, sync::{mpsc::Sender, Mutex}};
 use ulid::Ulid;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,39 +26,240 @@ pub struct MemoryEngine {
     pub tess_map: Arc<DashMap<String, String>>,
     pub total_doc_bytes: Arc<AtomicUsize>,
     pub doc_count: Arc<AtomicUsize>,
-    wal_tx: Sender<Wal>,
+    pub config: HexConfig,
+    pub wal_tx: Sender<Wal>,
+    pub id: Ulid,
+    pub name: String,
+    pub hex_type: String,
+    pub version: String,
+    pub start_datetime: DateTime<Utc>
 }
 
 impl MemoryEngine {
-    pub fn new(wal_tx: Sender<Wal>) -> Self {
+    pub async fn new(wal_tx: Sender<Wal>, config: HexConfig) -> Self {
+
+        let names = Self::load_names("./data/names.txt").await.unwrap_or_default();
+        let name = Self::pick_random_name(&names).unwrap_or_else(|| "Unnamed Hex".to_string());
+
         Self {
             store: Arc::new(DashMap::new()),
             node: Arc::new(Mutex::new(HexNode::new())),
             tess_map: Arc::new(DashMap::new()),
             total_doc_bytes: Arc::new(AtomicUsize::new(0)),
             doc_count: Arc::new(AtomicUsize::new(0)),
+            config,
             wal_tx,
+            id: Ulid::new(),
+            name,
+            hex_type: "manager".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            start_datetime: Utc::now(),
         }
     }
 
-    fn current_avg_doc_size(&self) -> usize {
-        let count = self.doc_count.load(Ordering::Relaxed).max(1);
-        self.total_doc_bytes.load(Ordering::Relaxed) / count
-    }
-
-    pub fn adaptive_max_docs(&self, ram_mb: u32) -> usize {
-        let bytes = ram_mb as usize * 1024 * 1024;
-        let avg = self.current_avg_doc_size().max(512); // Minimum floor
-        bytes / avg
-    }
-
-    fn track_doc_size(&self, doc: &Document) {
-        if let Ok(json) = serde_json::to_vec(doc) {
-            self.total_doc_bytes.fetch_add(json.len(), Ordering::Relaxed);
-            self.doc_count.fetch_add(1, Ordering::Relaxed);
+    pub async fn compact_all(&self) -> Result<()> {
+        let base = PathBuf::from("./.hexdb");
+        if !base.exists() {
+            return Ok(());
         }
+
+        let mut dirs = fs::read_dir(&base).await?;
+        while let Some(entry) = dirs.next_entry().await? {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(tess) = path.file_name().and_then(|n| n.to_str()) {
+                    self.compact_sstables(tess).await?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
+    pub async fn compact_sstables(&self, tess: &str) -> Result<()> {
+
+        info!("🔧 Compaction started for tessellation '{}'.", tess);
+
+        let dir = PathBuf::from(format!("./.hexdb/{}", tess));
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        let now = Utc::now().timestamp_millis();
+        let mut all_docs: HashMap<Ulid, Document> = HashMap::new();
+        let mut to_delete = Vec::new();
+
+        let mut files = fs::read_dir(&dir).await?;
+        while let Some(entry) = files.next_entry().await? {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "hxs") {
+                let map = SstReader::load_all(&path)?;
+                let mut retained = 0;
+                for (id, doc) in map {
+                    if doc.ttl.map_or(false, |ttl| ttl < now) {
+                        continue;
+                    }
+                    all_docs.insert(id, doc);
+                    retained += 1;
+                }
+
+                // Only delete if docs were valid and contributed
+                if retained > 0 {
+                    to_delete.push(path);
+                }
+            }
+        }
+
+        if all_docs.is_empty() {
+            info!("🧹 No active documents found in SSTables for '{}'.", tess);
+            return Ok(());
+        }
+
+        let compact_path = dir.join(format!("{}.hxs", Ulid::new()));
+        SstWriter::write(self.config.clone(), &compact_path, all_docs.clone().into_iter().collect())?;
+
+        // Remove old files
+        for path in &to_delete {
+            let _ = fs::remove_file(path).await;
+        }
+
+        info!("🔧 Compacted {} SSTables for '{}', retained {} docs.", to_delete.len(), tess, all_docs.len());
+
+        Ok(())
+    }
+
+    pub async fn load_sstables(&self) -> Result<()> {
+        let base = PathBuf::from("./.hexdb");
+        if !base.exists() {
+            return Ok(());
+        }
+
+        let mut tess_dirs = fs::read_dir(&base).await?;
+
+        while let Some(tess_entry) = tess_dirs.next_entry().await? {
+            if !tess_entry.file_type().await?.is_dir() {
+                continue;
+            }
+
+            let tess_name = tess_entry.file_name().to_string_lossy().to_string();
+            let dir_path = tess_entry.path();
+
+            info!("📂 Loading SSTables for tessellation '{}'", tess_name);
+
+            let mut files = fs::read_dir(&dir_path).await?;
+            while let Some(entry) = files.next_entry().await? {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "hxs") {
+                    let map = SstReader::load_all(&path)?;
+                    for (id, doc) in map {
+                        if let Some(ttl) = doc.ttl {
+                            if ttl < Utc::now().timestamp_millis() {
+                                continue;
+                            }
+                        }
+                        self.track_doc_size(&doc);
+                        self.tess_map.insert(id.to_string(), doc.tessellation.clone());
+                        self.store.insert(id.to_string(), doc);
+                    }
+                }
+            }
+        }
+
+        info!("✅ SSTables loaded into memory.");
+        Ok(())
+    }
+   
+    pub async fn load_names<P: AsRef<Path>>(path: P) -> io::Result<Vec<String>> {
+        let file = File::open(path).await?;
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+        let mut names = Vec::new();
+
+        while let Some(line) = lines.next_line().await? {
+            names.push(line);
+        }
+
+        Ok(names)
+    }
+
+    pub fn pick_random_name(names: &[String]) -> Option<String> {
+        let mut rng = rand::rng();
+        names.choose(&mut rng).cloned()
+    }
+
+    pub fn adaptive_max_docs(&self) -> usize {
+        let ram_mb = self.config.memory.ram_mb;
+        let ram_bytes = ram_mb as usize * 1024 * 1024;
+        let used_ram = self.total_doc_bytes.load(Ordering::Relaxed);
+        let doc_count = self.doc_count.load(Ordering::Relaxed);
+        let avg_size = self.current_avg_doc_size().max(512);
+        let max_docs = ram_bytes / avg_size;
+        let ram_pct = (used_ram as f64 / ram_bytes as f64) * 100.0;
+
+        debug!(
+            ram_mb,
+            ram_bytes,
+            used_ram,
+            ram_pct,
+            avg_size,
+            doc_count,
+            max_docs,
+            "🧠 Document limit check: {:.2} KB used / {} MB total ({:.2}%). {} documents, avg size {} bytes. Flush triggers at ~{} docs (~{} MB).",
+            used_ram as f64 / 1024.0,
+            ram_mb,
+            ram_pct,
+            doc_count,
+            avg_size,
+            max_docs,
+            max_docs * avg_size / 1024 / 1024
+        );
+
+        max_docs
+    }
+
+    pub fn used_ram_bytes(&self) -> usize {
+        self.total_doc_bytes.load(Ordering::Relaxed)
+    }
+
+    pub async fn sweep_expired_documents(&self) -> Result<usize> {
+        
+        info!("🧹 Starting TTL sweep...");
+
+        let now = Utc::now().timestamp_millis();
+        let mut removed = 0;
+
+        // Memory sweep
+        for entry in self.store.iter() {
+            if let Some(ttl) = entry.value().ttl {
+                if ttl < now {
+                    self.store.remove(entry.key());
+                    self.tess_map.remove(entry.key());
+                    removed += 1;
+                }
+            }
+        }
+
+        // Disk sweep by compacting each tessellation
+        let base = PathBuf::from("./.hexdb");
+        if base.exists() {
+            let mut dirs = fs::read_dir(&base).await?;
+            while let Some(entry) = dirs.next_entry().await? {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(tess) = path.file_name().and_then(|n| n.to_str()) {
+                        self.compact_sstables(tess).await?;
+                    }
+                }
+            }
+        }
+
+        if removed > 0 {
+            info!("🧹 TTL sweep removed {} expired in-memory docs.", removed);
+        }
+
+        Ok(removed)
+    }
+ 
     pub async fn insert_json(&self, tess: &str, json: Value) -> Result<Document> {
         let id = Ulid::new();
         let data = infer_fields_from_json(&json);
@@ -147,7 +349,7 @@ impl MemoryEngine {
         Ok(doc.clone())
     }
 
-    pub async fn flush_to_sstable(&self) -> Result<()> {
+    pub async fn flush_to_sstable(&self, wal_tx: &Sender<Wal>) -> Result<()> {
         let now = Utc::now().timestamp_millis();
         let mut tess_map: HashMap<String, Vec<(Ulid, Document)>> = HashMap::new();
 
@@ -171,26 +373,49 @@ impl MemoryEngine {
                 continue;
             }
 
-            let dir = PathBuf::from(format!(".hexdb/{}", tess));
+            let dir = PathBuf::from(format!("./.hexdb/{}", tess));
             fs::create_dir_all(&dir).await?;
 
             let filename = format!("{}.hxs", Ulid::new());
             let path = dir.join(filename);
 
-            SstWriter::write(&path, docs.clone())
-                .with_context(|| format!("Failed to write SSTable for {}", tess))?;
+            SstWriter::write(self.config.clone(), &path, docs.clone())
+                .with_context(|| format!("❌ Failed to write SSTable for {}.", tess))?;
 
             for (id, _) in docs {
                 self.store.remove(&id.to_string());
                 self.tess_map.remove(&id.to_string());
             }
+
+            // Compact the SSTable            
+            self.compact_sstables(&tess).await?;
         }
 
         self.total_doc_bytes.store(0, Ordering::Relaxed);
         self.doc_count.store(0, Ordering::Relaxed);
+
+        // Rotate WAL file
+        wal_tx.send(Wal::Rotate).await.ok();
+
         info!("✅ Flushed documents to SSTable successfully.");
         Ok(())
     }
+
+    fn current_avg_doc_size(&self) -> usize {
+        let count = self.doc_count.load(Ordering::Relaxed).max(1);
+        self.total_doc_bytes.load(Ordering::Relaxed) / count
+    }
+
+    fn track_doc_size(&self, doc: &Document) {
+        if let Ok(json) = serde_json::to_vec(doc) {
+            let len = json.len();
+            self.total_doc_bytes.fetch_add(len, Ordering::Relaxed);
+            self.doc_count.fetch_add(1, Ordering::Relaxed);
+
+            debug!(len, "➕ Tracked new document size");
+        }
+    }
+
 }
 
 #[async_trait]
@@ -223,7 +448,7 @@ impl Engine for MemoryEngine {
             return Ok(None);
         }
 
-        let dir = PathBuf::from(format!(".hexdb/{}", tess));
+        let dir = PathBuf::from(format!("./.hexdb/{}", tess));
         if !dir.exists() {
             return Ok(None);
         }

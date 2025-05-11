@@ -6,7 +6,7 @@
 // Zstandard (zstd) compression. The SSTable format is designed to be fast and
 // efficient, allowing for quick access to data while minimizing disk space usage.
 
-use crate::document::Document;
+use crate::{document::Document, HexConfig};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use serde_json;
 use std::{
@@ -33,7 +33,7 @@ pub struct SstEntry {
 pub struct SstWriter;
 
 impl SstWriter {
-    pub fn write<P: AsRef<Path>>(path: P, entries: Vec<(Ulid, Document)>) -> io::Result<()> {
+    pub fn write<P: AsRef<Path>>(config: HexConfig, path: P, entries: Vec<(Ulid, Document)>) -> io::Result<()> {
         let mut file = BufWriter::new(File::create(path)?);
         let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
 
@@ -48,7 +48,7 @@ impl SstWriter {
             }
 
             let raw_json = serde_json::to_vec(doc)?;
-            let compressed = encode_all(&raw_json[..], 0)?;
+            let compressed = encode_all(&raw_json[..], config.compression.compression_level)?;
             let length = compressed.len() as u32;
 
             entry_buf.write_all(&id.to_bytes())?;

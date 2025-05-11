@@ -5,6 +5,7 @@ discovery_endpoint = "127.0.0.1:7702"
 
 [memory]
 ram_mb = 1024
+ttl_scan_frequency = 60
 
 [storage]
 disk_mb = 16384

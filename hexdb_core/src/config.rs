@@ -22,18 +22,21 @@ pub struct NetworkConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MemoryConfig {
-    pub ram_mb: u32,
+    pub ram_mb: u64,
+    pub ttl_scan_frequency: u64, // seconds
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
-    pub disk_mb: u32,
-    pub encryption_key: String, // base64 encoded 256-bit AES key
+    pub disk_mb: u64,
+    pub encryption_key: String,
+    pub compaction_frequency: u64, // seconds
+    pub wal_flush_check_frequency: u64, // seconds
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct CompressionConfig {
-    pub compression_level: u8,
+    pub compression_level: i32,
 }
 
 impl Default for HexConfig {
@@ -45,11 +48,14 @@ impl Default for HexConfig {
                 discovery_endpoint: "127.0.0.1:7702".into(),
             },
             memory: MemoryConfig {
-                ram_mb: 512,
+                ram_mb: 1024,
+                ttl_scan_frequency: 600, // 10 minutes
             },
             storage: StorageConfig {
                 disk_mb: 8192,
                 encryption_key: "base64:...".into(), // fallback
+                compaction_frequency: 1800, // 30 minutes
+                wal_flush_check_frequency: 60, // 1 minute
             },
             compression: CompressionConfig {
                 compression_level: 0,
