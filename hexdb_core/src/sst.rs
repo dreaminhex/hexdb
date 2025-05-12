@@ -92,43 +92,37 @@ impl SstWriter {
         Ok(())
     }
 }
-
 pub struct SstReader;
 
 impl SstReader {
     pub fn load_all<P: AsRef<Path>>(path: P) -> io::Result<BTreeMap<Ulid, Document>> {
         let mut file = BufReader::new(File::open(path)?);
+
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic)?;
         if &magic != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid SSTable magic header."));
         }
 
+        // Read header metadata
         file.seek(SeekFrom::Start(8))?;
-        let _count = file.read_u64::<BigEndian>()?;
+        let _entry_count = file.read_u64::<BigEndian>()?;
         file.seek(SeekFrom::Start(16))?;
         let _created = file.read_i64::<BigEndian>()?;
         file.seek(SeekFrom::Start(24))?;
         let index_offset = file.read_u64::<BigEndian>()?;
 
-        file.seek(SeekFrom::Start(index_offset))?;
-        let mut offsets = Vec::new();
-        while let Ok(id_bytes) = {
-            let mut b = [0u8; 16];
-            file.read_exact(&mut b).map(|_| b)
-        } {
-            let id = Ulid::from(id_bytes);
-            let off = file.read_u64::<BigEndian>()?;
-            let len = file.read_u32::<BigEndian>()?;
-            offsets.push((id, off, len));
-        }
+        // Jump to beginning of entries
+        file.seek(SeekFrom::Start(64))?;
 
         let mut map = BTreeMap::new();
-        for (id, offset, _len) in offsets {
-            file.seek(SeekFrom::Start(offset))?;
-
+        while file.stream_position()? < index_offset {
             let mut id_buf = [0u8; 16];
-            file.read_exact(&mut id_buf)?;
+            if let Err(_) = file.read_exact(&mut id_buf) {
+                break; // done
+            }
+
+            let id = Ulid::from(id_buf);
             let flags = file.read_u8()?;
             let has_ttl = flags & 0b00000001 != 0;
             let ttl = if has_ttl {
@@ -136,12 +130,15 @@ impl SstReader {
             } else {
                 None
             };
+
             let clen = file.read_u32::<BigEndian>()?;
             let mut comp = vec![0u8; clen as usize];
             file.read_exact(&mut comp)?;
+
             let json_bytes = decode_all(&comp[..])?;
             let mut doc: Document = serde_json::from_slice(&json_bytes)?;
             doc.ttl = ttl;
+
             map.insert(id, doc);
         }
 

@@ -186,6 +186,7 @@ pub async fn recover_from_wal(
                 let mut hex = engine.node.lock().await;
                 hex.insert_document(&doc.tessellation, &doc.id.to_string(), &data);
                 drop(hex);
+                engine.track_doc_size(&doc);
                 engine.store.insert(doc.id.to_string(), doc);
             }
             Wal::Delete { tessellation, id } => {

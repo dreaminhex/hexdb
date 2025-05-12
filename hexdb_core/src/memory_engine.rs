@@ -78,8 +78,6 @@ impl MemoryEngine {
 
     pub async fn compact_sstables(&self, tess: &str) -> Result<()> {
 
-        info!("🔧 Compaction started for tessellation '{}'.", tess);
-
         let dir = PathBuf::from(format!("./.hexdb/{}", tess));
         if !dir.exists() {
             return Ok(());
@@ -123,7 +121,7 @@ impl MemoryEngine {
             let _ = fs::remove_file(path).await;
         }
 
-        info!("🔧 Compacted {} SSTables for '{}', retained {} docs.", to_delete.len(), tess, all_docs.len());
+        info!("🔧 Compaction check - Found {} SSTables for '{}'. Compacted, retained {} docs.", to_delete.len(), tess, all_docs.len());
 
         Ok(())
     }
@@ -188,13 +186,29 @@ impl MemoryEngine {
     }
 
     pub fn adaptive_max_docs(&self) -> usize {
+        let ram_docs = self.doc_count.load(Ordering::Relaxed);
+        let used_ram = self.total_doc_bytes.load(Ordering::Relaxed);
+        let disk_docs = self.enumerate_disk_documents().unwrap_or(0);
         let ram_mb = self.config.memory.ram_mb;
         let ram_bytes = ram_mb as usize * 1024 * 1024;
-        let used_ram = self.total_doc_bytes.load(Ordering::Relaxed);
-        let doc_count = self.doc_count.load(Ordering::Relaxed);
-        let avg_size = self.current_avg_doc_size().max(512);
-        let max_docs = ram_bytes / avg_size;
-        let ram_pct = (used_ram as f64 / ram_bytes as f64) * 100.0;
+
+        let avg_size = if ram_docs > 0 {
+            used_ram / ram_docs
+        } else {
+            0
+        };
+
+        let max_docs = if avg_size > 0 {
+            ram_bytes / avg_size
+        } else {
+            usize::MAX // can't calculate if avg_size is 0
+        };
+
+        let ram_pct = if ram_bytes > 0 {
+            (used_ram as f64 / ram_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
 
         debug!(
             ram_mb,
@@ -202,19 +216,46 @@ impl MemoryEngine {
             used_ram,
             ram_pct,
             avg_size,
-            doc_count,
+            ram_docs,
+            disk_docs,
             max_docs,
-            "🧠 Document limit check: {:.2} KB used / {} MB total ({:.2}%). {} documents, avg size {} bytes. Flush triggers at ~{} docs (~{} MB).",
+            "🧠 Memory status: {:.2} KB used / {} MB total ({:.2}%). Documents: In RAM: {}. On Disk: {}. Average doc size is {} bytes. Flush triggers at ~{} docs (~{} MB).",
             used_ram as f64 / 1024.0,
             ram_mb,
             ram_pct,
-            doc_count,
+            ram_docs,
+            disk_docs,
             avg_size,
             max_docs,
             max_docs * avg_size / 1024 / 1024
         );
 
         max_docs
+    }
+
+    pub fn enumerate_disk_documents(&self) -> Result<usize> {
+        let base = Path::new("./.hexdb");
+        if !base.exists() {
+            return Ok(0);
+        }
+
+        let mut total = 0;
+        for tess_entry in std::fs::read_dir(base)? {
+            let tess_path = tess_entry?.path();
+            if !tess_path.is_dir() {
+                continue;
+            }
+
+            for file in std::fs::read_dir(tess_path)? {
+                let path = file?.path();
+                if path.extension().map_or(false, |ext| ext == "hxs") {
+                    let map = SstReader::load_all(&path)?;
+                    total += map.len();
+                }
+            }
+        }
+
+        Ok(total)
     }
 
     pub fn used_ram_bytes(&self) -> usize {
@@ -397,16 +438,56 @@ impl MemoryEngine {
         // Rotate WAL file
         wal_tx.send(Wal::Rotate).await.ok();
 
+        // Reload the hot cache.
+        self.reload_cache()?;
+
         info!("✅ Flushed documents to SSTable successfully.");
         Ok(())
     }
+   
+    pub fn reload_cache(&self) -> Result<()> {
+        let base = Path::new("./.hexdb");
+        if !base.exists() {
+            return Ok(());
+        }
 
-    fn current_avg_doc_size(&self) -> usize {
-        let count = self.doc_count.load(Ordering::Relaxed).max(1);
-        self.total_doc_bytes.load(Ordering::Relaxed) / count
+        for tess_entry in std::fs::read_dir(base)? {
+            let tess_path = tess_entry?.path();
+            if !tess_path.is_dir() {
+                continue;
+            }
+
+            let mut entries: Vec<_> = std::fs::read_dir(&tess_path)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "hxs"))
+                .collect();
+
+            // Sort by most recent modified time
+            entries.sort_by_key(|e| std::fs::metadata(e.path()).and_then(|m| m.modified()).ok());
+            entries.reverse();
+
+            for entry in entries.iter().take(1) {
+                let path = entry.path();
+                if let Ok(map) = SstReader::load_all(&path) {
+                    for (_, doc) in map {
+                        if let Some(ttl) = doc.ttl {
+                            if ttl < Utc::now().timestamp_millis() {
+                                continue;
+                            }
+                        }
+                        self.track_doc_size(&doc);
+                        self.tess_map.insert(doc.id.to_string(), doc.tessellation.clone());
+                        self.store.insert(doc.id.to_string(), doc);
+                    }
+                }
+            }
+        }
+
+        info!("🔥 Hot cache reload complete.");
+        Ok(())
     }
 
-    fn track_doc_size(&self, doc: &Document) {
+    pub fn track_doc_size(&self, doc: &Document) {
         if let Ok(json) = serde_json::to_vec(doc) {
             let len = json.len();
             self.total_doc_bytes.fetch_add(len, Ordering::Relaxed);

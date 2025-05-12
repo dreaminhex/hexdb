@@ -5,11 +5,13 @@ discovery_endpoint = "127.0.0.1:7702"
 
 [memory]
 ram_mb = 1024
-ttl_scan_frequency = 60
+ttl_scan_frequency = 600
 
 [storage]
 disk_mb = 16384
 encryption_key = "base64:eTdfrgJPvGOy7tJPI8z7CyO5Z9TT+biDWK+SCVa7OfA="
+compaction_frequency = 180
+wal_flush_check_frequency = 60
 
 [compression]
 compression_level = 0
