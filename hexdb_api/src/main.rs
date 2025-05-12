@@ -3,7 +3,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use tokio::{net::TcpListener, sync::mpsc};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
-use hexdb_core::{init_logging, load_config, MemoryEngine, Wal, wal_writer_task, recover_from_wal};
+use hexdb_core::{init_logging, load_config, recover_from_all_wal_files, wal_writer_task, MemoryEngine, Wal};
 use hexdb_api::routes::app_router;
 use tracing::{info, warn, error};
 
@@ -35,9 +35,9 @@ async fn main() -> anyhow::Result<()> {
 
     info!("✅ Hex '{}' (id: {}) initialized.", engine.name.clone(), engine.id.clone());
 
-    // Begin recovering from the WAL if it exists
-    info!("🥁 Recovering data from write-ahead log...");
-    recover_from_wal(wal_path.clone(), &key, engine.clone()).await?;
+    // Begin recovering from the wal files.
+    info!("🥁 Recovering data from any write-ahead log files...");
+    recover_from_all_wal_files(PathBuf::from("./.hexdb"), &key, engine.clone(), true).await?;
 
     info!("🥁 Recovering data from SSTables...");
     engine.load_sstables().await?;

@@ -22,7 +22,7 @@ use aes_gcm::aead::{Aead, KeyInit};
 use getrandom::fill;
 use anyhow::Result;
 use zstd::stream::{encode_all, decode_all};
-use tracing::{info, error};
+use tracing::{info, warn, error};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Wal {
@@ -115,7 +115,57 @@ pub async fn wal_writer_task(
     Ok(())
 }
 
-pub async fn recover_from_wal(
+pub async fn recover_from_all_wal_files(
+    wal_dir: PathBuf,
+    key: &[u8],
+    engine: Arc<MemoryEngine>,
+    cleanup: bool,
+    ) -> Result<()> {
+    use std::ffi::OsStr;
+    use std::time::SystemTime;
+
+    if !wal_dir.exists() {
+        info!("🆕 No WAL directory found at {:?} — Fresh installation.", wal_dir);
+        return Ok(());
+    }
+
+    let mut wal_files: Vec<_> = std::fs::read_dir(&wal_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(OsStr::to_str)
+                .map(|n| n.starts_with(".hexdb") && n.ends_with(".dat"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    wal_files.sort_by_key(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    });
+
+    for file in &wal_files {
+        info!("🔁 Replaying WAL: {:?}", file);
+        recover_single_wal(file.clone(), key, engine.clone()).await?;
+    }
+
+    if cleanup {
+        for file in wal_files {
+            if file.file_name().unwrap() != ".hexdb.dat" {
+                match std::fs::remove_file(&file) {
+                    Ok(_) => info!("🗑️ Deleted old WAL file: {:?}", file),
+                    Err(e) => warn!("❗ Failed to delete WAL file {:?}: {}", file, e),
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn recover_single_wal(
     wal_path: PathBuf,
     key: &[u8],
     engine: Arc<MemoryEngine>,

@@ -109,7 +109,7 @@ impl MemoryEngine {
         }
 
         if all_docs.is_empty() {
-            info!("🧹 No active documents found in SSTables for '{}'.", tess);
+            debug!("🧹 No active documents found in SSTables for '{}'.", tess);
             return Ok(());
         }
 
@@ -118,6 +118,7 @@ impl MemoryEngine {
 
         // Remove old files
         for path in &to_delete {
+            debug!("🗑️  Deleted obsolete SSTable file after compaction: {:?}", path);
             let _ = fs::remove_file(path).await;
         }
 
@@ -492,8 +493,6 @@ impl MemoryEngine {
             let len = json.len();
             self.total_doc_bytes.fetch_add(len, Ordering::Relaxed);
             self.doc_count.fetch_add(1, Ordering::Relaxed);
-
-            debug!(len, "➕ Tracked new document size");
         }
     }
 

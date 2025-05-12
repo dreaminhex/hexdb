@@ -1,6 +1,6 @@
 param (
     [int]$Count = 1,
-    [string]$Endpoint = "http://127.0.0.1:7700/articles"
+    [string]$Endpoint = "http://127.0.0.1:7700/news"
 )
 
 function Get-RandomTitle {

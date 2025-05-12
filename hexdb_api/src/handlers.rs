@@ -76,5 +76,5 @@ pub async fn flush_now(State(engine): State<Arc<MemoryEngine>>) -> &'static str 
 }
 
 pub async fn status(State(engine): State<Arc<MemoryEngine>>) -> Json<HexStatus> {
-    Json(collect(&engine))
+    Json(collect(&engine).await)
 }

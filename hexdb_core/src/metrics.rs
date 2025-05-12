@@ -75,7 +75,7 @@ pub struct LatticeHex {
     pub endpoint: String,
 }
 
-pub fn collect(engine: &MemoryEngine) -> HexStatus {
+pub async fn collect(engine: &MemoryEngine) -> HexStatus {
     let now = Utc::now();
     let uptime = now.timestamp() - engine.start_datetime.timestamp();
 
@@ -122,6 +122,8 @@ pub fn collect(engine: &MemoryEngine) -> HexStatus {
         })
         .collect();
 
+    let disk_docs = engine.enumerate_disk_documents().unwrap_or(0);
+
     HexStatus {
         hex: HexMeta {
             id: engine.id.clone(),
@@ -133,16 +135,26 @@ pub fn collect(engine: &MemoryEngine) -> HexStatus {
             hex_type: engine.hex_type.clone(),
             ram_mb: engine.config.memory.ram_mb,
             disk_mb: engine.config.storage.disk_mb,
-            vertices: (0..6)
-                .map(|i| Vertex {
+            vertices: engine.node.lock().await.vertices.iter().map(|v| {
+                let ptr = v as *const crate::hex::Vertex as usize;
+
+                // Flatten storage into bytes for hashing
+                let mut hasher = blake3::Hasher::new();
+                for ((tess, doc_id), (chunk, _hash)) in &v.storage {
+                    hasher.update(tess.as_bytes());
+                    hasher.update(doc_id.as_bytes());
+                    hasher.update(chunk);
+                }
+
+                Vertex {
                     status: "healthy".to_string(),
-                    memory_address: format!("0x{:X}", 0x1A2B3C4D + i),
-                })
-                .collect(),
+                    memory_address: format!("0x{:X}", ptr)
+                }
+            }).collect(),
             metrics: HexMetrics {
                 total_document_count: total,
-                documents_in_ram: total, // SST support not fully counted yet
-                documents_on_disk: 0,
+                documents_in_ram: total,
+                documents_on_disk: disk_docs,
                 avg_document_size_bytes: avg,
                 max_document_size_bytes: max_size,
                 min_document_size_bytes: if min_size == usize::MAX { 0 } else { min_size },

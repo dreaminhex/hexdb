@@ -14,5 +14,5 @@ pub use engine::Engine;
 pub use memory_engine::MemoryEngine;
 pub use document::Document;
 pub use hex::HexNode;
-pub use wal::{Wal, wal_writer_task, recover_from_wal};
+pub use wal::{Wal, wal_writer_task, recover_from_all_wal_files};
 pub use metrics::{HexMetrics, Vertex, HexMeta, TessMetrics, NetworkStatus, LatticeHex, collect};
