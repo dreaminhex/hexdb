@@ -7,7 +7,10 @@
 use crate::HexDBEngine;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::{collections::HashMap, sync::atomic::Ordering};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::Ordering,
+};
 use ulid::Ulid;
 
 #[derive(Debug, Serialize)]
@@ -81,12 +84,18 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
     let disk_doc_count = engine.sst.count_documents_on_disk().unwrap_or(0);
     let disk_bytes = engine.sst.total_doc_bytes.load(Ordering::Relaxed);
 
+    let mut seen_keys = HashSet::new();
     let mut tess_sizes: HashMap<String, Vec<usize>> = HashMap::new();
 
     for vertex in &node.vertices {
-        for ((tess, _id), (chunk, _hash)) in &vertex.storage {
-            let size = chunk.len();
-            tess_sizes.entry(tess.clone()).or_default().push(size);
+        for ((tess, doc_id), (chunk, _hash, is_full)) in &vertex.storage {
+            if *is_full {
+                let key = (tess.clone(), doc_id.clone());
+                if seen_keys.insert(key.clone()) {
+                    let size = chunk.len();
+                    tess_sizes.entry(tess.clone()).or_default().push(size);
+                }
+            }
         }
     }
 
@@ -126,18 +135,26 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         hex_type: engine.hex_type.clone(),
         ram_mb: engine.config.memory.ram_mb,
         disk_mb: engine.config.storage.disk_mb,
-        vertices: node.vertices.iter().map(|v| {
-            let ptr = v as *const crate::vertex::Vertex as usize;
-            VertexMeta {
-                status: "healthy".to_string(),
-                memory_address: format!("0x{:X}", ptr),
-            }
-        }).collect(),
+        vertices: node
+            .vertices
+            .iter()
+            .map(|v| {
+                let ptr = v as *const crate::vertex::Vertex as usize;
+                VertexMeta {
+                    status: "healthy".to_string(),
+                    memory_address: format!("0x{:X}", ptr),
+                }
+            })
+            .collect(),
         metrics: HexMetrics {
             total_document_count: ram_doc_count + disk_doc_count,
             documents_in_ram: ram_doc_count,
             documents_on_disk: disk_doc_count,
-            avg_document_size_bytes: if ram_doc_count > 0 { ram_bytes / ram_doc_count } else { 0 },
+            avg_document_size_bytes: if ram_doc_count > 0 {
+                ram_bytes / ram_doc_count
+            } else {
+                0
+            },
             max_document_size_bytes: max_size,
             min_document_size_bytes: if min_size == usize::MAX { 0 } else { min_size },
             total_size_bytes: ram_bytes + disk_bytes,

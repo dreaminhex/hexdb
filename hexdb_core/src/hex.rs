@@ -5,9 +5,9 @@
 // fault tolerance. The engine supports operations such as inserting, retrieving,
 // validating, and repairing documents.
 
-use std::collections::{HashMap};
 use crate::Vertex;
 use blake3;
+use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 
 pub struct Hex {
@@ -37,25 +37,25 @@ impl Hex {
     /// Returns the total number of bytes of documents stored across all vertices.
     /// This includes both full documents and partial chunks.
     pub fn calculate_total_ram_bytes(&self) -> usize {
-        self.vertices.iter()
+        self.vertices
+            .iter()
             .flat_map(|v| v.storage.values())
-            .map(|(chunk, _hash)| chunk.len())
+            .filter(|(_, _, is_full)| *is_full)
+            .map(|(chunk, _, _)| chunk.len())
             .sum()
     }
 
     /// Returns the total number of unique documents stored across all vertices.
     pub fn count_total_documents(&self) -> usize {
-        use std::collections::HashSet;
-
-        let mut seen = HashSet::new();
+        let mut unique_ids = HashSet::new();
 
         for vertex in &self.vertices {
-            for (key, _) in vertex.storage.iter() {
-                seen.insert(key.clone()); // (tessellation, id)
+            for (key, _) in vertex.storage.keys() {
+                unique_ids.insert(key.clone()); // (tessellation, doc_id)
             }
         }
 
-        seen.len()
+        unique_ids.len()
     }
 
     /// Create a new tessellation with the given name and type.
@@ -64,7 +64,8 @@ impl Hex {
         if self.tessellations.contains_key(tess_name) {
             return false;
         }
-        self.tessellations.insert(tess_name.to_string(), tess_type.to_string());
+        self.tessellations
+            .insert(tess_name.to_string(), tess_type.to_string());
         true
     }
 
@@ -105,12 +106,14 @@ impl Hex {
         let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
 
         for (i, vertex) in self.vertices.iter_mut().enumerate() {
-            let chunk = if i == primary {
-                data.to_vec() // full document on primary
+            let is_full = i == primary;
+            let chunk = if is_full {
+                data.to_vec()
             } else {
-                chunks[i % chunks.len()].to_vec() // partial chunk on others
+                chunks[i % chunks.len()].to_vec()
             };
-            vertex.store_chunk(tess_name, doc_id, chunk);
+
+            vertex.store_chunk(tess_name, doc_id, chunk, is_full);
         }
     }
 
@@ -119,42 +122,51 @@ impl Hex {
     /// Returns true if the document was deleted, false if it didn't exist.
     pub fn delete_document(&mut self, tess_name: &str, doc_id: &str) {
         for vertex in self.vertices.iter_mut() {
-        vertex.storage.remove(&(tess_name.to_string(), doc_id.to_string()));
+            vertex
+                .storage
+                .remove(&(tess_name.to_string(), doc_id.to_string()));
         }
     }
 
     /// Retrieve a document by its tessellation name and document ID.
-    /// If the full document is not found, it attempts to reconstruct it from partial chunks.
-    /// Returns Some(data) if the document was found or reconstructed, None otherwise.
+    /// Returns Some(data) if a valid document is found or reconstructed, None otherwise.
     pub fn read_document(&self, tess_name: &str, doc_id: &str) -> Option<Vec<u8>> {
-        // Try to find full document first
         for vertex in &self.vertices {
-            if let Some((chunk, hash)) = vertex.get_chunk(tess_name, doc_id) {
-                if chunk.len() > 1024 && blake3::hash(chunk).to_hex().to_string() == *hash {
-                    info!("✅ Retrieved full document from vertex {}.", vertex.id);
+            if let Some((chunk, hash, is_full)) = vertex.get_chunk(tess_name, doc_id) {
+                if *is_full && blake3::hash(chunk).to_hex().to_string() == *hash {
+                    info!("✅ Retrieved valid document from vertex {}.", vertex.id);
                     return Some(chunk.clone());
                 }
             }
         }
 
-        // Attempt to reconstruct
+        // Attempt reconstruction from partials if no full found
         let mut combined: Vec<u8> = Vec::new();
         for vertex in &self.vertices {
-            if let Some((chunk, hash)) = vertex.get_chunk(tess_name, doc_id) {
+            if let Some((chunk, hash, _)) = vertex.get_chunk(tess_name, doc_id) {
                 let computed = blake3::hash(chunk).to_hex().to_string();
                 if computed == *hash {
                     combined.extend_from_slice(chunk);
                 } else {
-                    warn!("❗ Corrupt chunk detected on vertex {} for {}:{}", vertex.id, tess_name, doc_id);
+                    warn!(
+                        "❗ Corrupt chunk detected on vertex {} for {}:{}",
+                        vertex.id, tess_name, doc_id
+                    );
                 }
             }
         }
 
         if combined.is_empty() {
-            warn!("❌ Document reconstruction failed: no valid chunks found for {}:{}.", tess_name, doc_id);
+            warn!(
+                "❌ Document reconstruction failed: no valid chunks found for {}:{}.",
+                tess_name, doc_id
+            );
             None
         } else {
-            info!("🩹 Document reconstructed from partial chunks for {}:{}.", tess_name, doc_id);
+            info!(
+                "🩹 Document reconstructed from partial chunks for {}:{}.",
+                tess_name, doc_id
+            );
             Some(combined)
         }
     }
@@ -175,13 +187,19 @@ impl Hex {
         if let Some(reference) = self.read_document(tessellation, doc_id) {
             for vertex in self.vertices.iter_mut() {
                 if !vertex.validate_chunk(tessellation, doc_id) {
-                    warn!("🛠️ Repairing corrupt chunk on vertex {} for {}:{}", vertex.id, tessellation, doc_id);
-                    vertex.repair_chunk(tessellation, doc_id, reference.clone());                    
-                }                
+                    warn!(
+                        "🛠️ Repairing corrupt chunk on vertex {} for {}:{}",
+                        vertex.id, tessellation, doc_id
+                    );
+                    vertex.repair_chunk(tessellation, doc_id, reference.clone());
+                }
             }
             true
         } else {
-            warn!("❗ Repair failed: could not reconstruct document {}:{}", tessellation, doc_id);
+            warn!(
+                "❗ Repair failed: could not reconstruct document {}:{}",
+                tessellation, doc_id
+            );
             false
         }
     }
@@ -192,8 +210,8 @@ impl Hex {
         let mut results = Vec::new();
 
         for vertex in &self.vertices {
-            for ((tess, id), (chunk, _hash)) in &vertex.storage {
-                if tess == tess_name && chunk.len() > 1024 {
+            for ((tess, id), (chunk, _hash, is_full)) in &vertex.storage {
+                if tess == tess_name && *is_full {
                     results.push((id.clone(), chunk.clone()));
                 }
             }
@@ -201,5 +219,4 @@ impl Hex {
 
         results
     }
-
-} 
+}

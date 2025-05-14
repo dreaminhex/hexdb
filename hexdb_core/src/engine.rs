@@ -7,7 +7,7 @@
 use crate::{
     document::{infer_fields_from_json, Document},
     hex::Hex,
-    sst::{SstUtil},
+    sst::SstUtil,
     wal::Wal,
     HexConfig,
 };
@@ -15,12 +15,9 @@ use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use rand::seq::IndexedRandom;
 use serde_json::Value;
-use std::{
-    path::{Path},
-    sync::Arc,
-};
+use std::{path::Path, sync::Arc};
 use tokio::{
-    fs::{File},
+    fs::File,
     io::{self, AsyncBufReadExt, BufReader},
     sync::{mpsc::Sender, Mutex},
 };
@@ -89,13 +86,18 @@ impl HexDBEngine {
     /// and the number of documents currently stored on disk.
     /// The function also logs the memory status, including the amount of RAM used,
     /// the total RAM available, the average size of documents, and the estimated capacity.
-    pub fn adaptive_max_docs(&self) -> usize {
-        let ram_bytes = self.node.blocking_lock().calculate_total_ram_bytes();
+    pub async fn adaptive_max_docs(&self) -> usize {
+        let ram_bytes = self.node.lock().await.calculate_total_ram_bytes();
+
         let disk_docs = self.sst.count_documents_on_disk().unwrap_or(0);
         let ram_mb = self.config.memory.ram_mb;
         let ram_total = ram_mb as usize * 1024 * 1024;
-        let doc_count = self.node.blocking_lock().count_total_documents();
-        let avg = if doc_count > 0 { ram_bytes / doc_count } else { 0 };
+        let doc_count = self.node.lock().await.count_total_documents();
+        let avg = if doc_count > 0 {
+            ram_bytes / doc_count
+        } else {
+            0
+        };
 
         let max_docs = if avg > 0 { ram_total / avg } else { usize::MAX };
 
@@ -182,11 +184,6 @@ impl HexDBEngine {
 
         // Write to the hex node's vertices
         let data = serde_json::to_vec(&doc)?;
-
-        debug!(
-            "📝 Inserting document: {} into tessellation {}.",
-            doc.id, tess
-        );
 
         hex.create_document(&doc.tessellation, &doc.id.to_string(), &data);
         drop(hex);
@@ -313,7 +310,8 @@ impl HexDBEngine {
         drop(hex);
 
         if let Some(data) = raw {
-            Ok(Some(serde_json::from_slice(&data)?))
+            let doc: Document = serde_json::from_slice(&data)?;
+            return Ok(Some(doc));
         } else {
             Ok(None)
         }
@@ -340,39 +338,5 @@ impl HexDBEngine {
         }
 
         Ok(())
-    }    
-
-    /// Private method to insert a document into the hex.
-    /// This method is used internally and is not exposed to the public API.
-    async fn insert_document(&self, doc: Document) -> Result<()> {
-        let mut hex = self.node.lock().await;
-
-        // Check if the tessellation exists, if not, create it
-        if !hex.tessellation_exists(&doc.tessellation) {
-            hex.create_tessellation(&doc.tessellation, "user");
-        }
-
-        let raw = serde_json::to_vec(&doc)?;
-
-        // Write to the hex node's vertices
-        hex.create_document(&doc.tessellation, &doc.id.to_string(), &raw);
-
-        drop(hex);
-
-        // Track the document size in the SSTable
-        self.sst.track_document_size(&doc);
-
-        debug!(
-            "📝 Inserted document: {} into tessellation {}.",
-            doc.id, doc.tessellation
-        );
-
-        if let Err(e) = self.wal_tx.send(Wal::Insert(doc)).await {
-            warn!("❗ Failed to send WAL Insert operation: {}", e);
-        }
-
-        Ok(())
-    }
-    
-    
+    }   
 }

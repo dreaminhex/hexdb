@@ -4,19 +4,29 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use tracing::{error, warn};
 use std::sync::Arc;
-use hexdb_core::{document::Document, engine::HexDBEngine, metrics::{collect, HexMeta}};
+use hexdb_core::{engine::HexDBEngine, metrics::{collect, HexMeta}};
 use serde_json::Value;
 
 /// Get a document by tessellation and ID.
 /// Returns the document if found, or None if not found.
 pub async fn get_doc(
     Path((tess, id)): Path<(String, String)>,
-    State(engine): State<Arc<HexDBEngine>>
-) -> Json<Option<Document>> {
+    State(engine): State<Arc<HexDBEngine>>,
+) -> impl IntoResponse {
     match engine.get_document(&tess, &id).await {
-        Ok(doc) => Json(doc),
-        Err(_) => Json(None),
+        Ok(Some(doc)) => {
+            Json(Some(doc))
+        }
+        Ok(None) => {
+            warn!("⚠️ Document not found: {}/{}", tess, id);
+            Json(None)
+        }
+        Err(e) => {
+            error!("❌ Failed to fetch document: {}", e);
+            Json(None)
+        }
     }
 }
 

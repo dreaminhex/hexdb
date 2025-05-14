@@ -57,7 +57,7 @@ pub fn spawn_flush_task(
                 }
                 _ = tokio::time::sleep(interval) => {
                     let doc_count = engine.node.lock().await.count_total_documents();
-                    if doc_count > engine.adaptive_max_docs() {
+                    if doc_count > engine.adaptive_max_docs().await {
                         debug!("💾 Flushing WAL to SSTables...");
                         engine.sst.flush(engine.node.clone(), &wal_tx).await;
                     }
