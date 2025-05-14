@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Health { .. } => {
             let config = load_config().expect("❌ Failed to load config.");
-            let url = format!("http://{}/health", config.network.engine_endpoint);
+            let url = format!("http://{}/health", config.network.api_endpoint);
             let res = reqwest::get(&url).await?;
             let body = res.text().await?;
             info!("Health: {}", body);
@@ -137,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::Status { .. } => {
             let config = load_config().expect("❌ Failed to load config.");
-            let url = format!("http://{}/status", config.network.engine_endpoint);
+            let url = format!("http://{}/status", config.network.api_endpoint);
             let res = reqwest::get(&url).await?;
             let body = res.text().await?;
             info!("Status: {}", body);

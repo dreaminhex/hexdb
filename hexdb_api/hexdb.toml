@@ -1,13 +1,20 @@
 [network]
-engine_endpoint = "127.0.0.1:7700"
+api_endpoint = "127.0.0.1:7700"
 query_endpoint = "127.0.0.1:7701"
 discovery_endpoint = "127.0.0.1:7702"
+
+[security]
+admin_login = "hexdbadmin"
+admin_password = "hexdbadmin"
+admin_email = "admin@hexdb.ai"
 
 [memory]
 ram_mb = 1024
 ttl_scan_frequency = 600
+vertex_integrity_check_frequency = 300
 
 [storage]
+path = "./.hexdb"
 disk_mb = 16384
 encryption_key = "base64:eTdfrgJPvGOy7tJPI8z7CyO5Z9TT+biDWK+SCVa7OfA="
 compaction_frequency = 180

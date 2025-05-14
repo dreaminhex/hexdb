@@ -1,19 +1,14 @@
 // HexDB Core Metrics Module
 // This module provides functionality to collect and serialize metrics for the HexDB engine.
-// It includes structures for representing various metrics such as document counts, 
+// It includes structures for representing various metrics such as document counts,
 // document sizes, and tessellation statistics. The metrics are collected from the engine's
 // memory store and are serialized into a JSON format for easy consumption by external systems.
 
-use crate::MemoryEngine;
-use serde::Serialize;
-use std::collections::HashMap;
+use crate::HexDBEngine;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
+use std::{collections::HashMap, sync::atomic::Ordering};
 use ulid::Ulid;
-
-#[derive(Debug, Serialize)]
-pub struct HexStatus {
-    pub hex: HexMeta,
-}
 
 #[derive(Debug, Serialize)]
 pub struct HexMeta {
@@ -26,13 +21,13 @@ pub struct HexMeta {
     pub hex_type: String,
     pub ram_mb: u64,
     pub disk_mb: u64,
-    pub vertices: Vec<Vertex>,
+    pub vertices: Vec<VertexMeta>,
     pub metrics: HexMetrics,
-    pub network: NetworkStatus,
+    pub network: NetworkMetrics,
 }
 
 #[derive(Debug, Serialize)]
-pub struct Vertex {
+pub struct VertexMeta {
     pub status: String,
     pub memory_address: String,
 }
@@ -60,114 +55,99 @@ pub struct TessMetrics {
 }
 
 #[derive(Debug, Serialize)]
-pub struct NetworkStatus {
-    pub engine_endpoint: String,
+pub struct NetworkMetrics {
+    pub api_endpoint: String,
     pub query_endpoint: String,
     pub discovery_endpoint: String,
-    pub lattice: Vec<LatticeHex>,
+    pub lattice: Vec<LatticeMetrics>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct LatticeHex {
+pub struct LatticeMetrics {
     pub name: String,
     pub status: String,
     pub hex_type: String,
     pub endpoint: String,
 }
 
-pub async fn collect(engine: &MemoryEngine) -> HexStatus {
+pub async fn collect(engine: &HexDBEngine) -> HexMeta {
     let now = Utc::now();
     let uptime = now.timestamp() - engine.start_datetime.timestamp();
 
-    let mut total = 0;
-    let mut total_bytes = 0;
-    let mut min_size = usize::MAX;
-    let mut max_size = 0;
-    let mut tess_stats: HashMap<String, Vec<usize>> = HashMap::new();
+    let node = engine.node.lock().await;
+    let ram_doc_count = node.total_document_count;
+    let ram_bytes = node.calculate_total_ram_bytes();
 
-    for doc in engine.store.iter() {
-        let serialized = serde_json::to_vec(doc.value()).unwrap_or_default();
-        let size = serialized.len();
+    let disk_doc_count = engine.sst.count_documents_on_disk().unwrap_or(0);
+    let disk_bytes = engine.sst.total_doc_bytes.load(Ordering::Relaxed);
 
-        total += 1;
-        total_bytes += size;
-        min_size = min_size.min(size);
-        max_size = max_size.max(size);
+    let mut tess_sizes: HashMap<String, Vec<usize>> = HashMap::new();
 
-        tess_stats
-            .entry(doc.value().tessellation.clone())
-            .or_default()
-            .push(size);
+    for vertex in &node.vertices {
+        for ((tess, _id), (chunk, _hash)) in &vertex.storage {
+            let size = chunk.len();
+            tess_sizes.entry(tess.clone()).or_default().push(size);
+        }
     }
 
-    let avg = if total > 0 { total_bytes / total } else { 0 };
+    let (mut total_bytes, mut min_size, mut max_size) = (0, usize::MAX, 0);
 
-    let tessellations = tess_stats
+    let tessellations: Vec<TessMetrics> = tess_sizes
         .into_iter()
         .map(|(name, sizes)| {
-            let doc_count = sizes.len();
-            let total = sizes.iter().sum::<usize>();
-            let avg = total / doc_count;
+            let count = sizes.len();
+            let sum = sizes.iter().sum::<usize>();
+            let avg = if count > 0 { sum / count } else { 0 };
             let max = *sizes.iter().max().unwrap_or(&0);
             let min = *sizes.iter().min().unwrap_or(&0);
 
+            total_bytes += sum;
+            min_size = min_size.min(min);
+            max_size = max_size.max(max);
+
             TessMetrics {
                 name,
-                document_count: doc_count,
+                document_count: count,
                 avg_document_size_bytes: avg,
                 max_document_size_bytes: max,
                 min_document_size_bytes: min,
-                total_size_bytes: total,
+                total_size_bytes: sum,
             }
         })
         .collect();
 
-    let disk_docs = engine.enumerate_disk_documents().unwrap_or(0);
-
-    HexStatus {
-        hex: HexMeta {
-            id: engine.id.clone(),
-            name: engine.name.clone(),
-            version: engine.version.clone(),
-            start_datetime: engine.start_datetime,
-            uptime_seconds: uptime as u64,
-            status: "healthy".to_string(),
-            hex_type: engine.hex_type.clone(),
-            ram_mb: engine.config.memory.ram_mb,
-            disk_mb: engine.config.storage.disk_mb,
-            vertices: engine.node.lock().await.vertices.iter().map(|v| {
-                let ptr = v as *const crate::hex::Vertex as usize;
-
-                // Flatten storage into bytes for hashing
-                let mut hasher = blake3::Hasher::new();
-                for ((tess, doc_id), (chunk, _hash)) in &v.storage {
-                    hasher.update(tess.as_bytes());
-                    hasher.update(doc_id.as_bytes());
-                    hasher.update(chunk);
-                }
-
-                Vertex {
-                    status: "healthy".to_string(),
-                    memory_address: format!("0x{:X}", ptr)
-                }
-            }).collect(),
-            metrics: HexMetrics {
-                total_document_count: total,
-                documents_in_ram: total,
-                documents_on_disk: disk_docs,
-                avg_document_size_bytes: avg,
-                max_document_size_bytes: max_size,
-                min_document_size_bytes: if min_size == usize::MAX { 0 } else { min_size },
-                total_size_bytes: total_bytes,
-                tessellations,
-            },
-            network: NetworkStatus {
-                engine_endpoint: engine.config.network.engine_endpoint.clone(),
-                query_endpoint: engine.config.network.query_endpoint.clone(),
-                discovery_endpoint: engine.config.network.discovery_endpoint.clone(),
-                lattice: vec![], // to be added later
-            },
+    HexMeta {
+        id: engine.id.clone(),
+        name: engine.name.clone(),
+        version: engine.version.clone(),
+        start_datetime: engine.start_datetime,
+        uptime_seconds: uptime as u64,
+        status: "healthy".to_string(),
+        hex_type: engine.hex_type.clone(),
+        ram_mb: engine.config.memory.ram_mb,
+        disk_mb: engine.config.storage.disk_mb,
+        vertices: node.vertices.iter().map(|v| {
+            let ptr = v as *const crate::vertex::Vertex as usize;
+            VertexMeta {
+                status: "healthy".to_string(),
+                memory_address: format!("0x{:X}", ptr),
+            }
+        }).collect(),
+        metrics: HexMetrics {
+            total_document_count: ram_doc_count + disk_doc_count,
+            documents_in_ram: ram_doc_count,
+            documents_on_disk: disk_doc_count,
+            avg_document_size_bytes: if ram_doc_count > 0 { ram_bytes / ram_doc_count } else { 0 },
+            max_document_size_bytes: max_size,
+            min_document_size_bytes: if min_size == usize::MAX { 0 } else { min_size },
+            total_size_bytes: ram_bytes + disk_bytes,
+            tessellations,
+        },
+        network: NetworkMetrics {
+            api_endpoint: engine.config.network.api_endpoint.clone(),
+            query_endpoint: engine.config.network.query_endpoint.clone(),
+            discovery_endpoint: engine.config.network.discovery_endpoint.clone(),
+            lattice: vec![], // to be implemented
         },
     }
 }
-

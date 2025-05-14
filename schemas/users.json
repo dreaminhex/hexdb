@@ -1,0 +1,71 @@
+{
+    "users": [
+        {
+            "login": "hexdbadmin", // < -- The name of the user under security->admin_login from the config
+            "password": "hexdbadmin", // < -- SHA-256 hash of the password under security->admin_password from the config
+            "created": 1234567890, // < -- The date the user was created
+            "last_login": 1234567890, // < -- The date the user last logged in
+            "login_ips": ["10.1.1.26"], // < -- Ip addresses the user has logged in from
+            "is_locked": false, // < -- Whether the user is locked out
+            "password_attempts": 0, // < -- The number of failed password attempts (locked out after 3)
+            "email_address": "admin@myhexdb.ai", // < -- The email address of the user
+            "password_reset": false, // < -- Whether the user has requested a password reset
+            "password_reset_token": "123456789", // < -- The token for the password reset
+            "password_reset_expiry": 1234567890, // < -- The expiry date for the password reset token
+            "last_password_change": 1234567890, // < -- The date the user last changed their password
+            "password_expiration": -1, // < -- The date the user password expires, or -1 if it never expires
+            "use_mfa": false, // < -- Whether the user has MFA enabled
+            "mfa_secret": null, // < -- The MFA secret for the user
+            "mfa_backup_codes": [], // < -- The backup codes for the user
+            "roles": [ // < -- The roles the user has
+                {
+                    "name": "admin",
+                    "permissions": [
+                        "system",
+                        "articles",
+                        "blog",
+                        "news"
+                    ]
+                }
+            ]
+        },
+        {
+            "login": "someuser", // < -- The name of the user under security->admin_login from the config
+            "password": "someuser12345!", // < -- SHA-256 hash of the password under security->admin_password from the config
+            "created": 1234567890, // < -- The date the user was created
+            "last_login": 1234567890, // < -- The date the user last logged in
+            "login_ips": ["10.1.1.26"], // < -- Ip addresses the user has logged in from
+            "is_locked": false, // < -- Whether the user is locked out
+            "password_attempts": 0, // < -- The number of failed password attempts (locked out after 3)
+            "email_address": "someuser@myhexdb.ai", // < -- The email address of the user
+            "password_reset": false, // < -- Whether the user has requested a password reset
+            "password_reset_token": "123456789", // < -- The token for the password reset
+            "password_reset_expiry": 1234567890, // < -- The expiry date for the password reset token
+            "last_password_change": 1234567890, // < -- The date the user last changed their password
+            "password_expiration": -1, // < -- The date the user password expires, or -1 if it never expires
+            "use_mfa": true, // < -- Whether the user has MFA enabled
+            "mfa_secret": "123456789", // < -- The MFA secret for the user
+            "mfa_backup_codes": ["123456789"], // < -- The backup codes for the user
+            "roles": [ // < -- The roles the user has
+                {
+                    "name": "owner",
+                    "permissions": [
+                        "articles"
+                    ]
+                },
+                {
+                    "name": "writer",
+                    "permissions": [
+                        "blog"
+                    ]
+                },
+                {
+                    "name": "reader",
+                    "permissions": [
+                        "news"
+                    ]
+                }
+            ]
+        }
+    ]
+}

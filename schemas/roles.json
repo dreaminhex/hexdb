@@ -1,0 +1,20 @@
+{
+    "roles": [
+        {
+            "name": "admin", // < -- The name of the role
+            "description": "Full access to system, all tessellations, and all documents", // < -- The description of the role
+        },
+        {
+            "name": "reader", // < -- The name of the role
+            "description": "Read-only access to tessellations defined in permissions" // < -- The description of the role            
+        },
+        {
+            "name": "writer", // < -- The name of the role
+            "description": "Write access to tessellations defined in permissions (assumes read access)" // < -- The description of the role
+        },
+        {
+            "name": "owner", // < -- The name of the role
+            "description": "Read, write, delete access to tessellations defined in permissions" // < -- The description of the role
+        }
+    ]
+}

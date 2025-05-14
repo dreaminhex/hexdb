@@ -1,0 +1,20 @@
+{
+  "tessellations": [
+    {
+      "name": "articles",
+      "type": "user"
+    },
+    {
+      "name": "blog",
+      "type": "user"
+    },
+    {
+      "name": "users",
+      "type": "system"
+    },
+    {
+      "name": "roles",
+      "type": "system"
+    }
+  ]
+}

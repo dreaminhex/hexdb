@@ -3,10 +3,10 @@ use axum::{
     routing::{get, post, put, patch, delete},
 };
 use std::sync::Arc;
-use hexdb_core::memory_engine::MemoryEngine;
+use hexdb_core::engine::HexDBEngine;
 use crate::handlers::*;
 
-pub fn app_router(engine: Arc<MemoryEngine>) -> Router {
+pub fn app_router(engine: Arc<HexDBEngine>) -> Router {
     Router::new()
         // Document routes
         .route("/{tessellation}", post(insert_doc))
@@ -18,10 +18,19 @@ pub fn app_router(engine: Arc<MemoryEngine>) -> Router {
         // Tessellation routes
         .route("/tessellation/{name}", post(create_tessellation))
         .route("/tessellation/{name}", delete(delete_tessellation))
+        //.route("/tessellation", get(get_tessellations))
+
+        // TODO: Security routes
+        //.route("/user", get(get_user))
+        //.route("/user", post(insert_user))
+        //.route("/user", delete(delete_user))
+        //.route("/user", patch(patch_user))
+        //.route("/user", put(update_user))
+        //.route("/roles", get(get_roles))
 
         // Utility, Health, Status
         .route("/{tessellation}/count", get(count_docs))
-        .route("/flush", get(flush_now))
+        .route("/flush", get(flush))
         .route("/status", get(status))
 
         .with_state(engine)

@@ -8,7 +8,7 @@
 // is implemented using Tokio's asynchronous I/O capabilities, allowing for
 // non-blocking writes and efficient use of system resources.
 
-use crate::{document::Document, HexConfig, MemoryEngine};
+use crate::{document::Document, HexConfig, HexDBEngine};
 use serde::{Serialize, Deserialize};
 use tokio::{
     fs::{File, OpenOptions},
@@ -34,6 +34,9 @@ pub enum Wal {
     Rotate,
 }
 
+/// WAL writer task that handles writing operations to a file.
+/// It uses AES-GCM for encryption and Zstandard for compression.
+/// The task runs in an endless loop, waiting for operations to be sent.
 pub async fn wal_writer_task(
     config: HexConfig,
     mut rx: Receiver<Wal>,
@@ -59,7 +62,7 @@ pub async fn wal_writer_task(
 
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
 
-    info!("WAL writer task started (path: {:?})", wal_path);
+    info!("📓 WAL writer task started (path: {:?})", wal_path);
 
     while let Some(op) = rx.recv().await {
         // Rotate WAL on command
@@ -115,17 +118,20 @@ pub async fn wal_writer_task(
     Ok(())
 }
 
-pub async fn recover_from_all_wal_files(
+/// Recover data from all WAL files in the specified directory.
+/// This function reads each WAL file, decrypts the data, decompresses it,
+/// and applies the operations to the in-memory engine.
+pub async fn recover_from_wal(
     wal_dir: PathBuf,
     key: &[u8],
-    engine: Arc<MemoryEngine>,
+    engine: Arc<HexDBEngine>,
     cleanup: bool,
     ) -> Result<()> {
     use std::ffi::OsStr;
     use std::time::SystemTime;
 
     if !wal_dir.exists() {
-        info!("🆕 No WAL directory found at {:?} — Fresh installation.", wal_dir);
+        info!("🆕 No WAL directory found at {:?} — Creating fresh installation.", wal_dir);
         return Ok(());
     }
 
@@ -165,10 +171,12 @@ pub async fn recover_from_all_wal_files(
     Ok(())
 }
 
+/// Recover a single WAL file by reading, decrypting, decompressing,
+/// and applying the operations to the in-memory engine.
 async fn recover_single_wal(
     wal_path: PathBuf,
     key: &[u8],
-    engine: Arc<MemoryEngine>,
+    engine: Arc<HexDBEngine>,
 ) -> Result<()> {
 
     let file = match File::open(&wal_path).await {
@@ -234,17 +242,14 @@ async fn recover_single_wal(
                 info!("🔁 Replaying INSERT for {}", doc.id);
                 let data = serde_json::to_vec(&doc)?;
                 let mut hex = engine.node.lock().await;
-                hex.insert_document(&doc.tessellation, &doc.id.to_string(), &data);
+                hex.create_document(&doc.tessellation, &doc.id.to_string(), &data);
                 drop(hex);
-                engine.track_doc_size(&doc);
-                engine.store.insert(doc.id.to_string(), doc);
             }
             Wal::Delete { tessellation, id } => {
                 info!("🔁 Replaying DELETE for {}:{}", tessellation, id);
                 let mut hex = engine.node.lock().await;
                 hex.delete_document(&tessellation, &id);
                 drop(hex);
-                engine.store.remove(&id);
             }
             Wal::Rotate => {
                 info!("🔁 Skipping WAL Rotate marker (not replayed).");

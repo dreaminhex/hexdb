@@ -5,12 +5,14 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
-use hexdb_core::{document::Document, engine::Engine, memory_engine::MemoryEngine, metrics::{collect, HexStatus}};
+use hexdb_core::{document::Document, engine::HexDBEngine, metrics::{collect, HexMeta}};
 use serde_json::Value;
 
+/// Get a document by tessellation and ID.
+/// Returns the document if found, or None if not found.
 pub async fn get_doc(
     Path((tess, id)): Path<(String, String)>,
-    State(engine): State<Arc<MemoryEngine>>
+    State(engine): State<Arc<HexDBEngine>>
 ) -> Json<Option<Document>> {
     match engine.get_document(&tess, &id).await {
         Ok(doc) => Json(doc),
@@ -18,63 +20,68 @@ pub async fn get_doc(
     }
 }
 
-pub async fn insert_doc(Path(tess): Path<String>, State(engine): State<Arc<MemoryEngine>>, Json(json): Json<Value>) -> impl IntoResponse {
+/// Insert a new document into the tessellation.
+pub async fn insert_doc(Path(tess): Path<String>, State(engine): State<Arc<HexDBEngine>>, Json(json): Json<Value>) -> impl IntoResponse {
     match engine.insert_json(&tess, json).await {
         Ok(_) => StatusCode::OK,
         Err(_) => StatusCode::BAD_REQUEST,
     }
 }
 
-pub async fn update_doc(Path(tess): Path<String>, State(engine): State<Arc<MemoryEngine>>, Json(json): Json<Value>) -> impl IntoResponse {
+/// Update an existing document in the tessellation.
+pub async fn update_doc(Path(tess): Path<String>, State(engine): State<Arc<HexDBEngine>>, Json(json): Json<Value>) -> impl IntoResponse {
     match engine.update_json(&tess, json).await {
         Ok(_) => StatusCode::OK,
         Err(_) => StatusCode::BAD_REQUEST,
     }
 }
 
-pub async fn patch_doc(Path(tess): Path<String>, State(engine): State<Arc<MemoryEngine>>, Json(json): Json<Value>) -> impl IntoResponse {
+/// Patch an existing document in the tessellation.
+pub async fn patch_doc(Path(tess): Path<String>, State(engine): State<Arc<HexDBEngine>>, Json(json): Json<Value>) -> impl IntoResponse {
     match engine.patch_json(&tess, json).await {
         Ok(_) => StatusCode::OK,
         Err(_) => StatusCode::BAD_REQUEST,
     }
 }
 
-pub async fn delete_doc(Path((tess, id)): Path<(String, String)>, State(engine): State<Arc<MemoryEngine>>) -> impl IntoResponse {
+/// Delete a document from the tessellation by ID.
+pub async fn delete_doc(Path((tess, id)): Path<(String, String)>, State(engine): State<Arc<HexDBEngine>>) -> impl IntoResponse {
     match engine.delete_document(&tess, &id).await {
         Ok(_) => StatusCode::OK,
         Err(_) => StatusCode::NOT_FOUND,
     }
 }
 
-pub async fn count_docs(Path(tess): Path<String>, State(engine): State<Arc<MemoryEngine>>) -> String {
+/// Count the number of documents in a tessellation.
+pub async fn count_docs(Path(tess): Path<String>, State(engine): State<Arc<HexDBEngine>>) -> String {
     engine.count_documents(&tess).await.map(|c| c.to_string()).unwrap_or("0".into())
 }
 
-pub async fn create_tessellation(Path(name): Path<String>, State(engine): State<Arc<MemoryEngine>>) -> impl IntoResponse {
+pub async fn create_tessellation(Path((tess_name, tess_type)): Path<(String, String)>, State(engine): State<Arc<HexDBEngine>>) -> impl IntoResponse {
     let mut node = engine.node.lock().await;
-    if node.create_tessellation(&name) {
-        (StatusCode::OK, format!("✅ Created tessellation '{}'", name))
+    if node.create_tessellation(&tess_name, &tess_type) {
+        (StatusCode::OK, format!("✅ Created tessellation '{}'.", tess_name))
     } else {
-        (StatusCode::CONFLICT, format!("❗ Tessellation '{}' already exists", name))
+        (StatusCode::CONFLICT, format!("❗ Tessellation '{}' already exists.", tess_name))
     }
 }
 
-pub async fn delete_tessellation(Path(name): Path<String>, State(engine): State<Arc<MemoryEngine>>) -> impl IntoResponse {
+/// Delete a tessellation by name.
+/// This will also remove all associated documents from the vertices.
+pub async fn delete_tessellation(Path(name): Path<String>, State(engine): State<Arc<HexDBEngine>>) -> impl IntoResponse {
     let mut node = engine.node.lock().await;
-    if node.drop_tessellation(&name) {
-        (StatusCode::OK, format!("🗑️ Deleted tessellation '{}'", name))
+    if node.delete_tessellation(&name) {
+        (StatusCode::OK, format!("🗑️ Deleted tessellation '{}'.", name))
     } else {
-        (StatusCode::NOT_FOUND, format!("❗ Tessellation '{}' not found", name))
+        (StatusCode::NOT_FOUND, format!("❗ Tessellation '{}' not found.", name))
     }
 }
 
-pub async fn flush_now(State(engine): State<Arc<MemoryEngine>>) -> &'static str {
-    match engine.flush_to_sstable(&engine.wal_tx).await {
-        Ok(_) => "💾 Flush complete.",
-        Err(_) => "❌ Flush failed.",
-    }
+/// Flush the WAL to SSTable.
+pub async fn flush(State(engine): State<Arc<HexDBEngine>>) -> impl IntoResponse {
+    engine.sst.flush(engine.node.clone(), &engine.wal_tx).await;
 }
 
-pub async fn status(State(engine): State<Arc<MemoryEngine>>) -> Json<HexStatus> {
+pub async fn status(State(engine): State<Arc<HexDBEngine>>) -> Json<HexMeta> {
     Json(collect(&engine).await)
 }
