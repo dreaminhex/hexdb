@@ -102,19 +102,26 @@ impl Hex {
         let primary = self.total_document_count % 6;
         self.total_document_count += 1;
 
-        let chunk_size = (data.len() as f32 / 6.0).ceil() as usize;
+        // Determine replica targets (exclude primary)
+        let replica_indices: Vec<usize> = (0..6).filter(|&i| i != primary).collect();
+
+        // TODO: filter based on vertex health if available
+        let num_replicas = replica_indices.len();
+
+        // Store full document in primary
+        self.vertices[primary].store_chunk(tess_name, doc_id, data.to_vec(), true);
+
+        // Split into equal chunks for replicas
+        let chunk_size = (data.len() as f32 / num_replicas as f32).ceil() as usize;
         let chunks: Vec<&[u8]> = data.chunks(chunk_size).collect();
 
-        for (i, vertex) in self.vertices.iter_mut().enumerate() {
-            let is_full = i == primary;
-            let chunk = if is_full {
-                data.to_vec()
-            } else {
-                chunks[i % chunks.len()].to_vec()
-            };
-
-            vertex.store_chunk(tess_name, doc_id, chunk, is_full);
+        for (i, &idx) in replica_indices.iter().enumerate() {
+            let chunk = chunks.get(i).copied().unwrap_or(&[]).to_vec();
+            self.vertices[idx].store_chunk(tess_name, doc_id, chunk, false);
         }
+
+        // Optional: track which vertex is primary for this document
+        // self.primary_map.insert((tess_name.to_string(), doc_id.to_string()), primary);
     }
 
     /// Delete a document from all vertices.
