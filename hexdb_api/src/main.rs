@@ -176,7 +176,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the HTTP server
     info!("🌐 Starting the HTTP server...");
-    let app: Router = app_router(engine.clone(), ui_dir, shutdown_handle);
+    let schema = hexdb_query::build_schema(engine.clone());
+    let app: Router = app_router(engine.clone(), schema, ui_dir, shutdown_handle);
     let addr: SocketAddr = config.network.api_endpoint.parse().unwrap_or_else(|err| {
         error!(%err, "❌ Invalid endpoint: {}.", config.network.api_endpoint);
         std::process::exit(1);

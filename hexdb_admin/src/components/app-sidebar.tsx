@@ -32,12 +32,12 @@ const data = {
   navMain: [
     {
       title: "Dashboard",
-      url: "#",
+      route: "/",
       icon: IconDashboard,
     },
     {
       title: "Queries",
-      url: "#",
+      route: "/queries",
       icon: IconBrandGoogleBigQuery,
     },
     {
@@ -79,7 +79,7 @@ const data = {
   ],
 }
 
-export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps<typeof Sidebar> & { activeRoute?: string }) {
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
@@ -90,7 +90,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={data.navMain} />
+        <NavMain items={data.navMain} activeRoute={activeRoute} />
         <NavDatabase items={data.database} />
         <NavSecurity items={data.security} />
         <NavSecondary items={data.navSecondary} className="mt-auto" />

@@ -18,6 +18,7 @@
 
 use super::{EngineError, HexDBEngine, MAX_WRITE_RETRIES};
 use crate::{
+    filter::{sort_documents, Filter, SortKey},
     catalog::validate_tessellation_name,
     document::{is_reserved_field, CompactFields, Document, FieldValue},
     hex::DocKey,
@@ -98,6 +99,33 @@ pub struct UpdateSummary {
 pub struct ListPage {
     pub documents: Vec<Document>,
     /// Pass as `after` to get the next page; `None` on the last page.
+    pub next: Option<Ulid>,
+}
+
+/// A filtered, sorted, paged document query.
+#[derive(Debug, Clone)]
+pub struct DocumentQuery {
+    pub filter: Filter,
+    pub sort: Vec<SortKey>,
+    pub offset: usize,
+    pub limit: usize,
+    /// Return documents with IDs after this one (ID order only).
+    pub after: Option<Ulid>,
+}
+
+impl Default for DocumentQuery {
+    fn default() -> Self {
+        DocumentQuery { filter: Filter::all(), sort: Vec::new(), offset: 0, limit: 100, after: None }
+    }
+}
+
+/// One page of query results.
+#[derive(Debug, Clone)]
+pub struct QueryPage {
+    pub documents: Vec<Document>,
+    /// Number of documents matching the filter, across all pages.
+    pub total: usize,
+    /// Pass as `after` for the next page (ID order only); `None` on the last page.
     pub next: Option<Ulid>,
 }
 
@@ -237,6 +265,51 @@ impl HexDBEngine {
         Ok(ListPage { documents, next })
     }
 
+    /// Documents matching a filter, optionally sorted, one page at a time.
+    /// Without `sort`, results are in ID order and `next` can be passed as
+    /// `after` for the following page; with `sort`, page with `offset`.
+    pub async fn query_documents(&self, tess: &str, query: &DocumentQuery) -> Result<QueryPage> {
+        if query.after.is_some() && !query.sort.is_empty() {
+            return Err(invalid("after can't be combined with sort; use offset to page sorted results."));
+        }
+        let mut ids: Vec<Ulid> = self
+            .versions(tess)
+            .await
+            .into_iter()
+            .filter(|(id, v)| v.visible() && query.after.is_none_or(|a| *id > a))
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+
+        let mut matched = Vec::new();
+        for id in ids {
+            if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
+                if query.filter.matches(&doc) {
+                    matched.push(doc);
+                }
+            }
+        }
+        let total = matched.len();
+        sort_documents(&mut matched, &query.sort);
+
+        let documents: Vec<Document> = matched.into_iter().skip(query.offset).take(query.limit).collect();
+        let next = if query.sort.is_empty() && query.offset + documents.len() < total {
+            documents.last().map(|d| d.id)
+        } else {
+            None
+        };
+        Ok(QueryPage { documents, total, next })
+    }
+
+    /// Number of documents matching a filter.
+    pub async fn count_matching(&self, tess: &str, filter: &Filter) -> Result<usize> {
+        if filter.is_empty() {
+            return self.count_documents(tess).await;
+        }
+        let query = DocumentQuery { filter: filter.clone(), limit: 0, ..DocumentQuery::default() };
+        Ok(self.query_documents(tess, &query).await?.total)
+    }
+
     // -----------------------------------------------------------------------
     // Writes
     // -----------------------------------------------------------------------
@@ -332,8 +405,7 @@ impl HexDBEngine {
         self.run_write(idem, move || Box::pin(self.plan_delete(tess, id))).await
     }
 
-    /// Merge-patch every document whose fields equal all values in `filter`
-    /// (top-level fields; a `null` filter value also matches a missing field).
+    /// Merge-patch every document matching `filter` (see [`crate::filter`]).
     /// An empty filter matches every document. Atomic.
     pub async fn update_where(
         &self,
@@ -344,10 +416,7 @@ impl HexDBEngine {
         idem: Option<IdempotencyKey>,
     ) -> Result<Outcome<UpdateSummary>> {
         validate_tess(tess)?;
-        let Value::Object(filter) = filter else {
-            return Err(invalid("filter: expected a JSON object."));
-        };
-        let filter: Vec<(String, Value)> = filter.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let filter = Filter::parse(filter)?;
         let changes = patch_changes(update, "update")?;
         if changes.is_empty() && ttl.is_none() {
             return Err(invalid("update: nothing to change."));
@@ -443,7 +512,7 @@ impl HexDBEngine {
     async fn plan_update_where(
         &self,
         tess: &str,
-        filter: &[(String, Value)],
+        filter: &Filter,
         changes: &Changes,
         ttl: Option<i64>,
     ) -> Result<(Vec<BatchItem>, UpdateSummary)> {
@@ -462,15 +531,7 @@ impl HexDBEngine {
             let key = DocKey::new(tess, id);
             let (Some(mut doc), seq) = self.read_latest(&key).await? else { continue };
 
-            let matches = filter.iter().all(|(field, expected)| {
-                let actual = if field == "id" {
-                    Value::String(doc.id.to_string())
-                } else {
-                    doc.data.get(field).map(FieldValue::to_json).unwrap_or(Value::Null)
-                };
-                actual == *expected
-            });
-            if !matches {
+            if !filter.matches(&doc) {
                 continue;
             }
             summary.matched += 1;

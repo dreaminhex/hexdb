@@ -42,7 +42,9 @@ use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
 mod writes;
-pub use writes::{IdempotencyKey, ListPage, Outcome, UpdateSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS};
+pub use writes::{
+    DocumentQuery, IdempotencyKey, ListPage, Outcome, QueryPage, UpdateSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
+};
 
 /// The identity of this hex within its lattice, decided before the engine is built.
 #[derive(Debug, Clone)]

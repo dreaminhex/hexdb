@@ -676,3 +676,26 @@ pub async fn get_role(Path(name): Path<String>, State(engine): Engine) -> ApiRes
         None => Err(ApiError::not_found(format!("Role '{}' not found.", name))),
     }
 }
+
+// ---------------------------------------------------------------------------
+// GraphQL
+// ---------------------------------------------------------------------------
+
+/// Execute a GraphQL request: `{"query": "...", "variables": {...}, "operationName": "..."}`.
+pub async fn graphql(
+    Extension(schema): Extension<hexdb_query::HexDBSchema>,
+    body: Result<Json<async_graphql::Request>, JsonRejection>,
+) -> ApiResult {
+    let Json(request) = body?;
+    Ok(Json(schema.execute(request).await).into_response())
+}
+
+/// GraphiQL, as a fallback to the query console in the admin UI.
+pub async fn graphiql() -> axum::response::Html<String> {
+    axum::response::Html(
+        async_graphql::http::GraphiQLSource::build()
+            .endpoint("/graphql")
+            .title("HexDB GraphiQL")
+            .finish(),
+    )
+}

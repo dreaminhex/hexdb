@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 hexdb_core = { path = "../hexdb_core" }
+hexdb_query = { path = "../hexdb_query" }
+async-graphql = "7.0"
 tokio = { version = "1.37", features = ["full"] }
 axum = "0.8.4"
 tracing = "0.1"

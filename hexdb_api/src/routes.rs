@@ -6,6 +6,7 @@ use axum::{
 };
 use std::{path::PathBuf, sync::Arc};
 use hexdb_core::engine::HexDBEngine;
+use hexdb_query::HexDBSchema;
 use tower_http::services::{ServeDir, ServeFile};
 use crate::handlers::*;
 
@@ -18,7 +19,12 @@ pub const BULK_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Build the HTTP router.
 /// `ui_dir` is the built admin UI (Vite `dist`) directory; pass `None` to disable the UI.
-pub fn app_router(engine: Arc<HexDBEngine>, ui_dir: Option<PathBuf>, shutdown_handle: ShutdownHandle) -> Router {
+pub fn app_router(
+    engine: Arc<HexDBEngine>,
+    schema: HexDBSchema,
+    ui_dir: Option<PathBuf>,
+    shutdown_handle: ShutdownHandle,
+) -> Router {
     // Static segments (health, users, _bulk, ...) take priority over the
     // `{tessellation}` and `{id}` parameters, so these names are reserved.
     let mut router = Router::new()
@@ -27,6 +33,9 @@ pub fn app_router(engine: Arc<HexDBEngine>, ui_dir: Option<PathBuf>, shutdown_ha
         .route("/status", get(status))
         .route("/flush", post(flush))
         .route("/shutdown", post(shutdown))
+
+        // GraphQL (GET serves GraphiQL)
+        .route("/graphql", get(graphiql).post(graphql).layer(DefaultBodyLimit::max(BULK_BODY_LIMIT)))
 
         // Tessellations
         .route("/tessellations", get(list_tessellations).post(create_tessellation))
@@ -63,5 +72,8 @@ pub fn app_router(engine: Arc<HexDBEngine>, ui_dir: Option<PathBuf>, shutdown_ha
             .nest_service(UI_PREFIX, ServeDir::new(dir).fallback(ServeFile::new(index)));
     }
 
-    router.layer(Extension(shutdown_handle)).with_state(engine)
+    router
+        .layer(Extension(shutdown_handle))
+        .layer(Extension(schema))
+        .with_state(engine)
 }

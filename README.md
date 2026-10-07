@@ -40,7 +40,7 @@ HexDB is a reimagination of what modern persistence looks like with AI-native gu
 - Full-text search
 - OAS 3.0 Specification & Swagger-style documentation
 - Integrated management UI
-- GrahpQL Query Syntax
+- GraphQL Query Syntax
 - Remote management
 - Plugin ecosystem
 - HTTP, TCP, and Websocket support
@@ -130,7 +130,9 @@ curl http://localhost:7700/health
 
 ### 5. Access the UI
 
-Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/)
+Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/). The **Queries** page is a GraphQL console with schema-aware autocomplete, validation, example queries, history, and JSON or table results. Press Ctrl+Enter (⌘+Enter on macOS) to run.
+
+For UI development, run `npm run dev` in `hexdb_admin` while a HexDB server is running; API calls are proxied to `http://127.0.0.1:7700` (override with `HEXDB_API`).
 
 ### 6. Stop the Node
 
@@ -205,7 +207,7 @@ curl -X POST http://localhost:7700/articles/_bulk -H "Content-Type: application/
 curl -X PATCH http://localhost:7700/articles/_bulk -H "Content-Type: application/json" \
   -d '[{ "id": "01J...", "published": true }, { "id": "01J...", "published": true }]'
 
-# Patch every document whose top-level fields equal the filter ({} matches all)
+# Patch every document matching a filter ({} matches all; see "Filters" below)
 curl -X POST http://localhost:7700/articles/_update -H "Content-Type: application/json" \
   -d '{ "filter": { "status": "draft" }, "update": { "status": "published" } }'
 # => { "matched": 10, "modified": 10 }
@@ -249,6 +251,64 @@ curl http://localhost:7700/roles/admin
 ```
 
 PUT on a user replaces its editable fields and requires `email_address` and `roles`. Roles and permissions aren't enforced yet; requests are not authenticated.
+
+### Filters
+
+The REST `_update` endpoint and GraphQL share one filter language. A filter is a JSON object; every condition must hold.
+
+```json
+{
+  "status": "draft",
+  "views": { "$gte": 10, "$lt": 1000 },
+  "author.name": "Ada",
+  "tags": "rust",
+  "$or": [{ "featured": true }, { "pinned": true }]
+}
+```
+
+| Operator | Meaning |
+| --- | --- |
+| `value` or `$eq` | Equal (`1` equals `1.0`; `null` also matches a missing field) |
+| `$ne` | Not equal |
+| `$gt`, `$gte`, `$lt`, `$lte` | Compare numbers, strings or booleans |
+| `$in`, `$nin` | One of / none of an array of values |
+| `$exists` | The field is present (`true`) or absent (`false`) |
+| `$contains` | Substring of a string, or element of an array |
+| `$startsWith`, `$endsWith` | String prefix or suffix |
+| `$not` | Negates the operators inside it |
+| `$and`, `$or`, `$not` (top level) | Combine filters |
+
+Dotted paths reach into nested objects, and a condition on an array field matches if any element matches. Every operator can also be written with `_` instead of `$` (`_gte`, `_or`); use that form inside GraphQL query text, where `$` marks a variable.
+
+### GraphQL
+
+`POST /graphql` accepts standard GraphQL requests (`{"query", "variables", "operationName"}`). `GET /graphql` serves GraphiQL. The admin UI's **Queries** page is the main way to explore it.
+
+```graphql
+query Recent($filter: JSON) {
+  documents(
+    tessellation: "articles"
+    filter: $filter
+    sort: [{ field: "views", descending: true }]
+    limit: 25
+  ) {
+    total
+    next
+    documents { id expiresAt data field(path: "author.name") }
+  }
+  count(tessellation: "articles", filter: { published: { _eq: false } })
+}
+```
+
+| Queries | Mutations |
+| --- | --- |
+| `tessellations`, `tessellation(name)` with `documentCount` and `documents` | `insertDocument`, `insertDocuments` (atomic) |
+| `document(tessellation, id)` | `replaceDocument`, `patchDocument`, `deleteDocument` |
+| `documents(tessellation, filter, sort, limit, offset, after)` | `updateDocuments(tessellation, filter, update)` (atomic) |
+| `count(tessellation, filter)` | `createTessellation`, `deleteTessellation` |
+| `users`, `user(idOrLogin)`, `roles`, `status` | |
+
+Documents expose their fields through the `JSON` scalar (`data`, `json`, or `field(path)`). Without `sort`, results come in ID order and `next` pages forward via `after`; with `sort`, page with `offset`. Errors include `extensions.code` (`NOT_FOUND`, `INVALID_REQUEST`, `FORBIDDEN`, `CONFLICT`, ...). System tessellations aren't reachable through document fields.
 
 ### Operations
 
@@ -311,6 +371,7 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
   - ✅ Documents (create, read, replace, patch, delete, list, count)
   - ✅ Bulk writes (atomic insert, replace, patch, and update by filter)
   - ✅ Idempotency keys
+- ✅ GraphQL API (queries, filters, sorting, paging, mutations) with an in-UI query console
   - ✅ Tessellations (list, create, read, delete)
   - ✅ Users (create, read, update, delete)
   - ✅ Roles (read)

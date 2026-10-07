@@ -428,3 +428,50 @@ fn idempotent_user_creation() -> Result<()> {
     assert_eq!(first.body, second.body);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// GraphQL and filters
+// ---------------------------------------------------------------------------
+
+#[test]
+fn graphql_over_http() -> Result<()> {
+    let server = TestServer::start()?;
+    let docs: Vec<Value> = (1..=5).map(|n| json!({ "n": n })).collect();
+    server.request(Method::POST, "/posts/_bulk", Some(&json!(docs)), &[])?;
+
+    let query = json!({
+        "query": "{ count(tessellation: \"posts\", filter: { n: { _gte: 2 } }) documents(tessellation: \"posts\", sort: [{ field: \"n\", descending: true }], limit: 2) { total documents { field(path: \"n\") } } }",
+        "variables": {}
+    });
+    let res = server.request(Method::POST, "/graphql", Some(&query), &[])?;
+    assert_eq!(res.status, StatusCode::OK);
+    assert!(res.body.get("errors").is_none(), "{}", res.body);
+    assert_eq!(res.body["data"]["count"], 4);
+    assert_eq!(res.body["data"]["documents"]["total"], 5);
+    assert_eq!(res.body["data"]["documents"]["documents"], json!([{ "field": 5 }, { "field": 4 }]));
+
+    // Errors come back in the GraphQL errors array with a code.
+    let res = server.request(Method::POST, "/graphql", Some(&json!({ "query": "{ documents(tessellation: \"users\") { total } }" })), &[])?;
+    assert_eq!(res.body.pointer("/errors/0/extensions/code").and_then(Value::as_str), Some("FORBIDDEN"));
+
+    // GraphiQL is served as a fallback.
+    let page = server.get("/graphql")?;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(page.text()?.to_lowercase().contains("graphiql"));
+    Ok(())
+}
+
+#[test]
+fn rest_update_supports_filter_operators() -> Result<()> {
+    let server = TestServer::start()?;
+    let docs: Vec<Value> = (1..=10).map(|n| json!({ "n": n, "tags": if n % 2 == 0 { json!(["even"]) } else { json!(["odd"]) } })).collect();
+    server.request(Method::POST, "/nums/_bulk", Some(&json!(docs)), &[])?;
+
+    let update = json!({ "filter": { "n": { "$gt": 3 }, "tags": "even" }, "update": { "big_even": true } });
+    let res = server.request(Method::POST, "/nums/_update", Some(&update), &[])?;
+    assert_eq!(res.body, json!({ "matched": 4, "modified": 4 }), "6, 8 and 10 plus 4");
+
+    let res = server.request(Method::POST, "/nums/_update", Some(&json!({ "filter": { "n": { "$bogus": 1 } }, "update": { "x": 1 } })), &[])?;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    Ok(())
+}
