@@ -53,6 +53,25 @@ impl Document {
         self.ttl.is_some_and(|ttl| ttl <= now_millis)
     }
 
+    /// The document as returned by the API: its fields as plain JSON, plus
+    /// `id`, and `_expires_at` (RFC 3339) when it has a TTL.
+    pub fn to_api_json(&self) -> Value {
+        let mut map = Map::new();
+        map.insert("id".into(), Value::String(self.id.to_string()));
+        if let Some(ttl) = self.ttl {
+            if let Some(at) = DateTime::from_timestamp_millis(ttl) {
+                map.insert(
+                    "_expires_at".into(),
+                    Value::String(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+                );
+            }
+        }
+        for (k, v) in &self.data {
+            map.insert(k.clone(), v.to_json());
+        }
+        Value::Object(map)
+    }
+
     /// The document's fields as plain JSON (without id or metadata).
     pub fn data_json(&self) -> Value {
         Value::Object(
@@ -123,6 +142,14 @@ impl FieldValue {
     }
 }
 
+/// Field names that are metadata in API responses and are ignored in request bodies.
+pub const RESERVED_FIELDS: &[&str] = &["id", "_expires_at"];
+
+/// True for fields that are ignored when writing documents.
+pub fn is_reserved_field(name: &str) -> bool {
+    RESERVED_FIELDS.contains(&name)
+}
+
 /// Infer typed fields from a JSON object. Non-object values produce no fields.
 pub fn infer_fields_from_json(value: &Value) -> CompactFields {
     match value {
@@ -184,5 +211,26 @@ mod tests {
         };
         let bytes = serde_json::to_vec(&doc).unwrap();
         assert_eq!(serde_json::from_slice::<Document>(&bytes).unwrap(), doc);
+    }
+}
+
+#[cfg(test)]
+mod api_json_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn api_json_is_plain_with_metadata() {
+        let id = Ulid::new();
+        let doc = Document {
+            id,
+            tessellation: "t".into(),
+            data: infer_fields_from_json(&json!({ "title": "x", "tags": ["a"] })),
+            ttl: Some(0),
+        };
+        assert_eq!(
+            doc.to_api_json(),
+            json!({ "id": id.to_string(), "_expires_at": "1970-01-01T00:00:00.000Z", "title": "x", "tags": ["a"] })
+        );
     }
 }

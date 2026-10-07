@@ -11,7 +11,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use hexdb_core::{RuntimeInfo, SHUTDOWN_TOKEN_HEADER};
 use reqwest::blocking::{Client, Response};
-use reqwest::StatusCode;
+use reqwest::{header::HeaderMap, Method, StatusCode};
 use serde_json::Value;
 use std::{
     fs,
@@ -211,7 +211,7 @@ path = "./no-ui"
         cmd.arg("--config")
             .arg(&config_path)
             .current_dir(self.dir())
-            .env("RUST_LOG", "info,hexdb_core::engine=debug")
+            .env("RUST_LOG", "info")
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -317,6 +317,30 @@ path = "./no-ui"
         Ok(self.client.get(self.url(path)).send()?)
     }
 
+    /// Send any request and return the status, headers and JSON body
+    /// (`Value::Null` for empty bodies). Errors are not treated as failures.
+    pub fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        headers: &[(&str, &str)],
+    ) -> Result<ApiResponse> {
+        let mut builder = self.client.request(method, self.url(path));
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        if let Some(body) = body {
+            builder = builder.json(body);
+        }
+        let res = builder.send()?;
+        let status = res.status();
+        let headers = res.headers().clone();
+        let text = res.text()?;
+        let body = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
+        Ok(ApiResponse { status, headers, body })
+    }
+
     /// Insert a document and return its ID.
     pub fn insert(&self, tessellation: &str, doc: &Value) -> Result<String> {
         self.insert_with_query(tessellation, "", doc)
@@ -324,27 +348,18 @@ path = "./no-ui"
 
     /// Insert a document with a query string (e.g. `"?ttl=60"`) and return its ID.
     pub fn insert_with_query(&self, tessellation: &str, query: &str, doc: &Value) -> Result<String> {
-        let body = self
-            .client
-            .post(self.url(&format!("/{}{}", tessellation, query)))
-            .json(doc)
-            .send()?
-            .error_for_status()?
-            .text()?;
-
-        if let Some(id) = serde_json::from_str::<Value>(&body)
-            .ok()
-            .and_then(|v| v.get("id").and_then(Value::as_str).map(String::from))
-        {
-            return Ok(id);
+        let res = self.request(Method::POST, &format!("/{}{}", tessellation, query), Some(doc), &[])?;
+        if res.status != StatusCode::CREATED {
+            bail!("Insert returned {}: {}", res.status, res.body);
         }
-
-        // TODO(Phase 3): insert doesn't return the new ID yet, so read it from the server log.
-        self.id_from_log(tessellation)
-            .ok_or_else(|| anyhow!("Insert succeeded but the new document ID could not be determined"))
+        res.body
+            .get("id")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| anyhow!("Insert response has no id: {}", res.body))
     }
 
-    /// Insert a document without determining its ID. Safe to call from several threads.
+    /// Insert a document without reading its ID. Safe to call from several threads.
     pub fn post_document(&self, tessellation: &str, doc: &Value) -> Result<()> {
         self.client
             .post(self.url(&format!("/{}", tessellation)))
@@ -354,29 +369,20 @@ path = "./no-ui"
         Ok(())
     }
 
-    fn id_from_log(&self, tessellation: &str) -> Option<String> {
-        let marker = format!("inserted into tessellation {}.", tessellation);
-        let text = fs::read_to_string(self.log_path()).ok()?;
-        text.lines().rev().find(|l| l.contains(&marker)).and_then(|line| {
-            let rest = &line[line.find("Document ")? + "Document ".len()..];
-            rest.split_whitespace().next().map(String::from)
-        })
-    }
-
     /// Fetch a document. Returns `None` when it doesn't exist.
     pub fn get_doc(&self, tessellation: &str, id: &str) -> Result<Option<Value>> {
         let res = self.get(&format!("/{}/{}", tessellation, id))?;
         if res.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let value: Value = res.error_for_status()?.json()?;
-        Ok(if value.is_null() { None } else { Some(value) })
+        Ok(Some(res.error_for_status()?.json()?))
     }
 
     /// Partially update a document. `doc` must include `"id"`.
     pub fn patch(&self, tessellation: &str, doc: &Value) -> Result<()> {
+        let id = doc.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("patch needs an id"))?;
         self.client
-            .patch(self.url(&format!("/{}", tessellation)))
+            .patch(self.url(&format!("/{}/{}", tessellation, id)))
             .json(doc)
             .send()?
             .error_for_status()?;
@@ -391,14 +397,13 @@ path = "./no-ui"
         Ok(())
     }
 
+    /// Number of documents in a tessellation (errors if it doesn't exist).
     pub fn count(&self, tessellation: &str) -> Result<usize> {
-        let text = self
-            .get(&format!("/{}/count", tessellation))?
-            .error_for_status()?
-            .text()?;
-        text.trim()
-            .parse()
-            .with_context(|| format!("Unexpected count response: {:?}", text))
+        let body: Value = self.get(&format!("/{}/count", tessellation))?.error_for_status()?.json()?;
+        body.get("count")
+            .and_then(Value::as_u64)
+            .map(|c| c as usize)
+            .with_context(|| format!("Unexpected count response: {}", body))
     }
 
     /// POST a JSON body and return the status code without treating errors as failures.
@@ -409,7 +414,7 @@ path = "./no-ui"
     /// Delete a tessellation and all of its documents.
     pub fn delete_tessellation(&self, name: &str) -> Result<()> {
         self.client
-            .delete(self.url(&format!("/tessellation/{}", name)))
+            .delete(self.url(&format!("/tessellations/{}", name)))
             .send()?
             .error_for_status()?;
         Ok(())
@@ -417,7 +422,7 @@ path = "./no-ui"
 
     /// Flush in-memory documents to SSTables.
     pub fn flush(&self) -> Result<()> {
-        self.get("/flush")?.error_for_status()?;
+        self.client.post(self.url("/flush")).send()?.error_for_status()?;
         Ok(())
     }
 }
@@ -441,6 +446,26 @@ impl Drop for TestServer {
 /// Read a document field. Accepts both the current tagged format
 /// (`{"type": "...", "value": ...}` under `data`) and plain JSON, so tests
 /// keep working when the API starts returning plain documents.
+/// A response from [`TestServer::request`].
+#[derive(Debug)]
+pub struct ApiResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: Value,
+}
+
+impl ApiResponse {
+    /// True if the response was replayed from an idempotency record.
+    pub fn replayed(&self) -> bool {
+        self.headers.get("idempotent-replayed").is_some_and(|v| v == "true")
+    }
+
+    /// The error code from an error response.
+    pub fn error_code(&self) -> Option<&str> {
+        self.body.pointer("/error/code").and_then(Value::as_str)
+    }
+}
+
 pub fn field(doc: &Value, name: &str) -> Option<Value> {
     let data = doc.get("data").unwrap_or(doc);
     data.get(name).map(untag)

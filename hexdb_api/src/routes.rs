@@ -1,4 +1,5 @@
 use axum::{
+    extract::DefaultBodyLimit,
     response::Redirect,
     routing::{get, post},
     Extension, Router,
@@ -12,34 +13,46 @@ use crate::handlers::*;
 pub const UI_PREFIX: &str = "/ui";
 const UI_ROOT: &str = "/ui/";
 
+/// Request body limit for bulk endpoints (other endpoints use axum's 2 MB default).
+pub const BULK_BODY_LIMIT: usize = 32 * 1024 * 1024;
+
 /// Build the HTTP router.
 /// `ui_dir` is the built admin UI (Vite `dist`) directory; pass `None` to disable the UI.
 pub fn app_router(engine: Arc<HexDBEngine>, ui_dir: Option<PathBuf>, shutdown_handle: ShutdownHandle) -> Router {
-    // Static segments (health, status, ui, ...) take priority over the
-    // `{tessellation}` parameter, so these names are reserved.
+    // Static segments (health, users, _bulk, ...) take priority over the
+    // `{tessellation}` and `{id}` parameters, so these names are reserved.
     let mut router = Router::new()
         // Utility, Health, Status
         .route("/health", get(health))
         .route("/status", get(status))
-        .route("/flush", get(flush))
+        .route("/flush", post(flush))
         .route("/shutdown", post(shutdown))
 
-        // Tessellation routes
-        .route("/tessellation/{name}", post(create_tessellation).delete(delete_tessellation))
-        //.route("/tessellation", get(get_tessellations))
+        // Tessellations
+        .route("/tessellations", get(list_tessellations).post(create_tessellation))
+        .route("/tessellations/{name}", get(get_tessellation).delete(delete_tessellation))
 
-        // TODO: Security routes
-        //.route("/user", get(get_user))
-        //.route("/user", post(insert_user))
-        //.route("/user", delete(delete_user))
-        //.route("/user", patch(patch_user))
-        //.route("/user", put(update_user))
-        //.route("/roles", get(get_roles))
+        // Users and roles
+        .route("/users", get(list_users).post(create_user))
+        .route("/users/{user}", get(get_user).put(replace_user).patch(patch_user).delete(delete_user))
+        .route("/roles", get(list_roles))
+        .route("/roles/{name}", get(get_role))
 
-        // Document routes
-        .route("/{tessellation}", post(insert_doc).put(update_doc).patch(patch_doc))
+        // Documents
+        .route("/{tessellation}", get(list_docs).post(insert_doc))
         .route("/{tessellation}/count", get(count_docs))
-        .route("/{tessellation}/{id}", get(get_doc).delete(delete_doc));
+        .route(
+            "/{tessellation}/_bulk",
+            post(bulk_insert)
+                .put(bulk_replace)
+                .patch(bulk_patch)
+                .layer(DefaultBodyLimit::max(BULK_BODY_LIMIT)),
+        )
+        .route(
+            "/{tessellation}/_update",
+            post(update_where).layer(DefaultBodyLimit::max(BULK_BODY_LIMIT)),
+        )
+        .route("/{tessellation}/{id}", get(get_doc).put(replace_doc).patch(patch_doc).delete(delete_doc));
 
     // Admin UI routes and static assets. Unknown paths under /ui fall back to
     // index.html so client-side routes work.

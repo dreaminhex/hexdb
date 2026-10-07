@@ -154,52 +154,108 @@ Set `HEXDB_TEST_KEEP=1` to keep each test's directory (config, data, and `server
 
 ## API Operations
 
-### 1. Insert a Document
+Documents are plain JSON. Responses add `id` and, when a TTL is set, `_expires_at`; both are ignored if sent in a request body. Errors look like this:
+
+```json
+{ "error": { "code": "not_found", "message": "Document 01J... not found in 'articles'." } }
+```
+
+| Status | Code                     | Meaning                                                     |
+| ------ | ------------------------ | ----------------------------------------------------------- |
+| 400    | `invalid_request`        | Malformed JSON, bad parameters, or invalid values           |
+| 403    | `forbidden`              | System tessellations (`users`, `roles`) via document routes |
+| 404    | `not_found`              | Unknown document, tessellation, user or role                |
+| 409    | `conflict`               | Already exists, or an idempotent request is in progress     |
+| 413    | `payload_too_large`      | Body over 2 MB (32 MB for bulk endpoints)                   |
+| 422    | `idempotency_key_reused` | The `Idempotency-Key` was used with a different request     |
+
+### Documents
 
 ```bash
+# Insert (201, returns the document and a Location header). Add ?ttl=<seconds> to expire it.
 curl -X POST http://localhost:7700/articles \
   -H "Content-Type: application/json" \
   -d '{ "title": "Quantum Tessellation", "tags": [ "hexdb", "rust", "ai" ], "published": true, "views": 445 }'
-```
 
-To have a document expire, add `ttl` (in seconds) to an insert, update or patch:
-
-```bash
-curl -X POST "http://localhost:7700/sessions?ttl=3600" \
-  -H "Content-Type: application/json" \
-  -d '{ "user": "ada" }'
-```
-
-### 2. Fetch a Document
-
-```bash
+# Fetch, replace, patch (a null field removes it), delete (204)
 curl http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B
-```
+curl -X PUT   http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B -H "Content-Type: application/json" -d '{ "title": "New" }'
+curl -X PATCH http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B -H "Content-Type: application/json" -d '{ "views": 446, "tags": null }'
+curl -X DELETE http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B
 
-### 3. Count Documents
+# List in ID order, 1-1000 per page (default 100). Pass "next" from the response as ?after= for the next page.
+curl "http://localhost:7700/articles?limit=50"
 
-```bash
+# Count
 curl http://localhost:7700/articles/count
 ```
 
-### 4. Delete a Document
+Inserting into a tessellation that doesn't exist creates it.
+
+### Bulk Writes
+
+Each bulk request is atomic: every document is written, or none are. Up to 10,000 documents and 32 MB per request.
 
 ```bash
-curl -X DELETE http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B
+# Insert many (201): a JSON array, or {"documents": [...]}
+curl -X POST http://localhost:7700/articles/_bulk -H "Content-Type: application/json" \
+  -d '[{ "title": "One" }, { "title": "Two" }]'
+
+# Replace or patch many by id (every item needs an "id"; a missing id fails the whole request with 404)
+curl -X PATCH http://localhost:7700/articles/_bulk -H "Content-Type: application/json" \
+  -d '[{ "id": "01J...", "published": true }, { "id": "01J...", "published": true }]'
+
+# Patch every document whose top-level fields equal the filter ({} matches all)
+curl -X POST http://localhost:7700/articles/_update -H "Content-Type: application/json" \
+  -d '{ "filter": { "status": "draft" }, "update": { "status": "published" } }'
+# => { "matched": 10, "modified": 10 }
 ```
 
-### 5. Create Tessellation
+### Idempotency Keys
+
+Every write accepts an `Idempotency-Key` header (1-255 printable ASCII characters). The key and the result are stored atomically with the write for 24 hours. Retrying the same request with the same key returns the original response with `Idempotent-Replayed: true` instead of writing again, even after a crash. Reusing a key for a different request returns 422; a concurrent request with a key that is still being processed returns 409.
 
 ```bash
-curl -X POST http://localhost:7700/tessellation \
-  -H "Content-Type: application/json" \
-  -d '{ "name": "articles" }'
+curl -X POST http://localhost:7700/orders -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-7f3a" -d '{ "item": "widget", "qty": 2 }'
 ```
 
-### 6. Delete Tessellation
+### Tessellations
 
 ```bash
-curl -X DELETE http://localhost:7700/tessellation/articles
+curl http://localhost:7700/tessellations                          # list
+curl -X POST http://localhost:7700/tessellations -H "Content-Type: application/json" -d '{ "name": "articles" }'
+curl http://localhost:7700/tessellations/articles                 # details and document count
+curl -X DELETE http://localhost:7700/tessellations/articles       # deletes all of its documents
+```
+
+Names are 1-64 letters, digits, `_` or `-`, unique ignoring case, and can't start with `_` or be a route name (`users`, `roles`, `health`, ...).
+
+### Users and Roles
+
+Passwords are hashed with Argon2 and never returned. Users can be addressed by ID or login. The last unlocked admin can't be deleted, locked or demoted.
+
+```bash
+curl http://localhost:7700/users
+curl -X POST http://localhost:7700/users -H "Content-Type: application/json" -d '{
+  "login": "ada", "password": "correct horse battery", "email_address": "ada@example.com",
+  "roles": [{ "name": "writer", "permissions": ["articles"] }] }'
+curl http://localhost:7700/users/ada
+curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json" -d '{ "password": "a new long password" }'
+curl -X DELETE http://localhost:7700/users/ada
+
+curl http://localhost:7700/roles
+curl http://localhost:7700/roles/admin
+```
+
+PUT on a user replaces its editable fields and requires `email_address` and `roles`. Roles and permissions aren't enforced yet; requests are not authenticated.
+
+### Operations
+
+```bash
+curl http://localhost:7700/health
+curl http://localhost:7700/status
+curl -X POST http://localhost:7700/flush    # write unflushed data to SSTables
 ```
 
 ### Configuration
@@ -252,10 +308,12 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
 
 - ✅ Command-line interface
 - ✅ REST API
-  - ✅ Documents (create, read, update, delete)
-  - ✅ Tessellations (create/delete)
-  - Users (create, read, update, delete)
-  - Roles (create, read, delete)
+  - ✅ Documents (create, read, replace, patch, delete, list, count)
+  - ✅ Bulk writes (atomic insert, replace, patch, and update by filter)
+  - ✅ Idempotency keys
+  - ✅ Tessellations (list, create, read, delete)
+  - ✅ Users (create, read, update, delete)
+  - ✅ Roles (read)
   - Permissions (read)
   - ✅ Status (hex metrics)
   - ✅ Health
@@ -282,7 +340,7 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
 
 ### In-Progress
 
-- Roles, Users, Permissions
+- Roles and permissions enforcement, authentication
 
 ### Planned
 
@@ -293,9 +351,8 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
 - Ingest Sources
 - Indexes (Primary, Composite)
 - Full text search
-- Idempotency & Locking
+- Locking
 - Change Data Streams
-- Bulk APIs
 - ACID Transactions
 - Logging
 - Schemas & Versioning

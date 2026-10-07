@@ -266,7 +266,7 @@ fn deleted_tessellation_stays_deleted_after_crash() -> Result<()> {
     server.crash_and_restart()?;
 
     assert!(server.get_doc("scratch", &id)?.is_none());
-    assert_eq!(server.count("scratch")?, 0);
+    assert_eq!(server.get("/scratch/count")?.status().as_u16(), 404, "the tessellation should be gone");
     Ok(())
 }
 

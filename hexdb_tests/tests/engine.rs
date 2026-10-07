@@ -69,7 +69,7 @@ async fn compaction_drops_deleted_and_expired_documents() -> Result<()> {
     let kept = engine.insert_json("t", json!({ "name": "kept" }), None).await?.id;
     engine.flush().await?;
 
-    assert!(engine.delete_document("t", &deleted.to_string()).await?);
+    assert!(engine.delete_document("t", &deleted.to_string(), None).await?.value);
     engine.flush().await?;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -94,7 +94,7 @@ async fn sequence_numbers_never_go_backwards() -> Result<()> {
     let dir = TempDir::new()?;
     let engine = open(dir.path(), 64, &KEY).await?;
     let id = engine.insert_json("t", json!({ "a": 1 }), None).await?.id;
-    engine.delete_document("t", &id.to_string()).await?;
+    engine.delete_document("t", &id.to_string(), None).await?;
     engine.flush().await?;
     engine.compact().await?; // drops the tombstone and the only document
     let before = engine.stats().await.next_seq;
@@ -166,5 +166,43 @@ async fn refuses_to_start_with_the_wrong_key() -> Result<()> {
     // The WAL is untouched, so the right key still recovers the write.
     let engine = open(dir.path(), 64, &KEY).await?;
     assert_eq!(engine.count_documents("t").await?, 1);
+    engine.shutdown().await
+}
+
+#[tokio::test]
+async fn legacy_users_and_roles_are_migrated() -> Result<()> {
+    use hexdb_core::users;
+
+    let dir = TempDir::new()?;
+    let engine = open(dir.path(), 64, &KEY).await?;
+    let hash = hexdb_core::create_hash("legacy password");
+
+    // The layout written by earlier builds: one document holding an array.
+    engine.create_tessellation("roles", "system")?;
+    engine.create_tessellation("users", "system")?;
+    engine
+        .insert_json("roles", json!({ "roles": [
+            { "name": "admin", "description": "Full system access." },
+            { "name": "reader", "description": "Read-only." }
+        ] }), None)
+        .await?;
+    engine
+        .insert_json("users", json!({ "users": [{
+            "login": "legacyadmin", "password": hash, "email_address": "old@hexdb.ai",
+            "created": 1, "roles": [{ "name": "admin", "permissions": ["*"] }]
+        }] }), None)
+        .await?;
+
+    let mut config = HexConfig::default();
+    config.security.admin_login = "newadmin".into();
+    users::bootstrap(&engine, &config.security).await?;
+
+    let all = users::list_users(&engine).await?;
+    assert_eq!(all.len(), 1, "the migrated admin exists, so no new admin is created");
+    assert_eq!(all[0].login, "legacyadmin");
+    assert_eq!(engine.count_documents("users").await?, 1, "the legacy array document is removed");
+
+    let roles: Vec<String> = users::list_roles(&engine).await?.into_iter().map(|r| r.name).collect();
+    assert_eq!(roles.len(), 4, "{:?}", roles);
     engine.shutdown().await
 }

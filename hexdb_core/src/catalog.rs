@@ -100,6 +100,9 @@ pub fn validate_tessellation_name(name: &str) -> Result<()> {
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         bail!("Tessellation names may only contain letters, digits, '_' and '-'.");
     }
+    if name.starts_with('_') {
+        bail!("Tessellation names starting with '_' are reserved for system use.");
+    }
     if RESERVED_NAMES.iter().any(|r| r.eq_ignore_ascii_case(name)) {
         bail!("'{}' is reserved and can't be used as a tessellation name.", name);
     }
@@ -114,7 +117,7 @@ mod tests {
     fn validates_names() {
         assert!(validate_tessellation_name("articles").is_ok());
         assert!(validate_tessellation_name("blog_posts-2024").is_ok());
-        for bad in ["", "../etc", "a/b", "a.b", "has space", "WAL", "health", &"x".repeat(65)] {
+        for bad in ["", "../etc", "a/b", "a.b", "has space", "WAL", "health", "_system", &"x".repeat(65)] {
             assert!(validate_tessellation_name(bad).is_err(), "{:?} should be rejected", bad);
         }
     }

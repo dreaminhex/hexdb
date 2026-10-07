@@ -18,7 +18,7 @@
 
 use crate::{
     catalog::{validate_tessellation_name, Catalog, TessellationInfo},
-    document::{infer_fields_from_json, CompactFields, Document, FieldValue},
+    document::Document,
     hex::{DocKey, Hex, IntegrityReport, Lookup},
     network::discovery::PeerHex,
     sst::{parse_document, CompactionStats, DiskLookup, SstEntry, SstStore},
@@ -28,7 +28,6 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use rand::seq::IndexedRandom;
-use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
@@ -42,6 +41,9 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
+mod writes;
+pub use writes::{IdempotencyKey, ListPage, Outcome, UpdateSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS};
+
 /// The identity of this hex within its lattice, decided before the engine is built.
 #[derive(Debug, Clone)]
 pub struct HexIdentity {
@@ -54,6 +56,8 @@ pub struct HexIdentity {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineError {
     NotFound(String),
+    /// The request is well-formed but can't be processed (e.g. an idempotency key reused with a different request).
+    Unprocessable(String),
     Invalid(String),
     Conflict(String),
 }
@@ -61,7 +65,10 @@ pub enum EngineError {
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EngineError::NotFound(m) | EngineError::Invalid(m) | EngineError::Conflict(m) => f.write_str(m),
+            EngineError::NotFound(m)
+            | EngineError::Invalid(m)
+            | EngineError::Conflict(m)
+            | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }
 }
@@ -156,6 +163,10 @@ pub struct HexDBEngine {
     wal_floor: AtomicU64,
     ram_budget: usize,
     flush_threshold: usize,
+    /// Idempotency keys of requests currently being processed.
+    inflight: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Serializes user-management writes (e.g. so two users can't claim one login).
+    pub(crate) users_lock: Mutex<()>,
 }
 
 const MAX_WRITE_RETRIES: usize = 16;
@@ -212,24 +223,29 @@ impl HexDBEngine {
 
         let mut hex = Hex::new();
         let mut applied = 0usize;
-        for record in records {
-            let (tess, id) = match &record.op {
+        for (seq, op) in records.into_iter().flat_map(WalRecord::into_ops) {
+            let (tess, id) = match &op {
                 WalOp::Put(doc) => (doc.tessellation.clone(), doc.id),
                 WalOp::Delete { tessellation, id } => (tessellation.clone(), *id),
+                WalOp::Batch(_) => {
+                    warn!("⚠️ Skipping a nested WAL batch at sequence {}.", seq);
+                    continue;
+                }
             };
-            if catalog.dropped.get(&tess).is_some_and(|&d| record.seq <= d) {
+            if catalog.dropped.get(&tess).is_some_and(|&d| seq <= d) {
                 continue;
             }
-            if sst.seq_of(&tess, &id).await.is_some_and(|s| s >= record.seq) {
+            if sst.seq_of(&tess, &id).await.is_some_and(|s| s >= seq) {
                 continue;
             }
             let key = DocKey::new(&tess, id);
-            if hex.meta(&key).is_some_and(|m| m.seq >= record.seq) {
+            if hex.meta(&key).is_some_and(|m| m.seq >= seq) {
                 continue;
             }
-            match record.op {
-                WalOp::Put(doc) => hex.put(&key, record.seq, doc.ttl, &serde_json::to_vec(&doc)?, true),
-                WalOp::Delete { .. } => hex.put_tombstone(&key, record.seq, true),
+            match op {
+                WalOp::Put(doc) => hex.put(&key, seq, doc.ttl, &serde_json::to_vec(&doc)?, true),
+                WalOp::Delete { .. } => hex.put_tombstone(&key, seq, true),
+                WalOp::Batch(_) => unreachable!(),
             }
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
@@ -286,6 +302,8 @@ impl HexDBEngine {
             wal_floor: AtomicU64::new(wal_floor),
             ram_budget,
             flush_threshold: ram_budget / 4,
+            inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
+            users_lock: Mutex::new(()),
         };
 
         // Move recovered writes into SSTables and retire the old WAL segments.
@@ -324,6 +342,43 @@ impl HexDBEngine {
 
     pub fn tessellation_exists(&self, name: &str) -> bool {
         self.catalog.lock().unwrap().tessellations.contains_key(name)
+    }
+
+    /// Catalog details for one tessellation.
+    pub fn tessellation_info(&self, name: &str) -> Option<TessellationInfo> {
+        self.catalog.lock().unwrap().tessellations.get(name).cloned()
+    }
+
+    /// All tessellations with their catalog details, ordered by name.
+    pub fn tessellation_details(&self) -> Vec<(String, TessellationInfo)> {
+        self.catalog
+            .lock()
+            .unwrap()
+            .tessellations
+            .iter()
+            .map(|(name, info)| (name.clone(), info.clone()))
+            .collect()
+    }
+
+    /// True for tessellations managed by HexDB itself (users, roles, idempotency
+    /// records). The generic document API must not read or write them.
+    pub fn is_system_tessellation(&self, name: &str) -> bool {
+        name.starts_with('_')
+            || Catalog::default_kind(name) == "system"
+            || self.tessellation_info(name).is_some_and(|info| info.kind == "system")
+    }
+
+    /// Create a system tessellation if missing, bypassing user-facing name rules.
+    fn ensure_system_tessellation(&self, name: &str) -> Result<()> {
+        let mut catalog = self.catalog.lock().unwrap();
+        if !catalog.tessellations.contains_key(name) {
+            catalog.tessellations.insert(
+                name.to_string(),
+                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis() },
+            );
+            catalog.save(&self.storage_dir)?;
+        }
+        Ok(())
     }
 
     /// Create a tessellation. Returns false if it already exists.
@@ -383,83 +438,6 @@ impl HexDBEngine {
     // Documents
     // -----------------------------------------------------------------------
 
-    /// Insert a JSON object as a new document. `ttl` is an expiry time in epoch milliseconds.
-    /// An `id` field in the input is ignored; IDs are assigned by the server.
-    pub async fn insert_json(&self, tess: &str, json: Value, ttl: Option<i64>) -> Result<Document> {
-        validate_tessellation_name(tess).map_err(|e| EngineError::Invalid(e.to_string()))?;
-        let mut data = object_fields(&json)?;
-        data.remove("id");
-        self.ensure_tessellation(tess)?;
-
-        let doc = Document { id: Ulid::new(), tessellation: tess.to_string(), data, ttl };
-        let key = DocKey::new(tess, doc.id);
-        self.write(&key, WalOp::Put(doc.clone()), None).await?;
-        debug!("✅ Document {} inserted into tessellation {}.", doc.id, tess);
-        Ok(doc)
-    }
-
-    /// Replace a document's fields. `json` must contain the document's `id`.
-    /// The TTL is kept unless a new one is given.
-    pub async fn update_json(&self, tess: &str, json: Value, ttl: Option<i64>) -> Result<Document> {
-        let mut fields = object_fields(&json)?;
-        fields.remove("id");
-        self.modify(tess, &json, ttl, |doc| doc.data = fields.clone()).await
-    }
-
-    /// Merge fields into a document. `json` must contain the document's `id`.
-    /// A field set to `null` is removed (JSON Merge Patch semantics, top level only).
-    pub async fn patch_json(&self, tess: &str, json: Value, ttl: Option<i64>) -> Result<Document> {
-        let Value::Object(map) = &json else {
-            return Err(EngineError::Invalid("Expected a JSON object.".into()).into());
-        };
-        let changes: Vec<(String, Option<FieldValue>)> = map
-            .iter()
-            .filter(|(k, _)| k.as_str() != "id")
-            .map(|(k, v)| (k.clone(), if v.is_null() { None } else { Some(FieldValue::from_json(v)) }))
-            .collect();
-
-        self.modify(tess, &json, ttl, |doc| {
-            for (k, v) in &changes {
-                match v {
-                    Some(v) => {
-                        doc.data.insert(k.clone(), v.clone());
-                    }
-                    None => {
-                        doc.data.remove(k);
-                    }
-                }
-            }
-        })
-        .await
-    }
-
-    /// Read-modify-write with optimistic concurrency: retried if the document
-    /// changes between the read and the write.
-    async fn modify(&self, tess: &str, json: &Value, ttl: Option<i64>, change: impl Fn(&mut Document)) -> Result<Document> {
-        let id_str = json
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| EngineError::Invalid("Missing 'id' field.".into()))?;
-        let id = Ulid::from_string(id_str).map_err(|_| EngineError::NotFound(format!("Document {} not found.", id_str)))?;
-        let key = DocKey::new(tess, id);
-
-        for _ in 0..MAX_WRITE_RETRIES {
-            let (current, seq) = self.read_latest(&key).await?;
-            let Some(mut doc) = current else {
-                return Err(EngineError::NotFound(format!("Document {} not found in '{}'.", id, tess)).into());
-            };
-            change(&mut doc);
-            if ttl.is_some() {
-                doc.ttl = ttl;
-            }
-            if self.write(&key, WalOp::Put(doc.clone()), Some(seq)).await? {
-                debug!("📝 Document {} updated in tessellation {}.", id, tess);
-                return Ok(doc);
-            }
-        }
-        Err(EngineError::Conflict(format!("Document {} is being modified concurrently; try again.", id)).into())
-    }
-
     /// Fetch a document. Returns `None` for unknown, deleted or expired documents.
     pub async fn get_document(&self, tess: &str, id: &str) -> Result<Option<Document>> {
         let Ok(id) = Ulid::from_string(id) else { return Ok(None) };
@@ -469,50 +447,9 @@ impl HexDBEngine {
         Ok(self.read_latest(&DocKey::new(tess, id)).await?.0)
     }
 
-    /// Delete a document. Returns false if it didn't exist.
-    pub async fn delete_document(&self, tess: &str, id: &str) -> Result<bool> {
-        let Ok(id) = Ulid::from_string(id) else { return Ok(false) };
-        if validate_tessellation_name(tess).is_err() {
-            return Ok(false);
-        }
-        let key = DocKey::new(tess, id);
-        for _ in 0..MAX_WRITE_RETRIES {
-            let (current, seq) = self.read_latest(&key).await?;
-            if current.is_none() {
-                return Ok(false);
-            }
-            let op = WalOp::Delete { tessellation: tess.to_string(), id };
-            if self.write(&key, op, Some(seq)).await? {
-                debug!("🗑️ Document {} deleted from tessellation {}.", id, tess);
-                return Ok(true);
-            }
-        }
-        Err(EngineError::Conflict(format!("Document {} is being modified concurrently; try again.", id)).into())
-    }
-
     /// Number of visible documents in a tessellation.
     pub async fn count_documents(&self, tess: &str) -> Result<usize> {
         Ok(self.versions(tess).await.values().filter(|v| v.visible()).count())
-    }
-
-    /// Visible documents in a tessellation, ordered by ID.
-    pub async fn list_documents(&self, tess: &str, offset: usize, limit: usize) -> Result<Vec<Document>> {
-        let mut ids: Vec<Ulid> = self
-            .versions(tess)
-            .await
-            .into_iter()
-            .filter(|(_, v)| v.visible())
-            .map(|(id, _)| id)
-            .collect();
-        ids.sort();
-
-        let mut docs = Vec::new();
-        for id in ids.into_iter().skip(offset).take(limit) {
-            if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
-                docs.push(doc);
-            }
-        }
-        Ok(docs)
     }
 
     /// Per-tessellation statistics.
@@ -645,52 +582,6 @@ impl HexDBEngine {
         if state.hex.memory_bytes() > self.ram_budget {
             state.hex.evict_clean(self.ram_budget * 3 / 4);
         }
-    }
-
-    /// Apply a write. With `expected_seq`, the write only happens if the
-    /// document's newest version still has that sequence number; returns
-    /// false if it changed. Returns once the write is durable in the WAL.
-    async fn write(&self, key: &DocKey, op: WalOp, expected_seq: Option<u64>) -> Result<bool> {
-        if self.wal.has_failed() {
-            bail!("Writes are disabled after a WAL failure. Check the disk and restart HexDB.");
-        }
-        let bytes = match &op {
-            WalOp::Put(doc) => Some(serde_json::to_vec(doc)?),
-            WalOp::Delete { .. } => None,
-        };
-        let ttl = match &op {
-            WalOp::Put(doc) => doc.ttl,
-            WalOp::Delete { .. } => None,
-        };
-
-        let ack = {
-            let mut state = self.state.lock().await;
-            if let Some(expected) = expected_seq {
-                let current = match state.hex.meta(key) {
-                    Some(meta) => meta.seq,
-                    None => self.sst.seq_of(&key.tessellation, &key.id).await.unwrap_or(0),
-                };
-                if current != expected {
-                    return Ok(false);
-                }
-            }
-
-            let seq = state.next_seq;
-            // Queue to the WAL first so nothing is applied if the WAL is unavailable.
-            let ack = self.wal.append(WalRecord { seq, op }).await?;
-            state.next_seq += 1;
-            match &bytes {
-                Some(bytes) => state.hex.put(key, seq, ttl, bytes, true),
-                None => state.hex.put_tombstone(key, seq, true),
-            }
-            if state.hex.dirty_bytes() >= self.flush_threshold {
-                self.flush_needed.notify_one();
-            }
-            ack
-        };
-
-        ack.wait().await?;
-        Ok(true)
     }
 
     // -----------------------------------------------------------------------
@@ -857,11 +748,4 @@ impl HexDBEngine {
     pub async fn corrupt_shard_for_testing(&self, tess: &str, id: Ulid, vertex: usize) -> bool {
         self.state.lock().await.hex.corrupt_for_testing(&DocKey::new(tess, id), vertex)
     }
-}
-
-fn object_fields(json: &Value) -> Result<CompactFields> {
-    if !json.is_object() {
-        return Err(EngineError::Invalid("Expected a JSON object.".into()).into());
-    }
-    Ok(infer_fields_from_json(json))
 }

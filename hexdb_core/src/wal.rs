@@ -50,6 +50,31 @@ pub enum WalOp {
     Put(Document),
     /// Delete a document.
     Delete { tessellation: String, id: Ulid },
+    /// Several operations applied atomically. They use consecutive sequence
+    /// numbers starting at the record's `seq`. Batches are never nested.
+    Batch(Vec<WalOp>),
+}
+
+impl WalRecord {
+    /// The record's operations, each with its own sequence number.
+    pub fn into_ops(self) -> Vec<(u64, WalOp)> {
+        match self.op {
+            WalOp::Batch(ops) => ops
+                .into_iter()
+                .enumerate()
+                .map(|(i, op)| (self.seq + i as u64, op))
+                .collect(),
+            op => vec![(self.seq, op)],
+        }
+    }
+
+    /// The highest sequence number used by this record.
+    pub fn last_seq(&self) -> u64 {
+        match &self.op {
+            WalOp::Batch(ops) => self.seq + (ops.len() as u64).saturating_sub(1),
+            _ => self.seq,
+        }
+    }
 }
 
 enum WalCommand {
@@ -385,7 +410,7 @@ pub fn replay(dir: &Path, key: &[u8], mut apply: impl FnMut(WalRecord)) -> Resul
             match decode_record(&cipher, &payload) {
                 Ok(record) => {
                     stats.records += 1;
-                    stats.max_seq = stats.max_seq.max(record.seq);
+                    stats.max_seq = stats.max_seq.max(record.last_seq());
                     apply(record);
                 }
                 Err(e) => {
