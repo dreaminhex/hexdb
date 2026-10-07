@@ -23,7 +23,8 @@ use hexdb_core::{
     engine::HexDBEngine,
     metrics::{collect, HexMeta},
     users::{self, NewUser, UserChanges},
-    Document, EngineError, IdempotencyKey, Outcome, TessellationInfo, SHUTDOWN_TOKEN_HEADER,
+    Document, DocumentQuery, EngineError, Filter, IdempotencyKey, Outcome, SortKey, TessellationInfo,
+    SHUTDOWN_TOKEN_HEADER,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -140,11 +141,106 @@ impl WriteParams {
     }
 }
 
-/// Query parameters for listing documents.
+/// Query-string options for listing documents:
+/// `?filter=<JSON>&sort=-views,title&limit=100&offset=0&after=<id>`.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListParams {
+    /// A filter as URL-encoded JSON (see the README's "Filters").
+    pub filter: Option<String>,
+    /// Comma-separated field paths; prefix with `-` for descending.
+    pub sort: Option<String>,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
     pub after: Option<String>,
+}
+
+/// JSON body for `POST /{tessellation}/_query`, for filters too long for a URL.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryRequest {
+    #[serde(default)]
+    pub filter: Value,
+    pub sort: Option<SortSpec>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub after: Option<String>,
+}
+
+/// Sort keys as `"-views,title"` or `[{"field": "views", "descending": true}]`.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum SortSpec {
+    Text(String),
+    Keys(Vec<SortKey>),
+}
+
+/// Query-string options for counting documents: `?filter=<JSON>`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountParams {
+    pub filter: Option<String>,
+}
+
+fn parse_filter_param(filter: Option<&str>) -> Result<Value, ApiError> {
+    match filter.map(str::trim) {
+        None | Some("") => Ok(Value::Null),
+        Some(text) => serde_json::from_str(text).map_err(|e| ApiError::invalid(format!("filter is not valid JSON: {}", e))),
+    }
+}
+
+/// Parse `"-views,title"` into sort keys.
+fn parse_sort_text(text: &str) -> Result<Vec<SortKey>, ApiError> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (descending, field) = match part.strip_prefix('-') {
+                Some(field) => (true, field),
+                None => (false, part.strip_prefix('+').unwrap_or(part)),
+            };
+            if field.is_empty() {
+                return Err(ApiError::invalid(format!("sort: invalid key '{}'.", part)));
+            }
+            Ok(SortKey { field: field.to_string(), descending })
+        })
+        .collect()
+}
+
+/// Run a document query and render `{"documents", "total", "next"}`.
+async fn run_query(
+    engine: &HexDBEngine,
+    tess: &str,
+    filter: &Value,
+    sort: Vec<SortKey>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    after: Option<&str>,
+) -> ApiResult {
+    existing_tessellation(engine, tess)?;
+    let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE);
+    if limit > MAX_PAGE_SIZE {
+        return Err(ApiError::invalid(format!("limit must be 0-{}.", MAX_PAGE_SIZE)));
+    }
+    let after = match after {
+        Some(a) => Some(Ulid::from_string(a).map_err(|_| ApiError::invalid("after must be a document ID."))?),
+        None => None,
+    };
+    let query = DocumentQuery {
+        filter: Filter::parse(filter)?,
+        sort,
+        offset: offset.unwrap_or(0),
+        limit,
+        after,
+    };
+
+    let page = engine.query_documents(tess, &query).await?;
+    Ok(Json(json!({
+        "documents": docs_json(&page.documents),
+        "total": page.total,
+        "next": page.next.map(|id| id.to_string()),
+    }))
+    .into_response())
 }
 
 /// Build an idempotency key from the request, if the client sent one. The
@@ -375,35 +471,46 @@ pub async fn delete_tessellation(Path(name): Path<String>, State(engine): Engine
 // Documents
 // ---------------------------------------------------------------------------
 
-/// List documents in ID order: `?limit=100&after=<id>`.
+/// List documents, with optional filter, sort and paging:
+/// `?filter=<JSON>&sort=-views,title&limit=100&offset=0&after=<id>`.
+/// Without `sort`, results are in ID order and `next` pages forward via `after`.
 pub async fn list_docs(
     Path(tess): Path<String>,
     params: Result<Query<ListParams>, QueryRejection>,
     State(engine): Engine,
 ) -> ApiResult {
     let Query(params) = params?;
-    existing_tessellation(&engine, &tess)?;
-    let limit = params.limit.unwrap_or(DEFAULT_PAGE_SIZE);
-    if limit == 0 || limit > MAX_PAGE_SIZE {
-        return Err(ApiError::invalid(format!("limit must be 1-{}.", MAX_PAGE_SIZE)));
-    }
-    let after = match params.after.as_deref() {
-        Some(a) => Some(Ulid::from_string(a).map_err(|_| ApiError::invalid("after must be a document ID."))?),
-        None => None,
-    };
-
-    let page = engine.list_documents(&tess, after, limit).await?;
-    Ok(Json(json!({
-        "documents": docs_json(&page.documents),
-        "next": page.next.map(|id| id.to_string()),
-    }))
-    .into_response())
+    let filter = parse_filter_param(params.filter.as_deref())?;
+    let sort = parse_sort_text(params.sort.as_deref().unwrap_or(""))?;
+    run_query(&engine, &tess, &filter, sort, params.limit, params.offset, params.after.as_deref()).await
 }
 
-/// Count documents.
-pub async fn count_docs(Path(tess): Path<String>, State(engine): Engine) -> ApiResult {
+/// Query documents with a JSON body:
+/// `{"filter": {...}, "sort": "-views" | [{"field", "descending"}], "limit", "offset", "after"}`.
+pub async fn query_docs(
+    Path(tess): Path<String>,
+    State(engine): Engine,
+    body: Result<Json<QueryRequest>, JsonRejection>,
+) -> ApiResult {
+    let Json(request) = body?;
+    let sort = match request.sort {
+        Some(SortSpec::Text(text)) => parse_sort_text(&text)?,
+        Some(SortSpec::Keys(keys)) => keys,
+        None => Vec::new(),
+    };
+    run_query(&engine, &tess, &request.filter, sort, request.limit, request.offset, request.after.as_deref()).await
+}
+
+/// Count documents, optionally only those matching `?filter=<JSON>`.
+pub async fn count_docs(
+    Path(tess): Path<String>,
+    params: Result<Query<CountParams>, QueryRejection>,
+    State(engine): Engine,
+) -> ApiResult {
+    let Query(params) = params?;
     existing_tessellation(&engine, &tess)?;
-    Ok(Json(json!({ "count": engine.count_documents(&tess).await? })).into_response())
+    let filter = Filter::parse(&parse_filter_param(params.filter.as_deref())?)?;
+    Ok(Json(json!({ "count": engine.count_matching(&tess, &filter).await? })).into_response())
 }
 
 /// Get a document.
@@ -687,7 +794,18 @@ pub async fn graphql(
     body: Result<Json<async_graphql::Request>, JsonRejection>,
 ) -> ApiResult {
     let Json(request) = body?;
-    Ok(Json(schema.execute(request).await).into_response())
+    let (response, replays) = hexdb_query::execute(&schema, request).await;
+    // Replayed mutations are also listed in `extensions.idempotentReplays`.
+    Ok(respond_graphql(response, !replays.is_empty()))
+}
+
+fn respond_graphql(response: async_graphql::Response, replayed: bool) -> Response {
+    let mut http = Json(response).into_response();
+    if replayed {
+        http.headers_mut()
+            .insert(IDEMPOTENT_REPLAYED_HEADER, HeaderValue::from_static("true"));
+    }
+    http
 }
 
 /// GraphiQL, as a fallback to the query console in the admin UI.

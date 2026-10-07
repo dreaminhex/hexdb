@@ -185,11 +185,19 @@ curl -X PUT   http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B -H "Cont
 curl -X PATCH http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B -H "Content-Type: application/json" -d '{ "views": 446, "tags": null }'
 curl -X DELETE http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B
 
-# List in ID order, 1-1000 per page (default 100). Pass "next" from the response as ?after= for the next page.
+# List, filter, sort and page (see "Filters" below). Up to 1000 per page (default 100); responses include "total".
+# Without sort, results are in ID order and "next" goes in ?after= for the next page; with sort, page with offset.
 curl "http://localhost:7700/articles?limit=50"
+curl -G http://localhost:7700/articles --data-urlencode 'filter={"published":true,"views":{"$gte":100}}' \
+  --data-urlencode 'sort=-views,title' -d limit=25 -d offset=25
 
-# Count
+# The same as a JSON body, for filters too long for a URL ("sort" may also be "-views,title")
+curl -X POST http://localhost:7700/articles/_query -H "Content-Type: application/json" \
+  -d '{ "filter": { "tags": "rust" }, "sort": [{ "field": "views", "descending": true }], "limit": 25 }'
+
+# Count, optionally with a filter
 curl http://localhost:7700/articles/count
+curl -G http://localhost:7700/articles/count --data-urlencode 'filter={"published":false}'
 ```
 
 Inserting into a tessellation that doesn't exist creates it.
@@ -215,7 +223,7 @@ curl -X POST http://localhost:7700/articles/_update -H "Content-Type: applicatio
 
 ### Idempotency Keys
 
-Every write accepts an `Idempotency-Key` header (1-255 printable ASCII characters). The key and the result are stored atomically with the write for 24 hours. Retrying the same request with the same key returns the original response with `Idempotent-Replayed: true` instead of writing again, even after a crash. Reusing a key for a different request returns 422; a concurrent request with a key that is still being processed returns 409.
+Every REST write accepts an `Idempotency-Key` header (1-255 printable ASCII characters), and every GraphQL document mutation accepts an `idempotencyKey` argument. The key and the result are stored atomically with the write for 24 hours. Retrying the same request with the same key returns the original response with `Idempotent-Replayed: true` instead of writing again, even after a crash. Reusing a key for a different request returns 422; a concurrent request with a key that is still being processed returns 409.
 
 ```bash
 curl -X POST http://localhost:7700/orders -H "Content-Type: application/json" \
@@ -254,7 +262,7 @@ PUT on a user replaces its editable fields and requires `email_address` and `rol
 
 ### Filters
 
-The REST `_update` endpoint and GraphQL share one filter language. A filter is a JSON object; every condition must hold.
+REST (listing, `_query`, `count`, `_update`) and GraphQL share one filter language. A filter is a JSON object; every condition must hold.
 
 ```json
 {
@@ -308,7 +316,7 @@ query Recent($filter: JSON) {
 | `count(tessellation, filter)` | `createTessellation`, `deleteTessellation` |
 | `users`, `user(idOrLogin)`, `roles`, `status` | |
 
-Documents expose their fields through the `JSON` scalar (`data`, `json`, or `field(path)`). Without `sort`, results come in ID order and `next` pages forward via `after`; with `sort`, page with `offset`. Errors include `extensions.code` (`NOT_FOUND`, `INVALID_REQUEST`, `FORBIDDEN`, `CONFLICT`, ...). System tessellations aren't reachable through document fields.
+Document mutations take an optional `idempotencyKey` argument; replayed mutations are listed in the response's `extensions.idempotentReplays` and the HTTP response carries `Idempotent-Replayed: true`. Documents expose their fields through the `JSON` scalar (`data`, `json`, or `field(path)`). Without `sort`, results come in ID order and `next` pages forward via `after`; with `sort`, page with `offset`. Errors include `extensions.code` (`NOT_FOUND`, `INVALID_REQUEST`, `FORBIDDEN`, `CONFLICT`, ...). System tessellations aren't reachable through document fields.
 
 ### Operations
 

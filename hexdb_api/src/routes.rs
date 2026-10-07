@@ -51,6 +51,10 @@ pub fn app_router(
         .route("/{tessellation}", get(list_docs).post(insert_doc))
         .route("/{tessellation}/count", get(count_docs))
         .route(
+            "/{tessellation}/_query",
+            post(query_docs).layer(DefaultBodyLimit::max(BULK_BODY_LIMIT)),
+        )
+        .route(
             "/{tessellation}/_bulk",
             post(bulk_insert)
                 .put(bulk_replace)

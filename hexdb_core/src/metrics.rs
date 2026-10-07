@@ -114,7 +114,6 @@ pub struct LatticeMetrics {
 #[derive(Debug, Serialize)]
 pub struct NetworkMetrics {
     pub api_endpoint: String,
-    pub query_endpoint: String,
     pub discovery_endpoint: String,
     pub lattice: LatticeMetrics,
 }
@@ -214,7 +213,6 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         },
         network: NetworkMetrics {
             api_endpoint: engine.config.network.api_endpoint.clone(),
-            query_endpoint: engine.config.network.query_endpoint.clone(),
             discovery_endpoint: engine.config.network.discovery_endpoint.clone(),
             lattice: LatticeMetrics {
                 name: engine.config.network.lattice_name.clone(),

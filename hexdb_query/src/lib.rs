@@ -16,9 +16,10 @@ use chrono::{DateTime, Utc};
 use hexdb_core::{
     metrics::collect,
     users::{self, RoleGrant, RoleView, UserView},
-    validate_tessellation_name, Document, DocumentQuery, EngineError, Filter, HexDBEngine, SortKey, TessellationInfo,
+    validate_tessellation_name, Document, DocumentQuery, EngineError, Filter, HexDBEngine, IdempotencyKey, SortKey,
+    TessellationInfo,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::error;
 use ulid::Ulid;
@@ -405,14 +406,22 @@ impl MutationRoot {
         tessellation: String,
         data: Json<Value>,
         ttl: Option<u64>,
+        #[graphql(desc = "Retrying with the same key and arguments returns the original result instead of writing again (kept 24 hours). Reusing a key with different arguments fails with UNPROCESSABLE.")]
+        idempotency_key: Option<String>,
     ) -> GqlResult<DocumentObject> {
         let engine = engine(ctx);
         user_tessellation(engine, &tessellation)?;
-        let mut docs = engine
-            .insert_documents(&tessellation, vec![data.0], expiry(ttl), None)
+        let idem = idempotency(
+            "insertDocument",
+            idempotency_key,
+            json!({ "tessellation": tessellation, "data": data.0, "ttl": ttl }),
+        )?;
+        let outcome = engine
+            .insert_documents(&tessellation, vec![data.0], expiry(ttl), idem)
             .await
-            .map_err(to_gql)?
-            .value;
+            .map_err(to_gql)?;
+        note_replay(ctx, outcome.replayed);
+        let mut docs = outcome.value;
         Ok(DocumentObject(docs.remove(0)))
     }
 
@@ -423,11 +432,19 @@ impl MutationRoot {
         tessellation: String,
         documents: Vec<Json<Value>>,
         ttl: Option<u64>,
+        #[graphql(desc = "Retrying with the same key and arguments returns the original result instead of writing again (kept 24 hours). Reusing a key with different arguments fails with UNPROCESSABLE.")]
+        idempotency_key: Option<String>,
     ) -> GqlResult<Vec<DocumentObject>> {
         let engine = engine(ctx);
         user_tessellation(engine, &tessellation)?;
-        let docs = documents.into_iter().map(|d| d.0).collect();
-        let outcome = engine.insert_documents(&tessellation, docs, expiry(ttl), None).await.map_err(to_gql)?;
+        let docs: Vec<Value> = documents.into_iter().map(|d| d.0).collect();
+        let idem = idempotency(
+            "insertDocuments",
+            idempotency_key,
+            json!({ "tessellation": tessellation, "documents": docs, "ttl": ttl }),
+        )?;
+        let outcome = engine.insert_documents(&tessellation, docs, expiry(ttl), idem).await.map_err(to_gql)?;
+        note_replay(ctx, outcome.replayed);
         Ok(outcome.value.into_iter().map(DocumentObject).collect())
     }
 
@@ -439,13 +456,21 @@ impl MutationRoot {
         id: ID,
         data: Json<Value>,
         ttl: Option<u64>,
+        #[graphql(desc = "Retrying with the same key and arguments returns the original result instead of writing again (kept 24 hours). Reusing a key with different arguments fails with UNPROCESSABLE.")]
+        idempotency_key: Option<String>,
     ) -> GqlResult<DocumentObject> {
         let engine = engine(ctx);
         user_tessellation(engine, &tessellation)?;
+        let idem = idempotency(
+            "replaceDocument",
+            idempotency_key,
+            json!({ "tessellation": tessellation, "id": id.as_str(), "data": data.0, "ttl": ttl }),
+        )?;
         let outcome = engine
-            .replace_document(&tessellation, &id, data.0, expiry(ttl), None)
+            .replace_document(&tessellation, &id, data.0, expiry(ttl), idem)
             .await
             .map_err(to_gql)?;
+        note_replay(ctx, outcome.replayed);
         Ok(DocumentObject(outcome.value))
     }
 
@@ -457,21 +482,43 @@ impl MutationRoot {
         id: ID,
         data: Json<Value>,
         ttl: Option<u64>,
+        #[graphql(desc = "Retrying with the same key and arguments returns the original result instead of writing again (kept 24 hours). Reusing a key with different arguments fails with UNPROCESSABLE.")]
+        idempotency_key: Option<String>,
     ) -> GqlResult<DocumentObject> {
         let engine = engine(ctx);
         user_tessellation(engine, &tessellation)?;
+        let idem = idempotency(
+            "patchDocument",
+            idempotency_key,
+            json!({ "tessellation": tessellation, "id": id.as_str(), "data": data.0, "ttl": ttl }),
+        )?;
         let outcome = engine
-            .patch_document(&tessellation, &id, data.0, expiry(ttl), None)
+            .patch_document(&tessellation, &id, data.0, expiry(ttl), idem)
             .await
             .map_err(to_gql)?;
+        note_replay(ctx, outcome.replayed);
         Ok(DocumentObject(outcome.value))
     }
 
     /// Delete a document. Returns false if it didn't exist.
-    async fn delete_document(&self, ctx: &Context<'_>, tessellation: String, id: ID) -> GqlResult<bool> {
+    async fn delete_document(
+        &self,
+        ctx: &Context<'_>,
+        tessellation: String,
+        id: ID,
+        #[graphql(desc = "Retrying with the same key and arguments returns the original result instead of writing again (kept 24 hours). Reusing a key with different arguments fails with UNPROCESSABLE.")]
+        idempotency_key: Option<String>,
+    ) -> GqlResult<bool> {
         let engine = engine(ctx);
         user_tessellation(engine, &tessellation)?;
-        Ok(engine.delete_document(&tessellation, &id, None).await.map_err(to_gql)?.value)
+        let idem = idempotency(
+            "deleteDocument",
+            idempotency_key,
+            json!({ "tessellation": tessellation, "id": id.as_str() }),
+        )?;
+        let outcome = engine.delete_document(&tessellation, &id, idem).await.map_err(to_gql)?;
+        note_replay(ctx, outcome.replayed);
+        Ok(outcome.value)
     }
 
     /// Merge-patch every document matching a filter, atomically.
@@ -482,13 +529,21 @@ impl MutationRoot {
         filter: Json<Value>,
         update: Json<Value>,
         ttl: Option<u64>,
+        #[graphql(desc = "Retrying with the same key and arguments returns the original result instead of writing again (kept 24 hours). Reusing a key with different arguments fails with UNPROCESSABLE.")]
+        idempotency_key: Option<String>,
     ) -> GqlResult<UpdateResult> {
         let engine = engine(ctx);
         existing_tessellation(engine, &tessellation)?;
+        let idem = idempotency(
+            "updateDocuments",
+            idempotency_key,
+            json!({ "tessellation": tessellation, "filter": filter.0, "update": update.0, "ttl": ttl }),
+        )?;
         let outcome = engine
-            .update_where(&tessellation, &filter.0, &update.0, expiry(ttl), None)
+            .update_where(&tessellation, &filter.0, &update.0, expiry(ttl), idem)
             .await
             .map_err(to_gql)?;
+        note_replay(ctx, outcome.replayed);
         Ok(UpdateResult { matched: outcome.value.matched, modified: outcome.value.modified })
     }
 
@@ -512,5 +567,46 @@ impl MutationRoot {
             return Err(gql_error("FORBIDDEN", format!("'{}' is a system tessellation and can't be deleted.", name)));
         }
         engine.delete_tessellation(&name).await.map_err(to_gql)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Idempotency
+// ---------------------------------------------------------------------------
+
+/// Records which mutations in one request were answered from an idempotency record.
+#[derive(Default)]
+pub struct ReplayLog(std::sync::Mutex<Vec<String>>);
+
+/// Execute a request. Mutations answered from an idempotency record are listed
+/// (by response path) in `extensions.idempotentReplays` and returned.
+pub async fn execute(schema: &HexDBSchema, request: async_graphql::Request) -> (async_graphql::Response, Vec<String>) {
+    let log = Arc::new(ReplayLog::default());
+    let mut response = schema.execute(request.data(log.clone())).await;
+    let replays = log.0.lock().unwrap().clone();
+    if !replays.is_empty() {
+        response.extensions.insert(
+            "idempotentReplays".into(),
+            async_graphql::Value::List(replays.iter().cloned().map(async_graphql::Value::String).collect()),
+        );
+    }
+    (response, replays)
+}
+
+/// Build an idempotency key from a mutation's name and canonical arguments.
+fn idempotency(mutation: &str, key: Option<String>, args: Value) -> GqlResult<Option<IdempotencyKey>> {
+    let Some(key) = key else { return Ok(None) };
+    // serde_json orders object keys, so this is canonical.
+    let request = format!("graphql {}\n{}", mutation, serde_json::to_string(&args).unwrap_or_default());
+    IdempotencyKey::new(&key, request.as_bytes()).map(Some).map_err(to_gql)
+}
+
+fn note_replay(ctx: &Context<'_>, replayed: bool) {
+    if !replayed {
+        return;
+    }
+    if let Some(log) = ctx.data_opt::<Arc<ReplayLog>>() {
+        let path = ctx.path_node.map(|p| p.to_string_vec().join(".")).unwrap_or_default();
+        log.0.lock().unwrap().push(path);
     }
 }

@@ -41,6 +41,12 @@ async fn main() -> anyhow::Result<()> {
             CONFIG_FILE_NAME
         ),
     }
+    if let Some(endpoint) = &config.network.query_endpoint {
+        warn!(
+            "⚠️ network.query_endpoint ({}) is no longer used; GraphQL is served at /graphql on {}. Remove the setting to silence this warning.",
+            endpoint, config.network.api_endpoint
+        );
+    }
     info!(
         api_endpoint = %config.network.api_endpoint,
         storage = %config.storage.path,

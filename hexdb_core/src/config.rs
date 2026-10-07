@@ -35,7 +35,10 @@ pub struct HexConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NetworkConfig {
     pub api_endpoint: String,
-    pub query_endpoint: String,
+    /// No longer used: GraphQL is served at /graphql on `api_endpoint`. Accepted so
+    /// older config files still load; a warning is logged if it is set.
+    #[serde(default, skip_serializing)]
+    pub query_endpoint: Option<String>,
     pub discovery_endpoint: String,
     pub lattice_name: String,
 }
@@ -97,7 +100,7 @@ impl Default for HexConfig {
         Self {
             network: NetworkConfig {
                 api_endpoint: "127.0.0.1:7700".into(),
-                query_endpoint: "127.0.0.1:7701".into(),
+                query_endpoint: None,
                 discovery_endpoint: "127.0.0.1:7702".into(),
                 lattice_name: "Nebula Prime".into(),
             },
@@ -254,6 +257,19 @@ mod tests {
         assert_eq!(cfg.storage.encryption_key, "base64:abc");
         assert_eq!(cfg.source.as_deref(), Some(absolute(&file).as_path()));
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn retired_query_endpoint_still_loads() {
+        let dir = std::env::temp_dir().join(format!("hexdb-config-test-{}", ulid::Ulid::new()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hexdb.toml");
+        fs::write(&file, "[network]\nquery_endpoint = \"127.0.0.1:7701\"\n").unwrap();
+
+        let cfg = load_config_from(Some(&file)).unwrap();
+        assert_eq!(cfg.network.query_endpoint.as_deref(), Some("127.0.0.1:7701"));
+        assert_eq!(cfg.network.api_endpoint, "127.0.0.1:7700");
         fs::remove_dir_all(&dir).ok();
     }
 

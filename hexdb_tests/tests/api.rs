@@ -475,3 +475,114 @@ fn rest_update_supports_filter_operators() -> Result<()> {
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// REST filtering, sorting and paging; GraphQL idempotency over HTTP
+// ---------------------------------------------------------------------------
+
+/// Percent-encode a query-string value.
+fn enc(text: &str) -> String {
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{:02X}", b)
+            }
+        })
+        .collect()
+}
+
+fn field_values(body: &Value, field: &str) -> Vec<Value> {
+    body["documents"].as_array().unwrap().iter().map(|d| d[field].clone()).collect()
+}
+
+fn seed_numbers(server: &TestServer) -> Result<()> {
+    let docs: Vec<Value> = (1..=12)
+        .map(|n| json!({ "n": n, "group": if n % 2 == 0 { "even" } else { "odd" }, "name": format!("item-{:02}", n) }))
+        .collect();
+    let res = server.request(Method::POST, "/nums/_bulk", Some(&json!(docs)), &[])?;
+    assert_eq!(res.status, StatusCode::CREATED);
+    Ok(())
+}
+
+#[test]
+fn rest_list_filters_sorts_and_pages() -> Result<()> {
+    let server = TestServer::start()?;
+    seed_numbers(&server)?;
+
+    // Filter + sort descending + offset paging.
+    let filter = enc(r#"{"group":"even","n":{"$gt":2}}"#);
+    let res = server.request(Method::GET, &format!("/nums?filter={}&sort=-n&limit=2&offset=1", filter), None, &[])?;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(res.body["total"], 5, "4, 6, 8, 10, 12");
+    assert_eq!(field_values(&res.body, "n"), vec![json!(10), json!(8)]);
+    assert_eq!(res.body["next"], Value::Null, "sorted results page with offset");
+
+    // Multiple sort keys.
+    let res = server.request(Method::GET, "/nums?sort=group,-n&limit=3", None, &[])?;
+    assert_eq!(field_values(&res.body, "n"), vec![json!(12), json!(10), json!(8)]);
+
+    // Unsorted: cursor paging still works, now with a total.
+    let res = server.request(Method::GET, "/nums?limit=5", None, &[])?;
+    assert_eq!(res.body["total"], 12);
+    assert!(res.body["next"].is_string());
+
+    // Count with a filter.
+    let res = server.request(Method::GET, &format!("/nums/count?filter={}", enc(r#"{"group":"odd"}"#)), None, &[])?;
+    assert_eq!(res.body, json!({ "count": 6 }));
+
+    // Errors are 400s.
+    for path in [
+        format!("/nums?filter={}", enc("{not json")),
+        format!("/nums?filter={}", enc(r#"{"n":{"$bogus":1}}"#)),
+        "/nums?sort=-".to_string(),
+        "/nums?sort=n&after=01JTY87RVJ9B5863KMB2YD896B".to_string(),
+        "/nums?limit=5000".to_string(),
+        "/nums?colour=red".to_string(),
+    ] {
+        let res = server.request(Method::GET, &path, None, &[])?;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{} -> {}", path, res.body);
+    }
+    Ok(())
+}
+
+#[test]
+fn rest_query_endpoint_accepts_a_json_body() -> Result<()> {
+    let server = TestServer::start()?;
+    seed_numbers(&server)?;
+
+    let body = json!({
+        "filter": { "$or": [{ "n": { "$lte": 2 } }, { "name": { "$endsWith": "12" } }] },
+        "sort": [{ "field": "n", "descending": true }],
+        "limit": 10
+    });
+    let res = server.request(Method::POST, "/nums/_query", Some(&body), &[])?;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(res.body["total"], 3);
+    assert_eq!(field_values(&res.body, "n"), vec![json!(12), json!(2), json!(1)]);
+
+    // Sort may also be the compact string form.
+    let res = server.request(Method::POST, "/nums/_query", Some(&json!({ "sort": "-n", "limit": 1 })), &[])?;
+    assert_eq!(field_values(&res.body, "n"), vec![json!(12)]);
+
+    let res = server.request(Method::POST, "/nums/_query", Some(&json!({ "filters": {} })), &[])?;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "unknown keys are rejected");
+    Ok(())
+}
+
+#[test]
+fn graphql_idempotency_over_http() -> Result<()> {
+    let server = TestServer::start()?;
+    let body = json!({
+        "query": "mutation { insertDocument(tessellation: \"orders\", data: { qty: 1 }, idempotencyKey: \"gql-1\") { id } }"
+    });
+    let first = server.request(Method::POST, "/graphql", Some(&body), &[])?;
+    let second = server.request(Method::POST, "/graphql", Some(&body), &[])?;
+    assert!(!first.replayed());
+    assert!(second.replayed(), "the HTTP response is marked as replayed");
+    assert_eq!(second.body["data"], first.body["data"]);
+    assert_eq!(second.body["extensions"]["idempotentReplays"], json!(["insertDocument"]));
+    assert_eq!(server.count("orders")?, 1);
+    Ok(())
+}

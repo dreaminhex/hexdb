@@ -164,7 +164,7 @@ impl TestServer {
             bail!("Server is already running");
         }
 
-        let (api, query, discovery) = (free_port()?, free_port()?, free_port()?);
+        let (api, discovery) = (free_port()?, free_port()?);
         let lattice = self
             .dir()
             .file_name()
@@ -175,7 +175,6 @@ impl TestServer {
         let config = format!(
             r#"[network]
 api_endpoint = "127.0.0.1:{api}"
-query_endpoint = "127.0.0.1:{query}"
 discovery_endpoint = "127.0.0.1:{discovery}"
 lattice_name = "{lattice}"
 

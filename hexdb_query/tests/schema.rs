@@ -169,3 +169,41 @@ fn schema_exports_sdl() {
         assert!(sdl.contains(expected), "missing {:?}", expected);
     }
 }
+
+#[tokio::test]
+async fn mutations_are_idempotent_with_a_key() {
+    let (_dir, engine, schema) = setup().await;
+    let insert = r#"mutation($data: JSON!) { insertDocument(tessellation: "orders", data: $data, idempotencyKey: "order-1") { id } }"#;
+
+    let (first, replays) = hexdb_query::execute(&schema, Request::new(insert).variables(Variables::from_json(json!({ "data": { "qty": 1 } })))).await;
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert!(replays.is_empty());
+    let first = serde_json::to_value(first).unwrap();
+
+    let (second, replays) = hexdb_query::execute(&schema, Request::new(insert).variables(Variables::from_json(json!({ "data": { "qty": 1 } })))).await;
+    let second = serde_json::to_value(second).unwrap();
+    assert_eq!(replays, vec!["insertDocument".to_string()]);
+    assert_eq!(second["extensions"]["idempotentReplays"], json!(["insertDocument"]));
+    assert_eq!(second["data"], first["data"], "the replay returns the original document");
+    assert_eq!(engine.count_documents("orders").await.unwrap(), 1);
+
+    // Same key, different arguments.
+    let res = run(&schema, insert, json!({ "data": { "qty": 2 } })).await;
+    assert_eq!(error_code(&res), Some("UNPROCESSABLE"), "{}", res);
+
+    // Several keyed mutations in one request are tracked separately (by alias).
+    let id = first["data"]["insertDocument"]["id"].as_str().unwrap().to_string();
+    let both = r#"mutation($id: ID!) {
+        a: patchDocument(tessellation: "orders", id: $id, data: { qty: 3 }, idempotencyKey: "patch-1") { data }
+        b: insertDocument(tessellation: "orders", data: { qty: 9 }, idempotencyKey: "order-2") { id }
+    }"#;
+    let (_, replays) = hexdb_query::execute(&schema, Request::new(both).variables(Variables::from_json(json!({ "id": id })))).await;
+    assert!(replays.is_empty());
+    let (again, replays) = hexdb_query::execute(&schema, Request::new(both).variables(Variables::from_json(json!({ "id": id })))).await;
+    assert!(again.errors.is_empty(), "{:?}", again.errors);
+    assert_eq!(replays, vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(engine.count_documents("orders").await.unwrap(), 2);
+
+    drop(schema);
+    engine.shutdown().await.unwrap();
+}
