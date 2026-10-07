@@ -1,14 +1,52 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
+    Extension, Json,
 };
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 use std::sync::Arc;
-use hexdb_core::{engine::HexDBEngine, metrics::{collect, HexMeta}};
-use serde_json::Value;
+use hexdb_core::{constant_time_eq, engine::HexDBEngine, metrics::{collect, HexMeta}, SHUTDOWN_TOKEN_HEADER};
+use serde_json::{json, Value};
+use tokio::sync::watch;
+use chrono::Utc;
 
+/// Lets the shutdown endpoint trigger the server's graceful shutdown.
+/// The token is generated at startup and written to the runtime file in the data directory.
+#[derive(Clone)]
+pub struct ShutdownHandle {
+    pub token: Arc<String>,
+    pub trigger: Arc<watch::Sender<()>>,
+}
+
+/// Liveness check. Does not lock the storage engine.
+pub async fn health(State(engine): State<Arc<HexDBEngine>>) -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "id": engine.id.to_string(),
+        "name": engine.name,
+        "hex_type": engine.hex_type,
+        "version": engine.version,
+        "uptime_seconds": (Utc::now() - engine.start_datetime).num_seconds().max(0),
+    }))
+}
+
+/// Begin a graceful shutdown. Requires the token from the runtime file in the `x-hexdb-shutdown-token` header.
+pub async fn shutdown(Extension(handle): Extension<ShutdownHandle>, headers: HeaderMap) -> StatusCode {
+    let presented = headers
+        .get(SHUTDOWN_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if presented.is_empty() || !constant_time_eq(presented.as_bytes(), handle.token.as_bytes()) {
+        warn!("⚠️ Rejected shutdown request with a missing or invalid token.");
+        return StatusCode::UNAUTHORIZED;
+    }
+
+    info!("🛑 Shutdown requested through the API...");
+    let _ = handle.trigger.send(());
+    StatusCode::ACCEPTED
+}
 /// Get a document by tessellation and ID.
 /// Returns the document if found, or None if not found.
 pub async fn get_doc(

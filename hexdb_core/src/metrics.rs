@@ -13,6 +13,7 @@ use std::{
 };
 use ulid::Ulid;
 
+/// Represents the metadata of a HexDB engine instance.
 #[derive(Debug, Serialize)]
 pub struct HexMeta {
     pub id: Ulid,
@@ -29,12 +30,14 @@ pub struct HexMeta {
     pub network: NetworkMetrics,
 }
 
+/// Represents the metadata of a vertex in the HexDB engine.
 #[derive(Debug, Serialize)]
 pub struct VertexMeta {
     pub status: String,
     pub memory_address: String,
 }
 
+/// Represents the metrics of the HexDB engine, including document counts and sizes.
 #[derive(Debug, Serialize)]
 pub struct HexMetrics {
     pub total_document_count: usize,
@@ -47,6 +50,7 @@ pub struct HexMetrics {
     pub tessellations: Vec<TessMetrics>,
 }
 
+/// Represents the metrics of a tessellation in the HexDB engine.
 #[derive(Debug, Serialize)]
 pub struct TessMetrics {
     pub name: String,
@@ -57,22 +61,41 @@ pub struct TessMetrics {
     pub total_size_bytes: usize,
 }
 
-#[derive(Debug, Serialize)]
-pub struct NetworkMetrics {
-    pub api_endpoint: String,
-    pub query_endpoint: String,
-    pub discovery_endpoint: String,
-    pub lattice: Vec<LatticeMetrics>,
+/// Represents a single Hex node participating in the lattice.
+#[derive(Debug, Serialize, Clone)]
+pub struct LatticeHex {
+    pub name: String,
+    pub role: String,
+    pub status: String,
+    pub ip: String,
 }
 
+// Represents a hex node in the lattice with its metrics.
 #[derive(Debug, Serialize)]
-pub struct LatticeMetrics {
+pub struct LatticeMetric {
     pub name: String,
     pub status: String,
     pub hex_type: String,
     pub endpoint: String,
 }
 
+/// Report structure for the current lattice state.
+#[derive(Debug, Serialize, Clone)]
+pub struct LatticeMetrics {
+    pub name: String,
+    pub hexes: Vec<LatticeHex>,
+}
+
+/// Network metrics for the HexDB engine.
+#[derive(Debug, Serialize)]
+pub struct NetworkMetrics {
+    pub api_endpoint: String,
+    pub query_endpoint: String,
+    pub discovery_endpoint: String,
+    pub lattice: LatticeMetrics,
+}
+
+/// Collects metrics from the HexDB engine and returns a `HexMeta` structure.
 pub async fn collect(engine: &HexDBEngine) -> HexMeta {
     let now = Utc::now();
     let uptime = now.timestamp() - engine.start_datetime.timestamp();
@@ -125,6 +148,27 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         })
         .collect();
 
+    let mut lattice_hexes: Vec<LatticeHex> = Vec::new();
+
+    // Include self
+    lattice_hexes.push(LatticeHex {
+        name: engine.name.clone(),
+        role: engine.hex_type.clone(),
+        status: "active".to_string(),
+        ip: engine.config.network.discovery_endpoint.clone(),
+    });
+
+    // Include peers
+    let peer_list = engine.peers.lock().await;
+    for peer in peer_list.iter() {
+        lattice_hexes.push(LatticeHex {
+            name: peer.name.clone(),
+            role: peer.role.clone(),
+            status: "active".to_string(),
+            ip: peer.ip.clone(),
+        });
+    }
+
     HexMeta {
         id: engine.id.clone(),
         name: engine.name.clone(),
@@ -164,7 +208,10 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             api_endpoint: engine.config.network.api_endpoint.clone(),
             query_endpoint: engine.config.network.query_endpoint.clone(),
             discovery_endpoint: engine.config.network.discovery_endpoint.clone(),
-            lattice: vec![], // to be implemented
+            lattice: LatticeMetrics {
+                name: engine.config.network.lattice_name.clone(),
+                hexes: lattice_hexes.clone(),
+            },
         },
     }
 }

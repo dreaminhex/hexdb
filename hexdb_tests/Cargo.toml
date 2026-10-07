@@ -1,0 +1,13 @@
+[package]
+name = "hexdb_tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "End-to-end tests that run the real hexdb_api server."
+
+[dependencies]
+hexdb_core = { path = "../hexdb_core" }
+anyhow = "1.0"
+serde_json = "1.0.140"
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"] }
+tempfile = "3"

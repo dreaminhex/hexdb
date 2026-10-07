@@ -3,6 +3,7 @@ members = [
     "hexdb_core",
     "hexdb_api",
     "hexdb_cli",
-    "hexdb_query"
+    "hexdb_query",
+    "hexdb_tests"
 ]
 resolver = "2"

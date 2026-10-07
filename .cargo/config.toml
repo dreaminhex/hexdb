@@ -1,0 +1,5 @@
+# Lets `cargo run -p hexdb_api` (and `cargo run -p hexdb_cli -- ...`) work from
+# the repository root by pointing at the development config file.
+# A HEXDB_CONFIG already set in your environment takes precedence.
+[env]
+HEXDB_CONFIG = { value = "hexdb_api/hexdb.toml", relative = true }

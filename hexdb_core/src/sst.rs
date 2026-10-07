@@ -200,10 +200,10 @@ pub struct SstReader;
 
 impl SstReader {
     /// Read all SSTable files from the disk and load them into the Hex.
-    /// This function scans the `.hexdb` directory, finds all SSTable files,
+    /// This function scans the storage directory, finds all SSTable files,
     /// and loads their contents into the Hex.
-    pub async fn read_all(hex: &Arc<Mutex<Hex>>) -> Result<()> {
-        let base = PathBuf::from(".hexdb");
+    pub async fn read_all(hex: &Arc<Mutex<Hex>>, base: &Path) -> Result<()> {
+        let base = base.to_path_buf();
         if !base.exists() {
             return Ok(());
         }
@@ -389,7 +389,7 @@ impl SstUtil {
 
     /// Read all SSTable files from the disk and load them into the Hex.
     pub async fn read_all(&self, hex: &Arc<Mutex<Hex>>) -> Result<()> {
-        SstReader::read_all(hex).await
+        SstReader::read_all(hex, Path::new(&self.config.storage.path)).await
     }
 
     /// Flush the Write-Ahead Log (WAL) to SSTables.

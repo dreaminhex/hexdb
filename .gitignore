@@ -25,3 +25,5 @@ Thumbs.db
 # HexDB specific
 *.hexdb.pid
 hexdb_api/.hexdb
+# Local notes
+/TODO.md

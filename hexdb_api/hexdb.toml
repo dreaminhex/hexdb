@@ -2,6 +2,10 @@
 api_endpoint = "127.0.0.1:7700"
 query_endpoint = "127.0.0.1:7701"
 discovery_endpoint = "127.0.0.1:7702"
+lattice_name = "Nebula Prime"
+
+[identity]
+role = "auto" # auto | overseer | harvester | replicant
 
 [security]
 admin_login = "hexdbadmin"

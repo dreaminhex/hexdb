@@ -1,29 +1,31 @@
 use axum::{
-    Router,
-    routing::{get, post, put, patch, delete},
+    response::Redirect,
+    routing::{get, post},
+    Extension, Router,
 };
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use hexdb_core::engine::HexDBEngine;
-use tower_http::services::{ServeFile};
+use tower_http::services::{ServeDir, ServeFile};
 use crate::handlers::*;
 
-pub fn app_router(engine: Arc<HexDBEngine>) -> Router {
+/// URL prefix the admin UI is served under. Must match `base` in hexdb_admin/vite.config.ts.
+pub const UI_PREFIX: &str = "/ui";
+const UI_ROOT: &str = "/ui/";
 
-    let dist_dir = "../hexdb_admin/dist";
-    //let serve_dir = ServeDir::new(dist_dir);
-    let index_html = ServeFile::new(format!("{}/index.html", dist_dir));
-
-    Router::new()        
-        // Document routes
-        .route("/{tessellation}", post(insert_doc))
-        .route("/{tessellation}", put(update_doc))
-        .route("/{tessellation}", patch(patch_doc))
-        .route("/{tessellation}/{id}", get(get_doc))
-        .route("/{tessellation}/{id}", delete(delete_doc))
+/// Build the HTTP router.
+/// `ui_dir` is the built admin UI (Vite `dist`) directory; pass `None` to disable the UI.
+pub fn app_router(engine: Arc<HexDBEngine>, ui_dir: Option<PathBuf>, shutdown_handle: ShutdownHandle) -> Router {
+    // Static segments (health, status, ui, ...) take priority over the
+    // `{tessellation}` parameter, so these names are reserved.
+    let mut router = Router::new()
+        // Utility, Health, Status
+        .route("/health", get(health))
+        .route("/status", get(status))
+        .route("/flush", get(flush))
+        .route("/shutdown", post(shutdown))
 
         // Tessellation routes
-        .route("/tessellation/{name}", post(create_tessellation))
-        .route("/tessellation/{name}", delete(delete_tessellation))
+        .route("/tessellation/{name}", post(create_tessellation).delete(delete_tessellation))
         //.route("/tessellation", get(get_tessellations))
 
         // TODO: Security routes
@@ -34,14 +36,19 @@ pub fn app_router(engine: Arc<HexDBEngine>) -> Router {
         //.route("/user", put(update_user))
         //.route("/roles", get(get_roles))
 
-        // Utility, Health, Status
+        // Document routes
+        .route("/{tessellation}", post(insert_doc).put(update_doc).patch(patch_doc))
         .route("/{tessellation}/count", get(count_docs))
-        .route("/flush", get(flush))
-        .route("/status", get(status))
+        .route("/{tessellation}/{id}", get(get_doc).delete(delete_doc));
 
-        // Admin UI routes and static assets
-        .route_service("/hexdb.svg", ServeFile::new(format!("{}/hexdb.svg", dist_dir)))
-        .fallback_service(index_html)
+    // Admin UI routes and static assets. Unknown paths under /ui fall back to
+    // index.html so client-side routes work.
+    if let Some(dir) = ui_dir {
+        let index = dir.join("index.html");
+        router = router
+            .route("/", get(|| async { Redirect::temporary(UI_ROOT) }))
+            .nest_service(UI_PREFIX, ServeDir::new(dir).fallback(ServeFile::new(index)));
+    }
 
-        .with_state(engine)
+    router.layer(Extension(shutdown_handle)).with_state(engine)
 }

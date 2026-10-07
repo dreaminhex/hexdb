@@ -5,6 +5,8 @@ import svgr from 'vite-plugin-svgr'
 import tailwindcss from "@tailwindcss/vite"
 
 export default defineConfig({
+  // Served by the HexDB API under /ui/ (see UI_PREFIX in hexdb_api/src/routes.rs).
+  base: "/ui/",
   plugins: [react(), svgr(), tailwindcss()],
   resolve: {
     alias: {

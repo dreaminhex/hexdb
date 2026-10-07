@@ -1,0 +1,25 @@
+{
+    "lattice": {
+        "name": "nebula-prime",
+        "hexes": [
+            {
+                "name": "Falcon",
+                "role": "Overseer",
+                "status": "active",
+                "ip": "10.0.0.1"
+            },
+            {
+                "name": "Raptor",
+                "role": "Harvester",
+                "status": "active",
+                "ip": "10.0.0.2"
+            },
+            {
+                "name": "Phantom",
+                "role": "Replicant",
+                "status": "idle",
+                "ip": "10.0.0.3"
+            }
+        ]
+    }
+}

@@ -4,7 +4,7 @@
 
 ## 🧠 Philosophy
 
-HexDB isn't just another database — it's a reimagination of what modern persistence looks like with AI-native guidance, extensibility, and performance-aware modularity built directly into the core.
+HexDB is a reimagination of what modern persistence looks like with AI-native guidance, extensibility, and performance-aware modularity built directly into the core.
 
 | "Dream in Hex. Remember it with HexDB."
 
@@ -66,6 +66,7 @@ hexdb/
 |   └── src
 ├── hexdb_core
 |   └── src
+|       └── network
 ├── hexdb_cli
 |   └── src
 ├── hexdb_query
@@ -84,44 +85,72 @@ hexdb/
 curl https://sh.rustup.rs -sSf | sh
 ```
 
-### 2. Build Everything & Install CLI
+On Windows, the MSVC toolchain also needs the Visual Studio Build Tools ("Desktop development with C++").
+
+### 2. Build Everything & Install the CLI and Server
 
 ```bash
 cargo build --workspace
 
-cd hexdb_cli
-cargo install --path .
+# Installs the `hexdb` CLI and the `hexdb_api` server side by side.
+cargo install --path hexdb_cli
+cargo install --path hexdb_api
+```
+
+To build the admin UI (served at `/ui/`):
+
+```bash
+cd hexdb_admin
+npm install
+npm run build
 ```
 
 ### 3. Start the Node
 
-Apply the `-s` argument to run HexDB in the background.
+Run `hexdb` from the directory that contains `hexdb.toml` (e.g. `hexdb_api`), or point at it with `--config` or the `HEXDB_CONFIG` environment variable. Apply the `-s` argument to run HexDB in the background; output goes to `hexdb.log` in the data directory.
 
 ```bash
-hexdb start -s
+hexdb --config hexdb_api/hexdb.toml start -s
 ```
 
-Or you can simply run the API directly using `cargo`.
+Or you can simply run the API directly using `cargo` from the repository root.
 
 ```bash
 cargo run -p hexdb_api
 ```
 
-### 4. Ping Health Endpoint
+### 4. Check Health and Status
 
 ```bash
+hexdb health
+hexdb status
+
 curl http://localhost:7700/health
 ```
 
 ### 5. Access the UI
 
-Browse to [http://localhost:7700/index.html](http://localhost:7700/index.html)
+Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/)
 
 ### 6. Stop the Node
+
+`hexdb stop` asks the server to shut down gracefully, using a one-time token the server writes to `hexdb.pid` in its data directory. Use `--force` to kill a server that won't stop.
 
 ```bash
 hexdb stop
 ```
+
+## 🧪 Testing
+
+Unit tests live next to the code they test, in `#[cfg(test)]` modules. End-to-end tests live in the `hexdb_tests` crate, which starts the real `hexdb_api` server in a temporary directory on free ports and exercises it over HTTP, including restarts and crashes.
+
+```bash
+cargo test --workspace                     # everything
+cargo test -p hexdb_tests                  # end-to-end tests only
+cargo test -p hexdb_tests -- --ignored     # known bugs (see TODO.md); these currently fail
+```
+
+Set `HEXDB_TEST_KEEP=1` to keep each test's directory (config, data, and `server.log`) for inspection. Failed tests always keep theirs and print the server log tail.
 
 ## API Operations
 
@@ -167,9 +196,20 @@ curl -X DELETE http://localhost:7700/tessellation/articles
 
 ### Configuration
 
-Configuration values can be found in the root.
+The development configuration is [hexdb_api/hexdb.toml](hexdb_api/hexdb.toml). The config file is found in this order:
 
-[hexdb.toml](hexdb.toml)
+1. `--config <path>`
+2. the `HEXDB_CONFIG` environment variable (set automatically for `cargo run` by [.cargo/config.toml](.cargo/config.toml))
+3. `hexdb.toml` in the working directory
+4. `hexdb.toml` next to the executable
+
+Relative paths in the file (`storage.path`, `ui.path`) are resolved against the config file's directory. Missing values fall back to built-in defaults, and any value can be overridden with an environment variable named `HEXDB_<SECTION>__<FIELD>`, for example `HEXDB_NETWORK__API_ENDPOINT=0.0.0.0:7700`.
+
+`storage.encryption_key` is required and must be 32 random bytes, base64-encoded with a `base64:` prefix:
+
+```bash
+echo "base64:$(openssl rand -base64 32)"
+```
 
 ## Terminology
 
@@ -184,6 +224,19 @@ A vertex is an area of memory (RAM) replication within a Hex. A hex has 6 vertex
 ### Tessellation
 
 A tessellation is a collection of stored documents. Tessellations are used to compartmentalize data, and to limit access to specific roles and users.
+
+### Lattice
+
+A lattice is a networked group of three or more hexes. A lattice must have one Overseer hex, one or more Harvester hexes, and one or more Replicant hexes.
+
+### Hex Types
+
+- Overseer
+  - Primary, routes tasks to Harvester hexes, adds new hexes to the lattice when discovered
+- Harvester
+  - Serves data when requested by an Overseer
+- Replicant
+  - Cold data storage, can be restored by an Overseer if a dead Harverster is detected
 
 ## Features
 

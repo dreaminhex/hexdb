@@ -10,19 +10,24 @@ use crate::{
     sst::SstUtil,
     wal::Wal,
     HexConfig,
+    network::discovery::PeerHex
 };
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use rand::seq::IndexedRandom;
 use serde_json::Value;
-use std::{path::Path, sync::Arc};
-use tokio::{
-    fs::File,
-    io::{self, AsyncBufReadExt, BufReader},
-    sync::{mpsc::Sender, Mutex},
-};
+use std::sync::Arc;
+use tokio::sync::{mpsc::Sender, Mutex};
 use tracing::{debug, error, info, warn};
 use ulid::Ulid;
+
+/// The identity of this hex within its lattice, decided before the engine is built.
+#[derive(Debug, Clone)]
+pub struct HexIdentity {
+    pub id: Ulid,
+    pub name: String,
+    pub hex_type: String,
+}
 
 #[derive(Clone)]
 pub struct HexDBEngine {
@@ -35,44 +40,26 @@ pub struct HexDBEngine {
     pub version: String,
     pub start_datetime: DateTime<Utc>,
     pub sst: SstUtil,
+    pub peers: Arc<Mutex<Vec<PeerHex>>>,
 }
 
 impl HexDBEngine {
-    /// Creates a new instance of the HexDB engine.
-    /// It initializes the engine with a new hexagonal structure, loads names from a file,
-    /// and picks a random name for the hex.
+    /// Creates a new instance of the HexDB engine with a new hexagonal structure.
+    /// The identity (id, name, role) is decided by the caller, typically after peer discovery.
     /// The engine is designed to be memory-based, allowing for fast and efficient storage and retrieval of documents.
-    pub async fn new(wal_tx: Sender<Wal>, config: HexConfig) -> Self {
-        let names = Self::load_names("./data/names.txt")
-            .await
-            .unwrap_or_default();
-        let name = Self::pick_random_name(&names).unwrap_or_else(|| "Unnamed Hex".to_string());
-
+    pub fn new(wal_tx: Sender<Wal>, config: HexConfig, identity: HexIdentity) -> Self {
         Self {
             node: Arc::new(Mutex::new(Hex::new())),
             config: config.clone(),
             wal_tx,
-            id: Ulid::new(),
-            name,
-            hex_type: "manager".to_string(),
+            id: identity.id,
+            name: identity.name,
+            hex_type: identity.hex_type,
             version: env!("CARGO_PKG_VERSION").to_string(),
             start_datetime: Utc::now(),
             sst: SstUtil::new(config),
+            peers: Arc::new(Mutex::new(Vec::new())),
         }
-    }
-
-    /// Loads names from a file into a vector of strings.
-    pub async fn load_names<P: AsRef<Path>>(path: P) -> io::Result<Vec<String>> {
-        let file = File::open(path).await?;
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-        let mut names = Vec::new();
-
-        while let Some(line) = lines.next_line().await? {
-            names.push(line);
-        }
-
-        Ok(names)
     }
 
     /// Picks a random name for the Hex from the provided list of names.
