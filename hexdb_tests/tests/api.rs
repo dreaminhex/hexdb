@@ -586,3 +586,32 @@ fn graphql_idempotency_over_http() -> Result<()> {
     assert_eq!(server.count("orders")?, 1);
     Ok(())
 }
+
+#[test]
+fn status_reports_operations_and_history() -> Result<()> {
+    let server = TestServer::start()?;
+    let id = server.insert("items", &json!({ "n": 1 }))?;
+    server.insert("items", &json!({ "n": 2 }))?;
+    server.get_doc("items", &id)?;
+    server.request(Method::GET, "/items?sort=-n", None, &[])?;
+
+    let status = server.request(Method::GET, "/status", None, &[])?;
+    let ops = &status.body["operations"];
+    assert!(ops["writes_total"].as_u64().unwrap() >= 2, "{}", ops);
+    assert!(ops["reads_total"].as_u64().unwrap() >= 1, "{}", ops);
+    assert!(ops["queries_total"].as_u64().unwrap() >= 1, "{}", ops);
+    assert!(status.body["network"].get("query_endpoint").is_none(), "the retired port is gone from /status");
+
+    // A sample is recorded at startup.
+    let history = server.request(Method::GET, "/status/history?minutes=5", None, &[])?;
+    assert_eq!(history.status, StatusCode::OK);
+    assert_eq!(history.body["interval_seconds"], 15);
+    let samples = history.body["samples"].as_array().unwrap();
+    assert!(!samples.is_empty());
+    for key in ["timestamp", "documents", "memory_bytes", "disk_bytes", "writes_total"] {
+        assert!(samples[0].get(key).is_some(), "sample is missing {}", key);
+    }
+
+    assert_eq!(server.request(Method::GET, "/status/history?minutes=soon", None, &[])?.status, StatusCode::BAD_REQUEST);
+    Ok(())
+}

@@ -17,9 +17,10 @@ export default defineConfig({
     },
   },
   server: {
-    // Forward API calls to a running HexDB server during development.
-    proxy: Object.fromEntries(
-      ["/graphql", "/health", "/status", "/tessellations", "/users", "/roles", "/flush"].map((p) => [p, api]),
-    ),
+    // Forward everything outside the UI base path (/ui/) to a running HexDB server,
+    // including document routes like /articles/{id}.
+    proxy: {
+      "^/(?!ui(/|$)).*": { target: api, changeOrigin: true },
+    },
   },
 })

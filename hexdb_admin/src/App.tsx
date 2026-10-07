@@ -1,33 +1,26 @@
+import { lazy, Suspense } from "react"
+
 import { AppSidebar } from "@/components/app-sidebar"
-import { ChartAreaInteractive } from "@/components/chart-area-interactive"
-import { DataTable } from "./components/data-table"
-import { SectionCards } from "@/components/section-cards"
 import { SiteHeader } from "@/components/site-header"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
-import { lazy, Suspense } from "react"
+import { Toaster } from "@/components/ui/sonner"
 import { useRoute } from "@/lib/router"
-import data from "./app/dashboard/data.json"
+import { OverviewPage } from "@/pages/overview"
+import { RolesPage } from "@/pages/roles"
+import { TessellationsPage } from "@/pages/tessellations"
+import { UsersPage } from "@/pages/users"
 
-// The query console bundles the GraphQL editor, so load it only when visited.
+// Pages with the CodeMirror/GraphQL editor load on first visit.
 const QueriesPage = lazy(() => import("@/pages/queries").then((m) => ({ default: m.QueriesPage })))
-
-function DashboardPage() {
-  return (
-    <div className="@container/main flex flex-1 flex-col gap-2">
-      <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6">
-        <SectionCards />
-        <div className="px-4 lg:px-6">
-          <ChartAreaInteractive />
-        </div>
-        <DataTable data={data} />
-      </div>
-    </div>
-  )
-}
+const DocumentsPage = lazy(() => import("@/pages/documents").then((m) => ({ default: m.DocumentsPage })))
 
 const PAGES: Record<string, { title: string; element: React.ComponentType }> = {
-  "/": { title: "Overview", element: DashboardPage },
+  "/": { title: "Overview", element: OverviewPage },
   "/queries": { title: "Query Console", element: QueriesPage },
+  "/tessellations": { title: "Tessellations", element: TessellationsPage },
+  "/documents": { title: "Documents", element: DocumentsPage },
+  "/users": { title: "Users", element: UsersPage },
+  "/roles": { title: "Roles", element: RolesPage },
 }
 
 function App() {
@@ -37,7 +30,7 @@ function App() {
 
   return (
     <SidebarProvider>
-      <AppSidebar variant="inset" activeRoute={route} />
+      <AppSidebar variant="inset" activeRoute={PAGES[route] ? route : "/"} />
       <SidebarInset>
         <SiteHeader title={page.title} />
         <div className="flex min-h-0 flex-1 flex-col">
@@ -46,6 +39,7 @@ function App() {
           </Suspense>
         </div>
       </SidebarInset>
+      <Toaster richColors closeButton position="bottom-right" />
     </SidebarProvider>
   )
 }

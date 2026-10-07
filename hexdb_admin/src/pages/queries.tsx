@@ -27,7 +27,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { DocumentTable } from "@/components/document-table"
+import { toTable } from "@/lib/doc-table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { executeGraphQL, fetchSchema, GRAPHQL_ENDPOINT, type GraphQLResult } from "@/lib/graphql"
 import { QUERY_EXAMPLES } from "@/lib/query-examples"
@@ -35,9 +36,6 @@ import { QUERY_EXAMPLES } from "@/lib/query-examples"
 const DRAFT_KEY = "hexdb.query.draft"
 const HISTORY_KEY = "hexdb.query.history"
 const HISTORY_LIMIT = 25
-const MAX_TABLE_COLUMNS = 20
-/** Document metadata shown after the document's own fields. */
-const META_COLUMNS = ["tessellation", "expiresAt", "_expires_at"]
 
 interface HistoryEntry {
   query: string
@@ -75,114 +73,6 @@ function operationNames(query: string): string[] {
   } catch {
     return []
   }
-}
-
-// ---------------------------------------------------------------------------
-// Result table
-// ---------------------------------------------------------------------------
-
-interface TableData {
-  path: string
-  columns: string[]
-  rows: Record<string, unknown>[]
-}
-
-/** Find the first array of objects in the result, depth-first. */
-function findRows(value: unknown, path: string[] = []): { path: string[]; items: Record<string, unknown>[] } | null {
-  if (Array.isArray(value)) {
-    if (value.length > 0 && value.every((v) => v !== null && typeof v === "object" && !Array.isArray(v))) {
-      return { path, items: value as Record<string, unknown>[] }
-    }
-    return null
-  }
-  if (value !== null && typeof value === "object") {
-    for (const [key, child] of Object.entries(value)) {
-      const found = findRows(child, [...path, key])
-      if (found) return found
-    }
-  }
-  return null
-}
-
-/** Flatten document results so each document's fields become columns. */
-function toTable(data: unknown): TableData | null {
-  const found = findRows(data)
-  if (!found) return null
-
-  const rows = found.items.map((item) => {
-    const doc = (item.json ?? item.data) as Record<string, unknown> | undefined
-    if (doc && typeof doc === "object" && !Array.isArray(doc)) {
-      const rest = Object.fromEntries(Object.entries(item).filter(([key]) => key !== "json" && key !== "data"))
-      return { ...rest, ...doc }
-    }
-    return item
-  })
-
-  // id first, then document fields, then metadata; skip columns that are empty in every row.
-  const sample = rows.slice(0, 200)
-  const columns: string[] = []
-  for (const row of sample) {
-    for (const key of Object.keys(row)) {
-      if (!columns.includes(key)) columns.push(key)
-    }
-  }
-  // Scalars read best, so they come before objects and arrays.
-  const isComplex = (key: string) => {
-    const value = sample.find((row) => row[key] !== null && row[key] !== undefined)?.[key]
-    return typeof value === "object"
-  }
-  const rank = (key: string) => (key === "id" ? 0 : META_COLUMNS.includes(key) ? 3 : isComplex(key) ? 2 : 1)
-  const visible = columns
-    .filter((key) => sample.some((row) => row[key] !== null && row[key] !== undefined))
-    .sort((a, b) => rank(a) - rank(b))
-  return { path: found.path.join("."), columns: visible.slice(0, MAX_TABLE_COLUMNS), rows }
-}
-
-function formatCell(value: unknown): string {
-  if (value === undefined) return ""
-  if (value === null) return "null"
-  if (typeof value === "string") return value
-  const text = JSON.stringify(value)
-  return text.length > 80 ? `${text.slice(0, 77)}…` : text
-}
-
-function ResultTable({ table }: { table: TableData }) {
-  return (
-    <div className="h-full overflow-auto">
-      <Table>
-        <TableHeader className="bg-muted/60 sticky top-0 z-10">
-          <TableRow>
-            {table.columns.map((column) => (
-              <TableHead key={column} className="font-mono text-xs">
-                {column}
-              </TableHead>
-            ))}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {table.rows.map((row, i) => (
-            <TableRow key={i}>
-              {table.columns.map((column) => {
-                const value = row[column]
-                return (
-                  <TableCell
-                    key={column}
-                    className={
-                      "max-w-72 truncate font-mono text-xs " +
-                      (value === null || value === undefined ? "text-muted-foreground" : "")
-                    }
-                    title={typeof value === "object" && value !== null ? JSON.stringify(value, null, 2) : undefined}
-                  >
-                    {formatCell(value)}
-                  </TableCell>
-                )
-              })}
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  )
 }
 
 // ---------------------------------------------------------------------------
@@ -465,7 +355,7 @@ export function QueriesPage() {
                   {table.path || "data"} · {table.rows.length} row{table.rows.length === 1 ? "" : "s"}
                 </div>
                 <div className="min-h-0 flex-1">
-                  <ResultTable table={table} />
+                  <DocumentTable columns={table.columns} rows={table.rows} />
                 </div>
               </div>
             ) : (

@@ -269,6 +269,7 @@ impl HexDBEngine {
     /// Without `sort`, results are in ID order and `next` can be passed as
     /// `after` for the following page; with `sort`, page with `offset`.
     pub async fn query_documents(&self, tess: &str, query: &DocumentQuery) -> Result<QueryPage> {
+        self.queries_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if query.after.is_some() && !query.sort.is_empty() {
             return Err(invalid("after can't be combined with sort; use offset to page sorted results."));
         }
@@ -678,6 +679,8 @@ impl HexDBEngine {
             }
         }
 
+        let user_writes = items.iter().filter(|i| i.key.tessellation != IDEMPOTENCY_TESSELLATION).count() as u64;
+
         let prepared: Vec<(DocKey, Option<Vec<u8>>, Option<i64>)> = items
             .iter()
             .map(|item| match &item.op {
@@ -723,6 +726,7 @@ impl HexDBEngine {
         };
 
         ack.wait().await?;
+        self.writes_total.fetch_add(user_writes, std::sync::atomic::Ordering::Relaxed);
         Ok(true)
     }
 }

@@ -80,3 +80,20 @@ pub fn spawn_vertex_monitoring_task(engine: Arc<HexDBEngine>, interval: Duration
         }
     });
 }
+
+/// Record a metrics sample now and then every `interval`, for the dashboard's charts.
+pub fn spawn_metrics_task(engine: Arc<HexDBEngine>, interval: Duration, mut shutdown_rx: watch::Receiver<()>) {
+    tokio::spawn(async move {
+        loop {
+            let sample = crate::metrics::sample(&engine).await;
+            engine.history.push(sample);
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    debug!("🛑 Metrics task is shutting down...");
+                    break;
+                }
+                _ = tokio::time::sleep(interval) => {}
+            }
+        }
+    });
+}

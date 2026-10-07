@@ -34,5 +34,5 @@ pub use crypt::{create_hash, verify_hash, decode_encryption_key, constant_time_e
 pub use sst::{SstFile, SstStore};
 pub use catalog::{validate_tessellation_name, TessellationInfo};
 pub use filter::{Filter, SortKey};
-pub use tasks::{spawn_vertex_monitoring_task, spawn_ttl_sweep_task, spawn_flush_task, spawn_compaction_task};
+pub use tasks::{spawn_vertex_monitoring_task, spawn_ttl_sweep_task, spawn_flush_task, spawn_compaction_task, spawn_metrics_task};
 pub use network::discovery::{PeerHex, discover_peers, start_discovery_listener};

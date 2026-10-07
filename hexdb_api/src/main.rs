@@ -8,7 +8,7 @@ use hexdb_api::{handlers::ShutdownHandle, init::init_security, routes::app_route
 use hexdb_core::{
     config::CONFIG_FILE_NAME, decode_encryption_key, discover_peers, init_logging, load_config_from,
     spawn_compaction_task, spawn_flush_task, spawn_ttl_sweep_task,
-    spawn_vertex_monitoring_task, start_discovery_listener, HexConfig,
+    spawn_metrics_task, spawn_vertex_monitoring_task, start_discovery_listener, HexConfig,
     HexDBEngine, HexIdentity, PeerHex, RuntimeInfo,
 };
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -157,6 +157,13 @@ async fn main() -> anyhow::Result<()> {
     spawn_vertex_monitoring_task(
         engine.clone(),
         Duration::from_secs(config.memory.vertex_integrity_check_frequency.max(1)),
+        shutdown_rx.clone(),
+    );
+
+    // Record metrics samples for the dashboard's charts.
+    spawn_metrics_task(
+        engine.clone(),
+        Duration::from_secs(hexdb_core::metrics::HISTORY_INTERVAL_SECONDS),
         shutdown_rx.clone(),
     );
 

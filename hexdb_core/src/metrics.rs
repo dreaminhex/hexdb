@@ -25,6 +25,7 @@ pub struct HexMeta {
     pub vertices: Vec<VertexMeta>,
     pub metrics: HexMetrics,
     pub storage: StorageMetrics,
+    pub operations: OperationMetrics,
     pub network: NetworkMetrics,
 }
 
@@ -83,6 +84,14 @@ pub struct StorageMetrics {
     pub disk_bytes: u64,
     pub sstable_files: usize,
     pub next_sequence: u64,
+}
+
+/// Operation counters since startup.
+#[derive(Debug, Serialize)]
+pub struct OperationMetrics {
+    pub reads_total: u64,
+    pub writes_total: u64,
+    pub queries_total: u64,
 }
 
 /// Represents a single Hex node participating in the lattice.
@@ -211,6 +220,11 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             sstable_files: stats.sst_files,
             next_sequence: stats.next_seq,
         },
+        operations: OperationMetrics {
+            reads_total: stats.reads_total,
+            writes_total: stats.writes_total,
+            queries_total: stats.queries_total,
+        },
         network: NetworkMetrics {
             api_endpoint: engine.config.network.api_endpoint.clone(),
             discovery_endpoint: engine.config.network.discovery_endpoint.clone(),
@@ -219,5 +233,107 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
                 hexes: lattice_hexes,
             },
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+/// How often the metrics task records a sample.
+pub const HISTORY_INTERVAL_SECONDS: u64 = 15;
+/// How long samples are kept (6 hours).
+pub const HISTORY_RETENTION_SECONDS: u64 = 6 * 60 * 60;
+
+/// One point-in-time metrics sample.
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricsSample {
+    pub timestamp: DateTime<Utc>,
+    /// Visible documents per user tessellation.
+    pub documents: std::collections::BTreeMap<String, usize>,
+    pub memory_bytes: usize,
+    pub disk_bytes: u64,
+    pub unflushed_entries: usize,
+    /// Cumulative counters since startup; differences between samples give rates.
+    pub reads_total: u64,
+    pub writes_total: u64,
+    pub queries_total: u64,
+}
+
+/// A bounded, in-memory series of metrics samples. Not persisted across restarts.
+pub struct MetricsHistory {
+    samples: std::sync::Mutex<std::collections::VecDeque<MetricsSample>>,
+    capacity: usize,
+}
+
+impl Default for MetricsHistory {
+    fn default() -> Self {
+        let capacity = (HISTORY_RETENTION_SECONDS / HISTORY_INTERVAL_SECONDS) as usize;
+        MetricsHistory { samples: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(capacity)), capacity }
+    }
+}
+
+impl MetricsHistory {
+    pub fn push(&self, sample: MetricsSample) {
+        let mut samples = self.samples.lock().unwrap();
+        if samples.len() == self.capacity {
+            samples.pop_front();
+        }
+        samples.push_back(sample);
+    }
+
+    /// Samples taken at or after `since`, oldest first.
+    pub fn since(&self, since: DateTime<Utc>) -> Vec<MetricsSample> {
+        self.samples.lock().unwrap().iter().filter(|s| s.timestamp >= since).cloned().collect()
+    }
+}
+
+/// Take a metrics sample (document counts scan each tessellation's indexes).
+pub async fn sample(engine: &HexDBEngine) -> MetricsSample {
+    let stats = engine.stats().await;
+    let mut documents = std::collections::BTreeMap::new();
+    for (name, kind) in engine.tessellations() {
+        if kind == "user" {
+            documents.insert(name.clone(), engine.count_documents(&name).await.unwrap_or(0));
+        }
+    }
+    MetricsSample {
+        timestamp: Utc::now(),
+        documents,
+        memory_bytes: stats.memory_bytes,
+        disk_bytes: stats.disk_bytes,
+        unflushed_entries: stats.dirty_entries,
+        reads_total: stats.reads_total,
+        writes_total: stats.writes_total,
+        queries_total: stats.queries_total,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(seconds: i64) -> MetricsSample {
+        MetricsSample {
+            timestamp: DateTime::from_timestamp(seconds, 0).unwrap(),
+            documents: Default::default(),
+            memory_bytes: 0,
+            disk_bytes: 0,
+            unflushed_entries: 0,
+            reads_total: 0,
+            writes_total: 0,
+            queries_total: 0,
+        }
+    }
+
+    #[test]
+    fn history_is_bounded_and_filters_by_time() {
+        let history = MetricsHistory { samples: Default::default(), capacity: 3 };
+        for s in 0..5 {
+            history.push(at(s * 10));
+        }
+        let all = history.since(DateTime::from_timestamp(0, 0).unwrap());
+        assert_eq!(all.iter().map(|s| s.timestamp.timestamp()).collect::<Vec<_>>(), vec![20, 30, 40]);
+        assert_eq!(history.since(DateTime::from_timestamp(35, 0).unwrap()).len(), 1);
     }
 }

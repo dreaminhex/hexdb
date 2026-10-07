@@ -1,0 +1,228 @@
+// Typed client for the HexDB REST API. Errors come back as ApiError, built
+// from the server's `{"error": {"code", "message"}}` responses.
+
+export class ApiError extends Error {
+  status: number
+  code: string
+
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.status = status
+    this.code = code
+  }
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  let response: Response
+  try {
+    response = await fetch(path, {
+      method,
+      headers: body === undefined ? { Accept: "application/json" } : { "Content-Type": "application/json", Accept: "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch (e) {
+    throw new ApiError(0, "unreachable", `Could not reach HexDB: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  if (response.status === 204) return undefined as T
+
+  const text = await response.text()
+  let json: unknown = undefined
+  try {
+    json = text ? JSON.parse(text) : undefined
+  } catch {
+    // Not JSON; handled below.
+  }
+  if (!response.ok) {
+    const error = (json as { error?: { code?: string; message?: string } } | undefined)?.error
+    throw new ApiError(response.status, error?.code ?? "error", error?.message ?? (text || response.statusText))
+  }
+  return json as T
+}
+
+const enc = encodeURIComponent
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface VertexStatus {
+  id: number
+  status: string
+  bytes: number
+  shards: number
+  corrupt_shards_found: number
+  shards_repaired: number
+}
+
+export interface TessellationMetrics {
+  name: string
+  kind: string
+  document_count: number
+  documents_in_ram: number
+  documents_on_disk: number
+  avg_document_size_bytes: number
+  max_document_size_bytes: number
+  min_document_size_bytes: number
+  total_size_bytes: number
+}
+
+export interface LatticeHex {
+  name: string
+  role: string
+  status: string
+  ip: string
+}
+
+export interface Status {
+  id: string
+  name: string
+  start_datetime: string
+  uptime_seconds: number
+  version: string
+  status: string
+  hex_type: string
+  ram_mb: number
+  disk_mb: number
+  vertices: VertexStatus[]
+  metrics: {
+    total_document_count: number
+    documents_in_ram: number
+    documents_on_disk: number
+    avg_document_size_bytes: number
+    max_document_size_bytes: number
+    min_document_size_bytes: number
+    total_size_bytes: number
+    tessellations: TessellationMetrics[]
+  }
+  storage: {
+    ram_budget_bytes: number
+    memory_bytes: number
+    memory_entries: number
+    unflushed_entries: number
+    unflushed_bytes: number
+    disk_bytes: number
+    sstable_files: number
+    next_sequence: number
+  }
+  operations: { reads_total: number; writes_total: number; queries_total: number }
+  network: {
+    api_endpoint: string
+    discovery_endpoint: string
+    lattice: { name: string; hexes: LatticeHex[] }
+  }
+}
+
+export interface MetricsSample {
+  timestamp: string
+  documents: Record<string, number>
+  memory_bytes: number
+  disk_bytes: number
+  unflushed_entries: number
+  reads_total: number
+  writes_total: number
+  queries_total: number
+}
+
+export interface Tessellation {
+  name: string
+  kind: string
+  created: string | null
+  document_count?: number
+}
+
+/** A document as returned by the API: its fields plus `id` and `_expires_at`. */
+export type ApiDocument = { id: string; _expires_at?: string } & Record<string, unknown>
+
+export interface DocumentPage {
+  documents: ApiDocument[]
+  total: number
+  next: string | null
+}
+
+export interface SortKey {
+  field: string
+  descending?: boolean
+}
+
+export interface DocumentQuery {
+  filter?: unknown
+  sort?: SortKey[] | string
+  limit?: number
+  offset?: number
+}
+
+export interface RoleGrant {
+  name: string
+  permissions: string[]
+}
+
+export interface User {
+  id: string
+  login: string
+  email_address: string
+  roles: RoleGrant[]
+  created: number
+  last_login: number
+  is_locked: boolean
+  use_mfa: boolean
+  last_password_change: number
+  password_expiration: number
+}
+
+export interface Role {
+  id: string
+  name: string
+  description: string
+}
+
+export interface NewUser {
+  login: string
+  password: string
+  email_address: string
+  roles: RoleGrant[]
+}
+
+export type UserChanges = Partial<{
+  login: string
+  password: string
+  email_address: string
+  roles: RoleGrant[]
+  is_locked: boolean
+  use_mfa: boolean
+}>
+
+// ---------------------------------------------------------------------------
+// Endpoints
+// ---------------------------------------------------------------------------
+
+export const api = {
+  status: () => request<Status>("GET", "/status"),
+  history: (minutes: number) =>
+    request<{ interval_seconds: number; samples: MetricsSample[] }>("GET", `/status/history?minutes=${minutes}`),
+  flush: () => request<{ entries: number; tessellations: number }>("POST", "/flush"),
+
+  tessellations: () => request<{ tessellations: Tessellation[] }>("GET", "/tessellations").then((r) => r.tessellations),
+  tessellation: (name: string) => request<Tessellation>("GET", `/tessellations/${enc(name)}`),
+  createTessellation: (name: string) => request<Tessellation>("POST", "/tessellations", { name }),
+  deleteTessellation: (name: string) => request<void>("DELETE", `/tessellations/${enc(name)}`),
+
+  queryDocuments: (tess: string, query: DocumentQuery) => request<DocumentPage>("POST", `/${enc(tess)}/_query`, query),
+  document: (tess: string, id: string) => request<ApiDocument>("GET", `/${enc(tess)}/${enc(id)}`),
+  insertDocument: (tess: string, data: unknown, ttl?: number) =>
+    request<ApiDocument>("POST", `/${enc(tess)}${ttl ? `?ttl=${ttl}` : ""}`, data),
+  replaceDocument: (tess: string, id: string, data: unknown, ttl?: number) =>
+    request<ApiDocument>("PUT", `/${enc(tess)}/${enc(id)}${ttl ? `?ttl=${ttl}` : ""}`, data),
+  deleteDocument: (tess: string, id: string) => request<void>("DELETE", `/${enc(tess)}/${enc(id)}`),
+
+  users: () => request<{ users: User[] }>("GET", "/users").then((r) => r.users),
+  createUser: (user: NewUser) => request<User>("POST", "/users", user),
+  updateUser: (id: string, changes: UserChanges) => request<User>("PATCH", `/users/${enc(id)}`, changes),
+  deleteUser: (id: string) => request<void>("DELETE", `/users/${enc(id)}`),
+
+  roles: () => request<{ roles: Role[] }>("GET", "/roles").then((r) => r.roles),
+}
+
+/** A readable message for any error. */
+export function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}

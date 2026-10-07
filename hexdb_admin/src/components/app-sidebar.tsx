@@ -7,96 +7,155 @@ import {
   IconReport,
   IconSettings,
   IconUserCheck,
-  IconUserCircle
+  IconUserCircle,
+  type Icon,
 } from "@tabler/icons-react"
+import { useTheme } from "next-themes"
 
-import { NavDatabase } from "@/components/nav-database"
-import { NavMain } from "@/components/nav-main"
-import { NavSecondary } from "@/components/nav-secondary"
-import { NavUser } from "@/components/nav-user"
+import { Badge } from "@/components/ui/badge"
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
-import { NavSecurity } from "./nav-security"
+import { usePoll } from "@/hooks/use-poll"
+import { href, linkHandler } from "@/lib/router"
+import { cn } from "@/lib/utils"
 
-const data = {
-  user: {
-    name: "hexdbadmin",
-    email: "@hexdb.ai",
+interface NavItem {
+  title: string
+  icon: Icon
+  /** In-app route; items without one aren't built yet and render disabled. */
+  route?: string
+}
+
+const SECTIONS: { label?: string; items: NavItem[] }[] = [
+  {
+    items: [
+      { title: "Dashboard", route: "/", icon: IconDashboard },
+      { title: "Queries", route: "/queries", icon: IconBrandGoogleBigQuery },
+    ],
   },
-  navMain: [
-    {
-      title: "Dashboard",
-      route: "/",
-      icon: IconDashboard,
-    },
-    {
-      title: "Queries",
-      route: "/queries",
-      icon: IconBrandGoogleBigQuery,
-    },
-    {
-      title: "Logs",
-      url: "#",
-      icon: IconReport,
-    }
-  ],
-  navSecondary: [
-    {
-      title: "Settings",
-      url: "#",
-      icon: IconSettings,
-    }
-  ],
-  database: [
-    {
-      name: "Tessellations",
-      url: "#",
-      icon: IconHexagon3d,
-    },
-    {
-      name: "Documents",
-      url: "#",
-      icon: IconFileCode2,
-    }
-  ],
-  security: [
-    {
-      name: "Roles",
-      url: "#",
-      icon: IconUserCheck,
-    },
-    {
-      name: "Users",
-      url: "#",
-      icon: IconUserCircle,
-    }
-  ],
+  {
+    label: "Database",
+    items: [
+      { title: "Tessellations", route: "/tessellations", icon: IconHexagon3d },
+      { title: "Documents", route: "/documents", icon: IconFileCode2 },
+    ],
+  },
+  {
+    label: "Security",
+    items: [
+      { title: "Users", route: "/users", icon: IconUserCircle },
+      { title: "Roles", route: "/roles", icon: IconUserCheck },
+    ],
+  },
+]
+
+const FOOTER_ITEMS: NavItem[] = [
+  { title: "Logs", icon: IconReport },
+  { title: "Settings", icon: IconSettings },
+]
+
+function NavLink({ item, active }: { item: NavItem; active: boolean }) {
+  if (!item.route) {
+    return (
+      <SidebarMenuButton tooltip={`${item.title} (coming soon)`} aria-disabled className="text-muted-foreground cursor-default hover:bg-transparent">
+        <item.icon />
+        <span>{item.title}</span>
+        <Badge variant="outline" className="ml-auto px-1.5 py-0 text-[10px] font-normal">
+          Soon
+        </Badge>
+      </SidebarMenuButton>
+    )
+  }
+  return (
+    <SidebarMenuButton tooltip={item.title} isActive={active} asChild>
+      <a href={href(item.route)} onClick={linkHandler(item.route)}>
+        <item.icon />
+        <span>{item.title}</span>
+      </a>
+    </SidebarMenuButton>
+  )
+}
+
+/** This hex's name, role and health, refreshed every 30 seconds. */
+function HexIdentity() {
+  const health = usePoll(
+    () => fetch("/health").then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.statusText)))),
+    30_000,
+  )
+  const data = health.data as { name: string; hex_type: string; version: string } | undefined
+  const online = !!data && !health.error
+
+  return (
+    <div className="flex items-center gap-3 rounded-md px-2 py-1.5">
+      <span className="relative flex size-2.5 shrink-0">
+        {online && <span className="bg-status-good absolute inline-flex size-full animate-ping rounded-full opacity-40" />}
+        <span className={cn("relative inline-flex size-2.5 rounded-full", online ? "bg-status-good" : "bg-destructive")} />
+      </span>
+      <div className="grid min-w-0 flex-1 text-left text-sm leading-tight">
+        <span className="truncate font-medium">{data?.name ?? (health.loading ? "Connecting…" : "Unreachable")}</span>
+        <span className="text-muted-foreground truncate text-xs">
+          {data ? `${data.hex_type} · v${data.version}` : "HexDB"}
+        </span>
+      </div>
+    </div>
+  )
 }
 
 export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps<typeof Sidebar> & { activeRoute?: string }) {
+  const { resolvedTheme } = useTheme()
+  // The light logo has white lettering for dark backgrounds, and vice versa.
+  const logo = resolvedTheme === "light" ? "hexdb_lg_black.png" : "hexdb_logo_light.png"
+
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <img src="hexdb_logo_light.png" alt="logo" className="h-7" />
+            <a href={href("/")} onClick={linkHandler("/")} aria-label="HexDB dashboard">
+              <img src={logo} alt="HexDB" className="h-7" />
+            </a>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={data.navMain} activeRoute={activeRoute} />
-        <NavDatabase items={data.database} />
-        <NavSecurity items={data.security} />
-        <NavSecondary items={data.navSecondary} className="mt-auto" />
+        {SECTIONS.map((section, i) => (
+          <SidebarGroup key={section.label ?? i}>
+            {section.label && <SidebarGroupLabel>{section.label}</SidebarGroupLabel>}
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {section.items.map((item) => (
+                  <SidebarMenuItem key={item.title}>
+                    <NavLink item={item} active={item.route === activeRoute} />
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        ))}
+        <SidebarGroup className="mt-auto">
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {FOOTER_ITEMS.map((item) => (
+                <SidebarMenuItem key={item.title}>
+                  <NavLink item={item} active={false} />
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={data.user} />
+        <HexIdentity />
       </SidebarFooter>
     </Sidebar>
   )

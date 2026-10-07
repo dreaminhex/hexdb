@@ -31,6 +31,7 @@ pub fn app_router(
         // Utility, Health, Status
         .route("/health", get(health))
         .route("/status", get(status))
+        .route("/status/history", get(status_history))
         .route("/flush", post(flush))
         .route("/shutdown", post(shutdown))
 

@@ -99,6 +99,12 @@ pub struct EngineStats {
     pub next_seq: u64,
     pub wal_floor: u64,
     pub vertices: Vec<VertexStats>,
+    /// Document reads (single-document fetches) since startup.
+    pub reads_total: u64,
+    /// Documents written or deleted since startup.
+    pub writes_total: u64,
+    /// Queries (filtered lists and counts) since startup.
+    pub queries_total: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +175,11 @@ pub struct HexDBEngine {
     inflight: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Serializes user-management writes (e.g. so two users can't claim one login).
     pub(crate) users_lock: Mutex<()>,
+    pub(crate) reads_total: AtomicU64,
+    pub(crate) writes_total: AtomicU64,
+    pub(crate) queries_total: AtomicU64,
+    /// Recent metrics samples, for charts.
+    pub history: crate::metrics::MetricsHistory,
 }
 
 const MAX_WRITE_RETRIES: usize = 16;
@@ -306,6 +317,10 @@ impl HexDBEngine {
             flush_threshold: ram_budget / 4,
             inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             users_lock: Mutex::new(()),
+            reads_total: AtomicU64::new(0),
+            writes_total: AtomicU64::new(0),
+            queries_total: AtomicU64::new(0),
+            history: crate::metrics::MetricsHistory::default(),
         };
 
         // Move recovered writes into SSTables and retire the old WAL segments.
@@ -446,6 +461,7 @@ impl HexDBEngine {
         if validate_tessellation_name(tess).is_err() {
             return Ok(None);
         }
+        self.reads_total.fetch_add(1, Ordering::Relaxed);
         Ok(self.read_latest(&DocKey::new(tess, id)).await?.0)
     }
 
@@ -729,6 +745,9 @@ impl HexDBEngine {
             disk_bytes,
             sst_files,
             next_seq: state.next_seq,
+            reads_total: self.reads_total.load(Ordering::Relaxed),
+            writes_total: self.writes_total.load(Ordering::Relaxed),
+            queries_total: self.queries_total.load(Ordering::Relaxed),
             wal_floor: self.wal_floor.load(Ordering::SeqCst),
             vertices: state
                 .hex

@@ -817,3 +817,26 @@ pub async fn graphiql() -> axum::response::Html<String> {
             .finish(),
     )
 }
+
+// ---------------------------------------------------------------------------
+// Metrics history
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryParams {
+    /// How far back to return samples, 1-360 minutes (default 60).
+    pub minutes: Option<i64>,
+}
+
+/// Recent metrics samples: `{"interval_seconds", "samples": [...]}`. Kept in memory for 6 hours.
+pub async fn status_history(params: Result<Query<HistoryParams>, QueryRejection>, State(engine): Engine) -> ApiResult {
+    let Query(params) = params?;
+    let minutes = params.minutes.unwrap_or(60).clamp(1, 360);
+    let since = Utc::now() - chrono::Duration::minutes(minutes);
+    Ok(Json(json!({
+        "interval_seconds": hexdb_core::metrics::HISTORY_INTERVAL_SECONDS,
+        "samples": engine.history.since(since),
+    }))
+    .into_response())
+}

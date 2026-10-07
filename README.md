@@ -130,9 +130,17 @@ curl http://localhost:7700/health
 
 ### 5. Access the UI
 
-Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/). The **Queries** page is a GraphQL console with schema-aware autocomplete, validation, example queries, history, and JSON or table results. Press Ctrl+Enter (⌘+Enter on macOS) to run.
+Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/). The admin UI has:
 
-For UI development, run `npm run dev` in `hexdb_admin` while a HexDB server is running; API calls are proxied to `http://127.0.0.1:7700` (override with `HEXDB_API`).
+- **Dashboard**: live document, memory, disk and operation stats; an activity chart (documents per tessellation, operations per minute, or storage over the last 15 minutes to 6 hours); vertex health; the lattice; and per-tessellation sizes. "Flush to disk" writes unflushed data to SSTables.
+- **Queries**: a GraphQL console with schema-aware autocomplete, validation, example queries, history, and JSON or table results. Press Ctrl+Enter (⌘+Enter on macOS) to run.
+- **Tessellations**: create and delete tessellations and see their sizes.
+- **Documents**: browse a tessellation with a JSON filter, sort and paging, and create, edit or delete documents in a JSON editor.
+- **Users** and **Roles**: manage accounts and role grants.
+
+The sun/moon button in the header switches between light, dark and system themes.
+
+For UI development, run `npm run dev` in `hexdb_admin` while a HexDB server is running; every request outside `/ui/` is proxied to `http://127.0.0.1:7700` (override with `HEXDB_API`).
 
 ### 6. Stop the Node
 
@@ -323,6 +331,7 @@ Document mutations take an optional `idempotencyKey` argument; replayed mutation
 ```bash
 curl http://localhost:7700/health
 curl http://localhost:7700/status
+curl "http://localhost:7700/status/history?minutes=60"   # metrics samples every 15 s, kept for 6 hours
 curl -X POST http://localhost:7700/flush    # write unflushed data to SSTables
 ```
 
@@ -380,6 +389,7 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
   - ✅ Bulk writes (atomic insert, replace, patch, and update by filter)
   - ✅ Idempotency keys
 - ✅ GraphQL API (queries, filters, sorting, paging, mutations) with an in-UI query console
+- ✅ Admin UI (live dashboard, query console, tessellation, document, user and role management, light and dark themes)
   - ✅ Tessellations (list, create, read, delete)
   - ✅ Users (create, read, update, delete)
   - ✅ Roles (read)
@@ -425,7 +435,6 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
 - ACID Transactions
 - Logging
 - Schemas & Versioning
-- User Interface
 - API Documentation (OAS 3.0 & Swagger)
 - Clients (.NET, Node)
 - Community (wget, brew, chocolatey, apt-get)
