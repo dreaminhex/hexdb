@@ -17,7 +17,6 @@ pub fn init_logging(service_name: &str) {
         .with_thread_ids(true)
         .with_thread_names(true)
         .with_timer(fmt::time::UtcTime::rfc_3339())
-        .with_max_level(tracing::Level::TRACE)
         .with_writer(std::io::stdout)
         .with_ansi(atty::is(atty::Stream::Stdout))
         .pretty()

@@ -388,6 +388,22 @@ mod platform {
     /// Run the server without a console window, in its own process group so Ctrl+C here doesn't reach it.
     pub fn detach(cmd: &mut Command) {
         use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+
+        // Windows children inherit every inheritable handle, not just their own
+        // stdio. If this CLI's output is a pipe (e.g. `hexdb start -s | more` or a
+        // CI log), the server would hold that pipe open and whoever reads it would
+        // wait until the server exits. The server's stdio is redirected to the log
+        // file explicitly, so stop our own handles from being inherited.
+        unsafe {
+            for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                let handle = GetStdHandle(std_handle);
+                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+                }
+            }
+        }
         cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
 

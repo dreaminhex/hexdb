@@ -7,13 +7,13 @@ use axum::{serve, Router};
 use hexdb_api::{handlers::ShutdownHandle, init::init_security, routes::app_router};
 use hexdb_core::{
     config::CONFIG_FILE_NAME, decode_encryption_key, discover_peers, init_logging, load_config_from,
-    recover_from_wal, spawn_compaction_task, spawn_flush_task, spawn_ttl_sweep_task,
-    spawn_vertex_monitoring_task, spawn_wal_writer_task, start_discovery_listener, HexConfig,
-    HexDBEngine, HexIdentity, PeerHex, RuntimeInfo, Wal,
+    spawn_compaction_task, spawn_flush_task, spawn_ttl_sweep_task,
+    spawn_vertex_monitoring_task, start_discovery_listener, HexConfig,
+    HexDBEngine, HexIdentity, PeerHex, RuntimeInfo,
 };
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::watch;
-use tokio::{net::TcpListener, sync::mpsc};
+use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use ulid::Ulid;
 
@@ -57,9 +57,6 @@ async fn main() -> anyhow::Result<()> {
         .to_vec();
 
     let storage_dir = config.storage_dir();
-    let (wal_tx, wal_rx) = mpsc::channel::<Wal>(1024);
-    let wal_tx_flush = wal_tx.clone();
-    let wal_path = storage_dir.join(".hexdb.dat");
 
     // Decide who we are before building the engine: pick a name, discover
     // other hexes in our lattice, make sure the name is unique, and elect a role.
@@ -84,16 +81,20 @@ async fn main() -> anyhow::Result<()> {
 
     let role = elect_role(&config, &id.to_string(), &name, &peers);
 
-    // Setup the HexDBEngine
-    let engine = Arc::new(HexDBEngine::new(
-        wal_tx,
-        config.clone(),
-        HexIdentity {
-            id,
-            name: name.clone(),
-            hex_type: role.clone(),
-        },
-    ));
+    // Open storage: load SSTable indexes, replay the WAL, and start the WAL writer.
+    info!("🛠️  Opening storage at {}...", storage_dir.display());
+    let identity = HexIdentity {
+        id,
+        name: name.clone(),
+        hex_type: role.clone(),
+    };
+    let engine = match HexDBEngine::open(config.clone(), identity, &key).await {
+        Ok(engine) => Arc::new(engine),
+        Err(e) => {
+            error!("❌ Failed to open storage: {:#}", e);
+            std::process::exit(1);
+        }
+    };
     info!("✅ Hex '{}' (id: {}) initializing as {}...", engine.name, engine.id, engine.hex_type);
 
     // Set peers after discovering them
@@ -116,14 +117,6 @@ async fn main() -> anyhow::Result<()> {
         self_hex,
     ));
 
-    // Begin recovering from the WAL file(s).
-    info!("🛠️  Recovering data from any write-ahead log files...");
-    recover_from_wal(storage_dir.clone(), &key, engine.clone(), true).await?;
-
-    // Recover from any existing SSTables.
-    info!("🛠️  Recovering data from SSTables...");
-    engine.sst.read_all(&engine.node).await?;
-
     // Initialize security settings & create defaults if not present.
     info!("🔐 Initializing security settings...");
     init_security(engine.clone()).await?;
@@ -132,38 +125,32 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
     let shutdown_tx = Arc::new(shutdown_tx);
 
-    // Start the WAL writer task
-    info!("🏃‍➡️  Starting the write-ahead log task (1 of 5)...");
-    let key = Arc::new(key);
-    spawn_wal_writer_task(config.clone(), wal_rx, wal_path, key);
-
     // Start the SST compaction task
-    info!("🏃‍➡️  Starting the SST compaction task (2 of 5)...");
+    info!("🏃‍➡️  Starting the SST compaction task (1 of 4)...");
     spawn_compaction_task(
         engine.clone(),
-        Duration::from_secs(config.storage.compaction_frequency),
+        Duration::from_secs(config.storage.compaction_frequency.max(1)),
         shutdown_rx.clone(),
     );
 
-    // Spawn a task to flush the WAL to SSTables
-    info!("🏃‍➡️  Starting the WAL flush task (3 of 5)...");
+    // Spawn a task to flush writes to SSTables
+    info!("🏃‍➡️  Starting the flush task (2 of 4)...");
     spawn_flush_task(
         engine.clone(),
-        wal_tx_flush,
-        Duration::from_secs(config.storage.wal_flush_check_frequency),
+        Duration::from_secs(config.storage.wal_flush_check_frequency.max(1)),
         shutdown_rx.clone(),
     );
 
     // Spawn a task to sweep expired documents (ttl)
-    info!("🏃‍➡️  Starting the TTL sweep task (4 of 5)...");
-    let ttl_interval = Duration::from_secs(config.memory.ttl_scan_frequency * 60);
+    info!("🏃‍➡️  Starting the TTL sweep task (3 of 4)...");
+    let ttl_interval = Duration::from_secs(config.memory.ttl_scan_frequency.max(1));
     spawn_ttl_sweep_task(engine.clone(), ttl_interval, shutdown_rx.clone());
 
     // Spawn a task to monitor vertices
-    info!("🏃‍➡️  Starting the vertex monitoring task (5 of 5)...");
+    info!("🏃‍➡️  Starting the vertex monitoring task (4 of 4)...");
     spawn_vertex_monitoring_task(
         engine.clone(),
-        Duration::from_secs(config.memory.vertex_integrity_check_frequency),
+        Duration::from_secs(config.memory.vertex_integrity_check_frequency.max(1)),
         shutdown_rx.clone(),
     );
 
@@ -221,8 +208,12 @@ async fn main() -> anyhow::Result<()> {
         })
         .await;
 
+    // In-flight requests have finished; flush everything and stop the WAL writer.
+    info!("💾 Flushing to SSTables before exit...");
+    let stopped = engine.shutdown().await;
     RuntimeInfo::remove(&storage_dir);
     result?;
+    stopped?;
     info!("👋 HexDB stopped.");
 
     Ok(())

@@ -11,10 +11,9 @@ pub async fn init_security(engine: Arc<HexDBEngine>) -> Result<()> {
     let roles_exist = engine.count_documents("roles").await.unwrap_or(0) > 0;
 
     if !roles_exist {
-        let mut node = engine.node.lock().await;
 
-        if node.create_tessellation("roles", "system") {
-            drop(node); // release BEFORE await
+        engine.create_tessellation("roles", "system")?;
+        {
 
             let roles = json!({
                 "roles": [
@@ -25,7 +24,7 @@ pub async fn init_security(engine: Arc<HexDBEngine>) -> Result<()> {
                 ]
             });
 
-            if let Err(e) = engine.insert_json("roles", roles).await {
+            if let Err(e) = engine.insert_json("roles", roles, None).await {
                 bail!("❗ Failed to insert initial roles document: {}.", e);
             } else {
                 info!("✅ Roles tessellation initialized.");
@@ -48,10 +47,9 @@ pub async fn init_security(engine: Arc<HexDBEngine>) -> Result<()> {
     let users_exist = engine.count_documents("users").await.unwrap_or(0) > 0;
 
     if !users_exist {
-        let mut node = engine.node.lock().await;
 
-        if node.create_tessellation("users", "system") {
-            drop(node); // release BEFORE await
+        engine.create_tessellation("users", "system")?;
+        {
 
             let hashed = create_hash(password);
 
@@ -80,7 +78,7 @@ pub async fn init_security(engine: Arc<HexDBEngine>) -> Result<()> {
                 }]
             });
 
-            if let Err(e) = engine.insert_json("users", user).await {
+            if let Err(e) = engine.insert_json("users", user, None).await {
                 bail!("❗ Failed to insert initial admin user document: {}.", e);
             } else {
                 info!("✅ Admin user added.");

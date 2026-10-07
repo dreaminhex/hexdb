@@ -1,7 +1,7 @@
 //! Storage end-to-end tests: documents written through the API must read back
 //! correctly, including across graceful restarts, crashes, and flushes to SSTables.
 //!
-//! Tests marked `#[ignore]` describe known Phase 2 bugs (see TODO.md). Run them with:
+//! Tests marked `#[ignore]` describe known bugs (see TODO.md). Run them with:
 //!
 //!     cargo test -p hexdb_tests -- --ignored
 //!
@@ -77,12 +77,9 @@ fn documents_survive_graceful_restart() -> Result<()> {
 }
 
 #[test]
-fn documents_survive_crash_once_writes_settle() -> Result<()> {
+fn acknowledged_writes_survive_crash() -> Result<()> {
     let mut server = TestServer::start()?;
     let id = server.insert("articles", &json!({ "title": "Crash survivor" }))?;
-    // Writes are acknowledged before they reach the WAL (see the durability
-    // test below), so give the WAL writer a moment before pulling the plug.
-    thread::sleep(Duration::from_millis(500));
 
     server.crash_and_restart()?;
 
@@ -120,11 +117,10 @@ fn documents_survive_flush_and_restart() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Known Phase 2 bugs
+// Phase 2 regressions (these were bugs before Phase 2)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "Phase 2: deletes leave no tombstone in SSTables, so flushed documents come back"]
 fn delete_after_flush_survives_restart() -> Result<()> {
     let mut server = TestServer::start()?;
     let id = server.insert("articles", &json!({ "title": "Doomed" }))?;
@@ -139,7 +135,6 @@ fn delete_after_flush_survives_restart() -> Result<()> {
 }
 
 #[test]
-#[ignore = "Phase 2: startup replays the WAL before loading SSTables, so older versions win"]
 fn update_after_flush_survives_restart() -> Result<()> {
     let mut server = TestServer::start()?;
     let id = server.insert("articles", &json!({ "title": "Draft", "views": 1 }))?;
@@ -154,7 +149,6 @@ fn update_after_flush_survives_restart() -> Result<()> {
 }
 
 #[test]
-#[ignore = "Phase 2: strings that happen to be valid base64 are stored as binary"]
 fn strings_keep_their_type() -> Result<()> {
     let server = TestServer::start()?;
     let id = server.insert("articles", &json!({ "name": "Test", "code": "abcd", "title": "hello" }))?;
@@ -167,7 +161,6 @@ fn strings_keep_their_type() -> Result<()> {
 }
 
 #[test]
-#[ignore = "Phase 2: arrays and objects are flattened to JSON strings"]
 fn arrays_and_objects_round_trip() -> Result<()> {
     let server = TestServer::start()?;
     let id = server.insert(
@@ -182,14 +175,15 @@ fn arrays_and_objects_round_trip() -> Result<()> {
 }
 
 #[test]
-#[ignore = "Phase 2: a partial record at the end of the WAL stops the server from starting"]
 fn torn_wal_tail_does_not_block_startup() -> Result<()> {
     let mut server = TestServer::start()?;
     let id = server.insert("articles", &json!({ "title": "Before the tear" }))?;
-    server.stop()?;
+    // Crash so the write exists only in the WAL.
+    server.kill();
 
     // Simulate a crash mid-write: a length prefix promising more bytes than follow.
-    let mut wal = OpenOptions::new().append(true).open(server.wal_path())?;
+    let segment = server.newest_wal_segment().expect("a WAL segment");
+    let mut wal = OpenOptions::new().append(true).open(segment)?;
     wal.write_all(&[0x00, 0x00, 0x10, 0x00, b'a', b'b', b'c'])?;
     drop(wal);
 
@@ -200,15 +194,14 @@ fn torn_wal_tail_does_not_block_startup() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Known Phase 2 bugs (continued)
+// Phase 2 regressions (continued)
 // ---------------------------------------------------------------------------
 
 /// Concurrent writes followed immediately by a graceful restart must all survive.
 ///
-/// About 10-15% of 400 acknowledged writes are lost: they are still queued for
-/// the WAL writer when the process exits.
+/// Before Phase 2, about 10-15% of these writes were lost: acknowledged before
+/// they reached the WAL, and still queued when the process exited.
 #[test]
-#[ignore = "Phase 2: graceful shutdown doesn't drain queued WAL writes, so acknowledged writes are lost"]
 fn concurrent_writes_survive_immediate_graceful_restart() -> Result<()> {
     const THREADS: usize = 8;
     const PER_THREAD: usize = 50;
@@ -237,5 +230,52 @@ fn concurrent_writes_survive_immediate_graceful_restart() -> Result<()> {
     server.restart()?;
 
     assert_eq!(server.count("articles")?, THREADS * PER_THREAD);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 features
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ttl_expires_documents() -> Result<()> {
+    let mut server = TestServer::start()?;
+    let short = server.insert_with_query("articles", "?ttl=1", &json!({ "title": "Short lived" }))?;
+    let long = server.insert("articles", &json!({ "title": "Long lived" }))?;
+    assert!(server.get_doc("articles", &short)?.is_some());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    assert!(server.get_doc("articles", &short)?.is_none(), "expired document is still visible");
+    assert_eq!(server.count("articles")?, 1);
+
+    server.flush()?;
+    server.restart()?;
+    assert!(server.get_doc("articles", &short)?.is_none());
+    assert!(server.get_doc("articles", &long)?.is_some());
+    Ok(())
+}
+
+#[test]
+fn deleted_tessellation_stays_deleted_after_crash() -> Result<()> {
+    let mut server = TestServer::start()?;
+    let id = server.insert("scratch", &json!({ "title": "Temporary" }))?;
+    server.delete_tessellation("scratch")?;
+
+    // The insert is still in the WAL; replay must not bring it back.
+    server.crash_and_restart()?;
+
+    assert!(server.get_doc("scratch", &id)?.is_none());
+    assert_eq!(server.count("scratch")?, 0);
+    Ok(())
+}
+
+#[test]
+fn unsafe_tessellation_names_are_rejected() -> Result<()> {
+    let server = TestServer::start()?;
+    for name in ["has.dot", "bad%20name", "x".repeat(65).as_str()] {
+        let status = server.post_status(&format!("/{}", name), &json!({ "title": "x" }))?;
+        assert_eq!(status.as_u16(), 400, "name {:?} should be rejected", name);
+    }
     Ok(())
 }

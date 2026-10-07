@@ -162,6 +162,14 @@ curl -X POST http://localhost:7700/articles \
   -d '{ "title": "Quantum Tessellation", "tags": [ "hexdb", "rust", "ai" ], "published": true, "views": 445 }'
 ```
 
+To have a document expire, add `ttl` (in seconds) to an insert, update or patch:
+
+```bash
+curl -X POST "http://localhost:7700/sessions?ttl=3600" \
+  -H "Content-Type: application/json" \
+  -d '{ "user": "ada" }'
+```
+
 ### 2. Fetch a Document
 
 ```bash
@@ -219,7 +227,7 @@ A Hex is a running instance of HexDB.
 
 ### Vertex
 
-A vertex is an area of memory (RAM) replication within a Hex. A hex has 6 vertexes (or vertices) where data is stored. Each vertex has a different memory address. Database bytes are replicated in chunks across all 6 vertices so that if any part of a Hex's memory becomes corrupted, data can be recovered from the remaining uncorrupted vertices.
+A vertex is an area of memory (RAM) within a Hex. A hex has 6 vertices where data is stored. Each document in memory is split into 6 equal shards with Reed-Solomon coding, 4 data and 2 parity, and each vertex holds one shard. Every shard carries a BLAKE3 hash, so if a vertex's copy is corrupted, the document is rebuilt from the remaining shards. Any 2 of the 6 vertices can be lost or corrupt without losing data, and a background check repairs corrupt shards in place.
 
 ### Tessellation
 
@@ -302,18 +310,53 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
 
 ## Appendix
 
-### SSTable Header Structure
+### Storage Layout
 
-| Offset | Field             | Size     |
-| ------ | ----------------- | -------- |
-| 0x00   | MAGIC             | 4 bytes  |
-| 0x04   | VERSION           | 2 bytes  |
-| 0x06   | COMPRESSION TYPE  | 1 byte   |
-| 0x07   | Reserved          | 1 byte   |
-| 0x08   | Entry Count       | 8 bytes  |
-| 0x10   | Created Timestamp | 8 bytes  |
-| 0x18   | Index Offset      | 8 bytes  |
-| 0x20   | Index Size        | 8 bytes  |
-| 0x28   | Checksum          | 8 bytes  |
-| 0x30   | Reserved (16B)    | 16 bytes |
-| 0x40   | Start of data     | ...      |
+```text
+<storage.path>/
+├── catalog.json              tessellations, and the sequence number of each dropped one
+├── hexdb.pid                 runtime file of the running server (PID, endpoint, shutdown token)
+├── wal/
+│   └── <first-seq>.wal       write-ahead log segments, oldest first
+└── <tessellation>/
+    └── <ulid>.hxs            SSTables
+```
+
+Every write gets a sequence number. Deletes are recorded as tombstones. When several versions of a document exist in memory, the WAL, or SSTables, the one with the highest sequence number wins.
+
+### WAL Record Format
+
+Each record is `[u32 length][12-byte nonce][ciphertext]`. The ciphertext is AES-256-GCM over the Zstandard-compressed JSON record `{ "seq": ..., "op": { "Put": <document> } | { "Delete": { "tessellation", "id" } } }`.
+
+### SSTable Header Structure (version 2)
+
+All integers are big-endian.
+
+| Offset | Field                   | Size     |
+| ------ | ----------------------- | -------- |
+| 0x00   | MAGIC (`HXDB`)          | 4 bytes  |
+| 0x04   | VERSION (2)             | 2 bytes  |
+| 0x06   | COMPRESSION TYPE (zstd) | 1 byte   |
+| 0x07   | Reserved                | 1 byte   |
+| 0x08   | Entry Count             | 8 bytes  |
+| 0x10   | Created Timestamp (ms)  | 8 bytes  |
+| 0x18   | Index Offset            | 8 bytes  |
+| 0x20   | Index Size              | 8 bytes  |
+| 0x28   | Index Checksum          | 8 bytes  |
+| 0x30   | Max Sequence Number     | 8 bytes  |
+| 0x38   | Reserved                | 8 bytes  |
+| 0x40   | Start of data           | ...      |
+
+The index checksum is the first 8 bytes of a BLAKE3 hash of the index block.
+
+### SSTable Entry and Index Records
+
+| Field        | Size     | Entry | Index | Notes                                     |
+| ------------ | -------- | ----- | ----- | ----------------------------------------- |
+| Document ID  | 16 bytes | ✓     | ✓     | ULID                                      |
+| Flags        | 1 byte   | ✓     | ✓     | bit 0: has TTL, bit 1: tombstone          |
+| Sequence     | 8 bytes  | ✓     | ✓     |                                           |
+| TTL          | 8 bytes  | ✓     | ✓     | only if bit 0 is set; epoch milliseconds  |
+| Entry Offset | 8 bytes  |       | ✓     |                                           |
+| Length       | 4 bytes  | ✓     | ✓     | compressed body length (0 for tombstones) |
+| Body         | Length   | ✓     |       | Zstandard-compressed JSON document        |

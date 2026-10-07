@@ -121,9 +121,15 @@ impl TestServer {
         self.dir().join("data")
     }
 
-    /// The active write-ahead log file.
-    pub fn wal_path(&self) -> PathBuf {
-        self.data_dir().join(".hexdb.dat")
+    /// The newest write-ahead log segment, if any.
+    pub fn newest_wal_segment(&self) -> Option<PathBuf> {
+        let mut segments: Vec<PathBuf> = fs::read_dir(self.data_dir().join("wal"))
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "wal"))
+            .collect();
+        segments.sort();
+        segments.pop()
     }
 
     /// Combined server output across all launches.
@@ -205,7 +211,7 @@ path = "./no-ui"
         cmd.arg("--config")
             .arg(&config_path)
             .current_dir(self.dir())
-            .env("RUST_LOG", "info")
+            .env("RUST_LOG", "info,hexdb_core::engine=debug")
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
@@ -313,9 +319,14 @@ path = "./no-ui"
 
     /// Insert a document and return its ID.
     pub fn insert(&self, tessellation: &str, doc: &Value) -> Result<String> {
+        self.insert_with_query(tessellation, "", doc)
+    }
+
+    /// Insert a document with a query string (e.g. `"?ttl=60"`) and return its ID.
+    pub fn insert_with_query(&self, tessellation: &str, query: &str, doc: &Value) -> Result<String> {
         let body = self
             .client
-            .post(self.url(&format!("/{}", tessellation)))
+            .post(self.url(&format!("/{}{}", tessellation, query)))
             .json(doc)
             .send()?
             .error_for_status()?
@@ -390,6 +401,20 @@ path = "./no-ui"
             .with_context(|| format!("Unexpected count response: {:?}", text))
     }
 
+    /// POST a JSON body and return the status code without treating errors as failures.
+    pub fn post_status(&self, path: &str, body: &Value) -> Result<StatusCode> {
+        Ok(self.client.post(self.url(path)).json(body).send()?.status())
+    }
+
+    /// Delete a tessellation and all of its documents.
+    pub fn delete_tessellation(&self, name: &str) -> Result<()> {
+        self.client
+            .delete(self.url(&format!("/tessellation/{}", name)))
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Flush in-memory documents to SSTables.
     pub fn flush(&self) -> Result<()> {
         self.get("/flush")?.error_for_status()?;
@@ -418,10 +443,20 @@ impl Drop for TestServer {
 /// keep working when the API starts returning plain documents.
 pub fn field(doc: &Value, name: &str) -> Option<Value> {
     let data = doc.get("data").unwrap_or(doc);
-    match data.get(name)? {
-        Value::Object(map) if map.len() == 2 && map.contains_key("type") && map.contains_key("value") => {
-            map.get("value").cloned()
+    data.get(name).map(untag)
+}
+
+/// Recursively convert tagged values (`{"type": "...", "value": ...}`) to plain JSON.
+pub fn untag(value: &Value) -> Value {
+    match value {
+        Value::Object(map) if map.len() <= 2 && map.get("type").is_some_and(Value::is_string) => {
+            match map.get("value") {
+                Some(inner) => untag(inner),
+                None => Value::Null, // {"type": "Null"}
+            }
         }
-        other => Some(other.clone()),
+        Value::Object(map) => Value::Object(map.iter().map(|(k, v)| (k.clone(), untag(v))).collect()),
+        Value::Array(items) => Value::Array(items.iter().map(untag).collect()),
+        other => other.clone(),
     }
 }

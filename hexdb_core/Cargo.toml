@@ -28,4 +28,5 @@ getrandom = "0.3.3"
 byteorder = "1.5"
 argon2 = "0.5.3"
 futures = "0.3.31"
+reed-solomon-erasure = "6"
 

@@ -19,7 +19,7 @@ toml = "0.8.22"
 hexdb_core = { path = "../hexdb_core" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }

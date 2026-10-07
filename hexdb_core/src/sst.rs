@@ -1,536 +1,623 @@
 // HexDB Core SSTable Module
-// This module implements the SSTable (Sorted String Table) format for HexDB.
-// The SSTable format is used for storing large amounts of data in a compact
-// and efficient manner. The module provides functions for writing and reading
-// SSTable files, as well as for compressing and decompressing data using
-// Zstandard (zstd) compression. The SSTable format is designed to be fast and
-// efficient, allowing for quick access to data while minimizing disk space usage.
+//
+// SSTables are immutable files holding flushed document versions for one
+// tessellation (`<storage>/<tessellation>/<ulid>.hxs`). Each entry carries the
+// sequence number of the write that produced it, an optional TTL, and a
+// tombstone flag for deletes. When the same document appears in several
+// files, the entry with the highest sequence number wins.
+//
+// Only each file's index is kept in memory; document bodies are read from
+// disk on demand. Files are written to a temporary name, fsynced, and renamed
+// into place, so a crash never leaves a half-written table.
+//
+// File layout (version 2, all integers big-endian):
+//   Header (64 bytes)
+//     0x00 MAGIC "HXDB"           4
+//     0x04 VERSION (2)            2
+//     0x06 COMPRESSION (1 = zstd) 1
+//     0x07 reserved               1
+//     0x08 entry count            8
+//     0x10 created (epoch ms)     8
+//     0x18 index offset           8
+//     0x20 index size             8
+//     0x28 index checksum         8   (first 8 bytes of BLAKE3 over the index block)
+//     0x30 max sequence number    8
+//     0x38 reserved               8
+//   Entries, from 0x40, each:
+//     id (16) | flags (1: bit0 TTL, bit1 tombstone) | seq (8) | [ttl (8)] | len (4) | zstd(JSON document)
+//   Index block, sorted by id, each:
+//     id (16) | flags (1) | seq (8) | [ttl (8)] | entry offset (8) | len (4)
 
-use crate::{document::Document, Hex, HexConfig, Wal};
-use anyhow::{Context, Result};
+use crate::{document::Document, wal::sync_dir};
+use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use chrono::Utc;
-use futures::future::try_join_all;
-use serde_json;
 use std::{
-    collections::{BTreeMap, HashMap},
-    fs::File,
-    io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+    collections::HashMap,
+    fs::{self, File},
+    io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
-use tokio::{
-    fs,
-    sync::{mpsc::Sender, Mutex},
-};
-use tracing::{debug, error, info};
+use tokio::sync::{Mutex, RwLock};
+use tracing::{debug, info, warn};
 use ulid::Ulid;
 use zstd::stream::{decode_all, encode_all};
 
 const MAGIC: &[u8; 4] = b"HXDB";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const COMPRESSION_ZSTD: u8 = 1;
+const HEADER_LEN: u64 = 64;
+const FLAG_TTL: u8 = 0b01;
+const FLAG_TOMBSTONE: u8 = 0b10;
+pub const SST_EXTENSION: &str = "hxs";
 
-#[derive(Debug)]
+/// One entry to write into an SSTable.
+#[derive(Debug, Clone)]
 pub struct SstEntry {
     pub id: Ulid,
+    pub seq: u64,
     pub ttl: Option<i64>,
-    pub data: Vec<u8>,
+    /// Uncompressed JSON document, or `None` for a tombstone.
+    pub data: Option<Vec<u8>>,
 }
 
-#[derive(Clone)]
-pub struct SstWriter;
+/// Index information for one entry in an SSTable.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexEntry {
+    pub seq: u64,
+    pub ttl: Option<i64>,
+    pub tombstone: bool,
+    pub offset: u64,
+    /// Compressed body length.
+    pub len: u32,
+}
 
-impl SstWriter {
-    /// Write a list of entries to an SSTable file. The entries are compressed using Zstandard.
-    /// The function creates a new file, writes the header, and then writes the entries.
-    /// The header includes metadata such as the magic number, version, compression type,
-    /// entry count, creation time, and index offset.
-    pub async fn write_all(
-        hex: Arc<Mutex<Hex>>,
-        config: &HexConfig,
-        wal_tx: &Sender<Wal>,
-    ) -> Result<()> {
-        let base = PathBuf::from(&config.storage.path);
-        fs::create_dir_all(&base).await?;
-
-        let tessellations: Vec<String> = {
-            let hex = hex.lock().await;
-            hex.tessellations.keys().cloned().collect()
-        };
-
-        let tasks = tessellations.into_iter().map(|tess| {
-            let hex = Arc::clone(&hex);
-            let config = config.clone();
-            let base = base.clone();
-
-            tokio::spawn(async move {
-                let node = hex.lock().await;
-                let entries = node.get_all_docs(&tess);
-                drop(node);
-
-                let now = Utc::now().timestamp_millis();
-
-                let valid_docs: Vec<(Ulid, Document)> = entries
-                    .into_iter()
-                    .filter_map(|(id, data)| {
-                        let doc: Document = serde_json::from_slice(&data[..]).ok()?;
-                        if let Some(ttl) = doc.ttl {
-                            if ttl < now {
-                                return None;
-                            }
-                        }
-                        Some((Ulid::from_string(&id).ok()?, doc))
-                    })
-                    .collect();
-
-                if valid_docs.is_empty() {
-                    return Result::<usize, anyhow::Error>::Ok(0);
-                }
-
-                let folder = base.join(&tess);
-                fs::create_dir_all(&folder).await.ok();
-                let file_path = folder.join(format!("{}.hxs", Ulid::new()));
-
-                SstWriter::write(&config, &file_path, valid_docs.clone())
-                    .with_context(|| format!("❌ Failed to write SSTable for {}", tess))?;
-
-                Ok(valid_docs.len())
-            })
-        });
-
-        let results: Vec<_> = try_join_all(tasks)
-            .await?
-            .into_iter()
-            .filter_map(Result::ok)
-            .collect();
-
-        let total_written: usize = results.into_iter().sum();
-
-        if total_written > 0 {
-            wal_tx.send(Wal::Rotate).await.ok();
-            info!("✅ Flushed {} documents to SSTables.", total_written);
-        } else {
-            info!("💾 No valid documents to flush.");
-        }
-
-        Ok(())
+impl IndexEntry {
+    pub fn is_expired(&self, now_millis: i64) -> bool {
+        self.ttl.is_some_and(|ttl| ttl <= now_millis)
     }
+}
 
-    /// Private function to write a single SSTable file.
-    /// It takes a path and a vector of entries, each containing an Ulid and a Document.
-    fn write<P: AsRef<Path>>(
-        config: &HexConfig,
-        path: P,
-        entries: Vec<(Ulid, Document)>,
-    ) -> io::Result<()> {
-        let mut file = BufWriter::new(File::create(path)?);
-        let created = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+/// An open SSTable: its path and in-memory index.
+#[derive(Debug)]
+pub struct SstFile {
+    pub path: PathBuf,
+    pub max_seq: u64,
+    pub created: i64,
+    pub size_bytes: u64,
+    pub index: HashMap<Ulid, IndexEntry>,
+}
 
-        let mut index = Vec::new();
-        let mut entry_buf = Vec::new();
-        let mut offset = 64u64;
+impl SstFile {
+    /// Write entries to a new SSTable at `path` (atomically) and open it.
+    /// `seq_floor` raises the recorded max sequence number (used by compaction so
+    /// the highest sequence number on disk never goes down when entries are dropped).
+    pub fn write(path: &Path, mut entries: Vec<SstEntry>, compression_level: i32, seq_floor: u64) -> Result<SstFile> {
+        entries.sort_by_key(|e| e.id);
+        let created = chrono::Utc::now().timestamp_millis();
+        let max_seq = entries.iter().map(|e| e.seq).max().unwrap_or(0).max(seq_floor);
 
-        for (i, (id, doc)) in entries.iter().enumerate() {
+        let tmp = path.with_extension("tmp");
+        let mut file = BufWriter::new(File::create(&tmp).with_context(|| format!("Failed to create {}", tmp.display()))?);
+        file.write_all(&[0u8; HEADER_LEN as usize])?;
+
+        let mut index = Vec::with_capacity(entries.len());
+        let mut offset = HEADER_LEN;
+        for entry in &entries {
             let mut flags = 0u8;
-            if doc.ttl.is_some() {
-                flags |= 0b00000001;
+            if entry.ttl.is_some() {
+                flags |= FLAG_TTL;
             }
-
-            let raw_json = serde_json::to_vec(doc)?;
-            let compressed = encode_all(&raw_json[..], config.compression.compression_level)?;
-            let length = compressed.len() as u32;
-
-            entry_buf.write_all(&id.to_bytes())?;
-            entry_buf.write_u8(flags)?;
-            if let Some(ttl_ms) = doc.ttl {
-                entry_buf.write_i64::<BigEndian>(ttl_ms)?;
-            }
-            entry_buf.write_u32::<BigEndian>(length)?;
-            entry_buf.write_all(&compressed)?;
-
-            if i % 100 == 0 {
-                index.push((
-                    *id,
-                    offset,
-                    (16 + 1 + if doc.ttl.is_some() { 8 } else { 0 } + 4 + compressed.len()) as u32,
-                ));
-            }
-
-            offset +=
-                (16 + 1 + if doc.ttl.is_some() { 8 } else { 0 } + 4 + compressed.len()) as u64;
-        }
-
-        file.seek(SeekFrom::Start(64))?;
-        file.write_all(&entry_buf)?;
-
-        let index_offset = file.stream_position()?;
-        for (ulid, off, len) in &index {
-            file.write_all(&ulid.to_bytes())?;
-            file.write_u64::<BigEndian>(*off)?;
-            file.write_u32::<BigEndian>(*len)?;
-        }
-        let index_size = file.stream_position()? - index_offset;
-
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(MAGIC)?;
-        file.write_u16::<BigEndian>(VERSION)?;
-        file.write_u8(COMPRESSION_ZSTD)?;
-        file.write_u8(0)?; // reserved
-        file.write_u64::<BigEndian>(entries.len() as u64)?;
-        file.write_i64::<BigEndian>(created)?;
-        file.write_u64::<BigEndian>(index_offset)?;
-        file.write_u64::<BigEndian>(index_size as u64)?;
-        file.write_u64::<BigEndian>(0)?; // checksum placeholder
-        file.write_all(&[0u8; 16])?;
-
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct SstReader;
-
-impl SstReader {
-    /// Read all SSTable files from the disk and load them into the Hex.
-    /// This function scans the storage directory, finds all SSTable files,
-    /// and loads their contents into the Hex.
-    pub async fn read_all(hex: &Arc<Mutex<Hex>>, base: &Path) -> Result<()> {
-        let base = base.to_path_buf();
-        if !base.exists() {
-            return Ok(());
-        }
-
-        let mut dirs = fs::read_dir(&base).await?;
-        let mut loaded = 0;
-
-        while let Some(entry) = dirs.next_entry().await? {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(tess) = path.file_name().and_then(|n| n.to_str()) {
-                    let mut files = fs::read_dir(&path).await?;
-                    while let Some(file_entry) = files.next_entry().await? {
-                        let file_path = file_entry.path();
-                        if file_path.extension().map_or(false, |ext| ext == "hxs") {
-                            let entries = Self::read(&file_path)?;
-                            let mut node = hex.lock().await;
-                            for (id, doc) in entries {
-                                if let Some(ttl) = doc.ttl {
-                                    if ttl < Utc::now().timestamp_millis() {
-                                        continue;
-                                    }
-                                }
-                                node.create_tessellation(tess, "user");
-                                node.create_document(
-                                    tess,
-                                    &id.to_string(),
-                                    &serde_json::to_vec(&doc)?,
-                                );
-                                loaded += 1;
-                            }
-                        }
-                    }
+            let body = match &entry.data {
+                Some(data) => encode_all(&data[..], compression_level)?,
+                None => {
+                    flags |= FLAG_TOMBSTONE;
+                    Vec::new()
                 }
-            }
-        }
-
-        info!("✅ Loaded {} documents from SSTables.", loaded);
-        Ok(())
-    }
-
-    /// Reload the most recent SSTable per tessellation to rewarm hot documents into memory.
-    pub async fn refresh_cache(hex: &Arc<Mutex<Hex>>, sst_base_path: &str) -> Result<()> {
-        let base = PathBuf::from(sst_base_path);
-        if !base.exists() {
-            return Ok(());
-        }
-
-        let mut loaded = 0;
-        let mut tess_dirs = fs::read_dir(&base).await?;
-
-        while let Some(entry) = tess_dirs.next_entry().await? {
-            let tess_path = entry.path();
-            if !tess_path.is_dir() {
-                continue;
-            }
-
-            let tess_name = match tess_path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
             };
 
-            // Gather and sort SST files by modified time descending
-            let mut sst_files = fs::read_dir(&tess_path).await?;
-            let mut files_with_meta = Vec::new();
-
-            while let Some(f) = sst_files.next_entry().await? {
-                let path = f.path();
-                if SstUtil::is_sstable(&path) {
-                    let meta = fs::metadata(&path).await.ok();
-                    let modified = meta.and_then(|m| m.modified().ok());
-                    files_with_meta.push((path, modified));
-                }
+            let entry_offset = offset;
+            let mut header = Vec::with_capacity(37);
+            header.write_all(&entry.id.to_bytes())?;
+            header.write_u8(flags)?;
+            header.write_u64::<BigEndian>(entry.seq)?;
+            if let Some(ttl) = entry.ttl {
+                header.write_i64::<BigEndian>(ttl)?;
             }
+            header.write_u32::<BigEndian>(body.len() as u32)?;
+            file.write_all(&header)?;
+            file.write_all(&body)?;
+            offset += (header.len() + body.len()) as u64;
 
-            files_with_meta.sort_by_key(|(_, modified)| modified.map(std::cmp::Reverse));
-            let files: Vec<_> = files_with_meta.into_iter().map(|(p, _)| p).collect();
-
-            if let Some(latest) = files.first() {
-                let map = SstReader::read(latest)?;
-                let mut node = hex.lock().await;
-
-                for (id, doc) in map {
-                    if let Some(ttl) = doc.ttl {
-                        if ttl < Utc::now().timestamp_millis() {
-                            continue;
-                        }
-                    }
-
-                    node.create_tessellation(&tess_name, "user");
-                    node.create_document(&tess_name, &id.to_string(), &serde_json::to_vec(&doc)?);
-                    loaded += 1;
-                }
-            }
+            index.push((entry.id, flags, entry.seq, entry.ttl, entry_offset, body.len() as u32));
         }
 
-        info!(
-            "🔥 Percolated {} documents from latest SSTables into memory.",
-            loaded
-        );
-        Ok(())
+        let mut index_block = Vec::new();
+        for (id, flags, seq, ttl, entry_offset, len) in &index {
+            index_block.write_all(&id.to_bytes())?;
+            index_block.write_u8(*flags)?;
+            index_block.write_u64::<BigEndian>(*seq)?;
+            if let Some(ttl) = ttl {
+                index_block.write_i64::<BigEndian>(*ttl)?;
+            }
+            index_block.write_u64::<BigEndian>(*entry_offset)?;
+            index_block.write_u32::<BigEndian>(*len)?;
+        }
+        file.write_all(&index_block)?;
+        let checksum = checksum(&index_block);
+
+        let mut header = Vec::with_capacity(HEADER_LEN as usize);
+        header.write_all(MAGIC)?;
+        header.write_u16::<BigEndian>(VERSION)?;
+        header.write_u8(COMPRESSION_ZSTD)?;
+        header.write_u8(0)?;
+        header.write_u64::<BigEndian>(entries.len() as u64)?;
+        header.write_i64::<BigEndian>(created)?;
+        header.write_u64::<BigEndian>(offset)?;
+        header.write_u64::<BigEndian>(index_block.len() as u64)?;
+        header.write_u64::<BigEndian>(checksum)?;
+        header.write_u64::<BigEndian>(max_seq)?;
+        header.write_u64::<BigEndian>(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&header)?;
+
+        let file = file.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path).with_context(|| format!("Failed to move {} into place", path.display()))?;
+        if let Some(dir) = path.parent() {
+            sync_dir(dir);
+        }
+
+        SstFile::open(path)
     }
 
-    /// Private function to read a single SSTable file.
-    fn read<P: AsRef<Path>>(path: P) -> std::io::Result<BTreeMap<Ulid, Document>> {
-        let mut file = BufReader::new(File::open(path)?);
+    /// Open an SSTable and load its index.
+    pub fn open(path: &Path) -> Result<SstFile> {
+        let mut file = BufReader::new(File::open(path).with_context(|| format!("Failed to open {}", path.display()))?);
+        let size_bytes = file.get_ref().metadata()?.len();
 
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic)?;
         if &magic != MAGIC {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "❌ Invalid SSTable magic header.",
-            ));
+            bail!("{} is not an SSTable (bad magic header)", path.display());
         }
-
         let version = file.read_u16::<BigEndian>()?;
+        if version != VERSION {
+            bail!(
+                "{} is SSTable version {}, but this HexDB reads version {}. Files from older HexDB builds can't be read; move them out of the data directory.",
+                path.display(),
+                version,
+                VERSION
+            );
+        }
         let compression = file.read_u8()?;
+        if compression != COMPRESSION_ZSTD {
+            bail!("{} uses unsupported compression {}", path.display(), compression);
+        }
         let _reserved = file.read_u8()?;
         let entry_count = file.read_u64::<BigEndian>()?;
-        let _created = file.read_i64::<BigEndian>()?;
+        let created = file.read_i64::<BigEndian>()?;
         let index_offset = file.read_u64::<BigEndian>()?;
-        let _index_size = file.read_u64::<BigEndian>()?;
-        let _checksum = file.read_u64::<BigEndian>()?;
-        let mut _reserved2 = [0u8; 16];
-        file.read_exact(&mut _reserved2)?;
+        let index_size = file.read_u64::<BigEndian>()?;
+        let expected_checksum = file.read_u64::<BigEndian>()?;
+        let max_seq = file.read_u64::<BigEndian>()?;
 
-        if version != VERSION || compression != COMPRESSION_ZSTD {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "❌ Unsupported SST version or compression.",
-            ));
+        if index_offset.checked_add(index_size).is_none_or(|end| end > size_bytes) {
+            bail!("{} is truncated or corrupt (index outside the file)", path.display());
+        }
+        file.seek(SeekFrom::Start(index_offset))?;
+        let mut index_block = vec![0u8; index_size as usize];
+        file.read_exact(&mut index_block)?;
+        if checksum(&index_block) != expected_checksum {
+            bail!("{} is corrupt (index checksum mismatch)", path.display());
         }
 
-        file.seek(SeekFrom::Start(64))?;
-
-        let mut map = BTreeMap::new();
+        let mut index = HashMap::with_capacity(entry_count as usize);
+        let mut cursor = Cursor::new(&index_block[..]);
         for _ in 0..entry_count {
-            if file.stream_position()? >= index_offset {
-                break;
-            }
-
-            let mut id_buf = [0u8; 16];
-            file.read_exact(&mut id_buf)?;
-            let id = Ulid::from(id_buf);
-            let flags = file.read_u8()?;
-            let has_ttl = flags & 0b00000001 != 0;
-            let ttl = if has_ttl {
-                Some(file.read_i64::<BigEndian>()?)
-            } else {
-                None
-            };
-
-            let clen = file.read_u32::<BigEndian>()?;
-            let mut comp = vec![0u8; clen as usize];
-            file.read_exact(&mut comp)?;
-
-            let json_bytes = decode_all(&comp[..])?;
-            let mut doc: Document = serde_json::from_slice(&json_bytes)?;
-            doc.ttl = ttl;
-
-            map.insert(id, doc);
+            let mut id = [0u8; 16];
+            cursor.read_exact(&mut id)?;
+            let flags = cursor.read_u8()?;
+            let seq = cursor.read_u64::<BigEndian>()?;
+            let ttl = if flags & FLAG_TTL != 0 { Some(cursor.read_i64::<BigEndian>()?) } else { None };
+            let offset = cursor.read_u64::<BigEndian>()?;
+            let len = cursor.read_u32::<BigEndian>()?;
+            index.insert(
+                Ulid::from_bytes(id),
+                IndexEntry { seq, ttl, tombstone: flags & FLAG_TOMBSTONE != 0, offset, len },
+            );
         }
 
-        Ok(map)
+        Ok(SstFile { path: path.to_path_buf(), max_seq, created, size_bytes, index })
+    }
+
+    /// Read and decompress one entry's document JSON.
+    pub fn read_entry(&self, entry: &IndexEntry) -> Result<Vec<u8>> {
+        let mut file = File::open(&self.path).with_context(|| format!("Failed to open {}", self.path.display()))?;
+        file.seek(SeekFrom::Start(entry.offset))?;
+        let mut header = [0u8; 16 + 1 + 8];
+        file.read_exact(&mut header)?;
+        if entry.ttl.is_some() {
+            file.seek(SeekFrom::Current(8))?;
+        }
+        let len = file.read_u32::<BigEndian>()?;
+        if len != entry.len {
+            bail!("{} is corrupt (entry length mismatch)", self.path.display());
+        }
+        let mut body = vec![0u8; len as usize];
+        file.read_exact(&mut body)?;
+        Ok(decode_all(&body[..])?)
     }
 }
 
-#[derive(Clone)]
-pub struct SstUtil {
-    pub config: HexConfig,
-    pub total_doc_bytes: Arc<AtomicUsize>,
+fn checksum(bytes: &[u8]) -> u64 {
+    let hash = blake3::hash(bytes);
+    u64::from_be_bytes(hash.as_bytes()[..8].try_into().unwrap())
 }
 
-impl SstUtil {
-    /// Create a new SstUtil instance with the given configuration.
-    pub fn new(config: HexConfig) -> Self {
-        SstUtil {
-            config,
-            total_doc_bytes: Arc::new(AtomicUsize::new(0)),
-        }
-    }
+/// The newest on-disk version of a document.
+pub enum DiskLookup {
+    Live { file: Arc<SstFile>, entry: IndexEntry },
+    Tombstone { seq: u64 },
+}
 
-    /// Read all SSTable files from the disk and load them into the Hex.
-    pub async fn read_all(&self, hex: &Arc<Mutex<Hex>>) -> Result<()> {
-        SstReader::read_all(hex, Path::new(&self.config.storage.path)).await
-    }
+/// All SSTables, grouped by tessellation.
+pub struct SstStore {
+    base: PathBuf,
+    compression_level: i32,
+    tables: RwLock<HashMap<String, Vec<Arc<SstFile>>>>,
+    compaction: Mutex<()>,
+}
 
-    /// Flush the Write-Ahead Log (WAL) to SSTables.
-    pub async fn flush(&self, hex: Arc<Mutex<Hex>>, wal_tx: &Sender<Wal>) {
-        SstWriter::write_all(hex, &self.config, wal_tx)
-            .await
-            .unwrap_or_else(|e| {
-                error!("❌ Failed to flush WAL to SSTables: {}.", e);
-            });
-    }
+/// Summary of a compaction run.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompactionStats {
+    pub tessellations: usize,
+    pub files_merged: usize,
+    pub entries_kept: usize,
+    pub entries_dropped: usize,
+}
 
-    /// Compact all SSTable files in the storage directory.
-    /// This function reads all SSTable files, filters out expired documents,
-    /// and writes a new compacted SSTable file.
-    /// It also deletes the obsolete SSTable files.
-    pub async fn compact(&self) -> Result<()> {
-        let base = PathBuf::from(&self.config.storage.path);
-        if !base.exists() {
-            return Ok(());
-        }
-
-        let mut dirs = fs::read_dir(&base).await?;
-        while let Some(entry) = dirs.next_entry().await? {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(tess) = path.file_name().and_then(|n| n.to_str()) {
-                    self.compact_tessellation(tess).await?;
+impl SstStore {
+    /// Open every SSTable under `base`. Leftover temporary files from an
+    /// interrupted write are removed.
+    pub fn open(base: &Path, compression_level: i32) -> Result<SstStore> {
+        let mut tables: HashMap<String, Vec<Arc<SstFile>>> = HashMap::new();
+        if base.exists() {
+            for entry in fs::read_dir(base)? {
+                let dir = entry?.path();
+                if !dir.is_dir() {
+                    continue;
                 }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Check if the given path is an SSTable file.
-    /// This function checks the file extension to determine if it is a valid SSTable file.
-    pub fn is_sstable(path: &Path) -> bool {
-        path.extension().map_or(false, |ext| ext == "hxs")
-    }
-
-    async fn compact_tessellation(&self, tess: &str) -> Result<()> {
-        let dir = PathBuf::from(format!("{}/{}", &self.config.storage.path, tess));
-        if !dir.exists() {
-            return Ok(());
-        }
-
-        let now = Utc::now().timestamp_millis();
-        let mut all_docs: HashMap<Ulid, Document> = HashMap::new();
-        let mut to_delete = Vec::new();
-
-        let mut files = fs::read_dir(&dir).await?;
-        while let Some(entry) = files.next_entry().await? {
-            let path = entry.path();
-            if SstUtil::is_sstable(&path) {
-                let map = SstReader::read(&path)?;
-                let mut retained = 0;
-                for (id, doc) in map {
-                    if doc.ttl.map_or(true, |ttl| ttl >= now) {
-                        all_docs.insert(id, doc);
-                        retained += 1;
+                let Some(tess) = dir.file_name().and_then(|n| n.to_str()).map(String::from) else { continue };
+                if tess == "wal" {
+                    continue;
+                }
+                for file in fs::read_dir(&dir)? {
+                    let path = file?.path();
+                    match path.extension().and_then(|e| e.to_str()) {
+                        Some(SST_EXTENSION) => {
+                            tables.entry(tess.clone()).or_default().push(Arc::new(SstFile::open(&path)?));
+                        }
+                        Some("tmp") => {
+                            warn!("ðŸ§¹ Removing incomplete SSTable {}.", path.display());
+                            let _ = fs::remove_file(&path);
+                        }
+                        _ => {}
                     }
                 }
-
-                if retained > 0 {
-                    to_delete.push(path);
-                }
             }
         }
 
-        if all_docs.is_empty() {
-            debug!("🧹 No active documents found in SSTables for '{}'.", tess);
+        let files: usize = tables.values().map(Vec::len).sum();
+        info!("ðŸ“š Opened {} SSTables across {} tessellations.", files, tables.len());
+        Ok(SstStore {
+            base: base.to_path_buf(),
+            compression_level,
+            tables: RwLock::new(tables),
+            compaction: Mutex::new(()),
+        })
+    }
+
+    /// Highest sequence number in any SSTable.
+    pub async fn max_seq(&self) -> u64 {
+        self.tables
+            .read()
+            .await
+            .values()
+            .flatten()
+            .map(|f| f.max_seq)
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub async fn tessellations(&self) -> Vec<String> {
+        self.tables.read().await.keys().cloned().collect()
+    }
+
+    /// Sequence number of the newest on-disk version of a document, if any.
+    pub async fn seq_of(&self, tess: &str, id: &Ulid) -> Option<u64> {
+        let tables = self.tables.read().await;
+        tables
+            .get(tess)?
+            .iter()
+            .filter_map(|f| f.index.get(id).map(|e| e.seq))
+            .max()
+    }
+
+    /// Find the newest on-disk version of a document.
+    pub async fn lookup(&self, tess: &str, id: &Ulid) -> Option<DiskLookup> {
+        let tables = self.tables.read().await;
+        let (file, entry) = tables
+            .get(tess)?
+            .iter()
+            .filter_map(|f| f.index.get(id).map(|e| (f, *e)))
+            .max_by_key(|(_, e)| e.seq)?;
+        Some(if entry.tombstone {
+            DiskLookup::Tombstone { seq: entry.seq }
+        } else {
+            DiskLookup::Live { file: file.clone(), entry }
+        })
+    }
+
+    /// Newest on-disk index entry for every document in a tessellation.
+    pub async fn latest_entries(&self, tess: &str) -> HashMap<Ulid, (Arc<SstFile>, IndexEntry)> {
+        let tables = self.tables.read().await;
+        let mut latest: HashMap<Ulid, (Arc<SstFile>, IndexEntry)> = HashMap::new();
+        for file in tables.get(tess).into_iter().flatten() {
+            for (id, entry) in &file.index {
+                match latest.get(id) {
+                    Some((_, existing)) if existing.seq >= entry.seq => {}
+                    _ => {
+                        latest.insert(*id, (file.clone(), *entry));
+                    }
+                }
+            }
+        }
+        latest
+    }
+
+    /// Write a new SSTable for a tessellation and make it visible to readers.
+    pub async fn add_table(&self, tess: &str, entries: Vec<SstEntry>) -> Result<()> {
+        if entries.is_empty() {
             return Ok(());
         }
+        let dir = self.base.join(tess);
+        let path = dir.join(format!("{}.{}", Ulid::new(), SST_EXTENSION));
+        let level = self.compression_level;
+        let file = tokio::task::spawn_blocking(move || -> Result<SstFile> {
+            fs::create_dir_all(&dir)?;
+            SstFile::write(&path, entries, level, 0)
+        })
+        .await??;
 
-        let compact_path = dir.join(format!("{}.hxs", Ulid::new()));
-        SstWriter::write(
-            &self.config,
-            &compact_path,
-            all_docs.clone().into_iter().collect(),
-        )?;
-
-        for path in &to_delete {
-            debug!("🗑️  Deleted obsolete SSTable: {:?}", path);
-            let _ = fs::remove_file(path).await;
-        }
-
-        info!(
-            "🔧 Compacted {} SSTables for '{}', retained {} documents.",
-            to_delete.len(),
-            tess,
-            all_docs.len()
-        );
-
+        self.tables
+            .write()
+            .await
+            .entry(tess.to_string())
+            .or_default()
+            .push(Arc::new(file));
         Ok(())
     }
 
-    /// Count all non-expired documents currently stored on disk.
-    pub fn count_documents_on_disk(&self) -> Result<usize> {
-        let base = Path::new(&self.config.storage.path);
-        if !base.exists() {
-            return Ok(0);
+    /// Remove a tessellation's SSTables from disk.
+    pub async fn drop_tessellation(&self, tess: &str) -> Result<()> {
+        let _guard = self.compaction.lock().await;
+        self.tables.write().await.remove(tess);
+        let dir = self.base.join(tess);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).with_context(|| format!("Failed to delete {}", dir.display()))?;
+            sync_dir(&self.base);
         }
+        Ok(())
+    }
 
-        let now = Utc::now().timestamp_millis();
-        let mut total = 0;
+    /// Ignore (and delete) on-disk entries for documents in a dropped tessellation
+    /// that were written at or before `dropped_seq`.
+    pub async fn purge_dropped(&self, tess: &str, dropped_seq: u64) -> Result<()> {
+        let has_old = self
+            .tables
+            .read()
+            .await
+            .get(tess)
+            .is_some_and(|files| files.iter().any(|f| f.index.values().any(|e| e.seq <= dropped_seq)));
+        if has_old {
+            warn!("ðŸ§¹ Removing SSTables left over from dropped tessellation '{}'.", tess);
+            self.drop_tessellation(tess).await?;
+        }
+        Ok(())
+    }
 
-        for tess_entry in std::fs::read_dir(base)? {
-            let tess_path = tess_entry?.path();
-            if !tess_path.is_dir() {
+    /// Total bytes and file count on disk.
+    pub async fn disk_usage(&self) -> (u64, usize) {
+        let tables = self.tables.read().await;
+        let files: Vec<&Arc<SstFile>> = tables.values().flatten().collect();
+        (files.iter().map(|f| f.size_bytes).sum(), files.len())
+    }
+
+    /// Merge every SSTable of each tessellation into one file. The newest version
+    /// of each document is kept. Tombstones and expired documents are dropped
+    /// when their sequence number is below `drop_floor`, meaning no older
+    /// version can still be waiting in the WAL. Tessellations with one file are
+    /// only rewritten when they have something to drop.
+    pub async fn compact(&self, drop_floor: u64, now_millis: i64) -> Result<CompactionStats> {
+        let _guard = self.compaction.lock().await;
+        let mut stats = CompactionStats::default();
+
+        let snapshot: Vec<(String, Vec<Arc<SstFile>>)> = self
+            .tables
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (tess, files) in snapshot {
+            if files.is_empty() {
                 continue;
             }
 
-            for file in std::fs::read_dir(tess_path)? {
-                let path = file?.path();
-                if SstUtil::is_sstable(&path) {
-                    let map = SstReader::read(&path)?;
-                    total += map
-                        .values()
-                        .filter(|doc| doc.ttl.map_or(true, |ttl| ttl >= now))
-                        .count();
+            let mut latest: HashMap<Ulid, (Arc<SstFile>, IndexEntry)> = HashMap::new();
+            let mut total_entries = 0;
+            for file in &files {
+                for (id, entry) in &file.index {
+                    total_entries += 1;
+                    match latest.get(id) {
+                        Some((_, existing)) if existing.seq >= entry.seq => {}
+                        _ => {
+                            latest.insert(*id, (file.clone(), *entry));
+                        }
+                    }
                 }
             }
+
+            let droppable = |e: &IndexEntry| (e.tombstone || e.is_expired(now_millis)) && e.seq < drop_floor;
+            let drop_count = latest.values().filter(|(_, e)| droppable(e)).count();
+            if files.len() < 2 && drop_count == 0 {
+                continue;
+            }
+
+            let level = self.compression_level;
+            let kept: Vec<(Arc<SstFile>, Ulid, IndexEntry)> = latest
+                .into_iter()
+                .filter(|(_, (_, e))| !droppable(e))
+                .map(|(id, (f, e))| (f, id, e))
+                .collect();
+            let kept_count = kept.len();
+            let dir = self.base.join(&tess);
+            let write_dir = dir.clone();
+            // Keep the highest sequence number even if every entry is dropped, so
+            // sequence numbers are never reused after a restart.
+            let seq_floor = files.iter().map(|f| f.max_seq).max().unwrap_or(0);
+            let new_file = tokio::task::spawn_blocking(move || -> Result<Option<SstFile>> {
+                let mut entries = Vec::with_capacity(kept.len());
+                for (file, id, entry) in kept {
+                    let data = if entry.tombstone { None } else { Some(file.read_entry(&entry)?) };
+                    entries.push(SstEntry { id, seq: entry.seq, ttl: entry.ttl, data });
+                }
+                let path = write_dir.join(format!("{}.{}", Ulid::new(), SST_EXTENSION));
+                Ok(Some(SstFile::write(&path, entries, level, seq_floor)?))
+            })
+            .await??;
+
+            // Swap the merged file in for exactly the files it replaces; files
+            // flushed meanwhile stay.
+            {
+                let mut tables = self.tables.write().await;
+                let list = tables.entry(tess.clone()).or_default();
+                list.retain(|f| !files.iter().any(|old| Arc::ptr_eq(old, f)));
+                if let Some(file) = new_file {
+                    list.push(Arc::new(file));
+                }
+            }
+            for old in &files {
+                if let Err(e) = fs::remove_file(&old.path) {
+                    warn!("âš ï¸ Failed to delete compacted SSTable {}: {}", old.path.display(), e);
+                }
+            }
+            sync_dir(&dir);
+
+            stats.tessellations += 1;
+            stats.files_merged += files.len();
+            stats.entries_kept += kept_count;
+            stats.entries_dropped += total_entries - kept_count;
+            debug!("ðŸ—œï¸  Compacted {} SSTables for '{}' ({} entries kept).", files.len(), tess, kept_count);
         }
 
-        Ok(total)
+        Ok(stats)
+    }
+}
+
+/// Parse a document from SSTable or memtable bytes.
+pub fn parse_document(bytes: &[u8]) -> Result<Document> {
+    serde_json::from_slice(bytes).map_err(|e| anyhow!("Stored document is unreadable: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hexdb-sst-test-{}", Ulid::new()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
-    /// Tracks total compressed document size (on disk, SST format).
-    pub fn track_document_size(&self, doc: &Document) {
-        if let Ok(raw) = serde_json::to_vec(doc) {
-            if let Ok(comp) =
-                encode_all(Cursor::new(raw), self.config.compression.compression_level)
-            {
-                let mut entry_size = 16 + 1 + 4 + comp.len(); // id (16) + flags (1) + len (4) + compressed data
-                if doc.ttl.is_some() {
-                    entry_size += 8; // TTL
-                }
+    #[test]
+    fn writes_and_reads_entries() {
+        let dir = temp_dir();
+        let a = Ulid::new();
+        let b = Ulid::new();
+        let path = dir.join("x.hxs");
+        let file = SstFile::write(
+            &path,
+            vec![
+                SstEntry { id: a, seq: 5, ttl: Some(99), data: Some(b"{\"a\":1}".to_vec()) },
+                SstEntry { id: b, seq: 6, ttl: None, data: None },
+            ],
+            3,
+            0,
+        )
+        .unwrap();
 
-                self.total_doc_bytes
-                    .fetch_add(entry_size, Ordering::Relaxed);
-            }
-        }
+        assert_eq!(file.max_seq, 6);
+        let ea = file.index[&a];
+        assert_eq!((ea.seq, ea.ttl, ea.tombstone), (5, Some(99), false));
+        assert_eq!(file.read_entry(&ea).unwrap(), b"{\"a\":1}");
+        assert!(file.index[&b].tombstone);
+
+        let reopened = SstFile::open(&path).unwrap();
+        assert_eq!(reopened.index.len(), 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detects_corrupt_index() {
+        let dir = temp_dir();
+        let path = dir.join("x.hxs");
+        SstFile::write(&path, vec![SstEntry { id: Ulid::new(), seq: 1, ttl: None, data: Some(b"{}".to_vec()) }], 0, 0)
+            .unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        fs::write(&path, bytes).unwrap();
+        assert!(SstFile::open(&path).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn newest_version_wins_and_compaction_drops_tombstones() {
+        let dir = temp_dir();
+        let store = SstStore::open(&dir, 0).unwrap();
+        let id = Ulid::new();
+        let other = Ulid::new();
+
+        store
+            .add_table("t", vec![
+                SstEntry { id, seq: 1, ttl: None, data: Some(b"{\"v\":1}".to_vec()) },
+                SstEntry { id: other, seq: 2, ttl: None, data: Some(b"{\"v\":9}".to_vec()) },
+            ])
+            .await
+            .unwrap();
+        store.add_table("t", vec![SstEntry { id, seq: 3, ttl: None, data: None }]).await.unwrap();
+
+        assert!(matches!(store.lookup("t", &id).await, Some(DiskLookup::Tombstone { seq: 3 })));
+
+        // Floor below the tombstone: it must be kept.
+        let stats = store.compact(3, 0).await.unwrap();
+        assert_eq!(stats.files_merged, 2);
+        assert!(matches!(store.lookup("t", &id).await, Some(DiskLookup::Tombstone { seq: 3 })));
+
+        // Floor above it: dropped.
+        store.compact(10, 0).await.unwrap();
+        assert!(store.lookup("t", &id).await.is_none());
+        assert!(matches!(store.lookup("t", &other).await, Some(DiskLookup::Live { .. })));
+        assert_eq!(store.disk_usage().await.1, 1);
+
+        // Reopen from disk.
+        let reopened = SstStore::open(&dir, 0).unwrap();
+        assert_eq!(reopened.max_seq().await, 3, "max seq survives dropping the tombstone");
+        fs::remove_dir_all(&dir).ok();
     }
 }

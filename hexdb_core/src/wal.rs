@@ -1,262 +1,545 @@
 // HexDB Core Write-Ahead Log (WAL) Module
-// This module implements a Write-Ahead Log (WAL) for HexDB, allowing for
-// asynchronous logging of operations. The WAL is used to ensure durability and
-// consistency of data in the event of a crash or failure. The WAL is written
-// to a file, and operations are serialized in JSON format. The WAL is designed
-// to be efficient and can handle high-throughput workloads. The WAL is also
-// designed to be easy to use, with a simple API for writing operations. The WAL
-// is implemented using Tokio's asynchronous I/O capabilities, allowing for
-// non-blocking writes and efficient use of system resources.
+//
+// Every write is appended to the WAL before it is acknowledged. Records carry
+// a sequence number and are compressed with Zstandard and encrypted with
+// AES-256-GCM. A dedicated writer thread appends records in the order they
+// were queued, batches whatever is waiting into one write and one fsync
+// ("group commit"), and then acknowledges each record.
+//
+// The WAL is split into segment files named after the first sequence number
+// they may contain (`wal/00000000000000000042.wal`). A flush rotates to a new
+// segment, writes SSTables, and only then deletes the older segments, so a
+// crash at any point leaves every acknowledged write in a segment or an SSTable.
+//
+// Record framing: [u32 big-endian length][12-byte nonce][ciphertext].
 
-use crate::{document::Document, HexConfig, HexDBEngine};
-use serde::{Serialize, Deserialize};
-use tokio::{
-    fs::{File, OpenOptions},
-    io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
-    sync::mpsc::Receiver,
-};
-use ulid::Ulid;
-use std::{io::ErrorKind, path::PathBuf, sync::Arc};
-use aes_gcm::{Aes256Gcm, Key, Nonce}; // Orinoco
+use crate::document::Document;
 use aes_gcm::aead::{Aead, KeyInit};
-use getrandom::fill;
-use anyhow::Result;
-use zstd::stream::{encode_all, decode_all};
-use tracing::{info, warn, error};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub enum Wal {
-    Insert(Document),
-    Delete {
-        tessellation: String,
-        id: String,
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, BufWriter, ErrorKind, Read, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
     },
-    Rotate,
+    thread::JoinHandle,
+};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, error, info, warn};
+use ulid::Ulid;
+use zstd::stream::{decode_all, encode_all};
+
+const NONCE_LEN: usize = 12;
+const MAX_RECORD_LEN: usize = 256 * 1024 * 1024;
+const SEGMENT_EXTENSION: &str = "wal";
+
+/// One logged write.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WalRecord {
+    pub seq: u64,
+    pub op: WalOp,
 }
 
-/// WAL writer task that handles writing operations to a file.
-/// It uses AES-GCM for encryption and Zstandard for compression.
-/// The task runs in an endless loop, waiting for operations to be sent.
-pub async fn wal_writer_task(
-    config: HexConfig,
-    mut rx: Receiver<Wal>,
-    wal_path: PathBuf,
-    key: Arc<Vec<u8>>,
-) -> anyhow::Result<()> {
-    use tokio::fs;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum WalOp {
+    /// Insert or replace a document.
+    Put(Document),
+    /// Delete a document.
+    Delete { tessellation: String, id: Ulid },
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = wal_path.parent() {
-        fs::create_dir_all(parent).await?;
+enum WalCommand {
+    Append {
+        record: WalRecord,
+        ack: oneshot::Sender<std::result::Result<(), String>>,
+    },
+    Rotate {
+        next_seq: u64,
+        ack: oneshot::Sender<std::result::Result<u64, String>>,
+    },
+    Shutdown {
+        ack: oneshot::Sender<std::result::Result<(), String>>,
+    },
+}
+
+/// A pending acknowledgement for an appended record.
+pub struct WalAck(oneshot::Receiver<std::result::Result<(), String>>);
+
+impl WalAck {
+    /// Wait until the record is durable.
+    pub async fn wait(self) -> Result<()> {
+        match self.0.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(anyhow!("WAL write failed: {}", e)),
+            Err(_) => Err(anyhow!("WAL writer stopped before the write was acknowledged")),
+        }
+    }
+}
+
+/// Handle to the WAL writer thread.
+pub struct WalWriter {
+    tx: mpsc::Sender<WalCommand>,
+    failed: Arc<AtomicBool>,
+    thread: std::sync::Mutex<Option<JoinHandle<()>>>,
+}
+
+impl WalWriter {
+    /// Start the writer thread with a new segment for records from `next_seq` on.
+    pub fn start(dir: &Path, key: &[u8], compression_level: i32, sync: bool, next_seq: u64) -> Result<Self> {
+        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+        let file = open_segment(dir, next_seq)?;
+
+        let (tx, rx) = mpsc::channel(4096);
+        let failed = Arc::new(AtomicBool::new(false));
+        let state = WriterState {
+            dir: dir.to_path_buf(),
+            cipher,
+            compression_level,
+            sync,
+            file,
+            failed: failed.clone(),
+        };
+        let thread = std::thread::Builder::new()
+            .name("hexdb-wal".into())
+            .spawn(move || state.run(rx))
+            .context("Failed to start the WAL writer thread")?;
+
+        info!("📓 WAL writer started (segment {:020}).", next_seq);
+        Ok(WalWriter {
+            tx,
+            failed,
+            thread: std::sync::Mutex::new(Some(thread)),
+        })
     }
 
-    let mut writer = BufWriter::new(
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&wal_path)
-            .await?,
-    );
+    /// True after any WAL write has failed. Further writes are refused.
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
 
-    let current_path = wal_path.clone();
+    /// Queue a record. Records are written in the order they are queued; call
+    /// this while holding the lock that assigns sequence numbers.
+    pub async fn append(&self, record: WalRecord) -> Result<WalAck> {
+        if self.has_failed() {
+            bail!("The WAL is unavailable after an earlier write failure; restart HexDB.");
+        }
+        let (ack, rx) = oneshot::channel();
+        self.tx
+            .send(WalCommand::Append { record, ack })
+            .await
+            .map_err(|_| anyhow!("The WAL writer has stopped"))?;
+        Ok(WalAck(rx))
+    }
 
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    /// Start a new segment for records from `next_seq` on, after making
+    /// everything queued so far durable. Returns the new segment's sequence number.
+    /// Call this while holding the lock that assigns sequence numbers.
+    pub async fn rotate(&self, next_seq: u64) -> Result<oneshot::Receiver<std::result::Result<u64, String>>> {
+        let (ack, rx) = oneshot::channel();
+        self.tx
+            .send(WalCommand::Rotate { next_seq, ack })
+            .await
+            .map_err(|_| anyhow!("The WAL writer has stopped"))?;
+        Ok(rx)
+    }
 
-    info!("📓 WAL writer task started (path: {:?})", wal_path);
+    /// Make everything queued durable and stop the writer thread.
+    pub async fn shutdown(&self) -> Result<()> {
+        let (ack, rx) = oneshot::channel();
+        if self.tx.send(WalCommand::Shutdown { ack }).await.is_err() {
+            return Ok(()); // already stopped
+        }
+        let result = rx.await.map_err(|_| anyhow!("WAL writer stopped unexpectedly"))?;
+        if let Some(handle) = self.thread.lock().unwrap().take() {
+            let _ = tokio::task::spawn_blocking(move || handle.join()).await;
+        }
+        result.map_err(|e| anyhow!("Final WAL sync failed: {}", e))
+    }
+}
 
-    while let Some(op) = rx.recv().await {
-        // Rotate WAL on command
-        if matches!(op, Wal::Rotate) {
-            
-            writer.flush().await?;
-            
-            let rotated_path = current_path.with_file_name(format!(".hexdb.{}.dat", Ulid::new()));
+struct WriterState {
+    dir: PathBuf,
+    cipher: Aes256Gcm,
+    compression_level: i32,
+    sync: bool,
+    file: BufWriter<File>,
+    failed: Arc<AtomicBool>,
+}
 
-            drop(writer);
+impl WriterState {
+    fn run(mut self, mut rx: mpsc::Receiver<WalCommand>) {
+        let mut pending: Vec<oneshot::Sender<std::result::Result<(), String>>> = Vec::new();
 
-            fs::rename(&current_path, &rotated_path).await?;
+        while let Some(first) = rx.blocking_recv() {
+            let mut batch = vec![first];
+            while batch.len() < 4096 {
+                match rx.try_recv() {
+                    Ok(cmd) => batch.push(cmd),
+                    Err(_) => break,
+                }
+            }
 
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&current_path)
-                .await?;
-            writer = BufWriter::new(file);
+            for cmd in batch {
+                match cmd {
+                    WalCommand::Append { record, ack } => {
+                        if self.failed.load(Ordering::SeqCst) {
+                            let _ = ack.send(Err("WAL unavailable after an earlier failure".into()));
+                            continue;
+                        }
+                        match self.write_record(&record) {
+                            Ok(()) => pending.push(ack),
+                            Err(e) => {
+                                error!("❌ WAL write failed: {}", e);
+                                self.failed.store(true, Ordering::SeqCst);
+                                let _ = ack.send(Err(e.to_string()));
+                            }
+                        }
+                    }
+                    WalCommand::Rotate { next_seq, ack } => {
+                        let committed = self.commit(&mut pending);
+                        let result = committed.and_then(|_| {
+                            self.file = open_segment(&self.dir, next_seq).map_err(|e| e.to_string())?;
+                            debug!("🔄 WAL rotated to segment {:020}.", next_seq);
+                            Ok(next_seq)
+                        });
+                        if result.is_err() {
+                            self.failed.store(true, Ordering::SeqCst);
+                        }
+                        let _ = ack.send(result);
+                    }
+                    WalCommand::Shutdown { ack } => {
+                        let result = self.commit(&mut pending);
+                        let _ = ack.send(result);
+                        info!("📓 WAL writer stopped.");
+                        return;
+                    }
+                }
+            }
 
-            info!("🔄 WAL rotated, previous log saved to {:?}.", rotated_path);
-            continue;
+            let _ = self.commit(&mut pending);
         }
 
-        // Normal WAL operation (insert/delete)
-        let json = match serde_json::to_vec(&op) {
-            Ok(data) => data,
-            Err(e) => {
-                error!("❌ Failed to serialize WAL: {:?}.", e);
-                continue;
-            }
-        };
-
-        let compressed = encode_all(&*json, config.compression.compression_level)?;
-        let mut nonce_bytes = [0u8; 12];
-        fill(&mut nonce_bytes)?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let encrypted = match cipher.encrypt(nonce, compressed.as_ref()) {
-            Ok(enc) => enc,
-            Err(e) => {
-                error!("❌ WAL encryption failed: {:?}", e);
-                continue;
-            }
-        };
-
-        writer.write_u32((12 + encrypted.len()) as u32).await?;
-        writer.write_all(&nonce_bytes).await?;
-        writer.write_all(&encrypted).await?;
-        writer.flush().await?;
+        let _ = self.commit(&mut pending);
     }
 
-    Ok(())
+    fn write_record(&mut self, record: &WalRecord) -> Result<()> {
+        let frame = encode_record(&self.cipher, self.compression_level, record)?;
+        self.file.write_all(&frame)?;
+        Ok(())
+    }
+
+    /// Flush (and optionally fsync) the segment, then acknowledge pending records.
+    fn commit(
+        &mut self,
+        pending: &mut Vec<oneshot::Sender<std::result::Result<(), String>>>,
+    ) -> std::result::Result<(), String> {
+        let result = self
+            .file
+            .flush()
+            .and_then(|_| if self.sync { self.file.get_ref().sync_data() } else { Ok(()) })
+            .map_err(|e| e.to_string());
+
+        if let Err(e) = &result {
+            error!("❌ WAL sync failed: {}", e);
+            self.failed.store(true, Ordering::SeqCst);
+        }
+        for ack in pending.drain(..) {
+            let _ = ack.send(result.clone());
+        }
+        result
+    }
 }
 
-/// Recover data from all WAL files in the specified directory.
-/// This function reads each WAL file, decrypts the data, decompresses it,
-/// and applies the operations to the in-memory engine.
-pub async fn recover_from_wal(
-    wal_dir: PathBuf,
-    key: &[u8],
-    engine: Arc<HexDBEngine>,
-    cleanup: bool,
-    ) -> Result<()> {
-    use std::ffi::OsStr;
-    use std::time::SystemTime;
+fn segment_path(dir: &Path, seq: u64) -> PathBuf {
+    dir.join(format!("{:020}.{}", seq, SEGMENT_EXTENSION))
+}
 
-    if !wal_dir.exists() {
-        info!("🆕 No WAL directory found at {:?} — Creating fresh installation.", wal_dir);
-        return Ok(());
+fn open_segment(dir: &Path, seq: u64) -> Result<BufWriter<File>> {
+    let path = segment_path(dir, seq);
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("Failed to open WAL segment {}", path.display()))?;
+    sync_dir(dir);
+    Ok(BufWriter::with_capacity(1 << 20, file))
+}
+
+fn encode_record(cipher: &Aes256Gcm, level: i32, record: &WalRecord) -> Result<Vec<u8>> {
+    let json = serde_json::to_vec(record)?;
+    let compressed = encode_all(&json[..], level)?;
+
+    let mut nonce = [0u8; NONCE_LEN];
+    getrandom::fill(&mut nonce).map_err(|e| anyhow!("Failed to generate nonce: {}", e))?;
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), compressed.as_ref())
+        .map_err(|e| anyhow!("WAL encryption failed: {}", e))?;
+
+    let len = NONCE_LEN + ciphertext.len();
+    let mut frame = Vec::with_capacity(4 + len);
+    frame.extend_from_slice(&(len as u32).to_be_bytes());
+    frame.extend_from_slice(&nonce);
+    frame.extend_from_slice(&ciphertext);
+    Ok(frame)
+}
+
+fn decode_record(cipher: &Aes256Gcm, payload: &[u8]) -> Result<WalRecord> {
+    let (nonce, ciphertext) = payload.split_at(NONCE_LEN);
+    let compressed = cipher
+        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .map_err(|_| anyhow!("decryption failed (wrong key or corrupt record)"))?;
+    let json = decode_all(&compressed[..])?;
+    Ok(serde_json::from_slice(&json)?)
+}
+
+/// WAL segments in a directory, oldest first, as (first sequence number, path).
+pub fn list_segments(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
     }
-
-    let mut wal_files: Vec<_> = std::fs::read_dir(&wal_dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(OsStr::to_str)
-                .map(|n| n.starts_with(".hexdb") && n.ends_with(".dat"))
-                .unwrap_or(false)
-        })
-        .collect();
-
-    wal_files.sort_by_key(|p| {
-        std::fs::metadata(p)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-    });
-
-    for file in &wal_files {
-        info!("🔁 Replaying WAL: {:?}", file);
-        recover_single_wal(file.clone(), key, engine.clone()).await?;
+    let mut segments = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == SEGMENT_EXTENSION) {
+            if let Some(seq) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse().ok()) {
+                segments.push((seq, path));
+            }
+        }
     }
+    segments.sort_by_key(|(seq, _)| *seq);
+    Ok(segments)
+}
 
-    if cleanup {
-        for file in wal_files {
-            if file.file_name().unwrap() != ".hexdb.dat" {
-                match std::fs::remove_file(&file) {
-                    Ok(_) => info!("🗑️ Deleted old WAL file: {:?}", file),
-                    Err(e) => warn!("❗ Failed to delete WAL file {:?}: {}", file, e),
+/// Delete WAL segments older than `seq` (whose contents are now in SSTables).
+pub fn delete_segments_before(dir: &Path, seq: u64) -> Result<usize> {
+    let mut deleted = 0;
+    for (segment_seq, path) in list_segments(dir)? {
+        if segment_seq < seq {
+            fs::remove_file(&path).with_context(|| format!("Failed to delete {}", path.display()))?;
+            deleted += 1;
+        }
+    }
+    if deleted > 0 {
+        sync_dir(dir);
+    }
+    Ok(deleted)
+}
+
+/// Statistics from a WAL replay.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ReplayStats {
+    pub segments: usize,
+    pub records: usize,
+    pub torn_tails: usize,
+    pub corrupt_records: usize,
+    pub max_seq: u64,
+}
+
+/// Read every record from every segment, oldest first, and pass it to `apply`.
+/// A partial record at the end of a segment (from a crash mid-write) ends that
+/// segment. Records that fail to decrypt or decode are skipped and counted.
+pub fn replay(dir: &Path, key: &[u8], mut apply: impl FnMut(WalRecord)) -> Result<ReplayStats> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let mut stats = ReplayStats::default();
+    let segments = list_segments(dir)?;
+    let last = segments.len().saturating_sub(1);
+
+    for (index, (_, path)) in segments.iter().enumerate() {
+        stats.segments += 1;
+        let mut reader = io::BufReader::new(
+            File::open(path).with_context(|| format!("Failed to open {}", path.display()))?,
+        );
+
+        loop {
+            let mut len_buf = [0u8; 4];
+            match read_full(&mut reader, &mut len_buf)? {
+                ReadOutcome::Eof => break,
+                ReadOutcome::Partial => {
+                    note_torn_tail(path, index == last, &mut stats);
+                    break;
+                }
+                ReadOutcome::Full => {}
+            }
+
+            let len = u32::from_be_bytes(len_buf) as usize;
+            if !(NONCE_LEN + 16..=MAX_RECORD_LEN).contains(&len) {
+                // The framing is lost; nothing after this point can be trusted.
+                note_torn_tail(path, index == last, &mut stats);
+                break;
+            }
+
+            let mut payload = vec![0u8; len];
+            match read_full(&mut reader, &mut payload)? {
+                ReadOutcome::Full => {}
+                _ => {
+                    note_torn_tail(path, index == last, &mut stats);
+                    break;
+                }
+            }
+
+            match decode_record(&cipher, &payload) {
+                Ok(record) => {
+                    stats.records += 1;
+                    stats.max_seq = stats.max_seq.max(record.seq);
+                    apply(record);
+                }
+                Err(e) => {
+                    stats.corrupt_records += 1;
+                    error!("❌ Skipping unreadable WAL record in {}: {}", path.display(), e);
                 }
             }
         }
     }
 
-    Ok(())
+    Ok(stats)
 }
 
-/// Recover a single WAL file by reading, decrypting, decompressing,
-/// and applying the operations to the in-memory engine.
-async fn recover_single_wal(
-    wal_path: PathBuf,
-    key: &[u8],
-    engine: Arc<HexDBEngine>,
-) -> Result<()> {
+fn note_torn_tail(path: &Path, is_last_segment: bool, stats: &mut ReplayStats) {
+    stats.torn_tails += 1;
+    if is_last_segment {
+        warn!(
+            "⚠️ Ignoring an incomplete record at the end of {} (likely a crash during a write).",
+            path.display()
+        );
+    } else {
+        error!(
+            "❌ Incomplete record in {}, which is not the newest WAL segment. Later records in it are lost.",
+            path.display()
+        );
+    }
+}
 
-    let file = match File::open(&wal_path).await {
-        Ok(f) => f,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            info!("🆕 No WAL file found at {:?} — assuming first run.", wal_path);
-            return Ok(());
+enum ReadOutcome {
+    Full,
+    Partial,
+    Eof,
+}
+
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> Result<ReadOutcome> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => return Ok(if filled == 0 { ReadOutcome::Eof } else { ReadOutcome::Partial }),
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
         }
-        Err(e) => {
-            return Err(anyhow::anyhow!("❌ Failed to open WAL file: {}", e));
-        }
-    };
+    }
+    Ok(ReadOutcome::Full)
+}
 
-    let mut reader = BufReader::new(file);
+/// Find WAL files written by HexDB before sequence-numbered segments existed.
+pub fn legacy_wal_files(storage_dir: &Path) -> Vec<PathBuf> {
+    fs::read_dir(storage_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(".hexdb") && n.ends_with(".dat"))
+        })
+        .collect()
+}
 
-    loop {
-        let len_result = reader.read_u32().await;
+/// fsync a directory so file creations, renames and deletions in it are durable.
+/// A no-op on platforms that don't support it.
+pub fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(d) = File::open(dir) {
+        let _ = d.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
 
-        let size = match len_result {
-            Ok(sz) => sz as usize,
-            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break, // done
-            Err(e) => return Err(anyhow::anyhow!("❌ Failed to read WAL record length: {}", e)),
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::infer_fields_from_json;
+    use serde_json::json;
 
-        let mut buf = vec![0u8; size];
-        reader.read_exact(&mut buf).await?;
+    fn key() -> Vec<u8> {
+        (0u8..32).collect()
+    }
 
-        if buf.len() <= 12 {
-            error!("❌ WAL record too short, skipping.");
-            continue;
-        }
-
-        let (nonce_bytes, encrypted_data) = buf.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-
-        let decrypted = match cipher.decrypt(nonce, encrypted_data) {
-            Ok(data) => data,
-            Err(e) => {
-                error!("❌ Data decryption failed: {}", e);
-                continue;
-            }
-        };
-
-        let decompressed = match decode_all(&*decrypted) {
-            Ok(data) => data,
-            Err(e) => {
-                error!("❌ WAL decompression failed: {:?}", e);
-                continue;
-            }
-        };
-
-        let op: Wal = match serde_json::from_slice(&decompressed) {
-            Ok(op) => op,
-            Err(e) => {
-                error!("❌ WAL JSON decode failed: {}", e);
-                continue;
-            }
-        };
-
-        match op {
-            Wal::Insert(doc) => {
-                info!("🔁 Replaying INSERT for {}", doc.id);
-                let data = serde_json::to_vec(&doc)?;
-                let mut hex = engine.node.lock().await;
-                hex.create_document(&doc.tessellation, &doc.id.to_string(), &data);
-                drop(hex);
-            }
-            Wal::Delete { tessellation, id } => {
-                info!("🔁 Replaying DELETE for {}:{}", tessellation, id);
-                let mut hex = engine.node.lock().await;
-                hex.delete_document(&tessellation, &id);
-                drop(hex);
-            }
-            Wal::Rotate => {
-                info!("🔁 Skipping WAL Rotate marker (not replayed).");
-            }
+    fn put(seq: u64) -> WalRecord {
+        WalRecord {
+            seq,
+            op: WalOp::Put(Document {
+                id: Ulid::new(),
+                tessellation: "t".into(),
+                data: infer_fields_from_json(&json!({ "n": seq })),
+                ttl: None,
+            }),
         }
     }
 
-    info!("✅ Data recovery complete.");
-    Ok(())
+    fn temp_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hexdb-wal-test-{}", Ulid::new()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn writes_rotates_and_replays_in_order() {
+        let dir = temp_dir();
+        let wal = WalWriter::start(&dir, &key(), 0, true, 1).unwrap();
+        for seq in 1..=3 {
+            wal.append(put(seq)).await.unwrap().wait().await.unwrap();
+        }
+        let new_seg = wal.rotate(4).await.unwrap().await.unwrap().unwrap();
+        assert_eq!(new_seg, 4);
+        wal.append(put(4)).await.unwrap().wait().await.unwrap();
+        wal.shutdown().await.unwrap();
+
+        assert_eq!(list_segments(&dir).unwrap().len(), 2);
+        let mut seqs = Vec::new();
+        let stats = replay(&dir, &key(), |r| seqs.push(r.seq)).unwrap();
+        assert_eq!(seqs, vec![1, 2, 3, 4]);
+        assert_eq!(stats.max_seq, 4);
+
+        assert_eq!(delete_segments_before(&dir, 4).unwrap(), 1);
+        let mut seqs = Vec::new();
+        replay(&dir, &key(), |r| seqs.push(r.seq)).unwrap();
+        assert_eq!(seqs, vec![4]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn torn_tail_is_ignored() {
+        let dir = temp_dir();
+        let wal = WalWriter::start(&dir, &key(), 0, true, 1).unwrap();
+        wal.append(put(1)).await.unwrap().wait().await.unwrap();
+        wal.shutdown().await.unwrap();
+
+        let (_, path) = list_segments(&dir).unwrap().pop().unwrap();
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(&[0x00, 0x00, 0x10, 0x00, b'a', b'b', b'c']).unwrap();
+        drop(f);
+
+        let mut seqs = Vec::new();
+        let stats = replay(&dir, &key(), |r| seqs.push(r.seq)).unwrap();
+        assert_eq!(seqs, vec![1]);
+        assert_eq!(stats.torn_tails, 1);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wrong_key_records_are_skipped() {
+        let dir = temp_dir();
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key()));
+        let frame = encode_record(&cipher, 0, &put(1)).unwrap();
+        fs::write(segment_path(&dir, 1), frame).unwrap();
+
+        let other_key = [9u8; 32];
+        let stats = replay(&dir, &other_key, |_| panic!("should not decode")).unwrap();
+        assert_eq!(stats.corrupt_records, 1);
+        fs::remove_dir_all(&dir).ok();
+    }
 }

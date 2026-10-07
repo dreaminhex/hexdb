@@ -56,6 +56,10 @@ pub struct StorageConfig {
     pub encryption_key: String,
     pub compaction_frequency: u64, // seconds
     pub wal_flush_check_frequency: u64, // seconds
+    /// fsync the WAL before acknowledging writes. Disabling it is faster, but a
+    /// power loss or OS crash can lose recently acknowledged writes.
+    #[serde(default = "default_true")]
+    pub wal_sync: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -74,6 +78,10 @@ pub struct CompressionConfig {
 pub struct UiConfig {
     /// Built admin UI (Vite `dist`) directory. Relative paths are resolved against the config file's directory.
     pub path: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for UiConfig {
@@ -109,6 +117,7 @@ impl Default for HexConfig {
                 encryption_key: String::new(), // must be supplied by config or environment
                 compaction_frequency: 1800, // 30 minutes
                 wal_flush_check_frequency: 60, // 1 minute
+                wal_sync: true,
             },
             compression: CompressionConfig {
                 compression_level: 0,

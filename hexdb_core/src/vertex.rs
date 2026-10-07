@@ -1,50 +1,95 @@
+// HexDB Core Vertex
+// A vertex is one of the six memory regions of a hex. Each document is split
+// into six shards (four data, two parity), and each vertex holds one shard of
+// every document, along with a BLAKE3 hash used to detect corruption.
+
+use crate::hex::DocKey;
 use std::collections::HashMap;
-use blake3;
+
+/// One shard of a document, with the hash it had when stored.
+pub struct Shard {
+    pub bytes: Vec<u8>,
+    pub hash: blake3::Hash,
+}
+
+impl Shard {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        let hash = blake3::hash(&bytes);
+        Shard { bytes, hash }
+    }
+
+    /// True if the shard still matches its stored hash.
+    pub fn is_intact(&self) -> bool {
+        blake3::hash(&self.bytes) == self.hash
+    }
+}
 
 /// Represents a vertex in the hexagonal memory model.
-/// Stores document chunks identified by (tessellation, doc_id).
 pub struct Vertex {
     pub id: usize,
-    pub storage: HashMap<(String, String), (Vec<u8>, String, bool)>, // (chunk, hash, is_full)
+    shards: HashMap<DocKey, Shard>,
+    bytes: usize,
+    /// Corrupt shards found on this vertex since startup.
+    pub corrupt_found: u64,
+    /// Shards rebuilt on this vertex since startup.
+    pub repaired: u64,
 }
 
 impl Vertex {
     pub fn new(id: usize) -> Self {
         Vertex {
             id,
-            storage: HashMap::new(),
+            shards: HashMap::new(),
+            bytes: 0,
+            corrupt_found: 0,
+            repaired: 0,
         }
     }
 
-    /// Store a hashed chunk of data within the vertex.
-    /// `is_full` indicates whether this is the complete document or a partial chunk.
-    pub fn store_chunk(&mut self, tessellation: &str, doc_id: &str, chunk: Vec<u8>, is_full: bool) -> bool {
-        let hash = blake3::hash(&chunk).to_hex().to_string();
-        self.storage.insert((tessellation.to_string(), doc_id.to_string()), (chunk, hash, is_full));
-        true
-    }
-
-    /// Retrieve a chunk of data from the vertex.
-    /// Returns (chunk, hash, is_full)
-    pub fn get_chunk(&self, tessellation: &str, doc_id: &str) -> Option<&(Vec<u8>, String, bool)> {
-        self.storage.get(&(tessellation.to_string(), doc_id.to_string()))
-    }
-
-    /// Validate the integrity of a chunk by comparing its hash.
-    pub fn validate_chunk(&self, tessellation: &str, doc_id: &str) -> bool {
-        if let Some((chunk, stored_hash, _)) = self.get_chunk(tessellation, doc_id) {
-            let computed = blake3::hash(chunk).to_hex().to_string();
-            &computed == stored_hash
-        } else {
-            false
+    /// Store (or replace) a shard.
+    pub fn store(&mut self, key: &DocKey, bytes: Vec<u8>) {
+        self.bytes += bytes.len();
+        if let Some(old) = self.shards.insert(key.clone(), Shard::new(bytes)) {
+            self.bytes -= old.bytes.len();
         }
     }
 
-    /// Repair a chunk by replacing it with a new one.
-    /// Always overwrites with full data and sets `is_full` to true.
-    pub fn repair_chunk(&mut self, tessellation: &str, doc_id: &str, new_chunk: Vec<u8>) -> bool {
-        let new_hash = blake3::hash(&new_chunk).to_hex().to_string();
-        self.storage.insert((tessellation.to_string(), doc_id.to_string()), (new_chunk, new_hash, true));
-        true
+    pub fn get(&self, key: &DocKey) -> Option<&Shard> {
+        self.shards.get(key)
+    }
+
+    /// Return a copy of the shard if it exists and is intact.
+    pub fn intact_copy(&self, key: &DocKey) -> Option<Vec<u8>> {
+        self.shards
+            .get(key)
+            .filter(|s| s.is_intact())
+            .map(|s| s.bytes.clone())
+    }
+
+    pub fn remove(&mut self, key: &DocKey) {
+        if let Some(old) = self.shards.remove(key) {
+            self.bytes -= old.bytes.len();
+        }
+    }
+
+    /// Total shard bytes held by this vertex.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    /// Flip bits in a stored shard without updating its hash. Testing aid only.
+    #[doc(hidden)]
+    pub fn corrupt_for_testing(&mut self, key: &DocKey) -> bool {
+        match self.shards.get_mut(key) {
+            Some(shard) if !shard.bytes.is_empty() => {
+                shard.bytes[0] ^= 0xFF;
+                true
+            }
+            _ => false,
+        }
     }
 }
