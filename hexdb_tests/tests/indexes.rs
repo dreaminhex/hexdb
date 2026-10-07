@@ -1,0 +1,228 @@
+//! Secondary indexes: creation, use by queries, maintenance on writes,
+//! uniqueness, full-text search, persistence across restarts, and equivalence
+//! with unindexed queries.
+
+use anyhow::Result;
+use hexdb_tests::TestServer;
+use reqwest::Method;
+use serde_json::{json, Value};
+
+fn create_index(server: &TestServer, tess: &str, def: Value) -> Result<hexdb_tests::ApiResponse> {
+    server.request(Method::POST, &format!("/tessellations/{}/indexes", tess), Some(&def), &[])
+}
+
+/// Run a query; returns (sorted IDs, indexes used, documents scanned).
+fn query(server: &TestServer, tess: &str, filter: Value) -> Result<(Vec<String>, Vec<String>, u64)> {
+    let res = server.request(Method::POST, &format!("/{}/_query", tess), Some(&json!({ "filter": filter, "limit": 1000 })), &[])?;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    let mut ids: Vec<String> = res.body["documents"].as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap().to_string()).collect();
+    ids.sort();
+    let used = res.body["plan"]["indexes"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    Ok((ids, used, res.body["plan"]["scanned"].as_u64().unwrap()))
+}
+
+fn seed(server: &TestServer, n: usize) -> Result<()> {
+    let statuses = ["draft", "live", "archived"];
+    let docs: Vec<Value> = (0..n)
+        .map(|i| {
+            let mut doc = json!({
+                "n": i,
+                "status": statuses[i % 3],
+                "score": (i * 37 % 101) as f64 / 4.0,
+                "author": { "name": format!("author{}", i % 7) },
+                "tags": [format!("t{}", i % 5), format!("t{}", i % 4)],
+                "title": format!("Post {} about {}", i, ["rust", "databases", "hexagons", "tessellation"][i % 4]),
+            });
+            if i % 10 == 0 {
+                doc.as_object_mut().unwrap().remove("status");
+            }
+            if i % 13 == 0 {
+                doc["score"] = json!("unknown");
+            }
+            doc
+        })
+        .collect();
+    let res = server.request(Method::POST, "/posts/_bulk", Some(&Value::Array(docs)), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    Ok(())
+}
+
+fn filters() -> Vec<Value> {
+    vec![
+        json!({ "status": "live" }),
+        json!({ "status": null }),
+        json!({ "status": { "$in": ["draft", "archived"] } }),
+        json!({ "score": { "$gt": 10 } }),
+        json!({ "score": { "$gte": 5, "$lt": 12.5 } }),
+        json!({ "score": { "$lte": 3 } }),
+        json!({ "author.name": "author3" }),
+        json!({ "author.name": { "$startsWith": "author1" } }),
+        json!({ "tags": "t2" }),
+        json!({ "status": "live", "score": { "$gt": 15 } }),
+        json!({ "status": "draft", "author.name": "author2" }),
+        json!({ "$or": [{ "status": "archived" }, { "tags": "t0" }] }),
+        json!({ "$text": "rust" }),
+        json!({ "$text": "post databases" }),
+        json!({ "status": { "$ne": "live" } }),
+        json!({ "$not": { "tags": "t1" } }),
+    ]
+}
+
+#[test]
+fn indexed_queries_return_exactly_what_scans_return() -> Result<()> {
+    let server = TestServer::start()?;
+    seed(&server, 300)?;
+    let unindexed: Vec<Vec<String>> = filters().into_iter().map(|f| query(&server, "posts", f).map(|r| r.0)).collect::<Result<_>>()?;
+
+    for def in [
+        json!({ "fields": ["status"] }),
+        json!({ "fields": ["score"] }),
+        json!({ "fields": ["author.name"] }),
+        json!({ "fields": ["tags"] }),
+        json!({ "fields": ["status", "author.name"], "name": "status_author" }),
+        json!({ "fields": ["title"], "kind": "text" }),
+    ] {
+        let res = create_index(&server, "posts", def.clone())?;
+        assert_eq!(res.status.as_u16(), 201, "{} -> {}", def, res.body);
+    }
+    for (filter, expected) in filters().into_iter().zip(&unindexed) {
+        let (ids, used, scanned) = query(&server, "posts", filter.clone())?;
+        assert_eq!(&ids, expected, "{} returned different documents with indexes", filter);
+        let negated = filter.get("$not").is_some() || filter.to_string().contains("$ne");
+        if negated {
+            assert!(used.is_empty(), "{} can't use an index", filter);
+        } else {
+            assert!(!used.is_empty(), "{} should use an index", filter);
+            assert!(scanned < 300, "{} scanned {}", filter, scanned);
+        }
+    }
+    let (_, used, scanned) = query(&server, "posts", json!({ "status": "draft", "author.name": "author2" }))?;
+    assert!(used.contains(&"status_author".to_string()), "{:?}", used);
+    assert!(scanned <= 15, "composite lookup is exact; scanned {}", scanned);
+
+    // Writes keep indexes current.
+    let id = server.insert("posts", &json!({ "status": "brand-new", "score": 999, "title": "zebra" }))?;
+    assert_eq!(query(&server, "posts", json!({ "status": "brand-new" }))?.0, std::slice::from_ref(&id));
+    assert_eq!(query(&server, "posts", json!({ "$text": "zebra" }))?.0, std::slice::from_ref(&id));
+    server.patch("posts", &json!({ "id": id, "status": "changed", "title": "giraffe" }))?;
+    assert!(query(&server, "posts", json!({ "status": "brand-new" }))?.0.is_empty());
+    assert!(query(&server, "posts", json!({ "$text": "zebra" }))?.0.is_empty());
+    assert_eq!(query(&server, "posts", json!({ "status": "changed" }))?.0, std::slice::from_ref(&id));
+    server.delete("posts", &id)?;
+    assert!(query(&server, "posts", json!({ "status": "changed" }))?.0.is_empty());
+
+    // Update by filter uses indexes too and modifies exactly the matches.
+    let res = server.request(Method::POST, "/posts/_update", Some(&json!({ "filter": { "status": "archived" }, "update": { "flag": true } })), &[])?;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    let archived = query(&server, "posts", json!({ "status": "archived" }))?.0;
+    assert_eq!(res.body["modified"].as_u64().unwrap() as usize, archived.len());
+    assert_eq!(query(&server, "posts", json!({ "flag": true }))?.0, archived);
+
+    // Counts and aggregations use indexes too, and agree with queries.
+    let count = server.request(Method::GET, "/posts/count?filter=%7B%22status%22%3A%22live%22%7D", None, &[])?;
+    assert_eq!(count.body["count"].as_u64().unwrap() as usize, unindexed[0].len());
+    let agg = server.request(Method::POST, "/posts/_aggregate", Some(&json!({ "filter": { "$text": "rust" } })), &[])?;
+    assert_eq!(agg.body["rows"][0]["count"].as_u64().unwrap() as usize, unindexed[12].len());
+    Ok(())
+}
+
+#[test]
+fn unique_indexes_reject_duplicates() -> Result<()> {
+    let server = TestServer::start()?;
+    let a = server.insert("accounts", &json!({ "email": "a@x.io" }))?;
+    server.insert("accounts", &json!({ "nickname": "no email" }))?;
+    server.insert("accounts", &json!({ "nickname": "also none" }))?;
+    let res = create_index(&server, "accounts", json!({ "fields": ["email"], "unique": true }))?;
+    assert_eq!(res.status.as_u16(), 201, "{}", res.body);
+
+    let dup = server.request(Method::POST, "/accounts", Some(&json!({ "email": "a@x.io" })), &[])?;
+    assert_eq!(dup.status.as_u16(), 409, "{}", dup.body);
+    assert!(dup.body["error"]["message"].as_str().unwrap().contains("email"));
+
+    let b = server.insert("accounts", &json!({ "email": "b@x.io" }))?;
+    let res = server.request(Method::PATCH, &format!("/accounts/{}", b), Some(&json!({ "email": "a@x.io" })), &[])?;
+    assert_eq!(res.status.as_u16(), 409);
+    let res = server.request(Method::POST, "/accounts/_bulk", Some(&json!([{ "email": "c@x.io" }, { "email": "c@x.io" }])), &[])?;
+    assert_eq!(res.status.as_u16(), 409, "duplicates within one request");
+    assert_eq!(server.count("accounts")?, 4);
+
+    // Swapping values in one transaction is fine: the check sees the final state.
+    let res = server.request(
+        Method::POST,
+        "/transactions",
+        Some(&json!({ "operations": [
+            { "op": "patch", "tessellation": "accounts", "id": a, "data": { "email": "b@x.io" } },
+            { "op": "patch", "tessellation": "accounts", "id": b, "data": { "email": "a@x.io" } },
+        ]})),
+        &[],
+    )?;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+
+    // A unique index can't be created over duplicates, and leaves nothing behind.
+    server.insert("people", &json!({ "name": "x" }))?;
+    server.insert("people", &json!({ "name": "x" }))?;
+    let res = create_index(&server, "people", json!({ "fields": ["name"], "unique": true }))?;
+    assert_eq!(res.status.as_u16(), 409, "{}", res.body);
+    let list = server.request(Method::GET, "/tessellations/people/indexes", None, &[])?;
+    assert_eq!(list.body["indexes"], json!([]));
+    Ok(())
+}
+
+#[test]
+fn indexes_survive_restarts_and_can_be_dropped() -> Result<()> {
+    let mut server = TestServer::start()?;
+    seed(&server, 60)?;
+    assert_eq!(create_index(&server, "posts", json!({ "fields": ["status"] }))?.status.as_u16(), 201);
+    assert_eq!(create_index(&server, "posts", json!({ "fields": ["title"], "kind": "text" }))?.status.as_u16(), 201);
+
+    // Duplicates and bad definitions are rejected.
+    assert_eq!(create_index(&server, "posts", json!({ "fields": ["status"] }))?.status.as_u16(), 409);
+    assert_eq!(create_index(&server, "posts", json!({ "fields": ["body"], "kind": "text" }))?.status.as_u16(), 409);
+    assert_eq!(create_index(&server, "posts", json!({ "fields": [] }))?.status.as_u16(), 400);
+    assert_eq!(create_index(&server, "users", json!({ "fields": ["login"] }))?.status.as_u16(), 403);
+    assert_eq!(create_index(&server, "nothing", json!({ "fields": ["a"] }))?.status.as_u16(), 404);
+
+    let before = query(&server, "posts", json!({ "status": "live" }))?;
+    server.crash_and_restart()?;
+    let list = server.request(Method::GET, "/tessellations/posts/indexes", None, &[])?;
+    let indexes = list.body["indexes"].as_array().unwrap();
+    assert_eq!(indexes.len(), 2, "{}", list.body);
+    assert!(indexes.iter().all(|i| i["ready"] == true && i["documents"] == 60), "{}", list.body);
+    let after = query(&server, "posts", json!({ "status": "live" }))?;
+    assert_eq!(before.0, after.0);
+    assert_eq!(after.1, ["status"]);
+
+    let res = server.request(Method::DELETE, "/tessellations/posts/indexes/status", None, &[])?;
+    assert_eq!(res.status.as_u16(), 204);
+    let res = server.request(Method::DELETE, "/tessellations/posts/indexes/status", None, &[])?;
+    assert_eq!(res.status.as_u16(), 404);
+    let (ids, used, scanned) = query(&server, "posts", json!({ "status": "live" }))?;
+    assert_eq!(ids, before.0);
+    assert!(used.is_empty());
+    assert_eq!(scanned, 60);
+    server.restart()?;
+    let list = server.request(Method::GET, "/tessellations/posts/indexes", None, &[])?;
+    assert_eq!(list.body["indexes"].as_array().unwrap().len(), 1, "the drop persisted");
+    Ok(())
+}
+
+#[test]
+fn indexes_over_graphql() -> Result<()> {
+    let server = TestServer::start()?;
+    seed(&server, 30)?;
+    let create = r#"mutation { createIndex(tessellation: "posts", fields: ["status"]) { name kind fields unique documents ready } }"#;
+    let res = server.request(Method::POST, "/graphql", Some(&json!({ "query": create })), &[])?;
+    assert!(res.body["errors"].is_null(), "{}", res.body);
+    assert_eq!(res.body["data"]["createIndex"]["documents"], 30);
+
+    let q = r#"{ documents(tessellation: "posts", filter: { status: "live" }) { total indexesUsed scanned } tessellation(name: "posts") { indexes { name } } }"#;
+    let res = server.request(Method::POST, "/graphql", Some(&json!({ "query": q })), &[])?;
+    assert!(res.body["errors"].is_null(), "{}", res.body);
+    assert_eq!(res.body["data"]["documents"]["indexesUsed"], json!(["status"]));
+    assert_eq!(res.body["data"]["tessellation"]["indexes"], json!([{ "name": "status" }]));
+
+    let drop = r#"mutation { dropIndex(tessellation: "posts", name: "status") }"#;
+    let res = server.request(Method::POST, "/graphql", Some(&json!({ "query": drop })), &[])?;
+    assert_eq!(res.body["data"]["dropIndex"], true, "{}", res.body);
+    Ok(())
+}

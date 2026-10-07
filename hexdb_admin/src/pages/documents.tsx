@@ -327,6 +327,13 @@ export function DocumentsPage() {
           <span className="tabular-nums">
             {total === 0 ? "0 documents" : `${formatNumber(offset + 1)}–${formatNumber(offset + docs.length)} of ${formatNumber(total)}`}
           </span>
+          {page.data?.plan && (
+            <span className="hidden text-xs md:inline" title="How the query ran">
+              {page.data.plan.indexes.length
+                ? `via ${page.data.plan.indexes.join(", ")} · read ${formatNumber(page.data.plan.scanned)}`
+                : `full scan · read ${formatNumber(page.data.plan.scanned)}`}
+            </span>
+          )}
           <div className="ml-auto flex items-center gap-2">
             <span className="hidden sm:inline">Rows per page</span>
             <Select

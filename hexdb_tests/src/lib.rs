@@ -94,11 +94,36 @@ pub struct TestServer {
     base_url: String,
     launches: u32,
     client: Client,
+    options: TestOptions,
+}
+
+/// Settings for a test server. The defaults give an isolated single hex.
+#[derive(Debug, Clone, Default)]
+pub struct TestOptions {
+    /// Lattice name; defaults to a name unique to this server.
+    pub lattice: Option<String>,
+    /// Discovery port; defaults to a free port chosen at each launch.
+    pub discovery_port: Option<u16>,
+    /// Discovery endpoints of other test servers to probe.
+    pub peers: Vec<String>,
+    /// RAM in MB, which also ranks hexes in elections (default 1024).
+    pub ram_mb: Option<u64>,
+    /// Role preference: auto, overseer, harvester or replicant.
+    pub role: Option<String>,
+    /// Seconds between discovery rounds (default 10).
+    pub discovery_interval_seconds: Option<u64>,
+    /// Extra TOML appended to the config (whole sections only).
+    pub extra_toml: String,
 }
 
 impl TestServer {
-    /// Create a fresh directory and start a server in it.
+    /// Create a fresh directory and start an isolated server in it.
     pub fn start() -> Result<Self> {
+        Self::start_with(TestOptions::default())
+    }
+
+    /// Create a fresh directory and start a server with the given options.
+    pub fn start_with(options: TestOptions) -> Result<Self> {
         let dir = tempfile::Builder::new().prefix("hexdb-test-").tempdir()?;
         let mut server = Self {
             dir: Some(dir),
@@ -106,9 +131,15 @@ impl TestServer {
             base_url: String::new(),
             launches: 0,
             client: Client::builder().timeout(Duration::from_secs(10)).build()?,
+            options,
         };
         server.launch()?;
         Ok(server)
+    }
+
+    /// A free TCP port, e.g. to give a test server a known discovery port.
+    pub fn free_port() -> Result<u16> {
+        free_port()
     }
 
     /// The test's temporary directory (contains hexdb.toml, server.log, and data/).
@@ -164,22 +195,44 @@ impl TestServer {
             bail!("Server is already running");
         }
 
-        let (api, discovery) = (free_port()?, free_port()?);
-        let lattice = self
-            .dir()
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let api = free_port()?;
+        let discovery = match self.options.discovery_port {
+            Some(port) => port,
+            None => free_port()?,
+        };
+        let lattice = self.options.lattice.clone().unwrap_or_else(|| {
+            self.dir()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        let peers = self
+            .options
+            .peers
+            .iter()
+            .map(|p| format!("\"{}\"", p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ram_mb = self.options.ram_mb.unwrap_or(1024);
+        let interval = self.options.discovery_interval_seconds.unwrap_or(10);
+        let role = self.options.role.clone().unwrap_or_else(|| "auto".into());
 
         // Background tasks run hourly so they don't interfere unless a test triggers them.
+        // Local port scanning is off so tests never touch a developer's running server.
         let config = format!(
             r#"[network]
 api_endpoint = "127.0.0.1:{api}"
 discovery_endpoint = "127.0.0.1:{discovery}"
 lattice_name = "{lattice}"
+peers = [{peers}]
+scan_local_ports = false
+discovery_interval_seconds = {interval}
+
+[identity]
+role = "{role}"
 
 [memory]
-ram_mb = 1024
+ram_mb = {ram_mb}
 ttl_scan_frequency = 3600
 vertex_integrity_check_frequency = 3600
 
@@ -194,7 +247,7 @@ wal_flush_check_frequency = 3600
 path = "./no-ui"
 "#,
             key = TEST_ENCRYPTION_KEY
-        );
+        ) + &self.options.extra_toml;
         let config_path = self.dir().join("hexdb.toml");
         fs::write(&config_path, config)?;
 

@@ -67,10 +67,35 @@ export interface TessellationMetrics {
 }
 
 export interface LatticeHex {
+  id: string
   name: string
   role: string
+  /** "active" or "lost" (missed several discovery rounds). */
   status: string
   ip: string
+  api_endpoint: string
+  /** Configured role preference: auto, overseer, harvester, or replicant. */
+  preference: string
+  last_seq: number
+  last_seen: string | null
+  is_self: boolean
+  /** leading (Overseer), streaming, syncing, waiting, or error. */
+  replication_state: string
+  applied_seq: number
+  /** Changes behind the Overseer (replicas only, when known). */
+  lag: number | null
+}
+
+export interface ReplicationStatus {
+  state: string
+  source_id: string | null
+  source_name: string | null
+  applied_seq: number
+  source_seq: number
+  synced_documents: number
+  last_sync: string | null
+  last_error: string | null
+  lag?: number
 }
 
 export interface Status {
@@ -110,6 +135,48 @@ export interface Status {
     discovery_endpoint: string
     lattice: { name: string; hexes: LatticeHex[] }
   }
+  replication: ReplicationStatus
+}
+
+export interface LogRecord {
+  seq: number
+  timestamp: string
+  level: "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE"
+  target: string
+  message: string
+  fields?: Record<string, string>
+}
+
+export interface LogQuery {
+  level?: string
+  after?: number
+  before?: number
+  q?: string
+  target?: string
+  limit?: number
+}
+
+export interface LogPage {
+  records: LogRecord[]
+  last_seq: number
+  capacity: number
+}
+
+export interface PluginStatus {
+  id: string
+  name: string
+  type: string
+  version: string
+  description: string
+  runtime: "process" | "webhook" | ""
+  path: string
+  state: "running" | "standby" | "disabled" | "invalid" | "error"
+  delivered: number
+  last_seq: number
+  skipped: number
+  restarts: number
+  last_error: string | null
+  started_at: string | null
 }
 
 export interface MetricsSample {
@@ -128,6 +195,25 @@ export interface Tessellation {
   kind: string
   created: string | null
   document_count?: number
+  /** Names of the tessellation's secondary indexes. */
+  indexes: string[]
+}
+
+export interface IndexInfo {
+  name: string
+  kind: "field" | "text"
+  fields: string[]
+  unique: boolean
+  documents: number
+  keys: number
+  ready: boolean
+}
+
+export interface NewIndex {
+  fields: string[]
+  name?: string
+  kind?: "field" | "text"
+  unique?: boolean
 }
 
 /** A document as returned by the API: its fields plus `id` and `_expires_at`. */
@@ -137,6 +223,8 @@ export interface DocumentPage {
   documents: ApiDocument[]
   total: number
   next: string | null
+  /** How the query ran: indexes used (empty = full scan) and documents read. */
+  plan?: { indexes: string[]; scanned: number }
 }
 
 export interface SortKey {
@@ -199,12 +287,23 @@ export const api = {
   status: () => request<Status>("GET", "/status"),
   history: (minutes: number) =>
     request<{ interval_seconds: number; samples: MetricsSample[] }>("GET", `/status/history?minutes=${minutes}`),
+  plugins: () => request<{ plugins: PluginStatus[]; registry: string; enabled: boolean }>("GET", "/plugins"),
+  logs: (query: LogQuery) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== "") params.set(key, String(value))
+    }
+    return request<LogPage>("GET", `/logs?${params}`)
+  },
   flush: () => request<{ entries: number; tessellations: number }>("POST", "/flush"),
 
   tessellations: () => request<{ tessellations: Tessellation[] }>("GET", "/tessellations").then((r) => r.tessellations),
   tessellation: (name: string) => request<Tessellation>("GET", `/tessellations/${enc(name)}`),
   createTessellation: (name: string) => request<Tessellation>("POST", "/tessellations", { name }),
   deleteTessellation: (name: string) => request<void>("DELETE", `/tessellations/${enc(name)}`),
+  indexes: (tess: string) => request<{ indexes: IndexInfo[] }>("GET", `/tessellations/${enc(tess)}/indexes`).then((r) => r.indexes),
+  createIndex: (tess: string, index: NewIndex) => request<IndexInfo>("POST", `/tessellations/${enc(tess)}/indexes`, index),
+  dropIndex: (tess: string, name: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/indexes/${enc(name)}`),
 
   queryDocuments: (tess: string, query: DocumentQuery) => request<DocumentPage>("POST", `/${enc(tess)}/_query`, query),
   document: (tess: string, id: string) => request<ApiDocument>("GET", `/${enc(tess)}/${enc(id)}`),

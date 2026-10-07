@@ -29,4 +29,6 @@ byteorder = "1.5"
 argon2 = "0.5.3"
 futures = "0.3.31"
 reed-solomon-erasure = "6"
+toml = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 

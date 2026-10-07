@@ -1,0 +1,9 @@
+# An example process plugin: HexDB writes every committed change to the
+# command's stdin as one JSON line. Enable it in plugins.json.
+id = "@examples/change-logger"
+name = "Change logger"
+type = "stream"
+version = "0.1.0"
+description = "Prints a one-line summary of each change and appends the full change to changes.ndjson."
+command = ["node", "change-logger.mjs"]
+# tessellations = ["orders"]   # only these tessellations (default: all user tessellations)

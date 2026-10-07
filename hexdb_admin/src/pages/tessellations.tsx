@@ -1,8 +1,9 @@
 import { useState } from "react"
-import { IconLoader2, IconPlus, IconTrash } from "@tabler/icons-react"
+import { IconKey, IconLoader2, IconPlus, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
+import { IndexesDialog } from "@/components/indexes-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -84,6 +85,7 @@ export function TessellationsPage() {
   const status = usePoll(api.status, 10_000)
   const [creating, setCreating] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [indexing, setIndexing] = useState<string | null>(null)
 
   const metrics = new Map((status.data?.metrics.tessellations ?? []).map((t) => [t.name, t]))
   const rows = [...(tessellations.data ?? [])].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "user" ? -1 : 1))
@@ -110,6 +112,7 @@ export function TessellationsPage() {
               <TableHead>Kind</TableHead>
               <TableHead className="text-right">Documents</TableHead>
               <TableHead className="text-right">Total size</TableHead>
+              <TableHead>Indexes</TableHead>
               <TableHead>Created</TableHead>
               <TableHead className="w-12 pr-6" />
             </TableRow>
@@ -140,6 +143,25 @@ export function TessellationsPage() {
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{m ? formatNumber(m.document_count) : "—"}</TableCell>
                   <TableCell className="text-right tabular-nums">{m ? formatBytes(m.total_size_bytes) : "—"}</TableCell>
+                  <TableCell>
+                    {user ? (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-muted-foreground -ml-2 h-7 gap-1.5 px-2 font-normal"
+                        title={t.indexes.length ? t.indexes.join(", ") : "Manage indexes"}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setIndexing(t.name)
+                        }}
+                      >
+                        <IconKey className="size-3.5" />
+                        {t.indexes.length ? `${t.indexes.length} index${t.indexes.length === 1 ? "" : "es"}` : "Add"}
+                      </Button>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-muted-foreground text-sm">{formatTimestamp(t.created)}</TableCell>
                   <TableCell className="pr-6">
                     {user && (
@@ -162,7 +184,7 @@ export function TessellationsPage() {
             })}
             {tessellations.data && rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={6} className="text-muted-foreground py-10 text-center">
+                <TableCell colSpan={7} className="text-muted-foreground py-10 text-center">
                   No tessellations yet. Create one, or insert a document and it will be created for you.
                 </TableCell>
               </TableRow>
@@ -179,6 +201,7 @@ export function TessellationsPage() {
           void status.refresh()
         }}
       />
+      <IndexesDialog tessellation={indexing} onOpenChange={(open) => !open && setIndexing(null)} onChanged={() => void tessellations.refresh()} />
       <ConfirmDialog
         open={deleting !== null}
         onOpenChange={(open) => !open && setDeleting(null)}

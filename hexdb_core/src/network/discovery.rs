@@ -1,111 +1,413 @@
+// HexDB lattice discovery and role election.
+//
+// Every hex runs a small TCP discovery listener. A peer connects, sends
+// `HEXDB_HELLO`, and gets back `HEXDB_IDENTITY <json>` describing the hex: its
+// lattice, role, API address, resources and replication position.
+//
+// A background task probes the configured seed addresses (and, by default, the
+// local discovery ports 7702-7709) every `discovery_interval_seconds`, tracks
+// when each peer was last seen, and re-runs the role election:
+//
+// - Candidates for Overseer are live hexes whose preference is `auto` or
+//   `overseer`; if any prefer `overseer`, only those are considered.
+// - A hex that is already Overseer keeps the role while it is alive, so
+//   leadership doesn't flap when a larger node joins. If two hexes both claim
+//   it (for example after a network partition heals), the better-ranked wins.
+// - Otherwise candidates are ranked by RAM, then disk, then ID.
+// - Every other hex is a Harvester, or a Replicant if it prefers that.
+//
+// Every hex applies the same rule to the same view, so they agree without a
+// consensus round. Views can briefly differ while a peer joins or leaves.
+
+use crate::{HexConfig, HexDBEngine};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::{cmp::Ordering, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    sync::watch,
 };
-use serde::{Serialize, Deserialize};
-use tracing::{info, warn};
-use crate::HexConfig;
-use std::time::Duration;
+use tracing::{debug, info, warn};
 
-/// Represents a known peer Hex node in the same lattice.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub const ROLE_OVERSEER: &str = "Overseer";
+pub const ROLE_HARVESTER: &str = "Harvester";
+pub const ROLE_REPLICANT: &str = "Replicant";
+
+const HELLO: &str = "HEXDB_HELLO";
+const IDENTITY_PREFIX: &str = "HEXDB_IDENTITY ";
+const LOCAL_PORTS: std::ops::Range<u16> = 7702..7710;
+/// How long to wait for one peer to connect and identify itself.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// A peer not seen for this many discovery rounds is marked lost...
+const LOST_AFTER_ROUNDS: u32 = 3;
+/// ...and forgotten after this many.
+const FORGET_AFTER_ROUNDS: u32 = 30;
+
+/// A hex as described in the discovery handshake.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PeerHex {
     pub id: String,
     pub name: String,
     pub role: String,
     pub lattice: String,
+    /// Discovery address.
     pub ip: String,
+    /// REST/GraphQL address other hexes can reach.
+    #[serde(default)]
+    pub api_endpoint: String,
+    #[serde(default)]
+    pub ram_mb: u64,
+    #[serde(default)]
+    pub disk_mb: u64,
+    /// Configured role preference: auto, overseer, harvester or replicant.
+    #[serde(default = "default_preference")]
+    pub preference: String,
+    /// Highest sequence number this hex has applied.
+    #[serde(default)]
+    pub last_seq: u64,
+    #[serde(default)]
+    pub version: String,
+    /// Replication state: leading, streaming, syncing, waiting, or error.
+    #[serde(default)]
+    pub replication_state: String,
+    /// The Overseer sequence number this hex has applied (for the Overseer,
+    /// its own latest published sequence number).
+    #[serde(default)]
+    pub applied_seq: u64,
 }
 
-/// Starts a TCP listener on the discovery endpoint to respond to handshake requests from peer hexes.
-/// Responds to `HEXDB_HELLO` with a `HEXDB_IDENTITY` payload including local metadata.
-///
-/// # Arguments
-/// * `addr` - The address to bind the discovery listener.
-/// * `local_info` - Metadata describing the current Hex node.
-pub async fn start_discovery_listener(addr: String, local_info: PeerHex) {
-    let listener = TcpListener::bind(&addr)
-        .await
-        .expect("❌ Failed to bind discovery endpoint.");
+fn default_preference() -> String {
+    "auto".into()
+}
 
+/// A peer as tracked by this hex.
+#[derive(Debug, Clone, Serialize)]
+pub struct LatticeMember {
+    #[serde(flatten)]
+    pub hex: PeerHex,
+    pub last_seen: DateTime<Utc>,
+    /// "active", or "lost" when it hasn't answered for a few rounds.
+    pub status: String,
+}
+
+/// Normalize and check a configured role preference.
+pub fn parse_preference(value: &str) -> anyhow::Result<String> {
+    let lower = value.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "auto" | "overseer" | "harvester" | "replicant" => Ok(lower),
+        _ => anyhow::bail!("identity.role must be auto, overseer, harvester or replicant (got '{}')", value),
+    }
+}
+
+/// Replace the host of `endpoint` with `host`.
+fn with_host(endpoint: &str, host: &str) -> String {
+    match endpoint.rsplit_once(':') {
+        Some((_, port)) => format!("{}:{}", host, port),
+        None => endpoint.to_string(),
+    }
+}
+
+fn host_of(endpoint: &str) -> &str {
+    endpoint.rsplit_once(':').map(|(h, _)| h).unwrap_or(endpoint)
+}
+
+fn is_local_or_wildcard(host: &str) -> bool {
+    matches!(host, "0.0.0.0" | "[::]" | "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// An endpoint as other hexes should see it.
+fn advertised(config: &HexConfig, endpoint: &str) -> String {
+    match &config.network.advertise_host {
+        Some(host) if !host.trim().is_empty() => with_host(endpoint, host.trim()),
+        _ => endpoint.to_string(),
+    }
+}
+
+/// This hex's current identity.
+pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
+    let config = &engine.config;
+    let replication = if engine.is_writable() {
+        ("leading".to_string(), engine.changes.published_seq())
+    } else {
+        let status = engine.replication.lock().unwrap();
+        (status.state.clone(), status.applied_seq)
+    };
+    PeerHex {
+        id: engine.id.to_string(),
+        name: engine.name.clone(),
+        role: engine.role(),
+        lattice: config.network.lattice_name.clone(),
+        ip: advertised(config, &config.network.discovery_endpoint),
+        api_endpoint: advertised(config, &config.network.api_endpoint),
+        ram_mb: config.memory.ram_mb,
+        disk_mb: config.storage.disk_mb,
+        preference: parse_preference(&config.identity.role).unwrap_or_else(|_| "auto".into()),
+        last_seq: engine.stats().await.next_seq.saturating_sub(1),
+        version: engine.version.clone(),
+        replication_state: replication.0,
+        applied_seq: replication.1,
+    }
+}
+
+/// Answer discovery handshakes with this hex's current identity.
+pub async fn start_discovery_listener(engine: Arc<HexDBEngine>) {
+    let addr = engine.config.network.discovery_endpoint.clone();
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            warn!(%addr, "❗ Failed to bind the discovery endpoint ({}); other hexes won't find this one.", e);
+            return;
+        }
+    };
     info!(%addr, "📡 Discovery listener active.");
 
     loop {
         match listener.accept().await {
             Ok((mut socket, _)) => {
-                let local = local_info.clone();
+                let engine = engine.clone();
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(&mut socket);
                     let mut line = String::new();
-
-                    if reader.read_line(&mut line).await.is_ok() && line.trim() == "HEXDB_HELLO" {
-                        let identity = serde_json::to_string(&local).unwrap();
-                        let response = format!("HEXDB_IDENTITY {}\n", identity);
-                        let _ = socket.write_all(response.as_bytes()).await;
+                    let read = tokio::time::timeout(PROBE_TIMEOUT * 4, reader.read_line(&mut line)).await;
+                    if matches!(read, Ok(Ok(_))) && line.trim() == HELLO {
+                        let identity = local_identity(&engine).await;
+                        if let Ok(json) = serde_json::to_string(&identity) {
+                            let _ = socket.write_all(format!("{}{}\n", IDENTITY_PREFIX, json).as_bytes()).await;
+                        }
                     }
                 });
             }
-            Err(e) => {
-                warn!(%e, "❗ Discovery accept failed.");
-            }
+            Err(e) => warn!(%e, "❗ Discovery accept failed."),
         }
     }
 }
 
-/// Attempts to connect to other Hex nodes on known local ports, sending a `HEXDB_HELLO` message
-/// and awaiting a response with node metadata. Filters results to only include nodes in the same lattice.
-///
-/// # Arguments
-/// * `config` - Reference to the local configuration.
-/// * `local_id` - ULID of the current Hex node.
-/// * `local_name` - Name of the current Hex node.
-///
-/// # Returns
-/// A vector of peer Hex metadata matching the same lattice.
-pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str) -> Vec<PeerHex> {
-    let base_port = 7702;
-
-    // Probe all candidate ports concurrently, each with a timeout. On Windows a
-    // connection to a closed localhost port takes ~2s to fail, so sequential
-    // probes without a timeout added ~16s to every startup.
-    let probes = (base_port..(base_port + 8))
-        .filter(|port| !config.network.discovery_endpoint.ends_with(&port.to_string())) // skip self
-        .map(|port| async move {
-            tokio::time::timeout(PROBE_TIMEOUT, probe_peer(format!("127.0.0.1:{}", port)))
-                .await
-                .ok()
-                .flatten()
-        });
-
-    let mut peers = Vec::new();
-    for peer in futures::future::join_all(probes).await.into_iter().flatten() {
-        if peer.lattice == config.network.lattice_name && peer.id != local_id {
-            if peer.name == local_name {
-                warn!(name = %peer.name, "🎭 Name collision detected.");
-            }
-            peers.push(peer);
+/// Discovery addresses to probe: configured seeds, plus local ports if enabled.
+fn probe_targets(config: &HexConfig) -> Vec<String> {
+    let mut targets: Vec<String> = config.network.peers.iter().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+    if config.network.scan_local_ports {
+        for port in LOCAL_PORTS {
+            targets.push(format!("127.0.0.1:{}", port));
         }
     }
-
-    peers
+    let own = &config.network.discovery_endpoint;
+    let own_port = own.rsplit_once(':').map(|(_, p)| p).unwrap_or_default();
+    targets.retain(|t| {
+        // Skip ourselves (by exact address, or a loopback address on our port).
+        t != own && !(is_local_or_wildcard(host_of(t)) && is_local_or_wildcard(host_of(own)) && t.ends_with(&format!(":{}", own_port)))
+    });
+    targets.sort();
+    targets.dedup();
+    targets
 }
 
-/// How long to wait for a single peer to connect and identify itself.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// Send `HEXDB_HELLO` to one address and parse the `HEXDB_IDENTITY` reply.
+/// Send `HEXDB_HELLO` to one address and parse the reply.
 async fn probe_peer(addr: String) -> Option<PeerHex> {
     let mut stream = TcpStream::connect(&addr).await.ok()?;
-    let _ = stream.write_all(b"HEXDB_HELLO\n").await;
+    stream.write_all(format!("{}\n", HELLO).as_bytes()).await.ok()?;
 
     let mut reader = BufReader::new(&mut stream);
     let mut line = String::new();
+    reader.read_line(&mut line).await.ok()?;
+    let payload = line.trim_end().strip_prefix(IDENTITY_PREFIX)?;
+    let mut peer: PeerHex = serde_json::from_str(payload).ok()?;
 
-    if reader.read_line(&mut line).await.is_ok() && line.starts_with("HEXDB_IDENTITY ") {
-        // TODO(Phase 6): off by one; the prefix is 15 bytes, so this drops the opening brace.
-        let payload = line[16..].trim();
-        return serde_json::from_str::<PeerHex>(payload).ok();
+    // A peer that advertises a loopback or wildcard address is reachable at the
+    // host we just connected to.
+    let probed_host = host_of(&addr).to_string();
+    if !is_local_or_wildcard(&probed_host) {
+        if is_local_or_wildcard(host_of(&peer.api_endpoint)) {
+            peer.api_endpoint = with_host(&peer.api_endpoint, &probed_host);
+        }
+        peer.ip = addr;
+    }
+    Some(peer)
+}
+
+/// Probe every target once and return the hexes in our lattice (excluding ourselves).
+pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str) -> Vec<PeerHex> {
+    let probes = probe_targets(config).into_iter().map(|addr| async move {
+        tokio::time::timeout(PROBE_TIMEOUT, probe_peer(addr)).await.ok().flatten()
+    });
+
+    let mut peers: Vec<PeerHex> = Vec::new();
+    for peer in futures::future::join_all(probes).await.into_iter().flatten() {
+        if peer.lattice != config.network.lattice_name || peer.id == local_id || peers.iter().any(|p| p.id == peer.id) {
+            continue;
+        }
+        if peer.name == local_name {
+            warn!(name = %peer.name, "🎭 Name collision detected.");
+        }
+        peers.push(peer);
+    }
+    peers
+}
+
+/// Better candidates sort first: more RAM, then more disk, then lower ID.
+fn rank(a: &PeerHex, b: &PeerHex) -> Ordering {
+    b.ram_mb.cmp(&a.ram_mb).then(b.disk_mb.cmp(&a.disk_mb)).then(a.id.cmp(&b.id))
+}
+
+/// Decide this hex's role from its own identity and the live peers. Pure, so
+/// every hex with the same view reaches the same answer.
+pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
+    let all: Vec<&PeerHex> = std::iter::once(local).chain(live_peers.iter()).collect();
+    let mut candidates: Vec<&PeerHex> = all.iter().copied().filter(|h| h.preference == "auto" || h.preference == "overseer").collect();
+    if candidates.iter().any(|h| h.preference == "overseer") {
+        candidates.retain(|h| h.preference == "overseer");
     }
 
-    None
+    // A sitting Overseer keeps the role; among several, the best-ranked wins.
+    let sitting: Vec<&PeerHex> = candidates.iter().copied().filter(|h| h.role == ROLE_OVERSEER).collect();
+    let pool = if sitting.is_empty() { candidates } else { sitting };
+    let leader = pool.into_iter().min_by(|a, b| rank(a, b));
+
+    match leader {
+        Some(leader) if leader.id == local.id => ROLE_OVERSEER.into(),
+        _ if local.preference == "replicant" => ROLE_REPLICANT.into(),
+        _ => ROLE_HARVESTER.into(),
+    }
+}
+
+/// Re-probe peers every `interval`, track their liveness, and re-run the election.
+pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, mut shutdown_rx: watch::Receiver<()>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    debug!("🛑 Discovery task is shutting down...");
+                    break;
+                }
+                _ = tokio::time::sleep(interval) => {}
+            }
+            discovery_round(&engine, interval).await;
+        }
+    });
+}
+
+/// One discovery round: probe, update members, and re-elect.
+pub async fn discovery_round(engine: &HexDBEngine, interval: Duration) {
+    let found = discover_peers(&engine.config, &engine.id.to_string(), &engine.name).await;
+    let now = Utc::now();
+    let lost_after = chrono::Duration::from_std(interval * LOST_AFTER_ROUNDS).unwrap_or_default();
+    let forget_after = chrono::Duration::from_std(interval * FORGET_AFTER_ROUNDS).unwrap_or_default();
+
+    let live: Vec<PeerHex> = {
+        let mut members = engine.peers.lock().await;
+        for peer in found {
+            match members.iter_mut().find(|m| m.hex.id == peer.id) {
+                Some(member) => {
+                    if member.status != "active" {
+                        info!("🤝 Hex '{}' ({}) is back.", peer.name, peer.role);
+                    }
+                    member.hex = peer;
+                    member.last_seen = now;
+                    member.status = "active".into();
+                }
+                None => {
+                    info!("🤝 Discovered hex '{}' ({}) at {}.", peer.name, peer.role, peer.api_endpoint);
+                    members.push(LatticeMember { hex: peer, last_seen: now, status: "active".into() });
+                }
+            }
+        }
+        for member in members.iter_mut() {
+            if member.status == "active" && now - member.last_seen > lost_after {
+                warn!("⚠️ Lost contact with hex '{}'.", member.hex.name);
+                member.status = "lost".into();
+            }
+        }
+        members.retain(|m| now - m.last_seen <= forget_after);
+        members.iter().filter(|m| m.status == "active").map(|m| m.hex.clone()).collect()
+    };
+
+    let local = local_identity(engine).await;
+    let role = elect(&local, &live);
+    if role != local.role {
+        info!("🎖️ Role changed: {} -> {}.", local.role, role);
+        engine.set_role(&role);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(id: &str, role: &str, preference: &str, ram_mb: u64) -> PeerHex {
+        PeerHex {
+            id: id.into(),
+            name: id.into(),
+            role: role.into(),
+            lattice: "l".into(),
+            ip: String::new(),
+            api_endpoint: String::new(),
+            ram_mb,
+            disk_mb: 100,
+            preference: preference.into(),
+            last_seq: 0,
+            version: String::new(),
+            replication_state: String::new(),
+            applied_seq: 0,
+        }
+    }
+
+    #[test]
+    fn alone_a_hex_leads() {
+        assert_eq!(elect(&hex("a", "", "auto", 1), &[]), ROLE_OVERSEER);
+    }
+
+    #[test]
+    fn ranks_by_ram_then_id() {
+        let big = hex("b", "", "auto", 4096);
+        let small = hex("a", "", "auto", 1024);
+        assert_eq!(elect(&big, std::slice::from_ref(&small)), ROLE_OVERSEER);
+        assert_eq!(elect(&small, &[big]), ROLE_HARVESTER);
+        // Tie on resources: lower ID wins.
+        let a = hex("a", "", "auto", 1024);
+        let b = hex("b", "", "auto", 1024);
+        assert_eq!(elect(&a, std::slice::from_ref(&b)), ROLE_OVERSEER);
+        assert_eq!(elect(&b, &[a]), ROLE_HARVESTER);
+    }
+
+    #[test]
+    fn sitting_overseer_keeps_the_role() {
+        let sitting = hex("z", ROLE_OVERSEER, "auto", 512);
+        let bigger_newcomer = hex("a", "", "auto", 8192);
+        assert_eq!(elect(&bigger_newcomer, std::slice::from_ref(&sitting)), ROLE_HARVESTER);
+        assert_eq!(elect(&sitting, &[bigger_newcomer]), ROLE_OVERSEER);
+    }
+
+    #[test]
+    fn split_brain_resolves_to_the_better_ranked() {
+        let a = hex("a", ROLE_OVERSEER, "auto", 1024);
+        let b = hex("b", ROLE_OVERSEER, "auto", 2048);
+        assert_eq!(elect(&a, std::slice::from_ref(&b)), ROLE_HARVESTER);
+        assert_eq!(elect(&b, &[a]), ROLE_OVERSEER);
+    }
+
+    #[test]
+    fn preferences_are_honored() {
+        let preferred = hex("z", "", "overseer", 1);
+        let big = hex("a", "", "auto", 8192);
+        assert_eq!(elect(&preferred, std::slice::from_ref(&big)), ROLE_OVERSEER);
+        assert_eq!(elect(&big, &[preferred]), ROLE_HARVESTER);
+
+        let replicant = hex("r", "", "replicant", 8192);
+        assert_eq!(elect(&replicant, &[]), ROLE_REPLICANT, "a replicant never leads, even alone");
+        let harvester = hex("h", "", "harvester", 8192);
+        assert_eq!(elect(&harvester, &[]), ROLE_HARVESTER);
+    }
+
+    #[test]
+    fn parses_preferences() {
+        assert_eq!(parse_preference(" Overseer ").unwrap(), "overseer");
+        assert!(parse_preference("boss").is_err());
+    }
+
+    #[test]
+    fn rewrites_hosts() {
+        assert_eq!(with_host("0.0.0.0:7700", "10.0.0.5"), "10.0.0.5:7700");
+        assert!(is_local_or_wildcard(host_of("127.0.0.1:7702")));
+        assert!(!is_local_or_wildcard(host_of("10.0.0.5:7702")));
+    }
 }

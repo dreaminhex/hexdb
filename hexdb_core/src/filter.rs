@@ -15,6 +15,11 @@
 // Field operators: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $exists,
 // $contains (substring, or array element), $startsWith, $endsWith, $not.
 // `id` refers to the document ID. A null $eq also matches a missing field.
+//
+// Full-text search: { "$text": "rust database" } matches documents containing
+// every word (case-insensitive, whole words). It searches the fields of the
+// tessellation's text index, or every string field when there is none; a text
+// index makes it fast.
 
 use crate::{document::Document, engine::EngineError};
 use anyhow::Result;
@@ -24,18 +29,20 @@ use std::cmp::Ordering;
 
 /// A parsed filter.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Filter(Node);
+pub struct Filter(pub(crate) Node);
 
 #[derive(Debug, Clone, PartialEq)]
-enum Node {
+pub(crate) enum Node {
     And(Vec<Node>),
     Or(Vec<Node>),
     Not(Box<Node>),
     Field { path: Vec<String>, ops: Vec<Op> },
+    /// Every term must appear as a word in `fields` (all string fields when `None`).
+    Text { terms: Vec<String>, fields: Option<Vec<Vec<String>>> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Op {
+pub(crate) enum Op {
     Eq(Value),
     Ne(Value),
     Cmp(Ordering, bool, Value), // (direction, inclusive, value): $gt = (Greater, false)
@@ -85,12 +92,56 @@ impl Filter {
     pub fn is_empty(&self) -> bool {
         matches!(&self.0, Node::And(nodes) if nodes.is_empty())
     }
+
+    /// True if the filter uses `$text`.
+    pub fn has_text(&self) -> bool {
+        fn walk(node: &Node) -> bool {
+            match node {
+                Node::And(nodes) | Node::Or(nodes) => nodes.iter().any(walk),
+                Node::Not(node) => walk(node),
+                Node::Field { .. } => false,
+                Node::Text { .. } => true,
+            }
+        }
+        walk(&self.0)
+    }
+
+    /// Restrict `$text` conditions to these fields (a text index's fields).
+    pub fn with_text_fields(&self, fields: &[String]) -> Filter {
+        fn walk(node: &Node, fields: &[Vec<String>]) -> Node {
+            match node {
+                Node::And(nodes) => Node::And(nodes.iter().map(|n| walk(n, fields)).collect()),
+                Node::Or(nodes) => Node::Or(nodes.iter().map(|n| walk(n, fields)).collect()),
+                Node::Not(node) => Node::Not(Box::new(walk(node, fields))),
+                Node::Field { .. } => node.clone(),
+                Node::Text { terms, .. } => Node::Text { terms: terms.clone(), fields: Some(fields.to_vec()) },
+            }
+        }
+        let paths: Vec<Vec<String>> = fields.iter().map(|f| f.split('.').map(String::from).collect()).collect();
+        Filter(walk(&self.0, &paths))
+    }
+}
+
+/// Split text into lowercase words (runs of letters and digits).
+pub fn tokenize(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase)
+}
+
+/// Every string in a JSON value (recursively), for full-text matching.
+pub(crate) fn strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+    match value {
+        Value::String(s) => out.push(s),
+        Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+        Value::Object(map) => map.iter().filter(|(k, _)| k.as_str() != "id").for_each(|(_, v)| strings(v, out)),
+        _ => {}
+    }
 }
 
 /// Operators recognised with a `_` prefix as well as `$` (GraphQL literals
 /// can't contain `$`, which marks variables there).
 const OPERATORS: &[&str] = &[
     "and", "or", "not", "eq", "ne", "gt", "gte", "lt", "lte", "in", "nin", "exists", "contains", "startsWith", "endsWith",
+    "text",
 ];
 
 /// The canonical `$name` of an operator key, or `None` for a field name.
@@ -126,6 +177,16 @@ fn parse_object(map: &Map<String, Value>) -> Result<Node> {
                 Value::Object(m) => Node::Not(Box::new(parse_object(m)?)),
                 _ => return Err(invalid(format!("{} expects a filter object.", key))),
             },
+            Some("$text") => {
+                let text = value.as_str().ok_or_else(|| invalid(format!("{} expects a string of words.", key)))?;
+                let mut terms: Vec<String> = tokenize(text).collect();
+                terms.sort();
+                terms.dedup();
+                if terms.is_empty() {
+                    return Err(invalid(format!("{} needs at least one word.", key)));
+                }
+                Node::Text { terms, fields: None }
+            }
             Some(_) => return Err(invalid(format!("unknown or misplaced operator {}.", key))),
             None => {
                 if key.is_empty() || key.split('.').any(str::is_empty) {
@@ -179,7 +240,7 @@ fn parse_ops(value: &Value) -> Result<Vec<Op>> {
 }
 
 /// Look up a dotted path. Arrays along the way fan out (any element may match).
-fn resolve<'a>(json: &'a Value, path: &[String]) -> Vec<&'a Value> {
+pub(crate) fn resolve<'a>(json: &'a Value, path: &[String]) -> Vec<&'a Value> {
     let Some((first, rest)) = path.split_first() else { return vec![json] };
     match json {
         Value::Object(map) => map.get(first).map(|v| resolve(v, rest)).unwrap_or_default(),
@@ -196,6 +257,15 @@ fn eval(node: &Node, json: &Value) -> bool {
         Node::Field { path, ops } => {
             let values = resolve(json, path);
             ops.iter().all(|op| eval_op(op, &values))
+        }
+        Node::Text { terms, fields } => {
+            let mut texts = Vec::new();
+            match fields {
+                Some(paths) => paths.iter().flat_map(|p| resolve(json, p)).for_each(|v| strings(v, &mut texts)),
+                None => strings(json, &mut texts),
+            }
+            let words: std::collections::HashSet<String> = texts.iter().flat_map(|t| tokenize(t)).collect();
+            terms.iter().all(|t| words.contains(t))
         }
     }
 }
@@ -245,7 +315,7 @@ fn json_eq(a: &Value, b: &Value) -> bool {
 }
 
 /// Order two values of the same kind (numbers or strings). Mixed kinds don't compare.
-fn compare(a: &Value, b: &Value) -> Option<Ordering> {
+pub(crate) fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => x.as_f64()?.partial_cmp(&y.as_f64()?),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
@@ -296,7 +366,7 @@ fn sort_rank(v: Option<&Value>) -> u8 {
     }
 }
 
-fn sort_order(a: Option<&Value>, b: Option<&Value>) -> Ordering {
+pub(crate) fn sort_order(a: Option<&Value>, b: Option<&Value>) -> Ordering {
     let (ra, rb) = (sort_rank(a), sort_rank(b));
     if ra != rb {
         return ra.cmp(&rb);
@@ -347,6 +417,24 @@ mod tests {
         assert!(check(json!({ "views": { "_gte": 42 }, "_or": [{ "status": "draft" }] }), &d), "underscore operators");
         assert!(check(json!({ "author": { "_name": null } }), &d) == false, "unknown _keys are fields");
         assert!(!check(json!({ "views": { "$gt": "a" } }), &d), "mixed types don't compare");
+    }
+
+    #[test]
+    fn full_text() {
+        let d = doc(json!({ "title": "Rust databases, explained", "body": { "text": "Tessellations & hexes" }, "tags": ["Storage"] }));
+        assert!(check(json!({ "$text": "rust" }), &d));
+        assert!(check(json!({ "_text": "DATABASES rust" }), &d), "case-insensitive, any order");
+        assert!(check(json!({ "$text": "hexes storage" }), &d), "nested strings and arrays");
+        assert!(!check(json!({ "$text": "rust python" }), &d), "every word must appear");
+        assert!(!check(json!({ "$text": "data" }), &d), "whole words only");
+        assert!(check(json!({ "$text": "rust", "tags": "Storage" }), &d));
+
+        let only_title = Filter::parse(&json!({ "$text": "hexes" })).unwrap().with_text_fields(&["title".into()]);
+        assert!(!only_title.matches(&d));
+        let in_body = Filter::parse(&json!({ "$text": "hexes" })).unwrap().with_text_fields(&["body.text".into()]);
+        assert!(in_body.matches(&d));
+        assert!(Filter::parse(&json!({ "$text": " ,, " })).is_err());
+        assert!(Filter::parse(&json!({ "$text": 5 })).is_err());
     }
 
     #[test]

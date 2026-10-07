@@ -18,6 +18,7 @@
 
 use super::{EngineError, HexDBEngine, MAX_WRITE_RETRIES};
 use crate::{
+    changes::{Change, ChangeKind},
     filter::{sort_documents, Filter, SortKey},
     catalog::validate_tessellation_name,
     document::{is_reserved_field, CompactFields, Document, FieldValue},
@@ -127,6 +128,10 @@ pub struct QueryPage {
     pub total: usize,
     /// Pass as `after` for the next page (ID order only); `None` on the last page.
     pub next: Option<Ulid>,
+    /// Indexes the query used (empty: every document was scanned).
+    pub indexes: Vec<String>,
+    /// Documents read to answer the query.
+    pub scanned: usize,
 }
 
 /// One operation in an atomic commit.
@@ -148,10 +153,11 @@ enum Modification {
 
 enum IdempotencyLookup {
     Absent { seq: u64 },
-    Replay(Value),
+    /// The stored result, and the sequence number of the idempotency record.
+    Replay(Value, u64),
 }
 
-struct InflightGuard<'a> {
+pub(crate) struct InflightGuard<'a> {
     engine: &'a HexDBEngine,
     key: String,
 }
@@ -273,19 +279,15 @@ impl HexDBEngine {
         if query.after.is_some() && !query.sort.is_empty() {
             return Err(invalid("after can't be combined with sort; use offset to page sorted results."));
         }
-        let mut ids: Vec<Ulid> = self
-            .versions(tess)
-            .await
-            .into_iter()
-            .filter(|(id, v)| v.visible() && query.after.is_none_or(|a| *id > a))
-            .map(|(id, _)| id)
-            .collect();
-        ids.sort();
+        let (filter, plan) = self.prepare_filter(tess, &query.filter);
+        let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
+        let ids = self.candidate_ids(tess, plan, query.after).await;
+        let scanned = ids.len();
 
         let mut matched = Vec::new();
         for id in ids {
             if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
-                if query.filter.matches(&doc) {
+                if filter.matches(&doc) {
                     matched.push(doc);
                 }
             }
@@ -299,7 +301,62 @@ impl HexDBEngine {
         } else {
             None
         };
-        Ok(QueryPage { documents, total, next })
+        Ok(QueryPage { documents, total, next, indexes, scanned })
+    }
+
+    /// IDs to read for a query, in ID order: the planner's candidates, or
+    /// every visible document.
+    async fn candidate_ids(&self, tess: &str, plan: Option<crate::index::Plan>, after: Option<Ulid>) -> Vec<Ulid> {
+        match plan {
+            Some(plan) => plan.candidates.into_iter().filter(|id| after.is_none_or(|a| *id > a)).collect(),
+            None => {
+                let mut ids: Vec<Ulid> = self
+                    .versions(tess)
+                    .await
+                    .into_iter()
+                    .filter(|(id, v)| v.visible() && after.is_none_or(|a| *id > a))
+                    .map(|(id, _)| id)
+                    .collect();
+                ids.sort();
+                ids
+            }
+        }
+    }
+
+    /// Every visible document matching a filter, in ID order (using indexes).
+    pub async fn matching_documents(&self, tess: &str, filter: &Filter) -> Result<Vec<Document>> {
+        let (filter, plan) = self.prepare_filter(tess, filter);
+        let ids = self.candidate_ids(tess, plan, None).await;
+        let mut matched = Vec::new();
+        for id in ids {
+            if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
+                if filter.matches(&doc) {
+                    matched.push(doc);
+                }
+            }
+        }
+        Ok(matched)
+    }
+
+    /// Like `matching_documents`, but always reads every document (no indexes).
+    pub(crate) async fn matching_documents_scan(&self, tess: &str, filter: &Filter) -> Result<Vec<Document>> {
+        let ids = self.candidate_ids(tess, None, None).await;
+        let mut matched = Vec::new();
+        for id in ids {
+            if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
+                if filter.matches(&doc) {
+                    matched.push(doc);
+                }
+            }
+        }
+        Ok(matched)
+    }
+
+    /// Group and summarize the documents that match the aggregation's filter.
+    pub async fn aggregate(&self, tess: &str, aggregation: &crate::aggregate::Aggregation) -> Result<crate::aggregate::AggregateResult> {
+        self.queries_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let documents = self.matching_documents(tess, &aggregation.filter).await?;
+        aggregation.run(&documents)
     }
 
     /// Number of documents matching a filter.
@@ -517,14 +574,9 @@ impl HexDBEngine {
         changes: &Changes,
         ttl: Option<i64>,
     ) -> Result<(Vec<BatchItem>, UpdateSummary)> {
-        let mut ids: Vec<Ulid> = self
-            .versions(tess)
-            .await
-            .into_iter()
-            .filter(|(_, v)| v.visible())
-            .map(|(id, _)| id)
-            .collect();
-        ids.sort();
+        let (filter, plan) = self.prepare_filter(tess, filter);
+        let filter = &filter;
+        let ids = self.candidate_ids(tess, plan, None).await;
 
         let mut summary = UpdateSummary::default();
         let mut items = Vec::new();
@@ -582,7 +634,7 @@ impl HexDBEngine {
             let mut idem_seq = 0;
             if let Some(k) = &idem {
                 match self.idempotency_lookup(k).await? {
-                    IdempotencyLookup::Replay(result) => {
+                    IdempotencyLookup::Replay(result, _) => {
                         let value = serde_json::from_value(result)
                             .map_err(|e| anyhow!("Stored idempotent result is unreadable: {}", e))?;
                         return Ok(Outcome { value, replayed: true });
@@ -606,14 +658,14 @@ impl HexDBEngine {
     /// succeeded. Errors if the key was used with a different request.
     pub(crate) async fn replayed<T: DeserializeOwned>(&self, k: &IdempotencyKey) -> Result<Option<T>> {
         match self.idempotency_lookup(k).await? {
-            IdempotencyLookup::Replay(result) => Ok(Some(
+            IdempotencyLookup::Replay(result, _) => Ok(Some(
                 serde_json::from_value(result).map_err(|e| anyhow!("Stored idempotent result is unreadable: {}", e))?,
             )),
             IdempotencyLookup::Absent { .. } => Ok(None),
         }
     }
 
-    fn acquire_inflight(&self, key: &str) -> Result<InflightGuard<'_>> {
+    pub(crate) fn acquire_inflight(&self, key: &str) -> Result<InflightGuard<'_>> {
         if !self.inflight.lock().unwrap().insert(key.to_string()) {
             return Err(EngineError::Conflict(
                 "A request with this Idempotency-Key is already in progress.".into(),
@@ -621,6 +673,15 @@ impl HexDBEngine {
             .into());
         }
         Ok(InflightGuard { engine: self, key: key.to_string() })
+    }
+
+    /// The stored result for an idempotency key (if this request already
+    /// succeeded) and the record's version, for `expected_seq`.
+    pub(crate) async fn idempotency_lookup_seq(&self, k: &IdempotencyKey) -> Result<(Option<Value>, u64)> {
+        Ok(match self.idempotency_lookup(k).await? {
+            IdempotencyLookup::Replay(result, seq) => (Some(result), seq),
+            IdempotencyLookup::Absent { seq } => (None, seq),
+        })
     }
 
     async fn idempotency_lookup(&self, k: &IdempotencyKey) -> Result<IdempotencyLookup> {
@@ -639,10 +700,10 @@ impl HexDBEngine {
             )
             .into());
         }
-        Ok(IdempotencyLookup::Replay(data.get("result").cloned().unwrap_or(Value::Null)))
+        Ok(IdempotencyLookup::Replay(data.get("result").cloned().unwrap_or(Value::Null), seq))
     }
 
-    fn idempotency_item(&self, k: &IdempotencyKey, result: &impl Serialize, expected_seq: u64) -> Result<BatchItem> {
+    pub(crate) fn idempotency_item(&self, k: &IdempotencyKey, result: &impl Serialize, expected_seq: u64) -> Result<BatchItem> {
         let now = Utc::now().timestamp_millis();
         let mut data = CompactFields::new();
         data.insert("key".into(), FieldValue::String(k.key.clone()));
@@ -666,8 +727,54 @@ impl HexDBEngine {
     /// Apply operations atomically. Returns false, changing nothing, if any
     /// expected version no longer matches. Returns once the batch is durable.
     pub(crate) async fn commit(&self, items: Vec<BatchItem>) -> Result<bool> {
-        if items.is_empty() {
-            return Ok(true);
+        Ok(self.commit_checked(items, &[]).await?.is_some())
+    }
+
+    /// Like `commit`, and also verify that `checks` (documents that were read
+    /// but not written) still have the given versions. Returns the sequence
+    /// number of the first item written (for a read-only batch, the next
+    /// sequence number), or `None`, changing nothing, if any version changed.
+    pub(crate) async fn commit_checked(&self, items: Vec<BatchItem>, checks: &[(DocKey, u64)]) -> Result<Option<u64>> {
+        self.commit_with(items, checks, None).await
+    }
+
+    /// `commit_checked`, plus an optional trailing item built under the commit
+    /// lock from the batch's first sequence number. Transactions use it to
+    /// store an idempotency record that includes the versions being assigned.
+    pub(crate) async fn commit_with(
+        &self,
+        items: Vec<BatchItem>,
+        checks: &[(DocKey, u64)],
+        trailer: Option<&(dyn Fn(u64) -> Result<BatchItem> + Sync)>,
+    ) -> Result<Option<u64>> {
+        self.commit_inner(items, checks, trailer, false).await
+    }
+
+    /// Apply writes received from the Overseer: no write guard and no unique
+    /// checks (the Overseer already enforced them, and a batch can pass
+    /// through states that only look like duplicates).
+    pub(crate) async fn commit_replicated(&self, items: Vec<BatchItem>) -> Result<()> {
+        self.commit_inner(items, &[], None, true).await.map(|_| ())
+    }
+
+    async fn commit_inner(
+        &self,
+        items: Vec<BatchItem>,
+        checks: &[(DocKey, u64)],
+        trailer: Option<&(dyn Fn(u64) -> Result<BatchItem> + Sync)>,
+        replicated: bool,
+    ) -> Result<Option<u64>> {
+        if !replicated && (!items.is_empty() || trailer.is_some()) {
+            self.ensure_writable()?;
+        }
+        if items.is_empty() && trailer.is_none() {
+            let state = self.state.lock().await;
+            for (key, expected) in checks {
+                if self.current_seq(&state, key).await != *expected {
+                    return Ok(None);
+                }
+            }
+            return Ok(Some(state.next_seq));
         }
         if self.wal.has_failed() {
             bail!("Writes are disabled after a WAL failure. Check the disk and restart HexDB.");
@@ -681,37 +788,73 @@ impl HexDBEngine {
 
         let user_writes = items.iter().filter(|i| i.key.tessellation != IDEMPOTENCY_TESSELLATION).count() as u64;
 
-        let prepared: Vec<(DocKey, Option<Vec<u8>>, Option<i64>)> = items
-            .iter()
-            .map(|item| match &item.op {
+        fn prepare(item: &BatchItem) -> Result<(DocKey, Option<Vec<u8>>, Option<i64>)> {
+            match &item.op {
                 WalOp::Put(doc) => Ok((item.key.clone(), Some(serde_json::to_vec(doc)?), doc.ttl)),
                 WalOp::Delete { .. } => Ok((item.key.clone(), None, None)),
                 WalOp::Batch(_) => Err(anyhow!("Nested batches are not supported")),
-            })
-            .collect::<Result<_>>()?;
+            }
+        }
+        let mut prepared: Vec<(DocKey, Option<Vec<u8>>, Option<i64>)> = items.iter().map(prepare).collect::<Result<_>>()?;
+        let mut items = items;
 
-        let ack = {
+        let (ack, first, changes) = {
             let mut state = self.state.lock().await;
             for item in &items {
                 if let Some(expected) = item.expected_seq {
-                    let current = match state.hex.meta(&item.key) {
-                        Some(meta) => meta.seq,
-                        None => self.sst.seq_of(&item.key.tessellation, &item.key.id).await.unwrap_or(0),
-                    };
-                    if current != expected {
-                        return Ok(false);
+                    if self.current_seq(&state, &item.key).await != expected {
+                        return Ok(None);
                     }
+                }
+            }
+            for (key, expected) in checks {
+                if self.current_seq(&state, key).await != *expected {
+                    return Ok(None);
                 }
             }
 
             let first = state.next_seq;
+            if let Some(build) = trailer {
+                let item = build(first)?;
+                if let Some(expected) = item.expected_seq {
+                    if self.current_seq(&state, &item.key).await != expected {
+                        return Ok(None);
+                    }
+                }
+                prepared.push(prepare(&item)?);
+                items.push(item);
+            }
+            if !replicated {
+                self.check_unique(&items)?;
+            }
             let count = items.len() as u64;
+            let now = Utc::now();
+            let changes: Vec<Change> = items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    let (kind, document) = match &item.op {
+                        WalOp::Put(doc) => (ChangeKind::Put, Some(doc.clone())),
+                        WalOp::Delete { .. } => (ChangeKind::Delete, None),
+                        WalOp::Batch(_) => return None,
+                    };
+                    Some(Change {
+                        seq: first + i as u64,
+                        timestamp: now,
+                        kind,
+                        tessellation: item.key.tessellation.clone(),
+                        id: Some(item.key.id),
+                        document,
+                    })
+                })
+                .collect();
             let mut ops: Vec<WalOp> = items.into_iter().map(|i| i.op).collect();
             let op = if ops.len() == 1 { ops.pop().unwrap() } else { WalOp::Batch(ops) };
 
             // Queue to the WAL first so nothing is applied if the WAL is unavailable.
             let ack = self.wal.append(WalRecord { seq: first, op }).await?;
             state.next_seq += count;
+            let changes = (changes, count);
             for (i, (key, bytes, ttl)) in prepared.iter().enumerate() {
                 let seq = first + i as u64;
                 match bytes {
@@ -719,14 +862,75 @@ impl HexDBEngine {
                     None => state.hex.put_tombstone(key, seq, true),
                 }
             }
+            {
+                let mut indexes = self.indexes.write().unwrap();
+                for change in &changes.0 {
+                    if let Some(id) = change.id {
+                        indexes.apply(&change.tessellation, &id, change.document.as_ref());
+                    }
+                }
+            }
             if state.hex.dirty_bytes() >= self.flush_threshold {
                 self.flush_needed.notify_one();
             }
-            ack
+            (ack, first, changes)
         };
+        let (ack, first, (changes, count)) = (ack, first, changes);
 
-        ack.wait().await?;
+        // Publish once durable. A failed write still consumes its sequence
+        // numbers, so the feed is told about the range either way.
+        if let Err(e) = ack.wait().await {
+            self.changes.complete(first, count, Vec::new());
+            return Err(e);
+        }
+        self.changes.complete(first, count, changes);
         self.writes_total.fetch_add(user_writes, std::sync::atomic::Ordering::Relaxed);
-        Ok(true)
+        Ok(Some(first))
+    }
+
+    /// Fail with a conflict if a write would break a unique index.
+    fn check_unique(&self, items: &[BatchItem]) -> Result<()> {
+        let indexes = self.indexes.read().unwrap();
+        let mut changing: std::collections::HashMap<&str, HashSet<Ulid>> = std::collections::HashMap::new();
+        for item in items {
+            changing.entry(item.key.tessellation.as_str()).or_default().insert(item.key.id);
+        }
+        let mut claimed: HashSet<(String, String, Vec<String>)> = HashSet::new();
+        for item in items {
+            let WalOp::Put(doc) = &item.op else { continue };
+            let Some(list) = indexes.by_tessellation.get(&doc.tessellation) else { continue };
+            for index in list.iter().filter(|i| i.def.unique) {
+                if let Some(other) = index.unique_conflict(doc, &changing[doc.tessellation.as_str()]) {
+                    return Err(EngineError::Conflict(format!(
+                        "Unique index '{}' on '{}': document {} already has this {}.",
+                        index.def.name,
+                        doc.tessellation,
+                        other,
+                        index.def.fields.join(" + ")
+                    ))
+                    .into());
+                }
+                for key in index.unique_keys(doc) {
+                    if !claimed.insert((doc.tessellation.clone(), index.def.name.clone(), key)) {
+                        return Err(EngineError::Conflict(format!(
+                            "Unique index '{}' on '{}': two documents in this request share a {}.",
+                            index.def.name,
+                            doc.tessellation,
+                            index.def.fields.join(" + ")
+                        ))
+                        .into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sequence number of a document's newest version (0 if it never existed).
+    async fn current_seq(&self, state: &super::EngineState, key: &DocKey) -> u64 {
+        match state.hex.meta(key) {
+            Some(meta) => meta.seq,
+            None => self.sst.seq_of(&key.tessellation, &key.id).await.unwrap_or(0),
+        }
     }
 }

@@ -7,6 +7,11 @@ pub mod wal;
 pub mod sst;
 pub mod catalog;
 pub mod filter;
+pub mod index;
+pub mod aggregate;
+pub mod changes;
+pub mod replication;
+pub mod plugins;
 pub mod metrics;
 pub mod crypt;
 pub mod vertex;
@@ -19,11 +24,12 @@ pub mod network {
 
 pub use config::{load_config, load_config_from, HexConfig};
 pub use runtime::{RuntimeInfo, local_base_url, SHUTDOWN_TOKEN_HEADER};
-pub use logging::init_logging;
+pub use logging::{init_logging, log_buffer, parse_level, LogQuery, LogRecord, LOG_CAPACITY};
 pub use engine::{
     DocumentQuery, EngineError, EngineStats, FlushStats, HexDBEngine, HexIdentity, IdempotencyKey, ListPage, Outcome,
     QueryPage, TessellationStats,
     UpdateSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
+    parse_transaction, TransactionResult, TxOpKind, TxOperation, TxResult, MAX_TRANSACTION_OPS,
 };
 pub use document::{Document, FieldValue};
 pub use hex::Hex;
@@ -33,6 +39,15 @@ pub use metrics::{HexMeta, HexMetrics, VertexMeta, TessMetrics, NetworkMetrics, 
 pub use crypt::{create_hash, verify_hash, decode_encryption_key, constant_time_eq};
 pub use sst::{SstFile, SstStore};
 pub use catalog::{validate_tessellation_name, TessellationInfo};
-pub use filter::{Filter, SortKey};
+pub use filter::{tokenize, Filter, SortKey};
+pub use index::{IndexDef, IndexInfo, IndexKind};
+pub use engine::REPLICATION_TESSELLATION;
+pub use plugins::{spawn_plugins, PluginStatus};
+pub use replication::{lattice_token, spawn_replication_task, ReplicationStatus, LATTICE_TOKEN_HEADER};
+pub use changes::{Change, ChangeFeed, ChangeKind, HistoryExpired, CHANGE_HISTORY};
+pub use aggregate::{parse_aggregates, AggregateOp, AggregateResult, AggregateSpec, Aggregation};
 pub use tasks::{spawn_vertex_monitoring_task, spawn_ttl_sweep_task, spawn_flush_task, spawn_compaction_task, spawn_metrics_task};
-pub use network::discovery::{PeerHex, discover_peers, start_discovery_listener};
+pub use network::discovery::{
+    discover_peers, discovery_round, elect, local_identity, parse_preference, spawn_discovery_task, start_discovery_listener,
+    LatticeMember, PeerHex, ROLE_HARVESTER, ROLE_OVERSEER, ROLE_REPLICANT,
+};

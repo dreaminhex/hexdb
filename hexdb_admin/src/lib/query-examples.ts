@@ -49,6 +49,64 @@ query Documents($tessellation: String!, $filter: JSON) {
 }`,
   },
   {
+    name: "Aggregate",
+    description: "Group documents and compute counts, sums, and averages",
+    query: `# Operators: _count ("*" or a field), _countDistinct, _sum, _avg, _min, _max.
+# Rows hold the groupBy fields plus one column per aggregate.
+query Revenue {
+  aggregate(
+    tessellation: "orders"
+    filter: { status: { _ne: "cancelled" } }
+    groupBy: ["customer.country"]
+    aggregates: {
+      orders: { _count: "*" }
+      revenue: { _sum: "total" }
+      averageOrder: { _avg: "total" }
+      largest: { _max: "total" }
+    }
+    sort: [{ field: "revenue", descending: true }]
+    limit: 10
+  ) {
+    totalGroups
+    matched
+    rows
+  }
+}`,
+  },
+  {
+    name: "Full-text search",
+    description: "Documents containing every word (fast with a text index)",
+    query: `# $text matches whole words, case-insensitively. Create a text index on
+# the fields you search (Tessellations > Indexes) to make it fast.
+query Search {
+  documents(tessellation: "articles", filter: { _text: "rust" }, limit: 10) {
+    total
+    indexesUsed
+    scanned
+    documents { id data }
+  }
+}`,
+  },
+  {
+    name: "Transaction",
+    description: "Several writes that all succeed or none do",
+    query: `# Ops: get, check, insert, replace, patch, delete. Preconditions:
+# if_version (from a get, or 0 = must not exist) and if_match (a filter).
+# If any operation fails, nothing is written.
+mutation Restock($ops: JSON!) {
+  transaction(operations: $ops) {
+    writes
+    results { op tessellation id version document }
+  }
+}`,
+    variables: {
+      ops: [
+        { op: "insert", tessellation: "orders", data: { order_no: "ORD-DEMO", status: "pending", total: 0 } },
+        { op: "insert", tessellation: "audit", data: { event: "order created", ref: "ORD-DEMO" } },
+      ],
+    },
+  },
+  {
     name: "Insert a document",
     description: "Insert and return the stored document",
     query: `mutation Insert($data: JSON!) {

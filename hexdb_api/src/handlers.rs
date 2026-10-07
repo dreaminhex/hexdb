@@ -41,8 +41,8 @@ pub const IDEMPOTENT_REPLAYED_HEADER: &str = "idempotent-replayed";
 const DEFAULT_PAGE_SIZE: usize = 100;
 const MAX_PAGE_SIZE: usize = 1000;
 
-type Engine = State<Arc<HexDBEngine>>;
-type ApiResult = Result<Response, ApiError>;
+pub(crate) type Engine = State<Arc<HexDBEngine>>;
+pub(crate) type ApiResult = Result<Response, ApiError>;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -57,10 +57,10 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         ApiError { status, code, message: message.into() }
     }
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
     }
     fn not_found(message: impl Into<String>) -> Self {
@@ -94,6 +94,7 @@ impl From<anyhow::Error> for ApiError {
             Some(EngineError::Unprocessable(m)) => {
                 ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "idempotency_key_reused", m.clone())
             }
+            Some(EngineError::ReadOnly(m)) => ApiError::new(StatusCode::MISDIRECTED_REQUEST, "read_only_replica", m.clone()),
             None => {
                 error!("❌ Request failed: {:#}", e);
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "The request failed; see the server log.")
@@ -239,6 +240,7 @@ async fn run_query(
         "documents": docs_json(&page.documents),
         "total": page.total,
         "next": page.next.map(|id| id.to_string()),
+        "plan": { "indexes": page.indexes, "scanned": page.scanned },
     }))
     .into_response())
 }
@@ -368,7 +370,7 @@ pub async fn health(State(engine): Engine) -> Json<Value> {
         "status": "ok",
         "id": engine.id.to_string(),
         "name": engine.name,
-        "hex_type": engine.hex_type,
+        "hex_type": engine.role(),
         "version": engine.version,
         "uptime_seconds": (Utc::now() - engine.start_datetime).num_seconds().max(0),
     }))
@@ -411,7 +413,40 @@ pub async fn flush(State(engine): Engine) -> ApiResult {
 // ---------------------------------------------------------------------------
 
 fn tessellation_json(name: &str, info: &TessellationInfo) -> Value {
-    json!({ "name": name, "kind": info.kind, "created": millis_to_rfc3339(info.created) })
+    json!({
+        "name": name,
+        "kind": info.kind,
+        "created": millis_to_rfc3339(info.created),
+        "indexes": info.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
+    })
+}
+
+/// A tessellation's indexes with their statistics.
+pub async fn list_indexes(Path(name): Path<String>, State(engine): Engine) -> ApiResult {
+    existing_tessellation(&engine, &name)?;
+    Ok(Json(json!({ "indexes": engine.list_indexes(&name) })).into_response())
+}
+
+/// Create an index: `{"fields": ["status"], "name"?, "kind"?: "field" | "text", "unique"?: bool}`.
+/// Builds it from the existing documents before returning 201.
+pub async fn create_index(
+    Path(name): Path<String>,
+    State(engine): Engine,
+    body: Result<Json<hexdb_core::IndexDef>, JsonRejection>,
+) -> ApiResult {
+    let Json(def) = body?;
+    existing_tessellation(&engine, &name)?;
+    let info = engine.create_index(&name, def).await?;
+    Ok((StatusCode::CREATED, Json(json!(info))).into_response())
+}
+
+/// Drop an index.
+pub async fn drop_index(Path((name, index)): Path<(String, String)>, State(engine): Engine) -> ApiResult {
+    existing_tessellation(&engine, &name)?;
+    if !engine.drop_index(&name, &index)? {
+        return Err(ApiError::not_found(format!("'{}' has no index named '{}'.", name, index)));
+    }
+    Ok(no_content(false))
 }
 
 /// List tessellations.
@@ -516,8 +551,14 @@ pub async fn count_docs(
 /// Get a document.
 pub async fn get_doc(Path((tess, id)): Path<(String, String)>, State(engine): Engine) -> ApiResult {
     user_tessellation(&engine, &tess)?;
-    match engine.get_document(&tess, &id).await? {
-        Some(doc) => Ok(Json(doc.to_api_json()).into_response()),
+    match engine.get_document_versioned(&tess, &id).await? {
+        Some((doc, version)) => {
+            let mut response = Json(doc.to_api_json()).into_response();
+            if let Ok(etag) = HeaderValue::from_str(&format!("\"{}\"", version)) {
+                response.headers_mut().insert(header::ETAG, etag);
+            }
+            Ok(response)
+        }
         None => Err(ApiError::not_found(format!("Document {} not found in '{}'.", id, tess))),
     }
 }
@@ -839,4 +880,94 @@ pub async fn status_history(params: Result<Query<HistoryParams>, QueryRejection>
         "samples": engine.history.since(since),
     }))
     .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct LogParams {
+    /// Minimum level: error, warn, info, debug, or trace.
+    pub level: Option<String>,
+    /// Only records after this sequence number (for tailing).
+    pub after: Option<u64>,
+    /// Only records before this sequence number (for paging back).
+    pub before: Option<u64>,
+    /// Case-insensitive text search.
+    pub q: Option<String>,
+    /// Target module prefix, e.g. `hexdb_core::network`.
+    pub target: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// Loaded plugins and their delivery state: `{"plugins": [...], "registry"}`.
+pub async fn plugins(State(engine): Engine) -> ApiResult {
+    Ok(Json(json!({
+        "plugins": engine.plugins.list(),
+        "registry": hexdb_core::plugins::registry_path(&engine).display().to_string(),
+        "enabled": engine.config.plugins.enabled,
+    }))
+    .into_response())
+}
+
+/// Recent server log records: `{"records": [...], "last_seq", "capacity"}`.
+/// Records are oldest first. Poll with `after=<last seq seen>` to tail.
+pub async fn logs(params: Result<Query<LogParams>, QueryRejection>) -> ApiResult {
+    let Query(params) = params?;
+    let level = match params.level.as_deref().filter(|l| !l.is_empty()) {
+        Some(l) => Some(
+            hexdb_core::parse_level(l)
+                .ok_or_else(|| ApiError::invalid(format!("Unknown level '{}'. Use error, warn, info, debug, or trace.", l)))?,
+        ),
+        None => None,
+    };
+    let buffer = hexdb_core::log_buffer();
+    let records = buffer.query(&hexdb_core::LogQuery {
+        level,
+        after: params.after,
+        before: params.before,
+        search: params.q,
+        target: params.target.filter(|t| !t.is_empty()),
+        limit: params.limit.unwrap_or(200).clamp(1, 1000),
+    });
+    Ok(Json(json!({
+        "records": records,
+        "last_seq": buffer.last_seq(),
+        "capacity": buffer.capacity(),
+    }))
+    .into_response())
+}
+
+/// Group and summarize matching documents:
+/// `{"filter", "group_by": [...], "aggregates": {"name": {"$sum": "field"}}, "sort", "offset", "limit"}`.
+/// Returns `{"rows": [...], "total_groups", "matched"}`.
+pub async fn aggregate_docs(
+    Path(tess): Path<String>,
+    State(engine): Engine,
+    body: Result<Json<Value>, JsonRejection>,
+) -> ApiResult {
+    let Json(mut body) = body?;
+    existing_tessellation(&engine, &tess)?;
+    // Accept the same "field desc, other" sort text as the query endpoints.
+    if let Some(Value::String(text)) = body.get("sort") {
+        let keys = parse_sort_text(text)?;
+        body["sort"] = serde_json::to_value(keys).unwrap_or(Value::Null);
+    }
+    let aggregation = hexdb_core::Aggregation::from_json(&body)?;
+    Ok(Json(engine.aggregate(&tess, &aggregation).await?).into_response())
+}
+
+/// Run operations across tessellations atomically:
+/// `{"operations": [{"op": "insert|replace|patch|delete|get|check", "tessellation", "id", "data", "ttl", "if_version", "if_match"}]}`.
+/// Every operation succeeds or nothing is written. Returns `{"results": [...], "writes"}`;
+/// a failed precondition is a 409 and a missing document a 404.
+pub async fn transaction(
+    State(engine): Engine,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> ApiResult {
+    let Json(body) = body?;
+    let ops = hexdb_core::parse_transaction(&body)?;
+    let idem = idempotency(&headers, &method, &uri, Some(&body))?;
+    let outcome = engine.transaction(&ops, idem).await?;
+    Ok(respond(StatusCode::OK, serde_json::to_value(&outcome.value).unwrap_or(Value::Null), outcome.replayed))
 }

@@ -5,7 +5,9 @@ import { SiteHeader } from "@/components/site-header"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import { useRoute } from "@/lib/router"
+import { LogsPage } from "@/pages/logs"
 import { OverviewPage } from "@/pages/overview"
+import { PluginsPage } from "@/pages/plugins"
 import { RolesPage } from "@/pages/roles"
 import { TessellationsPage } from "@/pages/tessellations"
 import { UsersPage } from "@/pages/users"
@@ -21,6 +23,8 @@ const PAGES: Record<string, { title: string; element: React.ComponentType }> = {
   "/documents": { title: "Documents", element: DocumentsPage },
   "/users": { title: "Users", element: UsersPage },
   "/roles": { title: "Roles", element: RolesPage },
+  "/logs": { title: "Logs", element: LogsPage },
+  "/plugins": { title: "Plugins", element: PluginsPage },
 }
 
 function App() {

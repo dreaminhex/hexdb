@@ -17,7 +17,10 @@ use std::{
 pub const CATALOG_FILE: &str = "catalog.json";
 
 /// Names that can't be used for tessellations: API routes and storage folders.
-const RESERVED_NAMES: &[&str] = &["health", "status", "flush", "shutdown", "tessellation", "tessellations", "ui", "wal", "graphql"];
+const RESERVED_NAMES: &[&str] = &[
+    "health", "status", "flush", "shutdown", "tessellation", "tessellations", "ui", "wal", "graphql",
+    "logs", "changes", "indexes", "auth", "transactions", "plugins", "lattice", "replication",
+];
 const MAX_NAME_LEN: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -26,6 +29,9 @@ pub struct TessellationInfo {
     pub kind: String,
     /// Creation time in epoch milliseconds.
     pub created: i64,
+    /// Secondary index definitions (contents are rebuilt in memory at startup).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexes: Vec<crate::index::IndexDef>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -129,7 +135,7 @@ mod tests {
         assert!(Catalog::load(&dir).unwrap().is_none());
 
         let mut catalog = Catalog::default();
-        catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1 });
+        catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1, indexes: Vec::new() });
         catalog.dropped.insert("old".into(), 42);
         catalog.save(&dir).unwrap();
 

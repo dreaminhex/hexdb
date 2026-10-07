@@ -392,6 +392,7 @@ function VertexCard({ vertices }: { vertices: VertexStatus[] }) {
 
 function LatticeCard({ status }: { status: Status }) {
   const { lattice } = status.network
+  const active = lattice.hexes.filter((h) => h.status === "active").length
   return (
     <Card>
       <CardHeader>
@@ -399,29 +400,100 @@ function LatticeCard({ status }: { status: Status }) {
           <IconDatabase className="text-muted-foreground size-5" /> Lattice
         </CardTitle>
         <CardDescription>
-          {lattice.name} · {lattice.hexes.length} hex{lattice.hexes.length === 1 ? "" : "es"}
+          {lattice.name} · {active} of {lattice.hexes.length} hex{lattice.hexes.length === 1 ? "" : "es"} active
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
-        {lattice.hexes.map((hex, i) => (
-          <div key={`${hex.name}-${i}`} className="flex items-center gap-3 rounded-md border px-3 py-2">
-            <span className={cn("size-2 rounded-full", hex.status === "active" ? "bg-status-good" : "bg-muted-foreground")} />
+        {lattice.hexes.map((hex) => (
+          <div key={hex.id || hex.name} className="flex items-center gap-3 rounded-md border px-3 py-2">
+            <span
+              className={cn("size-2 shrink-0 rounded-full", hex.status === "active" ? "bg-status-good" : "bg-status-warning")}
+              title={hex.status}
+            />
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium">
                 {hex.name}
-                {i === 0 && <span className="text-muted-foreground ml-1.5 text-xs font-normal">(this hex)</span>}
+                {hex.is_self && <span className="text-muted-foreground ml-1.5 text-xs font-normal">(this hex)</span>}
+                {hex.status !== "active" && <span className="text-muted-foreground ml-1.5 text-xs font-normal">· {hex.status}</span>}
               </div>
-              <div className="text-muted-foreground font-mono text-xs">{hex.ip}</div>
+              <div
+                className="text-muted-foreground truncate font-mono text-xs"
+                title={`Discovery ${hex.ip}. ${hex.is_self ? "" : "Replication figures are as of the last discovery round."}`}
+              >
+                {hex.api_endpoint || hex.ip}
+                {hex.status === "active" && <> · {replicationLabel(hex)}</>}
+                {!hex.is_self && hex.last_seen && <> · seen {formatAgo(hex.last_seen)}</>}
+              </div>
             </div>
-            <Badge variant="secondary">{hex.role}</Badge>
+            <Badge variant={hex.role === "Overseer" ? "default" : "secondary"} title={`preference: ${hex.preference}`}>
+              {hex.role}
+            </Badge>
           </div>
         ))}
-        {lattice.hexes.length === 1 && (
-          <p className="text-muted-foreground pt-1 text-xs">No peers discovered. Peer discovery and replication are planned for Phase 6.</p>
+        {lattice.hexes.length === 1 ? (
+          <p className="text-muted-foreground pt-1 text-xs">
+            No peers discovered. Add seed addresses to network.peers in hexdb.toml to join other hexes.
+          </p>
+        ) : (
+          <p className="text-muted-foreground pt-1 text-xs">
+            The Overseer takes writes; Harvesters and Replicants keep full copies and serve reads. Replicants never become Overseer.
+          </p>
         )}
       </CardContent>
     </Card>
   )
+}
+
+function replicationLabel(hex: Status["network"]["lattice"]["hexes"][number]): string {
+  switch (hex.replication_state) {
+    case "leading":
+      return `writes · seq ${formatNumber(hex.applied_seq)}`
+    case "streaming":
+      return hex.lag === null || hex.lag === undefined ? "replicating" : hex.lag === 0 ? "in sync" : `${formatNumber(hex.lag)} behind`
+    case "syncing":
+      return "full sync…"
+    case "waiting":
+      return "waiting for an Overseer"
+    case "error":
+      return "replication error"
+    default:
+      return `seq ${formatNumber(hex.last_seq)}`
+  }
+}
+
+/** Shown on replicas: this hex is read-only and follows the Overseer. */
+function ReplicaBanner({ status }: { status: Status }) {
+  const r = status.replication
+  if (!r || r.state === "leading") return null
+  const overseer = status.network.lattice.hexes.find((h) => h.role === "Overseer" && h.status === "active")
+  return (
+    <div className="bg-muted/50 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-4 py-3 text-sm">
+      <Badge variant="secondary">{status.hex_type}</Badge>
+      <span>
+        This hex is a read-only replica
+        {overseer ? (
+          <>
+            {" "}
+            of <span className="font-medium">{overseer.name}</span>. Send writes to the Overseer at{" "}
+            <span className="font-mono">{overseer.api_endpoint}</span>.
+          </>
+        ) : (
+          <>. No Overseer is reachable right now.</>
+        )}
+      </span>
+      <span className="text-muted-foreground ml-auto text-xs">
+        {r.state === "streaming" && (r.lag ? `${formatNumber(r.lag)} changes behind` : "in sync")}
+        {r.state === "syncing" && "full sync in progress"}
+        {r.state === "waiting" && "waiting for an Overseer"}
+        {r.state === "error" && (r.last_error ?? "replication error")}
+      </span>
+    </div>
+  )
+}
+
+function formatAgo(iso: string): string {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000))
+  return seconds < 60 ? `${seconds}s ago` : formatDuration(seconds) + " ago"
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +612,11 @@ export function OverviewPage() {
           {flushing ? <IconLoader2 className="animate-spin" /> : <IconDeviceFloppy />} Flush to disk
         </Button>
       </div>
+      {status.data.replication && status.data.replication.state !== "leading" && (
+        <div className="px-4 lg:px-6">
+          <ReplicaBanner status={status.data} />
+        </div>
+      )}
       <StatCards status={status.data} samples={samples} />
       <div className="px-4 lg:px-6">
         <ActivityChart samples={samples} minutes={minutes} onMinutesChange={setMinutes} />

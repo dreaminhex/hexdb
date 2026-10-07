@@ -8,7 +8,8 @@ use hexdb_api::{handlers::ShutdownHandle, init::init_security, routes::app_route
 use hexdb_core::{
     config::CONFIG_FILE_NAME, decode_encryption_key, discover_peers, init_logging, load_config_from,
     spawn_compaction_task, spawn_flush_task, spawn_ttl_sweep_task,
-    spawn_metrics_task, spawn_vertex_monitoring_task, start_discovery_listener, HexConfig,
+    elect, parse_preference, spawn_discovery_task, spawn_metrics_task, spawn_vertex_monitoring_task,
+    start_discovery_listener, LatticeMember, ROLE_OVERSEER,
     HexDBEngine, HexIdentity, PeerHex, RuntimeInfo,
 };
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -85,7 +86,33 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let role = elect_role(&config, &id.to_string(), &name, &peers);
+    let preference = parse_preference(&config.identity.role).unwrap_or_else(|e| {
+        error!("❌ {}", e);
+        std::process::exit(1);
+    });
+    let provisional = PeerHex {
+        id: id.to_string(),
+        name: name.clone(),
+        role: String::new(),
+        lattice: config.network.lattice_name.clone(),
+        ip: config.network.discovery_endpoint.clone(),
+        api_endpoint: config.network.api_endpoint.clone(),
+        ram_mb: config.memory.ram_mb,
+        disk_mb: config.storage.disk_mb,
+        preference,
+        last_seq: 0,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        replication_state: String::new(),
+        applied_seq: 0,
+    };
+    let role = elect(&provisional, &peers);
+    match peers.iter().find(|p| p.role == ROLE_OVERSEER) {
+        Some(overseer) if role != ROLE_OVERSEER => info!(
+            "🤝 Joining lattice '{}' as {}. Overseer is '{}'.",
+            config.network.lattice_name, role, overseer.name
+        ),
+        _ => info!("🎖️ Starting as {} of lattice '{}'.", role, config.network.lattice_name),
+    }
 
     // Open storage: load SSTable indexes, replay the WAL, and start the WAL writer.
     info!("🛠️  Opening storage at {}...", storage_dir.display());
@@ -101,27 +128,20 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     };
-    info!("✅ Hex '{}' (id: {}) initializing as {}...", engine.name, engine.id, engine.hex_type);
+    info!("✅ Hex '{}' (id: {}) initializing as {}...", engine.name, engine.id, engine.role());
 
-    // Set peers after discovering them
+    // Remember the peers found at startup.
     {
+        let now = chrono::Utc::now();
         let mut known = engine.peers.lock().await;
-        *known = peers.clone();
+        *known = peers
+            .into_iter()
+            .map(|hex| LatticeMember { hex, last_seen: now, status: "active".into() })
+            .collect();
     }
 
-    let self_hex = PeerHex {
-        id: engine.id.to_string(),
-        name: name.clone(),
-        role: role.clone(),
-        lattice: config.network.lattice_name.clone(),
-        ip: config.network.discovery_endpoint.clone(),
-    };
-
-    // Start the discovery listener.
-    tokio::spawn(start_discovery_listener(
-        config.network.discovery_endpoint.clone(),
-        self_hex,
-    ));
+    // Answer other hexes' discovery handshakes.
+    tokio::spawn(start_discovery_listener(engine.clone()));
 
     // Initialize security settings & create defaults if not present.
     info!("🔐 Initializing security settings...");
@@ -159,6 +179,19 @@ async fn main() -> anyhow::Result<()> {
         Duration::from_secs(config.memory.vertex_integrity_check_frequency.max(1)),
         shutdown_rx.clone(),
     );
+
+    // Re-probe peers and re-elect roles periodically.
+    spawn_discovery_task(
+        engine.clone(),
+        Duration::from_secs(config.network.discovery_interval_seconds.max(1)),
+        shutdown_rx.clone(),
+    );
+
+    // Plugins consume the change feed while this hex is the Overseer.
+    hexdb_core::spawn_plugins(engine.clone(), shutdown_rx.clone());
+
+    // Follow the Overseer whenever this hex isn't one.
+    hexdb_core::spawn_replication_task(engine.clone(), shutdown_rx.clone());
 
     // Record metrics samples for the dashboard's charts.
     spawn_metrics_task(
@@ -258,57 +291,6 @@ fn parse_args() -> anyhow::Result<Option<PathBuf>> {
     }
 
     Ok(config)
-}
-
-/// Decide this hex's role in the lattice.
-/// If no Overseer exists, nodes are ranked by RAM, then disk, then ULID, and the top node becomes Overseer.
-fn elect_role(config: &HexConfig, local_id: &str, local_name: &str, peers: &[PeerHex]) -> String {
-    // If no overseer exists, determine if we should become one
-    let has_overseer = peers.iter().any(|p| p.role == "Overseer");
-
-    if has_overseer {
-        info!(
-            "🤝 Existing Overseer found. Joining lattice '{}' as a Harvester.",
-            config.network.lattice_name
-        );
-        return "Harvester".to_string();
-    }
-
-    let mut all_nodes = peers.to_vec();
-    all_nodes.push(PeerHex {
-        id: local_id.to_string(),
-        name: local_name.to_string(),
-        role: "Unassigned".to_string(),
-        lattice: config.network.lattice_name.clone(),
-        ip: config.network.discovery_endpoint.clone(),
-    });
-
-    // Rank by RAM, then disk, then ULID.
-    // TODO: peers don't report RAM/disk yet, so fixed values are assumed for them.
-    let ram = |p: &PeerHex| if p.id == local_id { config.memory.ram_mb } else { 512 };
-    let disk = |p: &PeerHex| if p.id == local_id { config.storage.disk_mb } else { 8192 };
-    all_nodes.sort_by(|a, b| {
-        ram(b)
-            .cmp(&ram(a))
-            .then(disk(b).cmp(&disk(a)))
-            .then(a.id.cmp(&b.id))
-    });
-
-    let elected = &all_nodes[0];
-    if elected.id == local_id {
-        info!(
-            "🎖️ Elected as Overseer for lattice '{}'.",
-            config.network.lattice_name
-        );
-        "Overseer".to_string()
-    } else {
-        info!(
-            "🤝 Joining lattice '{}' as Harvester. Overseer is '{}'.",
-            config.network.lattice_name,
-            elected.name
-        );
-        "Harvester".to_string()
-    }
 }
 
 async fn shutdown_signal() {

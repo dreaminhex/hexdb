@@ -1,6 +1,12 @@
 {
   "@streams/kafka": {
     "path": "./plugins/streams/kafka",
-    "type": "stream"
+    "type": "stream",
+    "enabled": false
+  },
+  "@examples/change-logger": {
+    "path": "./plugins/examples/change-logger",
+    "type": "stream",
+    "enabled": false
   }
 }

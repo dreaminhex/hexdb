@@ -20,7 +20,7 @@ use crate::{
     catalog::{validate_tessellation_name, Catalog, TessellationInfo},
     document::Document,
     hex::{DocKey, Hex, IntegrityReport, Lookup},
-    network::discovery::PeerHex,
+    network::discovery::LatticeMember,
     sst::{parse_document, CompactionStats, DiskLookup, SstEntry, SstStore},
     wal::{self, WalOp, WalRecord, WalWriter},
     HexConfig,
@@ -41,7 +41,12 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
+mod indexing;
+mod replica;
+pub use replica::{ReplicaCursor, ReplicaWrite, REPLICATION_TESSELLATION};
+mod transactions;
 mod writes;
+pub use transactions::{parse_transaction, TransactionResult, TxOpKind, TxOperation, TxResult, MAX_TRANSACTION_OPS};
 pub use writes::{
     DocumentQuery, IdempotencyKey, ListPage, Outcome, QueryPage, UpdateSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
 };
@@ -62,6 +67,8 @@ pub enum EngineError {
     Unprocessable(String),
     Invalid(String),
     Conflict(String),
+    /// This hex is a read-only replica; writes go to the Overseer.
+    ReadOnly(String),
 }
 
 impl fmt::Display for EngineError {
@@ -70,6 +77,7 @@ impl fmt::Display for EngineError {
             EngineError::NotFound(m)
             | EngineError::Invalid(m)
             | EngineError::Conflict(m)
+            | EngineError::ReadOnly(m)
             | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }
@@ -154,10 +162,12 @@ pub struct HexDBEngine {
     pub config: HexConfig,
     pub id: Ulid,
     pub name: String,
-    pub hex_type: String,
+    /// Lattice role (Overseer, Harvester or Replicant); changes when the lattice re-elects.
+    role: std::sync::RwLock<String>,
     pub version: String,
     pub start_datetime: DateTime<Utc>,
-    pub peers: Arc<Mutex<Vec<PeerHex>>>,
+    /// Other hexes in the lattice, as last seen by discovery.
+    pub peers: Arc<Mutex<Vec<LatticeMember>>>,
 
     storage_dir: PathBuf,
     wal_dir: PathBuf,
@@ -180,6 +190,16 @@ pub struct HexDBEngine {
     pub(crate) queries_total: AtomicU64,
     /// Recent metrics samples, for charts.
     pub history: crate::metrics::MetricsHistory,
+    /// Committed changes, for `/changes`, replication, and plugins.
+    pub changes: crate::changes::ChangeFeed,
+    /// Secondary indexes (contents in memory). Never held across an await.
+    pub(crate) indexes: std::sync::RwLock<crate::index::Indexes>,
+    /// The Overseer's API endpoint, when this hex is a replica (for error messages).
+    pub overseer_endpoint: std::sync::RwLock<Option<String>>,
+    /// What this hex's replication is doing.
+    pub replication: std::sync::Mutex<crate::replication::ReplicationStatus>,
+    /// Loaded plugins and their delivery state.
+    pub plugins: crate::plugins::PluginRegistry,
 }
 
 const MAX_WRITE_RETRIES: usize = 16;
@@ -217,7 +237,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis() },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
                 );
                 catalog_changed = true;
             }
@@ -263,7 +283,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis() },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
                 );
                 catalog_changed = true;
             }
@@ -299,7 +319,7 @@ impl HexDBEngine {
         let engine = HexDBEngine {
             id: identity.id,
             name: identity.name,
-            hex_type: identity.hex_type,
+            role: std::sync::RwLock::new(identity.hex_type),
             version: env!("CARGO_PKG_VERSION").to_string(),
             start_datetime: Utc::now(),
             peers: Arc::new(Mutex::new(Vec::new())),
@@ -321,14 +341,30 @@ impl HexDBEngine {
             writes_total: AtomicU64::new(0),
             queries_total: AtomicU64::new(0),
             history: crate::metrics::MetricsHistory::default(),
+            changes: crate::changes::ChangeFeed::new(next_seq, crate::changes::CHANGE_HISTORY),
+            indexes: std::sync::RwLock::new(crate::index::Indexes::default()),
+            overseer_endpoint: std::sync::RwLock::new(None),
+            replication: std::sync::Mutex::new(crate::replication::ReplicationStatus::default()),
+            plugins: crate::plugins::PluginRegistry::default(),
         };
 
         // Move recovered writes into SSTables and retire the old WAL segments.
         if replay.segments > 0 {
             engine.flush().await.context("Failed to flush recovered WAL records")?;
         }
+        engine.rebuild_indexes().await?;
 
         Ok(engine)
+    }
+
+    /// This hex's current lattice role.
+    pub fn role(&self) -> String {
+        self.role.read().unwrap().clone()
+    }
+
+    /// Change this hex's lattice role (after an election).
+    pub fn set_role(&self, role: &str) {
+        *self.role.write().unwrap() = role.to_string();
     }
 
     /// Picks a random name for the Hex from the provided list of names.
@@ -385,21 +421,52 @@ impl HexDBEngine {
             || self.tessellation_info(name).is_some_and(|info| info.kind == "system")
     }
 
+    /// True if this hex accepts writes (it is the Overseer of its lattice).
+    pub fn is_writable(&self) -> bool {
+        self.role() == crate::network::discovery::ROLE_OVERSEER
+    }
+
+    /// Fail with `EngineError::ReadOnly` unless this hex accepts writes.
+    pub fn ensure_writable(&self) -> Result<()> {
+        if self.is_writable() {
+            return Ok(());
+        }
+        let overseer = self.overseer_endpoint.read().unwrap().clone();
+        Err(EngineError::ReadOnly(match overseer {
+            Some(endpoint) => format!(
+                "This hex is a {} (a read-only replica). Send writes to the Overseer at http://{}.",
+                self.role(),
+                endpoint
+            ),
+            None => format!("This hex is a {} (a read-only replica) and no Overseer is reachable right now; try again shortly.", self.role()),
+        })
+        .into())
+    }
+
     /// Create a system tessellation if missing, bypassing user-facing name rules.
-    fn ensure_system_tessellation(&self, name: &str) -> Result<()> {
+    pub(crate) fn ensure_system_tessellation(&self, name: &str) -> Result<()> {
         let mut catalog = self.catalog.lock().unwrap();
         if !catalog.tessellations.contains_key(name) {
             catalog.tessellations.insert(
                 name.to_string(),
-                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis() },
+                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
             );
             catalog.save(&self.storage_dir)?;
         }
         Ok(())
     }
 
-    /// Create a tessellation. Returns false if it already exists.
+    /// Create a tessellation. Returns false if it already exists. User
+    /// tessellations can only be created on the Overseer.
     pub fn create_tessellation(&self, name: &str, kind: &str) -> Result<bool> {
+        if kind == "user" {
+            self.ensure_writable()?;
+        }
+        self.create_tessellation_unchecked(name, kind)
+    }
+
+    /// Create a tessellation without the write guard (replication).
+    pub(crate) fn create_tessellation_unchecked(&self, name: &str, kind: &str) -> Result<bool> {
         validate_tessellation_name(name).map_err(|e| EngineError::Invalid(e.to_string()))?;
         let mut catalog = self.catalog.lock().unwrap();
         if let Some(existing) = catalog.find_case_insensitive(name) {
@@ -414,7 +481,7 @@ impl HexDBEngine {
         }
         catalog.tessellations.insert(
             name.to_string(),
-            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis() },
+            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
         );
         catalog.save(&self.storage_dir)?;
         info!("🧩 Created tessellation '{}' ({}).", name, kind);
@@ -430,6 +497,12 @@ impl HexDBEngine {
 
     /// Delete a tessellation and all of its documents. Returns false if it doesn't exist.
     pub async fn delete_tessellation(&self, name: &str) -> Result<bool> {
+        self.ensure_writable()?;
+        self.delete_tessellation_unchecked(name).await
+    }
+
+    /// Delete a tessellation without the write guard (replication).
+    pub(crate) async fn delete_tessellation_unchecked(&self, name: &str) -> Result<bool> {
         if !self.tessellation_exists(name) {
             return Ok(false);
         }
@@ -440,11 +513,25 @@ impl HexDBEngine {
             let drop_seq = state.next_seq;
             state.next_seq += 1;
             state.hex.remove_tessellation(name);
+            self.indexes.write().unwrap().by_tessellation.remove(name);
 
-            let mut catalog = self.catalog.lock().unwrap();
-            catalog.tessellations.remove(name);
-            catalog.dropped.insert(name.to_string(), drop_seq);
-            catalog.save(&self.storage_dir)?;
+            let saved = {
+                let mut catalog = self.catalog.lock().unwrap();
+                catalog.tessellations.remove(name);
+                catalog.dropped.insert(name.to_string(), drop_seq);
+                catalog.save(&self.storage_dir)
+            };
+            // The sequence number is used either way; the feed must not stall on it.
+            let change = crate::changes::Change {
+                seq: drop_seq,
+                timestamp: Utc::now(),
+                kind: crate::changes::ChangeKind::DropTessellation,
+                tessellation: name.to_string(),
+                id: None,
+                document: None,
+            };
+            self.changes.complete(drop_seq, 1, if saved.is_ok() { vec![change] } else { Vec::new() });
+            saved?;
         }
         self.sst.drop_tessellation(name).await?;
         info!("🗑️ Deleted tessellation '{}'.", name);
@@ -463,6 +550,18 @@ impl HexDBEngine {
         }
         self.reads_total.fetch_add(1, Ordering::Relaxed);
         Ok(self.read_latest(&DocKey::new(tess, id)).await?.0)
+    }
+
+    /// A document and its version (the sequence number of its newest write).
+    /// Pass the version as a transaction's `if_version` for optimistic concurrency.
+    pub async fn get_document_versioned(&self, tess: &str, id: &str) -> Result<Option<(Document, u64)>> {
+        let Ok(id) = Ulid::from_string(id) else { return Ok(None) };
+        if validate_tessellation_name(tess).is_err() {
+            return Ok(None);
+        }
+        self.reads_total.fetch_add(1, Ordering::Relaxed);
+        let (doc, seq) = self.read_latest(&DocKey::new(tess, id)).await?;
+        Ok(doc.map(|d| (d, seq)))
     }
 
     /// Number of visible documents in a tessellation.

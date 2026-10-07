@@ -4,6 +4,7 @@ import {
   IconDashboard,
   IconFileCode2,
   IconHexagon3d,
+  IconPlug,
   IconReport,
   IconSettings,
   IconUserCheck,
@@ -56,10 +57,14 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
       { title: "Roles", route: "/roles", icon: IconUserCheck },
     ],
   },
+  {
+    label: "System",
+    items: [{ title: "Plugins", route: "/plugins", icon: IconPlug }],
+  },
 ]
 
 const FOOTER_ITEMS: NavItem[] = [
-  { title: "Logs", icon: IconReport },
+  { title: "Logs", route: "/logs", icon: IconReport },
   { title: "Settings", icon: IconSettings },
 ]
 
@@ -143,7 +148,7 @@ export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps
             <SidebarMenu>
               {FOOTER_ITEMS.map((item) => (
                 <SidebarMenuItem key={item.title}>
-                  <NavLink item={item} active={false} />
+                  <NavLink item={item} active={item.route === activeRoute} />
                 </SidebarMenuItem>
               ))}
             </SidebarMenu>

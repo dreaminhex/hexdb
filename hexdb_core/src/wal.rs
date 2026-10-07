@@ -180,7 +180,8 @@ impl WalWriter {
             return Ok(()); // already stopped
         }
         let result = rx.await.map_err(|_| anyhow!("WAL writer stopped unexpectedly"))?;
-        if let Some(handle) = self.thread.lock().unwrap().take() {
+        let handle = self.thread.lock().unwrap().take();
+        if let Some(handle) = handle {
             let _ = tokio::task::spawn_blocking(move || handle.join()).await;
         }
         result.map_err(|e| anyhow!("Final WAL sync failed: {}", e))

@@ -138,11 +138,13 @@ node scripts/seed.mjs
 
 Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/). The admin UI has:
 
-- **Dashboard**: live document, memory, disk and operation stats; an activity chart (documents per tessellation, operations per minute, or storage over the last 15 minutes to 6 hours); vertex health; the lattice; and per-tessellation sizes. "Flush to disk" writes unflushed data to SSTables.
-- **Queries**: a GraphQL console with schema-aware autocomplete, validation, example queries, history, and JSON or table results. Press Ctrl+Enter (⌘+Enter on macOS) to run.
-- **Tessellations**: create and delete tessellations and see their sizes.
-- **Documents**: browse a tessellation with a JSON filter, sort and paging, and create, edit or delete documents in a JSON editor.
+- **Dashboard**: live document, memory, disk and operation stats; an activity chart (documents per tessellation, operations per minute, or storage over the last 15 minutes to 6 hours); vertex health; the lattice with each hex's role and replication state; and per-tessellation sizes. On a replica, a banner names the Overseer. "Flush to disk" writes unflushed data to SSTables.
+- **Queries**: a GraphQL console with schema-aware autocomplete, validation, example queries (including aggregations, full-text search, and transactions), history, and JSON or table results. Press Ctrl+Enter (⌘+Enter on macOS) to run.
+- **Tessellations**: create and delete tessellations, see their sizes, and manage their indexes.
+- **Documents**: browse a tessellation with a JSON filter, sort and paging, and create, edit or delete documents in a JSON editor. The footer shows which index answered the query.
 - **Users** and **Roles**: manage accounts and role grants.
+- **Plugins**: loaded plugins, their state, and what they've delivered.
+- **Logs**: the server's recent log, tailed live, with level, module and text filters.
 
 The sun/moon button in the header switches between light, dark and system themes.
 
@@ -166,7 +168,7 @@ cargo test -p hexdb_tests                  # end-to-end tests only
 cargo test -p hexdb_tests -- --ignored     # known bugs (see TODO.md); these currently fail
 ```
 
-Set `HEXDB_TEST_KEEP=1` to keep each test's directory (config, data, and `server.log`) for inspection. Failed tests always keep theirs and print the server log tail.
+Lattice tests start several servers that discover each other on loopback, replicate, and fail over. Set `HEXDB_TEST_KEEP=1` to keep each test's directory (config, data, and `server.log`) for inspection. Failed tests always keep theirs and print the server log tail.
 
 ## API Operations
 
@@ -299,6 +301,7 @@ REST (listing, `_query`, `count`, `_update`) and GraphQL share one filter langua
 | `$startsWith`, `$endsWith` | String prefix or suffix |
 | `$not` | Negates the operators inside it |
 | `$and`, `$or`, `$not` (top level) | Combine filters |
+| `$text` (top level) | Full-text search: every word must appear (case-insensitive, whole words). Searches the tessellation's text index fields, or every string field when it has none |
 
 Dotted paths reach into nested objects, and a condition on an array field matches if any element matches. Every operator can also be written with `_` instead of `$` (`_gte`, `_or`); use that form inside GraphQL query text, where `$` marks a variable.
 
@@ -328,9 +331,108 @@ query Recent($filter: JSON) {
 | `document(tessellation, id)` | `replaceDocument`, `patchDocument`, `deleteDocument` |
 | `documents(tessellation, filter, sort, limit, offset, after)` | `updateDocuments(tessellation, filter, update)` (atomic) |
 | `count(tessellation, filter)` | `createTessellation`, `deleteTessellation` |
+| `aggregate(tessellation, filter, groupBy, aggregates, sort, limit, offset)` | `transaction(operations)` |
+| `changes(after, tessellation, limit)` | `createIndex`, `dropIndex` |
 | `users`, `user(idOrLogin)`, `roles`, `status` | |
 
 Document mutations take an optional `idempotencyKey` argument; replayed mutations are listed in the response's `extensions.idempotentReplays` and the HTTP response carries `Idempotent-Replayed: true`. Documents expose their fields through the `JSON` scalar (`data`, `json`, or `field(path)`). Without `sort`, results come in ID order and `next` pages forward via `after`; with `sort`, page with `offset`. Errors include `extensions.code` (`NOT_FOUND`, `INVALID_REQUEST`, `FORBIDDEN`, `CONFLICT`, ...). System tessellations aren't reachable through document fields.
+
+### Aggregations
+
+Group the documents that match a filter and summarize each group. Operators: `$count` (`"*"` for documents, or a field for non-null values), `$countDistinct`, `$sum`, `$avg`, `$min`, `$max`. Each row holds the group-by fields and one column per aggregate; without `group_by` there's a single row.
+
+```bash
+curl -X POST http://localhost:7700/orders/_aggregate -H "Content-Type: application/json" -d '{
+  "filter": { "status": { "$ne": "cancelled" } },
+  "group_by": ["customer.country"],
+  "aggregates": { "orders": { "$count": "*" }, "revenue": { "$sum": "total" }, "average": { "$avg": "total" } },
+  "sort": "-revenue",
+  "limit": 10 }'
+# => { "rows": [{ "customer.country": "US", "orders": 61, "revenue": 171234.5, "average": 2807.1 }, ...],
+#      "total_groups": 10, "matched": 351 }
+```
+
+GraphQL: `aggregate(tessellation: "orders", groupBy: ["status"], aggregates: { n: { _count: "*" } }) { rows totalGroups matched }`.
+
+### Transactions
+
+`POST /transactions` runs operations across any user tessellations atomically: all of them are written in one WAL record, or none are (rollback). Later operations see the effects of earlier ones. Operations: `get`, `check`, `insert`, `replace`, `patch`, `delete`. Preconditions on any operation with an `id`:
+
+- `if_version`: the document's version must equal this (`0` means it must not exist). Versions come back in every result and in the `ETag` header of `GET /{tessellation}/{id}`.
+- `if_match`: the document must exist and match this filter.
+
+```bash
+curl -X POST http://localhost:7700/transactions -H "Content-Type: application/json" -d '{ "operations": [
+  { "op": "patch", "tessellation": "accounts", "id": "01J...A", "data": { "balance": 70 }, "if_match": { "balance": { "$gte": 30 } } },
+  { "op": "patch", "tessellation": "accounts", "id": "01J...B", "data": { "balance": 35 } },
+  { "op": "insert", "tessellation": "ledger", "data": { "from": "01J...A", "to": "01J...B", "amount": 30 } } ] }'
+# => { "results": [{ "op": "patch", "id": "...", "version": 812, "document": {...} }, ...], "writes": 3 }
+```
+
+A failed precondition returns 409 and a missing document 404; nothing is written. Every document a transaction reads or writes is validated at commit, so concurrent transactions behave as if they ran one at a time. Up to 1,000 operations; `Idempotency-Key` works as for other writes. GraphQL: `transaction(operations: JSON!, idempotencyKey)`.
+
+### Indexes
+
+Secondary indexes speed up filtered queries, counts, and aggregations; results are identical with or without them. Every document is already reachable by its `id`, a ULID that HexDB generates and that sorts by creation time.
+
+- **Field indexes** cover one or more fields (composite) and can be `unique`. They answer equality, `$in`, ranges, and `$startsWith` on the first field, and equality on all fields together. Array values index each element.
+- **Text indexes** (an inverted index of words, one per tessellation, over any string fields) answer `$text`.
+
+```bash
+curl -X POST http://localhost:7700/tessellations/orders/indexes -H "Content-Type: application/json" -d '{ "fields": ["status"] }'
+curl -X POST http://localhost:7700/tessellations/orders/indexes -H "Content-Type: application/json" -d '{ "fields": ["customer.country", "status"] }'
+curl -X POST http://localhost:7700/tessellations/customers/indexes -H "Content-Type: application/json" -d '{ "fields": ["email"], "unique": true }'
+curl -X POST http://localhost:7700/tessellations/articles/indexes -H "Content-Type: application/json" -d '{ "fields": ["title", "body"], "kind": "text" }'
+curl http://localhost:7700/tessellations/orders/indexes
+curl -X DELETE http://localhost:7700/tessellations/orders/indexes/status
+```
+
+Query responses include `"plan": { "indexes": [...], "scanned": n }` (GraphQL: `indexesUsed`, `scanned`). Index definitions are stored in `catalog.json`; their contents live in memory and are rebuilt at startup. A write that would duplicate a unique key fails with 409. Manage indexes in the admin UI from the Tessellations page.
+
+### Change Feed
+
+Every committed write is published, in order, once it is durable: `{"seq", "timestamp", "op": "put" | "delete" | "drop_tessellation", "tessellation", "id", "document"}`. System tessellations are left out.
+
+```bash
+curl "http://localhost:7700/changes"                          # the current position: { "changes": [], "last_seq": 830 }
+curl "http://localhost:7700/changes?after=830&wait=30"        # long poll; pass last_seq back as after
+curl "http://localhost:7700/changes?after=830&tessellation=orders&limit=100"
+curl -N "http://localhost:7700/changes/stream?after=830"      # Server-Sent Events (event: change, id: <seq>)
+```
+
+The last 10,000 changes are kept in memory, starting when the server starts. Asking for older ones returns 410 (`history_expired`): re-read what you need and continue from a fresh `last_seq`. GraphQL: `changes(after, tessellation, limit) { changes lastSeq }`.
+
+### Plugins
+
+Plugins receive the change feed while their hex is the Overseer. The registry (`plugins.registry`, default `plugins.json` next to the config file) lists plugin folders, each with a `plugin.toml`:
+
+```toml
+id = "@examples/change-logger"
+name = "Change logger"
+version = "0.1.0"
+command = ["node", "change-logger.mjs"]   # a process: one change per line on stdin
+# tessellations = ["orders"]              # optional filter
+
+# ...or a webhook: batches of changes POSTed as a JSON array
+# [webhook]
+# url = "http://localhost:9000/hexdb"
+# headers = { Authorization = "Bearer ..." }
+# batch_size = 100
+```
+
+A process plugin's stdout and stderr go to the HexDB log, and it's restarted if it exits. `GET /plugins` (and the Plugins page) shows each plugin's state, deliveries, and errors. Plugins start at the current end of the feed, so changes made while a plugin is down are skipped; use `/changes` with a stored cursor when every change must be processed. See [plugins/examples/change-logger](plugins/examples/change-logger) (disabled in [plugins.json](plugins.json) by default).
+
+### Logs
+
+The server keeps its last 5,000 log records in memory. The admin UI's Logs page tails them with level, module, and text filters.
+
+```bash
+curl "http://localhost:7700/logs?level=warn&limit=100"        # oldest first; "last_seq" is the newest record
+curl "http://localhost:7700/logs?after=1200&q=index"          # tail after a record, search messages and fields
+curl "http://localhost:7700/logs?target=hexdb_core::network"  # module prefix
+```
+
+Writes, errors, and background tasks are logged at info and above; reads at debug. `RUST_LOG` sets the level for both the console and the in-memory log.
 
 ### Operations
 
@@ -339,7 +441,39 @@ curl http://localhost:7700/health
 curl http://localhost:7700/status
 curl "http://localhost:7700/status/history?minutes=60"   # metrics samples every 15 s, kept for 6 hours
 curl -X POST http://localhost:7700/flush    # write unflushed data to SSTables
+curl http://localhost:7700/plugins          # loaded plugins and their delivery state
 ```
+
+### Lattices and Replication
+
+Hexes with the same `network.lattice_name` that can reach each other's discovery endpoints form a lattice. Discovery runs every `network.discovery_interval_seconds` and elects one **Overseer**:
+
+- The sitting Overseer keeps the role while it's reachable, so a returning hex doesn't take it back.
+- Otherwise the hex preferring `overseer` wins, then the one with the most RAM, then the most disk, then the lowest ID.
+- Hexes with `role = "harvester"` or `"replicant"` never lead.
+
+| Role | What it does |
+| --- | --- |
+| Overseer | Takes all writes, publishes the change feed, and runs plugins. |
+| Harvester | A read replica: keeps a full copy by following the Overseer, and serves reads. Can be elected Overseer. |
+| Replicant | A standby copy that follows the Overseer like a Harvester but is never elected. Use it for backups or to rebuild Harvesters. |
+
+A new replica copies a snapshot from the Overseer, then streams its changes; `/status` shows `replication.state` (`streaming`, `syncing`, ...) and `lag`. Writes sent to a replica fail with 421 (`read_only_replica`) and name the Overseer's address. If the Overseer stops answering for about three discovery rounds, the remaining hexes elect a new one and the others re-sync from it. Replication is asynchronous: a write the Overseer acknowledged but no replica received is lost if the Overseer fails before it comes back. Hexes in a lattice must share `storage.encryption_key`, which also authenticates replication between them.
+
+```toml
+[network]
+api_endpoint = "10.0.0.11:7700"
+discovery_endpoint = "10.0.0.11:7702"
+lattice_name = "Nebula Prime"
+peers = ["10.0.0.12:7702", "10.0.0.13:7702"]  # other hexes' discovery endpoints
+discovery_interval_seconds = 10
+# advertise_host = "db1.example.com"          # address others should use, if different
+
+[identity]
+role = "auto"   # auto | overseer | harvester | replicant
+```
+
+Hexes on one machine also find each other on discovery ports 7702-7709 (`scan_local_ports = true`).
 
 ### Configuration
 
@@ -374,16 +508,16 @@ A tessellation is a collection of stored documents. Tessellations are used to co
 
 ### Lattice
 
-A lattice is a networked group of three or more hexes. A lattice must have one Overseer hex, one or more Harvester hexes, and one or more Replicant hexes.
+A lattice is a networked group of hexes with one Overseer. A single hex is the Overseer of its own lattice; add Harvesters for read capacity and failover, and Replicants for standby copies. See "Lattices and Replication" above.
 
 ### Hex Types
 
 - Overseer
-  - Primary, routes tasks to Harvester hexes, adds new hexes to the lattice when discovered
+  - The primary: takes all writes, publishes the change feed that replicas follow, and runs plugins
 - Harvester
-  - Serves data when requested by an Overseer
+  - A read replica that can be elected Overseer if the Overseer fails
 - Replicant
-  - Cold data storage, can be restored by an Overseer if a dead Harverster is detected
+  - A standby copy that is never elected; for backups and rebuilding Harvesters
 
 ## Features
 
@@ -394,59 +528,48 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
   - ✅ Documents (create, read, replace, patch, delete, list, count)
   - ✅ Bulk writes (atomic insert, replace, patch, and update by filter)
   - ✅ Idempotency keys
-- ✅ GraphQL API (queries, filters, sorting, paging, mutations) with an in-UI query console
-- ✅ Admin UI (live dashboard, query console, tessellation, document, user and role management, light and dark themes)
-  - ✅ Tessellations (list, create, read, delete)
-  - ✅ Users (create, read, update, delete)
-  - ✅ Roles (read)
-  - Permissions (read)
-  - ✅ Status (hex metrics)
-  - ✅ Health
-- ✅ Data replication
+- ✅ GraphQL API (queries, filters, sorting, paging, aggregations, transactions, mutations) with an in-UI query console
+- ✅ Admin UI (live dashboard, query console, tessellations and indexes, documents, users, roles, plugins, logs, light and dark themes)
 - ✅ Collections (Tessellations)
-- ✅ Plugin Ecosystem
-- ✅ Horizontal Partitioning
-- ✅ Configuration (URLs, RAM/DISK usage. compression)
-- ✅ Strong Typing (string, 32-, 64, 128-bit integer, boolean, datetime, binary)
-- ✅ Type Introspection
-- ✅ Write-Ahead Logging & Recovery
-- ✅ Encryption (AES-GCM)
-- ✅ Compression (zstd, default 0)
-- ✅ Self-tuning flush heuristics
-- ✅ SSTables integration (long-term storage)
-- ✅ Compaction
-- ✅ WAL file rotation logic
-- ✅ TTL Sweeps
-- ✅ Percolation
-- ✅ Hot set caching
-- ✅ Graceful task shutdown
-- ✅ Recovery
-- ✅ Configuration
+- ✅ Filters, sorting, and paging
+- ✅ Aggregations (count, count distinct, sum, average, min, max, group by)
+- ✅ ACID transactions across tessellations (preconditions, rollback, serializable for the documents they touch)
+- ✅ Indexes: field, composite, unique, and full-text (inverted); ULID primary keys
+- ✅ Full-text search (`$text`)
+- ✅ Change data stream (polling, long polling, Server-Sent Events)
+- ✅ Network discovery and Overseer election, with failover
+- ✅ Data replication (snapshot plus change stream; Harvester and Replicant read replicas)
+- ✅ Plugin loader (process and webhook plugins on the change stream)
+- ✅ Logging (in-memory log with API and UI)
+- ✅ Configuration (endpoints, lattice, RAM and disk budgets, compression, plugins)
+- ✅ Typed storage of JSON values (strings, integers up to 128-bit, floats, booleans, RFC 3339 datetimes, arrays, objects)
+- ✅ Write-ahead logging and crash recovery
+- ✅ Encryption at rest for the WAL (AES-256-GCM)
+- ✅ Compression (Zstandard)
+- ✅ SSTables (long-term storage), compaction, WAL rotation
+- ✅ TTL (per-document expiry)
+- ✅ Vertex sharding with Reed-Solomon repair
+- ✅ Graceful shutdown
 
 ### In-Progress
 
-- Roles and permissions enforcement, authentication
+- Authentication and enforcement of roles and permissions (Phase 7). Requests are not authenticated yet.
 
 ### Planned
 
-- Read/Write Endpoints
-- Network Discovery
+- Horizontal partitioning (sharding data across hexes; today every hex holds a full copy)
+- Synchronous replication options and write forwarding from replicas
+- Persistent change feed cursors for plugins
+- Decimal and binary values through the API (the storage types exist)
 - Open Telemetry
-- Aggregations
-- Ingest Sources
-- Indexes (Primary, Composite)
-- Full text search
+- Ingest sources
 - Locking
-- Change Data Streams
-- ACID Transactions
-- Logging
-- Schemas & Versioning
-- API Documentation (OAS 3.0 & Swagger)
+- Schemas & versioning
+- API documentation (OAS 3.0 & Swagger)
 - Clients (.NET, Node)
-- Community (wget, brew, chocolatey, apt-get)
-- Network load balancing by manager node
-- IP address blocking (IP or CIDR)
-- Whitelist
+- Community packages (wget, brew, chocolatey, apt-get)
+- Network load balancing by the Overseer
+- IP address blocking (IP or CIDR) and allow lists
 - Programmable stored actions and queries, with chaining
 
 ## Appendix
@@ -455,7 +578,7 @@ A lattice is a networked group of three or more hexes. A lattice must have one O
 
 ```text
 <storage.path>/
-├── catalog.json              tessellations, and the sequence number of each dropped one
+├── catalog.json              tessellations and their index definitions, and the sequence number of each dropped one
 ├── hexdb.pid                 runtime file of the running server (PID, endpoint, shutdown token)
 ├── wal/
 │   └── <first-seq>.wal       write-ahead log segments, oldest first

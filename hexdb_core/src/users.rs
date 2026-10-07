@@ -413,6 +413,11 @@ pub async fn get_role(engine: &HexDBEngine, name: &str) -> Result<Option<RoleVie
 /// Create default roles and the configured admin user if missing, and
 /// migrate users and roles stored in the old single-document format.
 pub async fn bootstrap(engine: &HexDBEngine, security: &SecurityConfig) -> Result<()> {
+    // Replicas receive users and roles from the Overseer.
+    if !engine.is_writable() {
+        info!("🔐 This hex is a {}; users and roles are replicated from the Overseer.", engine.role());
+        return Ok(());
+    }
     let login = security.admin_login.trim();
     let password = security.admin_password.trim();
     let email = security.admin_email.trim();

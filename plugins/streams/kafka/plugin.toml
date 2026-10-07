@@ -4,4 +4,6 @@ id = "@streams/kafka"
 type = "stream"
 entry = "main.rs"
 description = "Kafka Stream Output Plugin"
-version = "0.1.0"
+version = "0.1.0"# Not implemented yet: add `command = [...]` (a process that reads change
+# lines on stdin and produces them to Kafka) or a [webhook] section, then
+# enable it in plugins.json. See hexdb_core/src/plugins.rs for the protocol.

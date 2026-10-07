@@ -35,3 +35,4 @@ hexdb.pid
 *.hexdb.pid
 # Local notes
 /TODO.md
+plugins/**/changes.ndjson

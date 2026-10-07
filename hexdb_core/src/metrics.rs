@@ -27,6 +27,8 @@ pub struct HexMeta {
     pub storage: StorageMetrics,
     pub operations: OperationMetrics,
     pub network: NetworkMetrics,
+    /// This hex's replication (see `ReplicationStatus`), with its lag.
+    pub replication: serde_json::Value,
 }
 
 /// Represents the metadata of a vertex in the HexDB engine.
@@ -94,22 +96,30 @@ pub struct OperationMetrics {
     pub queries_total: u64,
 }
 
-/// Represents a single Hex node participating in the lattice.
+/// A hex in the lattice, as seen from this hex.
 #[derive(Debug, Serialize, Clone)]
 pub struct LatticeHex {
+    pub id: String,
     pub name: String,
     pub role: String,
+    /// "active", or "lost" when a peer stopped answering discovery.
     pub status: String,
+    /// Discovery address.
     pub ip: String,
-}
-
-// Represents a hex node in the lattice with its metrics.
-#[derive(Debug, Serialize)]
-pub struct LatticeMetric {
-    pub name: String,
-    pub status: String,
-    pub hex_type: String,
-    pub endpoint: String,
+    pub api_endpoint: String,
+    /// Role preference: auto, overseer, harvester or replicant.
+    pub preference: String,
+    /// Highest sequence number the hex has applied.
+    pub last_seq: u64,
+    /// When discovery last heard from it (None for this hex).
+    pub last_seen: Option<DateTime<Utc>>,
+    pub is_self: bool,
+    /// leading (Overseer), streaming, syncing, waiting, or error.
+    pub replication_state: String,
+    /// Overseer sequence number applied.
+    pub applied_seq: u64,
+    /// Changes behind the Overseer (replicas only, when known).
+    pub lag: Option<u64>,
 }
 
 /// Report structure for the current lattice state.
@@ -157,25 +167,47 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         all_sizes.extend(t.sizes);
     }
 
-    let mut lattice_hexes: Vec<LatticeHex> = Vec::new();
-
-    // Include self
-    lattice_hexes.push(LatticeHex {
-        name: engine.name.clone(),
-        role: engine.hex_type.clone(),
+    // This hex first, then peers.
+    let me = crate::network::discovery::local_identity(engine).await;
+    let mut lattice_hexes: Vec<LatticeHex> = vec![LatticeHex {
+        id: me.id,
+        name: me.name,
+        role: me.role,
         status: "active".to_string(),
-        ip: engine.config.network.discovery_endpoint.clone(),
-    });
-
-    // Include peers
-    let peer_list = engine.peers.lock().await;
-    for peer in peer_list.iter() {
+        ip: me.ip,
+        api_endpoint: me.api_endpoint,
+        preference: me.preference,
+        last_seq: me.last_seq,
+        last_seen: None,
+        is_self: true,
+        replication_state: me.replication_state,
+        applied_seq: me.applied_seq,
+        lag: None,
+    }];
+    for member in engine.peers.lock().await.iter() {
         lattice_hexes.push(LatticeHex {
-            name: peer.name.clone(),
-            role: peer.role.clone(),
-            status: "active".to_string(),
-            ip: peer.ip.clone(),
+            id: member.hex.id.clone(),
+            name: member.hex.name.clone(),
+            role: member.hex.role.clone(),
+            status: member.status.clone(),
+            ip: member.hex.ip.clone(),
+            api_endpoint: member.hex.api_endpoint.clone(),
+            preference: member.hex.preference.clone(),
+            last_seq: member.hex.last_seq,
+            last_seen: Some(member.last_seen),
+            is_self: false,
+            replication_state: member.hex.replication_state.clone(),
+            applied_seq: member.hex.applied_seq,
+            lag: None,
         });
+    }
+    // Lag relative to the Overseer (this hex's own view of it is freshest when it leads).
+    if let Some(head) = lattice_hexes.iter().find(|h| h.role == crate::network::discovery::ROLE_OVERSEER && h.status == "active").map(|h| h.applied_seq) {
+        for hex in lattice_hexes.iter_mut().filter(|h| h.role != crate::network::discovery::ROLE_OVERSEER && h.status == "active") {
+            if matches!(hex.replication_state.as_str(), "streaming" | "syncing") {
+                hex.lag = Some(head.saturating_sub(hex.applied_seq));
+            }
+        }
     }
 
     HexMeta {
@@ -185,7 +217,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         start_datetime: engine.start_datetime,
         uptime_seconds: uptime as u64,
         status: "healthy".to_string(),
-        hex_type: engine.hex_type.clone(),
+        hex_type: engine.role(),
         ram_mb: engine.config.memory.ram_mb,
         disk_mb: engine.config.storage.disk_mb,
         vertices: stats
@@ -232,6 +264,17 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
                 name: engine.config.network.lattice_name.clone(),
                 hexes: lattice_hexes,
             },
+        },
+        replication: {
+            let status = engine.replication.lock().unwrap().clone();
+            let mut value = serde_json::to_value(&status).unwrap_or_default();
+            if engine.is_writable() {
+                value["state"] = "leading".into();
+                value["applied_seq"] = engine.changes.published_seq().into();
+            } else {
+                value["lag"] = status.lag().into();
+            }
+            value
         },
     }
 }

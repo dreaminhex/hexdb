@@ -26,6 +26,10 @@ pub struct HexConfig {
     pub security: SecurityConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub identity: IdentityConfig,
+    #[serde(default)]
+    pub plugins: PluginsConfig,
 
     /// The config file this configuration was loaded from, if any.
     #[serde(skip)]
@@ -41,6 +45,18 @@ pub struct NetworkConfig {
     pub query_endpoint: Option<String>,
     pub discovery_endpoint: String,
     pub lattice_name: String,
+    /// Discovery endpoints (`host:port`) of other hexes to probe, e.g. on other machines.
+    #[serde(default)]
+    pub peers: Vec<String>,
+    /// Also probe the local discovery ports 7702-7709 (several hexes on one machine).
+    #[serde(default = "default_true")]
+    pub scan_local_ports: bool,
+    /// Seconds between discovery rounds.
+    #[serde(default = "default_discovery_interval")]
+    pub discovery_interval_seconds: u64,
+    /// Host other hexes should use to reach this one, when the endpoints bind 0.0.0.0.
+    #[serde(default)]
+    pub advertise_host: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -83,6 +99,50 @@ pub struct UiConfig {
     pub path: String,
 }
 
+fn default_discovery_interval() -> u64 {
+    10
+}
+
+/// Which lattice role this hex may take.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct IdentityConfig {
+    /// `auto` (elected), `overseer` (prefer leading), `harvester` or `replicant` (never lead).
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+impl Default for IdentityConfig {
+    fn default() -> Self {
+        IdentityConfig { role: default_role() }
+    }
+}
+
+fn default_role() -> String {
+    "auto".into()
+}
+
+/// Plugins that consume the change feed (see `hexdb_core::plugins`).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PluginsConfig {
+    /// Load plugins at startup.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The plugin registry: absolute, or relative to the config file's folder
+    /// (the working directory when there's no config file).
+    #[serde(default = "default_registry")]
+    pub registry: String,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        PluginsConfig { enabled: true, registry: default_registry() }
+    }
+}
+
+fn default_registry() -> String {
+    "plugins.json".into()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -103,6 +163,10 @@ impl Default for HexConfig {
                 query_endpoint: None,
                 discovery_endpoint: "127.0.0.1:7702".into(),
                 lattice_name: "Nebula Prime".into(),
+                peers: Vec::new(),
+                scan_local_ports: true,
+                discovery_interval_seconds: 10,
+                advertise_host: None,
             },
             security: SecurityConfig {
                 admin_login: "hexdbadmin".into(),
@@ -126,6 +190,8 @@ impl Default for HexConfig {
                 compression_level: 0,
             },
             ui: UiConfig::default(),
+            identity: IdentityConfig::default(),
+            plugins: PluginsConfig::default(),
             source: None,
         }
     }

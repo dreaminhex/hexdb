@@ -1,6 +1,8 @@
 use axum::{
-    extract::DefaultBodyLimit,
-    response::Redirect,
+    extract::{DefaultBodyLimit, Request},
+    http::Method,
+    middleware::{self, Next},
+    response::{Redirect, Response},
     routing::{get, post},
     Extension, Router,
 };
@@ -32,6 +34,17 @@ pub fn app_router(
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/status/history", get(status_history))
+        .route("/logs", get(logs))
+        .route("/plugins", get(plugins))
+        .route("/changes", get(crate::changes::changes))
+        .route("/changes/stream", get(crate::changes::change_stream))
+
+        // Lattice replication (hex to hex, token-protected)
+        .route("/lattice/snapshot", get(crate::lattice::snapshot))
+        .route("/lattice/catalog", get(crate::lattice::catalog))
+        .route("/lattice/snapshot/{tessellation}", get(crate::lattice::snapshot_page))
+        .route("/lattice/changes", get(crate::lattice::changes))
+        .route("/transactions", post(transaction).layer(DefaultBodyLimit::max(BULK_BODY_LIMIT)))
         .route("/flush", post(flush))
         .route("/shutdown", post(shutdown))
 
@@ -41,6 +54,8 @@ pub fn app_router(
         // Tessellations
         .route("/tessellations", get(list_tessellations).post(create_tessellation))
         .route("/tessellations/{name}", get(get_tessellation).delete(delete_tessellation))
+        .route("/tessellations/{name}/indexes", get(list_indexes).post(create_index))
+        .route("/tessellations/{name}/indexes/{index}", axum::routing::delete(drop_index))
 
         // Users and roles
         .route("/users", get(list_users).post(create_user))
@@ -54,6 +69,10 @@ pub fn app_router(
         .route(
             "/{tessellation}/_query",
             post(query_docs).layer(DefaultBodyLimit::max(BULK_BODY_LIMIT)),
+        )
+        .route(
+            "/{tessellation}/_aggregate",
+            post(aggregate_docs).layer(DefaultBodyLimit::max(BULK_BODY_LIMIT)),
         )
         .route(
             "/{tessellation}/_bulk",
@@ -78,7 +97,35 @@ pub fn app_router(
     }
 
     router
+        .layer(middleware::from_fn(log_request))
         .layer(Extension(shutdown_handle))
         .layer(Extension(schema))
         .with_state(engine)
+}
+
+/// Log every API request once it completes. Writes are logged at INFO so they
+/// show up on the Logs page by default; reads (including the UI's own polling)
+/// are logged at DEBUG.
+async fn log_request(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let status = response.status().as_u16();
+    let millis = started.elapsed().as_millis() as u64;
+    if path.starts_with(UI_PREFIX) {
+        return response;
+    }
+    // Query and aggregate requests are POSTs but only read.
+    let read = matches!(method, Method::GET | Method::HEAD | Method::OPTIONS)
+        || path.ends_with("/_query")
+        || path.ends_with("/_aggregate");
+    if status >= 500 {
+        tracing::error!(target: "hexdb_api::requests", %method, %path, status, millis, "{} {} -> {}", method, path, status);
+    } else if read && status < 400 {
+        tracing::debug!(target: "hexdb_api::requests", %method, %path, status, millis, "{} {} -> {}", method, path, status);
+    } else {
+        tracing::info!(target: "hexdb_api::requests", %method, %path, status, millis, "{} {} -> {}", method, path, status);
+    }
+    response
 }
