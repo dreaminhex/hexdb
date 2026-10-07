@@ -10,7 +10,6 @@ import {
   IconUserCircle,
   type Icon,
 } from "@tabler/icons-react"
-import { useTheme } from "next-themes"
 
 import { Badge } from "@/components/ui/badge"
 import {
@@ -112,17 +111,14 @@ function HexIdentity() {
 }
 
 export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps<typeof Sidebar> & { activeRoute?: string }) {
-  const { resolvedTheme } = useTheme()
-  // The light logo has white lettering for dark backgrounds, and vice versa.
-  const logo = resolvedTheme === "light" ? "hexdb_lg_black.png" : "hexdb_logo_light.png"
-
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
             <a href={href("/")} onClick={linkHandler("/")} aria-label="HexDB dashboard">
-              <img src={logo} alt="HexDB" className="h-7" />
+              {/* Transparent, with outlined lettering, so one image works in light and dark themes. */}
+              <img src="hexdb_lg.png" alt="HexDB" className="h-9 w-auto" />
             </a>
           </SidebarMenuItem>
         </SidebarMenu>

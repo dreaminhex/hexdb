@@ -23,7 +23,15 @@ Thumbs.db
 /Cargo.lock
 
 # HexDB specific
+# Data directories (the default and any backups such as .hexdb-legacy-2025) and
+# data files wherever storage.path points: WAL segments, SSTables, the catalog
+# and runtime file. Legacy (pre-Phase 2) WAL files are .dat.
+**/.hexdb/
+**/.hexdb-*/
+*.dat
+*.wal
+*.hxs
+hexdb.pid
 *.hexdb.pid
-hexdb_api/.hexdb
 # Local notes
 /TODO.md

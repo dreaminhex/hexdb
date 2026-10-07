@@ -128,6 +128,12 @@ hexdb status
 curl http://localhost:7700/health
 ```
 
+To load sample data (articles, products, customers, orders, and sessions that expire after 15 minutes), run this with Node.js 18+ while the server is running. It skips tessellations that already have documents, so it's safe to re-run.
+
+```bash
+node scripts/seed.mjs
+```
+
 ### 5. Access the UI
 
 Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/). The admin UI has:
