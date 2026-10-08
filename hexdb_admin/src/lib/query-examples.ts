@@ -200,12 +200,13 @@ mutation Restock($ops: JSON!) {
     isLocked
     roles {
       name
-      permissions
+      tessellations
     }
   }
   roles {
     name
     description
+    permissions
   }
 }`,
     },
