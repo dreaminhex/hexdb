@@ -15,8 +15,9 @@ Client libraries for HexDB's REST API. Each one covers the same ground:
 | JavaScript / TypeScript | [node](node) | `hexdb` (npm) | Node.js 18+, Deno, Bun or a browser; no dependencies |
 | Python | [python](python) | `hexdb` (PyPI) | Python 3.9+; standard library only |
 | .NET (C#, F#) | [dotnet](dotnet) | `HexDB.Client` (NuGet) | .NET 8+ |
+| Entity Framework Core | [dotnet/HexDB.EntityFrameworkCore](dotnet/HexDB.EntityFrameworkCore) | `HexDB.EntityFrameworkCore` (NuGet) | .NET 8+, EF Core 8 |
 
-All three authenticate with an API key (create one on the admin UI's Account page) or by signing in with a login and password. They retry `429` and `503` answers for reads, and for writes that carry an idempotency key.
+The three drivers authenticate with an API key (create one on the admin UI's Account page) or by signing in with a login and password. They retry `429` and `503` answers for reads, and for writes that carry an idempotency key.
 
 ## Quick examples
 
@@ -44,6 +45,21 @@ await orders.InsertAsync(new { customer = "ada", total = 12 });
 var page = await orders.QueryAsync(new Query { Filter = new { status = "paid" }, Sort = "-total" });
 ```
 
+## Entity Framework Core
+
+`HexDB.EntityFrameworkCore` is an EF Core 8 provider over the .NET driver. Each entity type is a tessellation and each `SaveChanges` is one atomic transaction:
+
+```csharp
+protected override void OnConfiguring(DbContextOptionsBuilder options) =>
+    options.UseHexDB("http://127.0.0.1:7700", Environment.GetEnvironmentVariable("HEXDB_API_KEY"));
+
+db.Orders.Add(new Order { Customer = "ada", Total = 12 });   // string Id left null: a ULID is generated
+await db.SaveChangesAsync();
+var big = await db.Orders.Where(o => o.Total > 10).OrderByDescending(o => o.Total).ToListAsync();
+```
+
+Filters, sorting and paging run on the server; a query HexDB can't answer throws instead of running in memory. Relationships, owned types, inheritance and explicit transactions aren't supported yet. See the [manual](../MANUAL.md#entity-framework-core) for the mapping, the supported LINQ and concurrency tokens.
+
 ## Running the tests
 
 Each suite runs against a real server. `testing/server.mjs` starts a throwaway one (from `target/debug/hexdb_api`, so run `cargo build -p hexdb_api` first) and sets `HEXDB_URL` and `HEXDB_API_KEY` for the command it runs:
@@ -56,4 +72,4 @@ node drivers/testing/server.mjs dotnet test drivers/dotnet
 
 ## ODBC and JDBC
 
-ODBC and JDBC drivers need a SQL dialect and a wire protocol that BI tools speak. HexDB has neither yet: its query language is JSON filters, aggregations and GraphQL. A SQL layer (translating `SELECT ... WHERE ... GROUP BY` into filters and aggregations) would come first. For now, tools that support REST or JSON sources, such as Power BI, Tableau Web Data Connectors and Grafana's JSON data source, can read HexDB directly.
+ODBC and JDBC drivers need a SQL dialect, which HexDB doesn't have yet: its query language is JSON filters, aggregations and GraphQL. A SQL endpoint (translating `SELECT ... WHERE ... GROUP BY` into filters and aggregations) is planned, followed by an ODBC driver that sends SQL to it over HTTP. Until then, tools that support REST or JSON sources, such as Power BI, Tableau Web Data Connectors and Grafana's JSON data source, can read HexDB directly.

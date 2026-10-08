@@ -1511,8 +1511,9 @@ Hard-linked backups share disk blocks with the live data, so they don't protect 
 | JavaScript / TypeScript | [drivers/node](drivers/node) | `npm install hexdb` (Node.js 18+, Deno, Bun, browsers) |
 | Python | [drivers/python](drivers/python) | `pip install hexdb` (3.9+, no dependencies) |
 | .NET | [drivers/dotnet](drivers/dotnet) | `dotnet add package HexDB.Client` (.NET 8+) |
+| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 8+, EF Core 8) |
 
-Each covers:
+Each driver covers:
 - documents, queries, counts, aggregations and upserts;
 - transactions and idempotency keys;
 - the change feed;
@@ -1521,7 +1522,95 @@ Each covers:
 
 They authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
 
-There's no ODBC or JDBC driver: both need a SQL dialect, which HexDB doesn't have. Tools with REST or JSON data sources (Power BI, Tableau Web Data Connectors, Grafana's JSON data source) can read HexDB directly.
+### Entity Framework Core
+
+`HexDB.EntityFrameworkCore` (in [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore)) is an EF Core 8 provider built on `HexDB.Client`. Install it with `dotnet add package HexDB.EntityFrameworkCore` and configure a context:
+
+```csharp
+public class Order
+{
+    public string Id { get; set; } = null!;   // leave null: a ULID is generated on Add
+    public string Customer { get; set; } = "";
+    public double Total { get; set; }
+    public OrderStatus Status { get; set; }
+    public List<string> Tags { get; set; } = new();
+}
+
+public class ShopContext : DbContext
+{
+    public DbSet<Order> Orders => Set<Order>();
+
+    protected override void OnConfiguring(DbContextOptionsBuilder options) =>
+        options.UseHexDB("http://127.0.0.1:7700", Environment.GetEnvironmentVariable("HEXDB_API_KEY"));
+}
+
+await using var db = new ShopContext();
+await db.Database.EnsureCreatedAsync();          // creates the tessellations
+db.Orders.Add(new Order { Customer = "ada", Total = 12 });
+await db.SaveChangesAsync();
+var big = await db.Orders.Where(o => o.Total > 10).OrderByDescending(o => o.Total).Take(20).ToListAsync();
+```
+
+`UseHexDB(url, apiKey, o => ...)` takes two options: `o.HttpClient(client)` to supply your own `HttpClient`, and `o.PageSize(n)` (1 to 1000, default 500), which sets how many documents each request reads.
+
+**Mapping.**
+- Each entity type is a tessellation, named after its `DbSet` property (or the class name). Override it with `modelBuilder.Entity<T>().ToTessellation("name")`.
+- Each property is a document field of the same name. Override it with `.Property(x => x.P).ToJsonProperty("name")`.
+- The key is the document's `id`, so it must be a single `string` or `Guid` property.
+  - A `string` key left `null` gets a new ULID when the entity is added. EF Core only generates a value when the key holds its default, so initialize string keys to `null!`, not `""`.
+  - A `Guid` key is stored as the ULID with the same 128 bits.
+- Property types:
+  - numbers, strings, booleans, enums (stored as numbers);
+  - `DateTime`, `DateTimeOffset`, `DateOnly`, `TimeOnly`, `TimeSpan`, `Guid`, `byte[]`;
+  - arrays, lists and string-keyed dictionaries of those;
+  - `JsonNode` and `JsonElement` for free-form JSON.
+- Value converters apply as usual.
+- `decimal` is stored as a JSON number, which the server reads as a 64-bit float, so it keeps about 15 significant digits.
+
+**Queries.** LINQ is translated into one `_query` request: filters, sorting and paging run on the server. Results come back a page at a time and are tracked and identity-resolved like any EF Core query. Supported:
+- `Where`, with:
+  - `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`;
+  - null checks and boolean properties;
+  - `string.Contains`, `StartsWith`, `EndsWith`, `Equals` and `string.IsNullOrEmpty`;
+  - `list.Contains(x.P)` (becomes `$in`) and `x.Tags.Contains(value)` (an array element);
+  - `EF.Property(x, "P")`.
+- `OrderBy`, `ThenBy`, and their `Descending` forms. String sorting is ordinal (case-sensitive).
+- `Skip` and `Take`.
+- `First`, `Single`, `Count`, `LongCount` and `Any`, with or without a predicate.
+- `Find`.
+- `Select`: the projection runs on the client, after the documents are read.
+- `AsNoTracking`, async execution, and `ToQueryString()`, which describes the HexDB request.
+
+A query HexDB can't answer throws `InvalidOperationException` instead of loading the tessellation and filtering in memory. This covers, for example:
+- method calls such as `ToUpper()` in a filter;
+- `Sum` and other aggregates (use the client's `AggregateAsync`);
+- `GroupBy` and `Join`;
+- `Where` after `Skip`, `Take` or `Select`.
+
+**Saving.** `SaveChanges` sends every added, modified and deleted entity as one `POST /transactions`, so the save is atomic: if one operation fails, none apply.
+- Added entities are inserted.
+- Modified entities are patched with only the changed properties; a property set to `null` removes the field.
+- Deleted entities are deleted.
+
+Concurrency tokens (`[ConcurrencyCheck]` or `.IsConcurrencyToken()`) become an `if_match` precondition on their original values. A document changed or deleted since it was read raises `DbUpdateConcurrencyException`. Any other refusal, such as a unique-index conflict, raises `DbUpdateException` with HexDB's status and message.
+
+**Database operations.**
+- `EnsureCreated` creates the model's tessellations; existing ones are kept.
+- `EnsureDeleted` drops them.
+- `CanConnect` checks `/health`.
+- Indexes, schemas and permissions aren't created from the model. Set them up through the API, the CLI or the admin UI.
+
+**Not supported yet.**
+- Navigations and relationships: store related ids as properties and query them separately.
+- Owned types and complex types: use a property of a JSON-serializable type instead.
+- Inheritance.
+- Composite keys.
+- Explicit transactions: `BeginTransaction` throws, because each `SaveChanges` is already one transaction.
+- Migrations.
+
+### ODBC and JDBC
+
+There's no ODBC or JDBC driver yet: both need a SQL dialect. A SQL endpoint is planned, followed by an ODBC driver that sends SQL to it. Until then, tools with REST or JSON data sources (Power BI, Tableau Web Data Connectors, Grafana's JSON data source) can read HexDB directly.
 
 ## 23. FAQ
 

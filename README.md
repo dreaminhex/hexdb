@@ -21,7 +21,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon sharding that repairs corrupted memory.
-- **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, and drivers for Node.js, Python and .NET.
+- **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, and an Entity Framework Core provider.
 
 ## Quick start
 
@@ -245,6 +245,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | JavaScript / TypeScript | [drivers/node](drivers/node) | Node.js 18+, Deno, Bun or a browser |
 | Python | [drivers/python](drivers/python) | Python 3.9+, standard library only |
 | .NET | [drivers/dotnet](drivers/dotnet) | .NET 8+ |
+| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | .NET 8+, EF Core 8 |
 
 See [drivers/README.md](drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](hexdb_api/openapi.json)).
 
@@ -281,4 +282,5 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 ## Limitations
 
 - Every hex holds a full copy of the data. Horizontal partitioning (sharding across hexes) isn't implemented.
-- There's no SQL interface, so no ODBC or JDBC driver yet.
+- There's no SQL interface yet, so no ODBC or JDBC driver. A SQL endpoint is planned, then an ODBC driver over it.
+- The Entity Framework Core provider maps one entity type to one tessellation. It doesn't support relationships, owned types, inheritance or explicit transactions (see [MANUAL.md](MANUAL.md#entity-framework-core)).

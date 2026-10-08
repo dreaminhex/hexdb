@@ -165,6 +165,7 @@ jobs:
         if: env.NUGET_KEY != ''
         run: |
           dotnet pack drivers/dotnet/HexDB.Client -c Release -o nupkg
+          dotnet pack drivers/dotnet/HexDB.EntityFrameworkCore -c Release -o nupkg
           dotnet nuget push "nupkg/*.nupkg" --api-key "$NUGET_KEY" --source https://api.nuget.org/v3/index.json
         env:
           NUGET_KEY: ${{ secrets.NUGET_KEY }}
