@@ -29,6 +29,7 @@ services:
     environment:
       <<: *env
       HEXDB_NETWORK__ADVERTISE_HOST: hex1
+      HEXDB_IDENTITY__NAME: "Great Dane"
       HEXDB_STORAGE__ENCRYPTION_KEY: ${HEX1_KEY:-base64:MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE=}
       HEXDB_MEMORY__RAM_MB: "2048"
 
@@ -40,6 +41,7 @@ services:
     environment:
       <<: *env
       HEXDB_NETWORK__ADVERTISE_HOST: hex2
+      HEXDB_IDENTITY__NAME: "Maine Coon"
       HEXDB_STORAGE__ENCRYPTION_KEY: ${HEX2_KEY:-base64:MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjI=}
 
   hex3:
@@ -50,6 +52,7 @@ services:
     environment:
       <<: *env
       HEXDB_NETWORK__ADVERTISE_HOST: hex3
+      HEXDB_IDENTITY__NAME: "Dachshund"
       HEXDB_STORAGE__ENCRYPTION_KEY: ${HEX3_KEY:-base64:MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=}
       HEXDB_IDENTITY__ROLE: replicant
 

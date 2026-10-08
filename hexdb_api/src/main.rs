@@ -9,14 +9,13 @@ use hexdb_core::{
     config::CONFIG_FILE_NAME, discover_peers, init_logging, load_config_from,
     spawn_compaction_task, spawn_flush_task, spawn_ttl_sweep_task,
     elect, parse_preference, spawn_discovery_task, spawn_metrics_task, spawn_vertex_monitoring_task,
-    start_discovery_listener, LatticeMember, ROLE_OVERSEER,
+    start_discovery_listener, LatticeMember, NameSource, ROLE_OVERSEER,
     HexDBEngine, HexIdentity, PeerHex, RuntimeInfo,
 };
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::watch;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
-use ulid::Ulid;
 
 /// Names a hex can be given. Embedded so the server doesn't depend on its working directory.
 const HEX_NAMES: &str = include_str!("../data/names.txt");
@@ -105,23 +104,36 @@ async fn main() -> anyhow::Result<()> {
 
     let storage_dir = config.storage_dir();
 
-    // Decide who we are before building the engine: pick a name, discover
-    // other hexes in our lattice, make sure the name is unique, and elect a role.
+    // Decide who we are before building the engine: take the configured or
+    // saved name (or pick one), discover other hexes in our lattice, make sure
+    // the name is unique, and elect a role.
     let names: Vec<String> = HEX_NAMES
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(String::from)
         .collect();
-    let id = Ulid::new();
-    let mut name = HexDBEngine::pick_random_name(&names).unwrap_or_else(|| "Unnamed Hex".to_string());
+    let (id, mut name, name_source) = match hexdb_core::network::discovery::resolve_hex_identity(&config, &keys, &names) {
+        Ok(identity) => identity,
+        Err(e) => {
+            error!("❌ {:#}", e);
+            std::process::exit(1);
+        }
+    };
+    if name_source == NameSource::Generated {
+        info!("🐾 No identity.name configured; this hex is now called '{}'. The name is saved and kept on later starts.", name);
+    }
 
     let peers = discover_peers(&config, &id.to_string(), &name).await;
 
     let peer_names: HashSet<&str> = peers.iter().map(|p| p.name.as_str()).collect();
     if peer_names.contains(name.as_str()) {
+        if name_source == NameSource::Configured {
+            error!("❌ identity.name '{}' is already used by another hex in lattice '{}'. Give this hex a different name.", name, config.network.lattice_name);
+            std::process::exit(1);
+        }
         if let Some(free) = names.iter().find(|n| !peer_names.contains(n.as_str())) {
-            warn!("🎭 Hex name '{}' already in use. Reassigning to '{}'.", name, free);
+            warn!("🎭 Hex name '{}' is already used by another hex. This hex is now called '{}'.", name, free);
             name = free.clone();
         }
     }

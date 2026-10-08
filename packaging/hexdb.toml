@@ -10,6 +10,8 @@ discovery_endpoint = "127.0.0.1:7702"
 
 [identity]
 role = "auto" # auto | overseer | harvester | replicant
+# name: left out, the first start names the hex after a cat or dog breed and
+# keeps it. Set one to choose, e.g. name = "Great Pyrenees".
 
 [security]
 admin_login = "hexdbadmin"

@@ -1,239 +1,239 @@
-Adder
-Alamo
-Amos
-Anab
-Arrow
-Ash
-Asp
-Atoll
-Awl
-Backfire
-Bandit
-Bandog
-Banshee
-Basalt
-Bat
+Abyssinian
+Affenpinscher
+Afghan Hound
+Airedale
+Akita
+Alaskan Malamute
+American Bobtail
+American Bulldog
+American Curl
+American Shorthair
+American Wirehair
+Anatolian Shepherd
+Australian Cattle Dog
+Australian Shepherd
+Balinese
+Basenji
+Basset Hound
 Beagle
-Bear
-Beetle
-Behemoth
-Bison
-Blackfire
-Blackjack
-Blade
-Blinder
-Boomerang
-Boris
+Bearded Collie
+Bengal
+Bernese Mountain Dog
+Bichon Frise
+Birman
+Black Lab
+Bloodhound
+Blue Heeler
+Bobcat
+Bombay
+Border Collie
+Border Terrier
+Borzoi
+Boston Terrier
+Bouvier
 Boxer
-Brick
-Bronco
-Broomstick
-Buckshot
-Bullfrog
-Buzzard
-Cabbage
-Cactus
-Candlestick
-Canoe
-Canyon
+Briard
+British Shorthair
+Brittany
+Brussels Griffon
+Bull Terrier
+Bulldog
+Bullmastiff
+Burmese
+Burmilla
+Cairn Terrier
+Cane Corso
+Caracal
+Cardigan Corgi
+Catahoula
 Cavalier
-Claw
-Cobra
-Condor
-Copperhead
-Crab
-Cricket
-Crocodile
-Cyclone
-Dagger
-Dart
-Defector
-Delta
+Chartreux
+Chausie
+Cheetah
+Chesapeake
+Chihuahua
+Chinook
+Chiweenie
+Chocolate Lab
+Chow Chow
+Clouded Leopard
+Clumber Spaniel
+Cocker Spaniel
+Collie
+Coonhound
+Cornish Rex
+Coton de Tulear
+Cougar
+Coyote
+Cymric
+Dachshund
+Dalmatian
+Dandie Dinmont
+Deerhound
+Devon Rex
+Dhole
 Dingo
-Diver
-Dragon
-Drake
-Duck
-Eagle
-Echo
-Elk
-Falcon
-Ferret
-Firebrand
-Firefly
-Fist
-Flanker
-Flogger
-Foxbat
-Foxglove
+Doberman
+Dogo Argentino
+Donskoy
+Egyptian Mau
+Elkhound
+English Setter
+Entlebucher
+Eskimo Dog
+Eurasier
+Exotic Shorthair
+Field Spaniel
+Fishing Cat
+Flat-Coated Retriever
+Fox Terrier
 Foxhound
-Frigate
-Frogfoot
-Fury
-Gannet
-Gargoyle
-Gazelle
-Gepard
-Ghost
-Giant
-Gibbon
-Gnat
-Goblin
-Golem
-Griffon
-Grizzly
-Groza
-Gull
-Hammer
-Hawk
-Hellhound
-Hermit
-Hind
-Hornet
-Horse
-Howler
-Hurricane
-Hydra
-Ibis
-Igloo
-Imp
-Inferno
-Intruder
+French Bulldog
+German Shepherd
+Golden Retriever
+Gordon Setter
+Great Dane
+Great Pyrenees
+Greater Swiss
+Greyhound
+Harrier
+Havana Brown
+Havanese
+Himalayan
+Hovawart
+Husky
+Ibizan Hound
+Irish Setter
+Irish Terrier
+Irish Wolfhound
+Italian Greyhound
+Jack Russell
 Jackal
 Jaguar
-Javelin
-Jeep
-Jester
-Jet
-Kestrel
-Kite
-Kodiak
-Komodo
-Kraken
-Lancer
+Jaguarundi
+Japanese Bobtail
+Japanese Chin
+Javanese
+Jungle Cat
+Kangal
+Keeshond
+Kerry Blue
+Khao Manee
+King Charles
+Komondor
+Korat
+Kuvasz
+Labradoodle
+Labrador
+Labradane
+Lagotto
+LaPerm
+Lakeland Terrier
+Leonberger
 Leopard
-Lightning
+Lhasa Apso
 Lion
-Lizard
-Locust
-Longbow
+Lurcher
+Lykoi
 Lynx
-Mace
-Magnet
-Mamba
-Manatee
-Mantis
-Marlin
-Martlet
-Maverick
-Merlin
-Mescalero
-Meteor
-Minotaur
-Mongoose
-Mosquito
-Mustang
-Nautilus
-Needle
-Nighthawk
-Nomad
-Nova
+Maine Coon
+Malinois
+Maltese
+Manchester Terrier
+Maned Wolf
+Manx
+Margay
+Mastiff
+Miniature Pinscher
+Mountain Cur
+Mudi
+Munchkin
+Nebelung
+Newfoundland
+Norfolk Terrier
+Norwegian Forest Cat
+Norwich Terrier
 Ocelot
-Ogre
-Orca
-Orion
-Osprey
-Otter
-Outlaw
-Panther
-Pegasus
-Pelican
-Phantom
-Pike
-Piranha
-Platypus
-Polecat
-Porcupine
-Predator
-Puma
-Python
-Quake
-Raccoon
-Raptor
-Raven
-Reaper
-Rhino
-Rook
-Saber
-Salamander
-Scarab
-Scimitar
-Scorpion
-Seafox
-Seahawk
-Seagull
-Serpent
-Shadow
-Shark
-Shrew
-Shrike
-Silverback
-Siren
-Skeeter
-Skyfire
-Skyhook
-Slingshot
-Snapper
-Specter
-Sphinx
-Spider
-Spike
-Spitfire
-Stag
-Starfighter
-Stiletto
-Stingray
-Storm
-Striker
-Sturgeon
-Swallow
-Swift
-Swordfish
-Talon
-Tapir
-Tempest
-Thunder
-Thunderbolt
+Ocicat
+Old English Sheepdog
+Oriental Shorthair
+Otterhound
+Painted Dog
+Pallas's Cat
+Papillon
+Pekingese
+Pembroke Corgi
+Persian
+Peterbald
+Pharaoh Hound
+Pixiebob
+Plott Hound
+Pointer
+Pomeranian
+Poodle
+Portuguese Water Dog
+Pug
+Puli
+Pumi
+Ragamuffin
+Ragdoll
+Rat Terrier
+Redbone
+Rhodesian Ridgeback
+Rottweiler
+Russian Blue
+Saint Bernard
+Saluki
+Samoyed
+Sand Cat
+Savannah
+Schipperke
+Schnauzer
+Scottish Deerhound
+Scottish Fold
+Scottish Terrier
+Sealyham
+Selkirk Rex
+Serval
+Shar Pei
+Sheltie
+Shiba Inu
+Shih Tzu
+Siamese
+Siberian
+Silver Lab
+Singapura
+Skye Terrier
+Sloughi
+Snow Leopard
+Snowshoe
+Sokoke
+Somali
+Spaniel
+Sphynx
+Springer Spaniel
+Staffordshire
+Sussex Spaniel
+Swedish Vallhund
+Silver Lab
+Gray Tabby
+Orange Tabby
+Tibetan Mastiff
+Tibetan Spaniel
+Tibetan Terrier
 Tiger
-Tornado
-Tortoise
-Toucan
-Tracker
-Triton
-Troll
-Tsunami
-Tusk
-Typhoon
-Umbra
-Valkyrie
-Vampire
-Vega
-Viper
-Vixen
-Vulture
-Warthog
-Wasp
-Weasel
-Whale
-Whirlwind
-Widow
-Wildcat
+Tonkinese
+Tosa
+Toyger
+Turkish Angora
+Turkish Van
+Vizsla
+Weimaraner
+Welsh Terrier
+Westie
+Whippet
 Wolf
-Wolverine
-Wombat
-Wyvern
-Yak
-Zephyr
-Zero
-Zodiac
-Zombie
+Wolfhound
+Xoloitzcuintli
+Yellow Lab
+Yorkie

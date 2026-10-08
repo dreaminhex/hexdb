@@ -310,18 +310,40 @@ fn default_discovery_interval() -> u64 {
     10
 }
 
-/// Which lattice role this hex may take.
+/// Who this hex is: its name and which lattice role it may take.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct IdentityConfig {
     /// `auto` (elected), `overseer` (prefer leading), `harvester` or `replicant` (never lead).
     #[serde(default = "default_role")]
     pub role: String,
+    /// The hex's name, shown in logs, the dashboard and to other hexes. When
+    /// empty, HexDB picks a name on the first start and keeps it.
+    #[serde(default)]
+    pub name: String,
 }
 
 impl Default for IdentityConfig {
     fn default() -> Self {
-        IdentityConfig { role: default_role() }
+        IdentityConfig { role: default_role(), name: String::new() }
     }
+}
+
+/// Longest hex name accepted.
+pub const MAX_HEX_NAME_LEN: usize = 64;
+
+/// Check a configured hex name: trimmed, 1 to 64 characters, printable.
+pub fn validate_hex_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("identity.name must not be blank.".into());
+    }
+    if name.chars().count() > MAX_HEX_NAME_LEN {
+        return Err(format!("identity.name must be at most {} characters.", MAX_HEX_NAME_LEN));
+    }
+    if name.chars().any(char::is_control) {
+        return Err("identity.name must not contain control characters.".into());
+    }
+    Ok(name.to_string())
 }
 
 fn default_role() -> String {

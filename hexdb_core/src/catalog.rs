@@ -58,6 +58,12 @@ pub struct Catalog {
     /// The lattice this data belongs to, when the config doesn't name one.
     #[serde(default)]
     pub lattice_name: String,
+    /// This hex's ID, kept across restarts.
+    #[serde(default)]
+    pub hex_id: String,
+    /// This hex's name, kept across restarts when the config doesn't set one.
+    #[serde(default)]
+    pub hex_name: String,
 }
 
 impl Catalog {

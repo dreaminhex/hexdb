@@ -304,3 +304,47 @@ async fn counts_stay_exact_through_every_kind_of_write() -> Result<()> {
         Err(_) => anyhow::bail!("engine still shared"),
     }
 }
+
+#[tokio::test]
+async fn hex_name_and_id_survive_restarts() -> Result<()> {
+    use hexdb_core::catalog::Catalog;
+    use hexdb_core::network::discovery::{resolve_hex_identity, NameSource};
+
+    let dir = TempDir::new()?;
+    let keys = std::sync::Arc::new(hexdb_core::KeyRing::new(&KEY, &[]));
+    let names = vec!["Lion".to_string(), "Great Pyrenees".to_string()];
+    let mut config = config(dir.path(), 64);
+
+    // A fresh data directory: a name is drawn and saved with the ID.
+    let (id, name, source) = resolve_hex_identity(&config, &keys, &names)?;
+    assert_eq!(source, NameSource::Generated);
+    assert!(names.contains(&name));
+    let identity = HexIdentity { id, name: name.clone(), hex_type: "Overseer".into() };
+    HexDBEngine::open(config.clone(), identity, keys.clone()).await?.shutdown().await?;
+
+    let catalog = Catalog::load(&config.storage_dir(), &keys)?.expect("catalog saved");
+    assert_eq!(catalog.hex_id, id.to_string());
+    assert_eq!(catalog.hex_name, name);
+
+    // The next start keeps both.
+    let (again_id, again_name, source) = resolve_hex_identity(&config, &keys, &names)?;
+    assert_eq!(source, NameSource::Saved);
+    assert_eq!(again_id, id);
+    assert_eq!(again_name, name);
+
+    // A configured name replaces the saved one but keeps the ID.
+    config.identity.name = " Dachshund ".into();
+    let (cfg_id, cfg_name, source) = resolve_hex_identity(&config, &keys, &names)?;
+    assert_eq!(source, NameSource::Configured);
+    assert_eq!(cfg_id, id);
+    assert_eq!(cfg_name, "Dachshund");
+    let identity = HexIdentity { id: cfg_id, name: cfg_name, hex_type: "Overseer".into() };
+    HexDBEngine::open(config.clone(), identity, keys.clone()).await?.shutdown().await?;
+    let catalog = Catalog::load(&config.storage_dir(), &keys)?.expect("catalog saved");
+    assert_eq!(catalog.hex_name, "Dachshund");
+
+    // A bad configured name is refused.
+    config.identity.name = "x".repeat(65);
+    assert!(resolve_hex_identity(&config, &keys, &names).is_err());
+    Ok(())
+}

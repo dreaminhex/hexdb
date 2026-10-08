@@ -26,6 +26,7 @@ use crate::{HexConfig, HexDBEngine};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, sync::Arc, time::Duration};
+use ulid::Ulid;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -333,6 +334,45 @@ pub fn resolve_lattice_name(config: &HexConfig, keys: &crate::crypt::KeyRing) ->
     Ok((generate_lattice_name(), true))
 }
 
+/// Where a hex's name came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameSource {
+    /// `identity.name` in the config.
+    Configured,
+    /// Saved in the data directory by an earlier start.
+    Saved,
+    /// Drawn from the built-in list just now.
+    Generated,
+}
+
+/// This hex's identity: the ID and name saved in the data directory, or new
+/// ones. A configured `identity.name` always wins and is saved; otherwise the
+/// name picked on the first start is kept.
+pub fn resolve_hex_identity(config: &HexConfig, keys: &crate::crypt::KeyRing, names: &[String]) -> anyhow::Result<(Ulid, String, NameSource)> {
+    let configured = if config.identity.name.trim().is_empty() {
+        None
+    } else {
+        Some(crate::config::validate_hex_name(&config.identity.name).map_err(|e| anyhow::anyhow!("{}", e))?)
+    };
+    let catalog = crate::catalog::Catalog::load(&config.storage_dir(), keys)?;
+    let (saved_id, saved_name) = match &catalog {
+        Some(c) => (c.hex_id.as_str(), c.hex_name.as_str()),
+        None => ("", ""),
+    };
+    Ok(choose_hex_identity(configured.as_deref(), saved_id, saved_name, names))
+}
+
+/// The pure part of `resolve_hex_identity`.
+pub fn choose_hex_identity(configured: Option<&str>, saved_id: &str, saved_name: &str, names: &[String]) -> (Ulid, String, NameSource) {
+    let id = Ulid::from_string(saved_id).unwrap_or_else(|_| Ulid::new());
+    let saved_name = saved_name.trim();
+    match configured {
+        Some(name) => (id, name.to_string(), NameSource::Configured),
+        None if !saved_name.is_empty() => (id, saved_name.to_string(), NameSource::Saved),
+        None => (id, HexDBEngine::pick_random_name(names).unwrap_or_else(|| "Unnamed Hex".to_string()), NameSource::Generated),
+    }
+}
+
 /// Better candidates sort first: more RAM, then more disk, then lower ID.
 fn rank(a: &PeerHex, b: &PeerHex) -> Ordering {
     b.ram_mb.cmp(&a.ram_mb).then(b.disk_mb.cmp(&a.disk_mb)).then(a.id.cmp(&b.id))
@@ -439,6 +479,34 @@ mod tests {
             applied_seq: 0,
             tls: false,
         }
+    }
+
+    fn names() -> Vec<String> {
+        vec!["Lion".to_string(), "Beagle".to_string()]
+    }
+
+    #[test]
+    fn configured_name_wins_and_saved_id_is_kept() {
+        let saved = Ulid::new();
+        let (id, name, source) = choose_hex_identity(Some("Great Dane"), &saved.to_string(), "Lion", &names());
+        assert_eq!(id, saved);
+        assert_eq!(name, "Great Dane");
+        assert_eq!(source, NameSource::Configured);
+    }
+
+    #[test]
+    fn saved_name_is_reused() {
+        let (_, name, source) = choose_hex_identity(None, "", "Ocelot", &names());
+        assert_eq!(name, "Ocelot");
+        assert_eq!(source, NameSource::Saved);
+    }
+
+    #[test]
+    fn fresh_hex_draws_a_name_and_a_new_id() {
+        let (id, name, source) = choose_hex_identity(None, "not a ulid", "  ", &names());
+        assert!(names().contains(&name));
+        assert_eq!(source, NameSource::Generated);
+        assert_ne!(id.to_string(), "not a ulid");
     }
 
     #[test]

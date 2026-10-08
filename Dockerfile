@@ -24,6 +24,10 @@ COPY hexdb_api hexdb_api
 COPY hexdb_cli hexdb_cli
 COPY hexdb_query hexdb_query
 COPY hexdb_tests hexdb_tests
+# Workspace members that are not built here but must be present for Cargo to
+# load the workspace manifest.
+COPY drivers/odbc drivers/odbc
+COPY bench bench
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release -p hexdb_api -p hexdb_cli \

@@ -1353,6 +1353,10 @@ On the Dashboard, "Add a hex" (administrators, password required) shows:
 
 The lattice name is `network.lattice_name`. When it's left empty on the first hex, HexDB generates a name (an adjective and a noun) and saves it in the catalog. Every other hex must use the same name.
 
+### Hex names
+
+Every hex has a name, shown in logs, in the dashboard and to other hexes. Set it with `identity.name` (or `HEXDB_IDENTITY__NAME`): 1 to 64 printable characters, spaces allowed. When it's left empty, the first start draws a name from a built-in list of cat and dog breeds (Great Pyrenees, Ocelot, Dachshund, Norwegian Forest Cat, ...) and saves it in the catalog with the hex's ID, so the hex keeps its name and ID across restarts. Setting `identity.name` later renames the hex and keeps its ID; clearing it again keeps the configured name, since it was saved. Two hexes in a lattice can't share a name: a configured name that a live hex already uses stops the start with an error, and a drawn name that collides is replaced by a free one.
+
 To try a lattice on one machine, either start a separate demo lattice or add hexes to your own server:
 
 ```bash
@@ -1530,6 +1534,7 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 | `network.previous_lattice_secrets` | `[]` | Old secrets still accepted, for rotation |
 | `network.trusted_proxies` | `[]` | Proxies whose `X-Forwarded-For` is trusted |
 | `identity.role` | `auto` | `auto`, `overseer`, `harvester` or `replicant` |
+| `identity.name` | generated | The hex's name (1-64 characters); drawn and saved on the first start when empty |
 | `storage.path` | `./.hexdb` | Data directory |
 | `storage.encryption_key` | required | `base64:` plus 32 bytes |
 | `storage.previous_encryption_keys` | `[]` | Old keys still accepted for reading |

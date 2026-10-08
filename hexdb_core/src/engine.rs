@@ -321,13 +321,20 @@ impl HexDBEngine {
         if lattice_changed {
             catalog.lattice_name = config.network.lattice_name.clone();
         }
+        // Remember who we are (ID and name) so the next start is the same hex.
+        let id_text = identity.id.to_string();
+        let identity_changed = catalog.hex_id != id_text || catalog.hex_name != identity.name;
+        if identity_changed {
+            catalog.hex_id = id_text;
+            catalog.hex_name = identity.name.clone();
+        }
 
         // Clean up tables left behind by a drop that was interrupted.
         for (tess, &dropped_seq) in &catalog.dropped {
             sst.purge_dropped(tess, dropped_seq).await?;
         }
         // Register tessellations found on disk but missing from the catalog.
-        let mut catalog_changed = history_created || lattice_changed;
+        let mut catalog_changed = history_created || lattice_changed || identity_changed;
         for tess in sst.tessellations().await {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
