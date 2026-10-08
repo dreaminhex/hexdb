@@ -74,6 +74,20 @@ enum Commands {
     },
     /// Print a new random key for storage.encryption_key or network.lattice_secret
     Secret,
+    /// Run a SQL SELECT and print the rows as a table (needs a token with read access)
+    Sql {
+        /// The statement, e.g. "SELECT customer, COUNT(*) FROM orders GROUP BY customer"
+        statement: String,
+        /// A value for the next ? placeholder: JSON (42, true, "text") or plain text
+        #[arg(short, long = "param")]
+        params: Vec<String>,
+        /// Print the server's JSON answer (every page) instead of a table
+        #[arg(long)]
+        json: bool,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long)]
+        url: Option<String>,
+    },
     /// Back up the running server's data (needs a token with the maintenance permission)
     Backup {
         /// Folder name for the backup (default: date, time and sequence number)
@@ -172,6 +186,38 @@ async fn main() -> Result<()> {
         }
         Commands::Secret => {
             println!("{}", lattice::new_secret());
+            Ok(())
+        }
+        Commands::Sql { statement, params, json, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb sql` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key with read access.");
+            }
+            let params: Vec<serde_json::Value> =
+                params.iter().map(|p| serde_json::from_str(p).unwrap_or_else(|_| serde_json::Value::String(p.clone()))).collect();
+            let mut cursor: Option<String> = None;
+            let mut columns: Vec<String> = Vec::new();
+            let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+            loop {
+                let body = serde_json::json!({ "sql": statement, "params": params, "cursor": cursor });
+                let text = request_text(&config, &base, reqwest::Method::POST, "/sql", token, Some(&body)).await?;
+                let page: serde_json::Value = serde_json::from_str(&text)?;
+                if json {
+                    println!("{}", pretty(&text));
+                } else {
+                    if columns.is_empty() {
+                        columns = page["columns"].as_array().into_iter().flatten().filter_map(|c| c["name"].as_str().map(String::from)).collect();
+                    }
+                    rows.extend(page["rows"].as_array().into_iter().flatten().filter_map(|r| r.as_array().cloned()));
+                }
+                match page["next"].as_str() {
+                    Some(next) => cursor = Some(next.to_string()),
+                    None => break,
+                }
+            }
+            if !json {
+                print_table(&columns, &rows);
+            }
             Ok(())
         }
         Commands::Backup { name, list, url } => {
@@ -477,6 +523,40 @@ async fn request_text(
 
 async fn is_healthy(config: &HexConfig, base: &str) -> bool {
     get_text(config, base, "/health", None).await.is_ok()
+}
+
+/// Rows as an aligned text table; long values are cut at 60 characters.
+fn print_table(columns: &[String], rows: &[Vec<serde_json::Value>]) {
+    let cell = |v: &serde_json::Value| -> String {
+        let text = match v {
+            serde_json::Value::Null => "NULL".to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let text = text.replace(['\n', '\r', '\t'], " ");
+        if text.chars().count() > 60 {
+            format!("{}...", text.chars().take(57).collect::<String>())
+        } else {
+            text
+        }
+    };
+    let cells: Vec<Vec<String>> = rows.iter().map(|r| r.iter().map(cell).collect()).collect();
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count()).collect();
+    for row in &cells {
+        for (w, c) in widths.iter_mut().zip(row) {
+            *w = (*w).max(c.chars().count());
+        }
+    }
+    let line = |values: &[String]| {
+        let padded: Vec<String> = values.iter().zip(&widths).map(|(v, w)| format!("{:<width$}", v, width = *w)).collect();
+        println!("{}", padded.join(" | ").trim_end());
+    };
+    line(columns);
+    println!("{}", widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("-+-"));
+    for row in &cells {
+        line(row);
+    }
+    println!("({} row{})", rows.len(), if rows.len() == 1 { "" } else { "s" });
 }
 
 fn pretty(body: &str) -> String {

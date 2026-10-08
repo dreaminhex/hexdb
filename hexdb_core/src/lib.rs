@@ -30,6 +30,7 @@ pub mod schema;
 pub mod streams;
 pub mod functions;
 pub mod triggers;
+pub mod sql;
 pub mod network {
     pub mod discovery;
     pub mod lattice_auth;
@@ -60,6 +61,7 @@ pub use audit::{AuditEvent, AuditQuery, AUDIT_TESSELLATION};
 pub use auth::{Action, Permission, Principal, RoleDefinitions, SESSION_COOKIE};
 pub use replication::{spawn_replication_task, ReplicationStatus, LATTICE_SIGNATURE_HEADER};
 pub use changes::{Change, ChangeFeed, ChangeKind, HistoryExpired, CHANGE_HISTORY};
+pub use sql::{SqlColumn, SqlColumnInfo, SqlPage, SqlQuery, SqlResult, DEFAULT_SQL_PAGE_SIZE, MAX_SQL_PAGE_SIZE};
 pub use aggregate::{parse_aggregates, AggregateOp, AggregateResult, AggregateSpec, Aggregation};
 pub use tasks::{spawn_vertex_monitoring_task, spawn_ttl_sweep_task, spawn_flush_task, spawn_compaction_task, spawn_metrics_task};
 pub use network::discovery::{

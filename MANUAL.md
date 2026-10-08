@@ -15,33 +15,34 @@ Examples use `curl` against `http://localhost:7700` and leave out credentials. A
 7. [Full-text search and analyzers](#7-full-text-search-and-analyzers)
 8. [GraphQL](#8-graphql)
 9. [Aggregations](#9-aggregations)
-10. [Transactions](#10-transactions)
-11. [Indexes and the query advisor](#11-indexes-and-the-query-advisor)
-12. [Schemas](#12-schemas)
-13. [Change data](#13-change-data)
-14. [Streams](#14-streams)
-15. [Functions, schedules and triggers](#15-functions-schedules-and-triggers)
-16. [Plugins](#16-plugins)
-17. [Security](#17-security)
-18. [Lattices and replication](#18-lattices-and-replication)
-19. [Storage internals](#19-storage-internals)
-20. [Limits and configuration reference](#20-limits-and-configuration-reference)
-21. [Operations](#21-operations)
-22. [Drivers](#22-drivers)
-23. [FAQ](#23-faq)
+10. [SQL](#10-sql)
+11. [Transactions](#11-transactions)
+12. [Indexes and the query advisor](#12-indexes-and-the-query-advisor)
+13. [Schemas](#13-schemas)
+14. [Change data](#14-change-data)
+15. [Streams](#15-streams)
+16. [Functions, schedules and triggers](#16-functions-schedules-and-triggers)
+17. [Plugins](#17-plugins)
+18. [Security](#18-security)
+19. [Lattices and replication](#19-lattices-and-replication)
+20. [Storage internals](#20-storage-internals)
+21. [Limits and configuration reference](#21-limits-and-configuration-reference)
+22. [Operations](#22-operations)
+23. [Drivers](#23-drivers)
+24. [FAQ](#24-faq)
 
 ---
 
 ## 1. Overview
 
-HexDB stores JSON documents in named collections (tessellations) and serves them over HTTP: a REST API, a GraphQL endpoint, and an admin UI, all from one server binary (`hexdb_api`). A command-line tool (`hexdb`) starts, stops and inspects servers.
+HexDB stores JSON documents in named collections (tessellations) and serves them over HTTP: a REST API, a GraphQL endpoint, a read-only SQL endpoint, and an admin UI, all from one server binary (`hexdb_api`). A command-line tool (`hexdb`) starts, stops and inspects servers.
 
 What it provides:
 
 | Area | Features |
 | --- | --- |
 | Data | Documents with generated, time-sortable IDs; replace, merge-patch, delete; bulk writes; upserts; update-by-filter; per-document TTLs; idempotency keys; optional versioned schemas |
-| Reading | A JSON filter language, sorting, cursor and offset paging, counts, aggregations, full-text search with analyzers, GraphQL |
+| Reading | A JSON filter language, sorting, cursor and offset paging, counts, aggregations, full-text search with analyzers, GraphQL, SQL `SELECT` |
 | Consistency | Every write is atomic and durable before it's acknowledged; multi-document transactions are serializable for the documents they touch |
 | Performance | Field, composite, unique and text indexes; an index advisor; an LRU memory cache; SSTables with Bloom filters; Zstandard compression |
 | Change data | An ordered change feed with an on-disk history; streams (publish/subscribe) with consumer groups; plugins for Kafka, Kinesis, OpenTelemetry and more |
@@ -52,7 +53,7 @@ What it provides:
 What it doesn't do (yet):
 
 - Partition data across hexes. Every hex holds a full copy.
-- Speak SQL. Use filters, aggregations or GraphQL.
+- Join tessellations or write through SQL. SQL is read-only and reads one tessellation at a time.
 
 ## 2. Terminology
 
@@ -97,7 +98,7 @@ The one required setting is `storage.encryption_key`: 32 random bytes, base64-en
 encryption_key = "base64:..."
 
 [network]
-lattice_secret = "base64:..."   # optional; see section 18
+lattice_secret = "base64:..."   # optional; see section 19
 ```
 
 ### Starting and stopping
@@ -110,6 +111,7 @@ hexdb stop --force     # kill a server that won't stop (unflushed writes come ba
 hexdb health
 HEXDB_TOKEN=hxk_... hexdb status
 HEXDB_TOKEN=hxk_... hexdb backup        # a consistent backup while running; --list shows them
+HEXDB_TOKEN=hxk_... hexdb sql "SELECT COUNT(*) FROM orders"   # see section 10; -p fills ? parameters, --json prints the raw answer
 ```
 
 `hexdb start` runs the `hexdb_api` binary found next to the CLI (or on `PATH`, or `--server-bin`). The server writes `hexdb.pid` to its data directory: its PID, endpoint, executable, start time and a one-time shutdown token. The file is readable by its owner only. `hexdb stop` posts the token to `POST /shutdown`. `--force` kills the process only if its executable and start time match the file, so a stale file can't kill an unrelated process that reused the PID.
@@ -142,7 +144,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - An activity chart: documents per tessellation, operations per minute, or storage, over 15 minutes to 6 hours.
 - Vertex health: a hexagon of the six shards.
 - The lattice card: each hex's role, address, replication state and lag. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
-- A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#21-operations)).
+- A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#22-operations)).
 
 **Queries.** A GraphQL console with schema-aware completion and validation, variables, examples, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
 
@@ -329,7 +331,7 @@ curl -G http://localhost:7700/articles/count --data-urlencode 'filter={"publishe
 
 Sorting uses an index when the first sort key has a single-field index. HexDB walks that index in order, reading only planner candidates, and stops once the page is full; documents tied on the first key are ordered by the remaining keys. That applies to unfiltered queries, and to filtered ones run with `total=false`. A filtered query that needs `total` reads every match anyway, so it sorts in memory. Unfiltered pages without a sort read only the page itself, and their `total` comes from the maintained count.
 
-The advisor records each query's shape for index suggestions; see [section 11](#11-indexes-and-the-query-advisor).
+The advisor records each query's shape for index suggestions; see [section 12](#12-indexes-and-the-query-advisor).
 
 ## 7. Full-text search and analyzers
 
@@ -448,7 +450,87 @@ The filter uses indexes like a query. Grouping then runs in memory over the matc
 
 GraphQL: `aggregate(tessellation: "orders", groupBy: ["status"], aggregates: { n: { _count: "*" } }) { rows totalGroups matched }`.
 
-## 10. Transactions
+## 10. SQL
+
+`POST /sql` runs a read-only SQL `SELECT`. It's translated into the query or aggregation the REST API already runs, so indexes, permissions, row filters and field masks all apply the same way. BI tools and the planned ODBC driver use it; the `hexdb sql` command prints its results as a table.
+
+```bash
+curl -X POST http://localhost:7700/sql -H "Authorization: Bearer $HEXDB_API_KEY" -H "Content-Type: application/json" -d '{
+  "sql": "SELECT customer, COUNT(*) AS orders, SUM(total) AS revenue FROM orders WHERE status = ? GROUP BY customer HAVING COUNT(*) > 1 ORDER BY revenue DESC LIMIT 10",
+  "params": ["paid"] }'
+# => { "columns": [{ "name": "customer", "type": "string" }, { "name": "orders", "type": "integer" }, { "name": "revenue", "type": "number" }],
+#      "rows": [["ada", 12, 4410.5], ["grace", 9, 3120]],
+#      "next": null,
+#      "translated": { "tessellation": "orders", "aggregate": { ... }, "having": "COUNT(*) > 1", "limit": 10 } }
+```
+
+```bash
+HEXDB_TOKEN=... hexdb sql "SELECT customer, total FROM orders WHERE total > ? ORDER BY total DESC LIMIT 5" -p 100
+```
+
+**Request.**
+- `sql`: one statement.
+- `params`: values for `?` placeholders (numbered in order of appearance) or `$1`, `$2`, ... Every parameter must be used.
+- `page_size`: rows per response, 1 to 10,000 (default 1,000).
+- `cursor`: the previous response's `next`, to get the following page. Send the same statement and parameters with it.
+
+**Response.**
+- `columns`: each column's name and a type inferred from the page's values: `boolean`, `integer`, `number`, `string`, `json` (objects, arrays, or mixed types) or `null` (no values).
+- `rows`: arrays of values in column order.
+- `next`: a cursor, or null on the last page.
+- `translated`: the filter, sort and aggregation the statement became. Use it to check which index a query can use.
+
+**Catalog.** SQL clients list tables and columns before they query:
+- `GET /sql/tables` returns the tessellations the caller can read.
+- `GET /sql/columns?table=orders` returns each column's `name`, `type`, `nullable` and `source`:
+  - `id` comes first;
+  - then the current schema's fields (`source: "schema"`; a nested rule such as `dims.width` lists `dims` as a `json` column);
+  - then, unless the schema forbids other fields, the fields found in the first 100 documents (`source: "sample"`).
+- Hidden fields of the caller's role aren't listed.
+
+**What's supported.**
+
+| Clause | Supported |
+| --- | --- |
+| `SELECT` | `*`, fields (dotted paths such as `address.city`), values, `AS` aliases, `DISTINCT`; `COUNT(*)`, `COUNT(field)`, `COUNT(DISTINCT field)`, `SUM`, `AVG`, `MIN`, `MAX` |
+| `FROM` | One tessellation, with an optional alias (`FROM orders o`, then `o.total`). `SELECT 1` works without `FROM` |
+| `WHERE` | A field compared with a value (`=`, `<>`, `<`, `<=`, `>`, `>=`); `AND`, `OR`, `NOT`; `IN`, `NOT IN`; `BETWEEN`; `LIKE` and `NOT LIKE`; `IS [NOT] NULL`; `IS [NOT] TRUE` / `FALSE`; a boolean field on its own |
+| `GROUP BY` | Fields, select aliases or positions (`GROUP BY 1`) |
+| `HAVING` | Comparisons of group fields and aggregates with values, with `AND`, `OR`, `NOT`, `IN`, `BETWEEN`, `IS NULL` |
+| `ORDER BY` | Fields, aliases, aggregates or positions, `ASC` / `DESC` |
+| Paging | `LIMIT`, `OFFSET`, `LIMIT offset, count`, `FETCH FIRST n ROWS ONLY`, `TOP n` |
+
+Notes:
+- **Fields and values.**
+  - `id` is the document ID. `SELECT *` returns `id` and then every field present in the page's documents, in the order they first appear. Metadata fields (`_schema`, `_expires_at`) are left out of `*` but can be selected by name.
+  - Identifiers are case-sensitive, like field names. Quote names that aren't plain identifiers: `"order-date"`.
+  - Dates are strings in HexDB: `placed_at >= '2026-01-01'` and `DATE '2026-01-01'` both compare as text, which works for ISO 8601 dates.
+  - Equality on an array field matches any element: `tags = 'rust'`.
+- **NULL rules.** Comparisons follow SQL's rules for NULL:
+  - a comparison with NULL matches nothing (use `IS NULL`);
+  - `x <> 1`, `NOT (x = 1)` and `x NOT IN (1, 2)` don't match documents where `x` is missing or null;
+  - `SUM` of no values is NULL;
+  - a missing field reads as NULL.
+- **LIKE patterns.**
+  - `%` may appear only at the start or end, giving an exact, prefix, suffix or substring match. Matching is case-sensitive.
+  - `_` isn't supported. To match a literal `_`, escape it: `LIKE 'a!_%' ESCAPE '!'`.
+- **Aggregates.**
+  - They follow [Aggregations](#9-aggregations), including the 100,000-group limit.
+  - `HAVING` is evaluated over every group before paging.
+  - `COUNT(*)` without `GROUP BY` uses the exact count, so it doesn't read the documents.
+- **Access.**
+  - Reading needs read permission on the tessellation.
+  - A restricted role sees only its rows, and its hidden fields come back as NULL.
+  - Filtering, grouping or sorting by a hidden field is refused with 403, as in the REST API.
+- **Replicas.** `POST /sql` is a read, so a replica answers it itself instead of forwarding it to the Overseer.
+
+**Not supported.** These are refused with a message naming the part that isn't supported:
+- joins, subqueries, `UNION`, `WITH`;
+- expressions over fields (`total * 2`, `UPPER(name)`, `CASE`), comparing two fields, `ILIKE`;
+- window functions;
+- statements other than `SELECT` (SQL is read-only; write through the REST API or transactions).
+
+## 11. Transactions
 
 `POST /transactions` runs up to 1,000 operations across any user tessellations as one atomic write.
 
@@ -478,7 +560,7 @@ HexDB uses optimistic concurrency control.
 
 Validating every read at commit makes transactions serializable for the documents they touch. Two concurrent read-modify-write transactions on the same document can't both succeed with stale data. Every other write path (replace, patch, delete, `_update`) uses the same mechanism.
 
-## 11. Indexes and the query advisor
+## 12. Indexes and the query advisor
 
 ### Indexes
 
@@ -539,7 +621,7 @@ model = "claude-sonnet-5-5"
 
 Query statistics are kept per hex and saved with the metrics history (`query-stats.hxe`), so they survive restarts. Shapes not seen for 30 days are dropped. Needs `manage` on the tessellation.
 
-## 12. Schemas
+## 13. Schemas
 
 A tessellation is schemaless until a schema is registered. A schema is a numbered version: the fields documents may or must have, and, from version 2 on, the migration from the previous version.
 
@@ -619,7 +701,7 @@ History stays linear: the rollback is a new version (`"restores": 2`), checked f
 
 `DELETE /tessellations/{name}/schemas` removes the schema, and the tessellation becomes schemaless. Schema changes need `manage` on the tessellation.
 
-## 13. Change data
+## 14. Change data
 
 ### The change feed
 
@@ -659,7 +741,7 @@ The change history serves:
 | Several independent consumers, each with a server-side position | A stream with a tessellation source and consumer groups |
 | Push to Kafka, Kinesis, a webhook, a SIEM | A plugin, or a stream destination for webhooks |
 
-## 14. Streams
+## 15. Streams
 
 A stream is a named, ordered log of messages kept for `retention_hours`.
 - Producers publish messages.
@@ -704,7 +786,7 @@ Creating a stream needs `manage` on its name. A grant on `*` covers every tessel
 
 **Storage.** Messages are documents in the system tessellation `_stream_<name>`, so they're encrypted, replicated, and expire by TTL. Configurations live in `_streams` and offsets in `_stream_offsets`. Sources and destinations run on the Overseer.
 
-## 15. Functions, schedules and triggers
+## 16. Functions, schedules and triggers
 
 A function is saved on the server and run by name with parameters.
 
@@ -845,7 +927,7 @@ Other kinds of function receive the values their declared parameters name; for e
 - Internal writes (schema migrations, replication) don't fire triggers either.
 - `GET /triggers` shows each trigger with its status on this hex: runs, failures, refused writes, last run and last error.
 
-## 16. Plugins
+## 17. Plugins
 
 Plugins extend HexDB without changing it. Each is a folder with a `plugin.toml` manifest, listed in the registry (`plugins.registry`, default `plugins.json` next to the config file):
 
@@ -973,7 +1055,7 @@ All of these are listed, disabled, in [plugins.json](plugins.json).
 
 **How do I ship the audit trail to a SIEM?** Use a `stream` plugin with `audit = true` and `tessellations = []` (or just `_audit`).
 
-## 17. Security
+## 18. Security
 
 ### Authentication
 
@@ -1211,7 +1293,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 - Secrets belong in `hexdb.local.toml` or environment variables, never in a committed `hexdb.toml`.
 - `GET /settings` hides secrets in the effective configuration.
 
-## 18. Lattices and replication
+## 19. Lattices and replication
 
 ### Discovery and election
 
@@ -1293,7 +1375,7 @@ For hexes on different machines:
 
 Each hex can have its own `storage.encryption_key` when a `lattice_secret` is set.
 
-## 19. Storage internals
+## 20. Storage internals
 
 ### Write path
 
@@ -1392,7 +1474,7 @@ Versions 2 (unencrypted) and 3 (encrypted bodies, plaintext index) are still rea
 
 **Sealed file.** `HXE1 | key ID (8) | nonce (12) | AES-256-GCM(content)`, authenticated with the file name.
 
-## 20. Limits and configuration reference
+## 21. Limits and configuration reference
 
 ### Limits
 
@@ -1471,7 +1553,7 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 | `analyzers.<name>` | none | Custom text analyzers |
 | `ui.path` | `../hexdb_admin/dist` | Built admin UI |
 
-## 21. Operations
+## 22. Operations
 
 ```bash
 curl http://localhost:7700/health                       # public: {"status": "ok"}; signed-in users also get name, role, version
@@ -1504,7 +1586,7 @@ Hard-linked backups share disk blocks with the live data, so they don't protect 
 
 **Monitoring.** Use the `@sinks/otlp` plugin for metrics, a logs plugin for logs, and the audit trail for security events. `/status` is suitable for health checks that need more than `/health`.
 
-## 22. Drivers
+## 23. Drivers
 
 | Language | Folder | Install |
 | --- | --- | --- |
@@ -1610,9 +1692,9 @@ Concurrency tokens (`[ConcurrencyCheck]` or `.IsConcurrencyToken()`) become an `
 
 ### ODBC and JDBC
 
-There's no ODBC or JDBC driver yet: both need a SQL dialect. A SQL endpoint is planned, followed by an ODBC driver that sends SQL to it. Until then, tools with REST or JSON data sources (Power BI, Tableau Web Data Connectors, Grafana's JSON data source) can read HexDB directly.
+There's no ODBC or JDBC driver yet. An ODBC driver that sends statements to [`POST /sql`](#10-sql) is planned. Until then, tools with REST or JSON data sources (Power BI, Tableau Web Data Connectors, Grafana's JSON data source) can read HexDB directly.
 
-## 23. FAQ
+## 24. FAQ
 
 **How do I choose between `_update`, a transaction and a function?**
 - `_update` applies one merge patch to everything a filter matches.
@@ -1621,7 +1703,7 @@ There's no ODBC or JDBC driver yet: both need a SQL dialect. A SQL endpoint is p
 
 **Why did my write return 503 but the data is there?** With `replication.min_acks` set, the write committed on the Overseer, but not enough replicas confirmed within `ack_timeout_ms`. Retry with the same idempotency key to be safe.
 
-**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
+**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `sql`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
 
 **A replica is far behind or keeps re-syncing.**
 1. Check the Logs page on the replica, filtered by `hexdb_core::replication`.

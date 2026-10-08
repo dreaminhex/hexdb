@@ -1,12 +1,12 @@
 # HexDB
 
-HexDB is a document database written in Rust. Documents are JSON, grouped into collections called tessellations, and served over REST and GraphQL from a single binary that also hosts an admin UI. Several HexDB servers (hexes) form a lattice: one Overseer takes writes, and the others replicate its data, serve reads, and take over if it fails.
+HexDB is a document database written in Rust. Documents are JSON, grouped into collections called tessellations, and served over REST, GraphQL and read-only SQL from a single binary that also hosts an admin UI. Several HexDB servers (hexes) form a lattice: one Overseer takes writes, and the others replicate its data, serve reads, and take over if it fails.
 
 The [technical manual](MANUAL.md) covers every feature in depth, including how the storage engine, encryption, replication and indexes work.
 
 ## Features
 
-- **Documents and queries.** Insert, replace, patch, delete, bulk writes, upserts, update-by-filter, TTLs and idempotency keys. A JSON filter language with sorting and paging, shared by REST and GraphQL.
+- **Documents and queries.** Insert, replace, patch, delete, bulk writes, upserts, update-by-filter, TTLs and idempotency keys. A JSON filter language with sorting and paging, shared by REST and GraphQL, and SQL `SELECT` (with `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` and paging) translated onto it.
 - **Indexes and search.** Field, composite and unique indexes. Full-text indexes with configurable analyzers (stemming, n-grams, autocomplete). A query advisor that suggests indexes from observed queries, with an optional second opinion from Claude.
 - **Aggregations and transactions.** Group-by with count, distinct count, sum, average, min and max. Multi-document ACID transactions across tessellations, with version and filter preconditions.
 - **Schemas.** Optional, versioned per tessellation, with compatibility checks, background migrations (rename, copy, remove, default, convert, or a function you write), and rollback to an earlier version.
@@ -212,6 +212,7 @@ hexdb health                     is it up?
 hexdb status                     status and metrics (needs HEXDB_TOKEN)
 hexdb secret                     print a new random key
 hexdb backup [--name N] [--list] back up the running server (needs HEXDB_TOKEN)
+hexdb sql "SELECT ..." [-p V]   run a SQL query and print a table (needs HEXDB_TOKEN)
 hexdb plugins add|remove|list    manage the plugin registry
 hexdb lattice spawn --count 2    start more hexes on this machine that join its lattice
 hexdb lattice list|stop          list or stop them (stop --remove deletes their data)
@@ -282,5 +283,5 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 ## Limitations
 
 - Every hex holds a full copy of the data. Horizontal partitioning (sharding across hexes) isn't implemented.
-- There's no SQL interface yet, so no ODBC or JDBC driver. A SQL endpoint is planned, then an ODBC driver over it.
+- SQL is read-only and covers single-tessellation `SELECT`s: no joins, subqueries or expressions over fields. There's no ODBC or JDBC driver yet; an ODBC driver over `POST /sql` is planned.
 - The Entity Framework Core provider maps one entity type to one tessellation. It doesn't support relationships, owned types, inheritance or explicit transactions (see [MANUAL.md](MANUAL.md#entity-framework-core)).

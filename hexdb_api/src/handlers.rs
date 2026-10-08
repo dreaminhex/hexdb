@@ -379,7 +379,7 @@ fn user_tessellation(engine: &HexDBEngine, tess: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn existing_tessellation(engine: &HexDBEngine, tess: &str) -> Result<(), ApiError> {
+pub(crate) fn existing_tessellation(engine: &HexDBEngine, tess: &str) -> Result<(), ApiError> {
     user_tessellation(engine, tess)?;
     if !engine.tessellation_exists(tess) {
         return Err(ApiError::not_found(format!("Tessellation '{}' not found.", tess)));

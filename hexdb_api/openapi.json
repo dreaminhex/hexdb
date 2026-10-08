@@ -39,6 +39,9 @@
       "name": "GraphQL"
     },
     {
+      "name": "SQL"
+    },
+    {
       "name": "Users and roles"
     },
     {
@@ -2970,6 +2973,144 @@
         "responses": {
           "200": {
             "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sql": {
+      "post": {
+        "tags": [
+          "SQL"
+        ],
+        "summary": "Run a SQL SELECT (read-only; one page of rows, then pass next as cursor)",
+        "operationId": "post_sql",
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "sql"
+                ],
+                "properties": {
+                  "sql": {
+                    "type": "string"
+                  },
+                  "params": {
+                    "type": "array",
+                    "description": "values for ? or $1, $2, ... placeholders"
+                  },
+                  "page_size": {
+                    "type": "integer",
+                    "description": "rows per page, 1-10000 (default 1000)"
+                  },
+                  "cursor": {
+                    "type": "string",
+                    "description": "next from the previous page"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{\"columns\": [{\"name\", \"type\"}], \"rows\": [[...]], \"next\", \"translated\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sql/tables": {
+      "get": {
+        "tags": [
+          "SQL"
+        ],
+        "summary": "Tessellations the caller can read (a catalog for SQL clients)",
+        "operationId": "get_sql_tables",
+        "responses": {
+          "200": {
+            "description": "{\"tables\": [{\"name\"}]}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sql/columns": {
+      "get": {
+        "tags": [
+          "SQL"
+        ],
+        "summary": "A tessellation's columns: id, the current schema's fields, then fields sampled from documents",
+        "operationId": "get_sql_columns",
+        "parameters": [
+          {
+            "name": "table",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{\"table\", \"columns\": [{\"name\", \"type\", \"nullable\", \"source\": \"schema|sample\"}]}",
             "content": {
               "application/json": {
                 "schema": {

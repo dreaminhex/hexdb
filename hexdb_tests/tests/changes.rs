@@ -92,11 +92,19 @@ fn long_polling_wakes_up_on_a_change() -> Result<()> {
         Ok(())
     })?;
 
-    // With nothing new, a short wait times out with no changes and the same cursor.
+    // With nothing new, a short wait times out with no changes. The cursor may
+    // move past system writes the caller can't see (such as the trigger
+    // runner saving its position), but never backwards.
     let last = changes(&server, "")?["last_seq"].as_u64().unwrap();
     let body = changes(&server, &format!("after={}&wait=1", last))?;
-    assert!(body["changes"].as_array().unwrap().is_empty());
-    assert_eq!(body["last_seq"], last);
+    assert!(body["changes"].as_array().unwrap().is_empty(), "{}", body);
+    assert!(body["last_seq"].as_u64().unwrap() >= last);
+
+    // Once the trigger runner has saved its position, an idle server writes nothing.
+    std::thread::sleep(Duration::from_millis(2500));
+    let settled = changes(&server, "")?["last_seq"].as_u64().unwrap();
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(changes(&server, "")?["last_seq"].as_u64().unwrap(), settled, "an idle server kept writing");
     Ok(())
 }
 

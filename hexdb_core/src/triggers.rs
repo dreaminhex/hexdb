@@ -383,6 +383,10 @@ pub fn spawn_trigger_runner(engine: Arc<HexDBEngine>, mut shutdown_rx: watch::Re
     tokio::spawn(async move {
         let mut reader: Option<crate::engine::ChangeReader> = None;
         let mut saved = 0u64;
+        // The last change to a user tessellation that has been handled. System
+        // changes (including this runner's own cursor saves) don't move it, so
+        // saving the cursor doesn't cause another save.
+        let mut handled = 0u64;
         let mut last_save = std::time::Instant::now();
         loop {
             if !engine.is_writable() {
@@ -403,6 +407,7 @@ pub fn spawn_trigger_runner(engine: Arc<HexDBEngine>, mut shutdown_rx: watch::Re
                 };
                 debug!("Trigger runner starts after sequence {}.", start);
                 saved = start;
+                handled = start;
                 reader = Some(crate::engine::ChangeReader::new(start));
             }
             let r = reader.as_mut().unwrap();
@@ -411,24 +416,28 @@ pub fn spawn_trigger_runner(engine: Arc<HexDBEngine>, mut shutdown_rx: watch::Re
                 next = tokio::time::timeout(Duration::from_secs(1), r.next(&engine)) => next,
             };
             match next {
-                Ok(Some(change)) => engine.run_after_triggers(&change).await,
+                Ok(Some(change)) => {
+                    engine.run_after_triggers(&change).await;
+                    if !change.tessellation.starts_with('_') {
+                        handled = change.seq;
+                    }
+                }
                 Ok(None) => {
                     reader = None;
                     continue;
                 }
                 Err(_) => {}
             }
-            let position = reader.as_ref().map(|r| r.cursor).unwrap_or(saved);
-            if position != saved && last_save.elapsed() >= Duration::from_secs(1) {
-                let cursor = SavedCursor { history_id: engine.history_id(), seq: position };
+            if handled > saved && last_save.elapsed() >= Duration::from_secs(1) {
+                let cursor = SavedCursor { history_id: engine.history_id(), seq: handled };
                 if engine.put_system_document(TRIGGER_CURSORS_TESSELLATION, cursor_id(), json!(cursor), None).await.is_ok() {
-                    saved = position;
+                    saved = handled;
                 }
                 last_save = std::time::Instant::now();
             }
         }
-        if let Some(r) = reader {
-            let cursor = SavedCursor { history_id: engine.history_id(), seq: r.cursor };
+        if reader.is_some() && handled > saved {
+            let cursor = SavedCursor { history_id: engine.history_id(), seq: handled };
             let _ = engine.put_system_document(TRIGGER_CURSORS_TESSELLATION, cursor_id(), json!(cursor), None).await;
         }
         info!("🛑 Trigger runner stopped.");

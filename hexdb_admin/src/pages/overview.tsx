@@ -230,11 +230,20 @@ function ActivityChart({ samples, minutes, onMinutesChange }: { samples: Metrics
     />
   )
 
+  // Wide enough for the longest tick label: the axis rounds the top value up,
+  // so measure a value a little above the largest point (stacked: the sum).
+  const yLabel = (v: number) => valueFormat(v).replace("/min", "")
+  const top = data.reduce((max, row) => {
+    const values = keys.map((k) => Number((row as Record<string, number>)[k] ?? 0))
+    return Math.max(max, stacked ? values.reduce((a, b) => a + b, 0) : Math.max(0, ...values))
+  }, 0)
+  const yWidth = Math.max(56, yLabel(top * 1.25).length * 7 + 12)
+
   // Recharts finds its children by type and doesn't look inside fragments, so use a keyed array.
   const axes = [
     <CartesianGrid key="grid" vertical={false} stroke="var(--border)" />,
     <XAxis key="x" dataKey="t" type="number" scale="time" domain={["dataMin", "dataMax"]} tickFormatter={timeLabel} tickLine={false} axisLine={false} tickMargin={8} minTickGap={48} />,
-    <YAxis key="y" tickFormatter={(v: number) => valueFormat(v).replace("/min", "")} tickLine={false} axisLine={false} width={56} />,
+    <YAxis key="y" tickFormatter={yLabel} tickLine={false} axisLine={false} width={yWidth} />,
   ]
 
   return (

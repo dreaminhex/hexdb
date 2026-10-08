@@ -50,6 +50,7 @@ fn handled_locally(method: &Method, path: &str) -> bool {
         || matches!(path, "/auth/login" | "/auth/logout" | "/shutdown" | "/flush" | "/compact")
         || path.ends_with("/_query")
         || path.ends_with("/_aggregate")
+        || path == "/sql"
 }
 
 /// True if a GraphQL request body contains a mutation.

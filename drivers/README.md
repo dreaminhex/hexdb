@@ -72,4 +72,4 @@ node drivers/testing/server.mjs dotnet test drivers/dotnet
 
 ## ODBC and JDBC
 
-ODBC and JDBC drivers need a SQL dialect, which HexDB doesn't have yet: its query language is JSON filters, aggregations and GraphQL. A SQL endpoint (translating `SELECT ... WHERE ... GROUP BY` into filters and aggregations) is planned, followed by an ODBC driver that sends SQL to it over HTTP. Until then, tools that support REST or JSON sources, such as Power BI, Tableau Web Data Connectors and Grafana's JSON data source, can read HexDB directly.
+HexDB answers read-only SQL at `POST /sql` (see the [manual](../MANUAL.md#10-sql)). An ODBC driver that sends statements there over HTTP is planned. Until then, tools that support REST or JSON sources, such as Power BI, Tableau Web Data Connectors and Grafana's JSON data source, can read HexDB directly.

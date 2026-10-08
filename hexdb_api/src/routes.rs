@@ -101,6 +101,9 @@ pub fn app_router(
 
         // GraphQL (the admin UI's Queries page is the console)
         .route("/graphql", post(graphql).layer(DefaultBodyLimit::max(body_limit)))
+        .route("/sql", post(crate::sql::run).layer(DefaultBodyLimit::max(body_limit)))
+        .route("/sql/tables", get(crate::sql::tables))
+        .route("/sql/columns", get(crate::sql::columns))
 
         // Tessellations
         .route("/tessellations", get(list_tessellations).post(create_tessellation))

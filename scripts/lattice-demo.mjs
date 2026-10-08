@@ -215,6 +215,13 @@ try {
     "the hexes to find each other",
     async () => (await status(hexes[0]))?.network?.lattice?.hexes?.filter((h) => h.status === "active").length === count,
   )
+  // Right after joining, a hex may still call itself Overseer until the
+  // election settles; wait until every hex names the same single Overseer.
+  await waitFor("the election to settle", async () => {
+    const views = await Promise.all(hexes.map((h) => status(h).catch(() => null)))
+    const overseers = views.map((v) => (v?.network?.lattice?.hexes ?? []).filter((h) => h.role === "Overseer" && h.status === "active").map((h) => h.id))
+    return overseers.every((o) => o.length === 1 && o[0] === overseers[0][0])
+  })
 } catch (e) {
   console.error(`${e.message} See the server.log files in ${dir}.`)
   await quit()

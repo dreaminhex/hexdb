@@ -97,6 +97,9 @@ ROUTES = [
     ("patch", "/{tessellation}/{id}", "Documents", "Merge fields into a document (null removes)", {"parameters": [TESS, ID, TTL, IDEM], "requestBody": body(), "responses": ok()}),
     ("delete", "/{tessellation}/{id}", "Documents", "Delete a document", {"parameters": [TESS, ID, IDEM], "responses": no_content()}),
     ("post", "/transactions", "Documents", "Operations across tessellations, all or nothing", {"parameters": [IDEM], "requestBody": body(description="{\"operations\": [{\"op\": \"insert|replace|patch|delete|get|check\", \"tessellation\", \"id\", \"data\", \"if_version\"}]}"), "responses": ok()}),
+    ("post", "/sql", "SQL", "Run a SQL SELECT (read-only; one page of rows, then pass next as cursor)", {"requestBody": body({"type": "object", "required": ["sql"], "properties": {"sql": {"type": "string"}, "params": {"type": "array", "description": "values for ? or $1, $2, ... placeholders"}, "page_size": {"type": "integer", "description": "rows per page, 1-10000 (default 1000)"}, "cursor": {"type": "string", "description": "next from the previous page"}}}), "responses": ok("{\"columns\": [{\"name\", \"type\"}], \"rows\": [[...]], \"next\", \"translated\"}")}),
+    ("get", "/sql/tables", "SQL", "Tessellations the caller can read (a catalog for SQL clients)", {"responses": ok("{\"tables\": [{\"name\"}]}")}),
+    ("get", "/sql/columns", "SQL", "A tessellation's columns: id, the current schema's fields, then fields sampled from documents", {"parameters": [param("table", "query")], "responses": ok("{\"table\", \"columns\": [{\"name\", \"type\", \"nullable\", \"source\": \"schema|sample\"}]}")}),
     ("post", "/graphql", "GraphQL", "Run a GraphQL query or mutation", {"requestBody": body({"type": "object", "properties": {"query": {"type": "string"}, "variables": OBJ, "operationName": {"type": "string"}}}), "responses": ok()}),
     # Changes
     ("get", "/changes", "Changes", "Committed changes after a sequence number (long poll with wait)", {"parameters": [param(n, "query") for n in ("after", "tessellation", "limit", "wait")], "responses": ok()}),
@@ -144,7 +147,7 @@ ROUTES = [
     ("delete", "/roles/{name}", "Users and roles", "Delete an unused custom role", {"parameters": [NAME], "responses": no_content()}),
 ]
 
-TAGS = ["Authentication", "Documents", "Tessellations", "Indexes", "Schemas", "Changes", "Streams", "Functions", "GraphQL", "Users and roles", "Server"]
+TAGS = ["Authentication", "Documents", "Tessellations", "Indexes", "Schemas", "Changes", "Streams", "Functions", "GraphQL", "SQL", "Users and roles", "Server"]
 
 
 def build():
