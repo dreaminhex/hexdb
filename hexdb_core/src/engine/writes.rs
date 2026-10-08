@@ -48,6 +48,10 @@ const MAX_IDEMPOTENCY_KEY_LEN: usize = 255;
 pub struct IdempotencyKey {
     pub key: String,
     pub fingerprint: String,
+    /// Store only document IDs and metadata, not their fields (for bulk
+    /// requests whose response is a list of IDs), so a keyed 10,000-document
+    /// insert doesn't write every document twice.
+    pub compact: bool,
 }
 
 impl IdempotencyKey {
@@ -64,7 +68,13 @@ impl IdempotencyKey {
         if !key.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
             return Err(EngineError::Invalid("Idempotency keys must be printable ASCII.".into()).into());
         }
-        Ok(IdempotencyKey { key: key.to_string(), fingerprint: blake3::hash(request).to_hex().to_string() })
+        Ok(IdempotencyKey { key: key.to_string(), fingerprint: blake3::hash(request).to_hex().to_string(), compact: false })
+    }
+
+    /// Keep only IDs in the stored result (see `compact`).
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
+        self
     }
 
     /// Scope the key to one user, so users can't replay or block each other's keys.
@@ -254,14 +264,8 @@ impl HexDBEngine {
 
     /// Visible documents in a tessellation in ID order, starting after `after`.
     pub async fn list_documents(&self, tess: &str, after: Option<Ulid>, limit: usize) -> Result<ListPage> {
-        let mut ids: Vec<Ulid> = self
-            .versions(tess)
-            .await
-            .into_iter()
-            .filter(|(id, v)| v.visible() && after.is_none_or(|a| *id > a))
-            .map(|(id, _)| id)
-            .collect();
-        ids.sort();
+        // One extra ID tells whether there's a next page.
+        let ids = self.visible_ids_after(tess, after, limit.saturating_add(1)).await;
 
         let mut documents = Vec::new();
         let mut next = None;
@@ -285,9 +289,40 @@ impl HexDBEngine {
         if query.after.is_some() && !query.sort.is_empty() {
             return Err(invalid("after can't be combined with sort; use offset to page sorted results."));
         }
+        // No filter and no sort: read just the page, in ID order. The total
+        // comes from the cached count.
+        if query.filter.is_empty() && query.sort.is_empty() {
+            let want = query.offset.saturating_add(query.limit).saturating_add(1);
+            let ids = self.visible_ids_after(tess, query.after, want).await;
+            let scanned = ids.len();
+            let mut documents = Vec::new();
+            let mut more = false;
+            for id in ids.into_iter().skip(query.offset) {
+                if documents.len() == query.limit {
+                    more = true;
+                    break;
+                }
+                if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
+                    documents.push(doc);
+                }
+            }
+            let next = if more { documents.last().map(|d| d.id) } else { None };
+            let total = self.count_documents(tess).await?;
+            return Ok(QueryPage { documents, total, next, indexes: Vec::new(), scanned });
+        }
+
+        // No filter, one sort key with a field index: walk the index in order.
+        if query.filter.is_empty() && query.sort.len() == 1 && query.after.is_none() {
+            if let Some(page) = self.query_sorted_by_index(tess, query).await? {
+                return Ok(page);
+            }
+        }
+
         let (filter, plan) = self.prepare_filter(tess, &query.filter);
         let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
-        let ids = self.candidate_ids(tess, plan, query.after).await;
+        // Every candidate is checked so `total` covers all pages; `after`
+        // only decides where the returned page starts.
+        let ids = self.candidate_ids(tess, plan, None).await;
         let scanned = ids.len();
 
         let mut matched = Vec::new();
@@ -301,8 +336,13 @@ impl HexDBEngine {
         let total = matched.len();
         sort_documents(&mut matched, &query.sort);
 
-        let documents: Vec<Document> = matched.into_iter().skip(query.offset).take(query.limit).collect();
-        let next = if query.sort.is_empty() && query.offset + documents.len() < total {
+        let start = match query.after {
+            Some(after) => matched.partition_point(|d| d.id <= after),
+            None => 0,
+        };
+        let remaining = matched.len() - start;
+        let documents: Vec<Document> = matched.into_iter().skip(start + query.offset).take(query.limit).collect();
+        let next = if query.sort.is_empty() && query.offset + documents.len() < remaining {
             documents.last().map(|d| d.id)
         } else {
             None
@@ -714,7 +754,18 @@ impl HexDBEngine {
         let mut data = CompactFields::new();
         data.insert("key".into(), FieldValue::String(k.key.clone()));
         data.insert("fingerprint".into(), FieldValue::String(k.fingerprint.clone()));
-        data.insert("result".into(), FieldValue::from_json(&serde_json::to_value(result)?));
+        let mut result = serde_json::to_value(result)?;
+        if k.compact {
+            // Documents keep their ID and metadata; their fields are dropped.
+            if let Value::Array(items) = &mut result {
+                for item in items {
+                    if let Some(data) = item.get_mut("data") {
+                        *data = Value::Object(Default::default());
+                    }
+                }
+            }
+        }
+        data.insert("result".into(), FieldValue::from_json(&result));
         data.insert("created".into(), FieldValue::Integer(now));
 
         let doc = Document {
@@ -868,6 +919,7 @@ impl HexDBEngine {
                     None => state.hex.put_tombstone(key, seq, true),
                 }
             }
+            self.bump_generation();
             {
                 let mut indexes = self.indexes.write().unwrap();
                 for change in &changes.0 {

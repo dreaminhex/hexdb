@@ -143,7 +143,7 @@ impl Ord for KeyPart {
 
 impl KeyPart {
     /// The key for a scalar JSON value; `None` for arrays and objects.
-    fn from_scalar(value: &Value) -> Option<KeyPart> {
+    pub(crate) fn from_scalar(value: &Value) -> Option<KeyPart> {
         Some(match value {
             Value::Null => KeyPart::Null,
             Value::Bool(b) => KeyPart::Bool(*b),
@@ -188,6 +188,10 @@ pub(crate) struct FieldIndex {
     unique: bool,
     entries: BTreeMap<Key, BTreeSet<Ulid>>,
     by_doc: HashMap<Ulid, Vec<Key>>,
+    /// Documents whose first indexed field is an array or object. Those sort
+    /// as a whole, not by the elements they're indexed under, so index order
+    /// isn't sort order while any exist.
+    irregular: HashSet<Ulid>,
 }
 
 pub(crate) struct TextIndex {
@@ -233,6 +237,7 @@ impl Index {
                 unique: def.unique,
                 entries: BTreeMap::new(),
                 by_doc: HashMap::new(),
+                irregular: HashSet::new(),
             }),
             IndexKind::Text => IndexData::Text(TextIndex { paths, words: HashMap::new(), by_doc: HashMap::new() }),
         };
@@ -245,6 +250,27 @@ impl Index {
             IndexData::Text(t) => (t.by_doc.len(), t.words.len()),
         };
         IndexInfo { def: self.def.clone(), documents, keys, ready: self.ready }
+    }
+
+    /// For a single-field index: every (first key part, ID) in key order
+    /// (descending keys when `descending`), IDs ascending within a key.
+    pub(crate) fn ordered(&self, descending: bool) -> Option<Vec<(KeyPart, Ulid)>> {
+        let IndexData::Field(f) = &self.data else { return None };
+        if f.paths.len() != 1 || !f.irregular.is_empty() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(f.by_doc.len());
+        let mut push = |key: &Key, ids: &BTreeSet<Ulid>| {
+            for id in ids {
+                out.push((key[0].clone(), *id));
+            }
+        };
+        if descending {
+            f.entries.iter().rev().for_each(|(k, ids)| push(k, ids));
+        } else {
+            f.entries.iter().for_each(|(k, ids)| push(k, ids));
+        }
+        Some(out)
     }
 
     pub(crate) fn contains(&self, id: &Ulid) -> bool {
@@ -280,6 +306,7 @@ impl Index {
     pub(crate) fn remove(&mut self, id: &Ulid) {
         match &mut self.data {
             IndexData::Field(f) => {
+                f.irregular.remove(id);
                 for key in f.by_doc.remove(id).unwrap_or_default() {
                     if let Some(ids) = f.entries.get_mut(&key) {
                         ids.remove(id);
@@ -313,6 +340,10 @@ impl Index {
                     f.entries.entry(key.clone()).or_default().insert(doc.id);
                 }
                 f.by_doc.insert(doc.id, keys);
+                let first = resolve(&json, &f.paths[0]);
+                if first.len() > 1 || first.iter().any(|v| v.is_array() || v.is_object()) {
+                    f.irregular.insert(doc.id);
+                }
             }
             IndexData::Text(t) => {
                 let mut texts = Vec::new();

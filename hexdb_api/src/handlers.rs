@@ -174,6 +174,8 @@ pub struct ListParams {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub after: Option<String>,
+    /// Comma-separated field paths to return (default: all fields).
+    pub fields: Option<String>,
 }
 
 /// JSON body for `POST /{tessellation}/_query`, for filters too long for a URL.
@@ -186,6 +188,29 @@ pub struct QueryRequest {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
     pub after: Option<String>,
+    /// Field paths to return: `["name", "address.city"]` or `"name,address.city"`.
+    pub fields: Option<FieldList>,
+}
+
+/// Field paths as a list or a comma-separated string.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum FieldList {
+    Text(String),
+    List(Vec<String>),
+}
+
+impl FieldList {
+    fn paths(self) -> Vec<String> {
+        match self {
+            FieldList::Text(t) => split_fields(&t),
+            FieldList::List(l) => l.into_iter().filter(|f| !f.trim().is_empty()).collect(),
+        }
+    }
+}
+
+fn split_fields(text: &str) -> Vec<String> {
+    text.split(',').map(str::trim).filter(|f| !f.is_empty()).map(String::from).collect()
 }
 
 /// Sort keys as `"-views,title"` or `[{"field": "views", "descending": true}]`.
@@ -229,6 +254,7 @@ fn parse_sort_text(text: &str) -> Result<Vec<SortKey>, ApiError> {
 }
 
 /// Run a document query and render `{"documents", "total", "next"}`.
+#[allow(clippy::too_many_arguments)]
 async fn run_query(
     engine: &HexDBEngine,
     tess: &str,
@@ -237,6 +263,7 @@ async fn run_query(
     limit: Option<usize>,
     offset: Option<usize>,
     after: Option<&str>,
+    fields: Option<Vec<String>>,
 ) -> ApiResult {
     existing_tessellation(engine, tess)?;
     let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE);
@@ -256,8 +283,12 @@ async fn run_query(
     };
 
     let page = engine.query_documents(tess, &query).await?;
+    let documents = match &fields {
+        Some(f) if !f.is_empty() => Value::Array(page.documents.iter().map(|d| hexdb_core::project(&d.to_api_json(), f)).collect()),
+        _ => docs_json(&page.documents),
+    };
     Ok(Json(json!({
-        "documents": docs_json(&page.documents),
+        "documents": documents,
         "total": page.total,
         "next": page.next.map(|id| id.to_string()),
         "plan": { "indexes": page.indexes, "scanned": page.scanned },
@@ -594,7 +625,8 @@ pub async fn list_docs(
     let Query(params) = params?;
     let filter = parse_filter_param(params.filter.as_deref())?;
     let sort = parse_sort_text(params.sort.as_deref().unwrap_or(""))?;
-    run_query(&engine, &tess, &filter, sort, params.limit, params.offset, params.after.as_deref()).await
+    let fields = params.fields.as_deref().map(split_fields);
+    run_query(&engine, &tess, &filter, sort, params.limit, params.offset, params.after.as_deref(), fields).await
 }
 
 /// Query documents with a JSON body:
@@ -612,7 +644,8 @@ pub async fn query_docs(
         Some(SortSpec::Keys(keys)) => keys,
         None => Vec::new(),
     };
-    run_query(&engine, &tess, &request.filter, sort, request.limit, request.offset, request.after.as_deref()).await
+    let fields = request.fields.map(FieldList::paths);
+    run_query(&engine, &tess, &request.filter, sort, request.limit, request.offset, request.after.as_deref(), fields).await
 }
 
 /// Count documents, optionally only those matching `?filter=<JSON>`.
@@ -630,12 +663,29 @@ pub async fn count_docs(
 }
 
 /// Get a document.
-pub async fn get_doc(Path((tess, id)): Path<(String, String)>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GetParams {
+    /// Comma-separated field paths to return.
+    pub fields: Option<String>,
+}
+
+pub async fn get_doc(
+    Path((tess, id)): Path<(String, String)>,
+    params: Result<Query<GetParams>, QueryRejection>,
+    State(engine): Engine,
+    Auth(principal): Auth,
+) -> ApiResult {
     principal.require(Permission::Read, &tess)?;
+    let Query(params) = params?;
     user_tessellation(&engine, &tess)?;
     match engine.get_document_versioned(&tess, &id).await? {
         Some((doc, version)) => {
-            let mut response = Json(doc.to_api_json()).into_response();
+            let json = match params.fields.as_deref().map(split_fields) {
+                Some(f) if !f.is_empty() => hexdb_core::project(&doc.to_api_json(), &f),
+                _ => doc.to_api_json(),
+            };
+            let mut response = Json(json).into_response();
             if let Ok(etag) = HeaderValue::from_str(&format!("\"{}\"", version)) {
                 response.headers_mut().insert(header::ETAG, etag);
             }
@@ -742,7 +792,8 @@ pub async fn bulk_insert(
     principal.require(Permission::Write, &tess)?;
     let (Query(params), Json(body)) = (params?, body?);
     user_tessellation(&engine, &tess)?;
-    let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?;
+    // The response lists IDs only, so the stored result does too.
+    let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?.map(IdempotencyKey::compact);
     let outcome = engine.insert_documents(&tess, bulk_items(body)?, params.expiry(), idem).await?;
     Ok(respond(StatusCode::CREATED, ids_json(&outcome.value), outcome.replayed))
 }
@@ -761,7 +812,8 @@ pub async fn bulk_replace(
     principal.require(Permission::Write, &tess)?;
     let (Query(params), Json(body)) = (params?, body?);
     user_tessellation(&engine, &tess)?;
-    let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?;
+    // The response lists IDs only, so the stored result does too.
+    let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?.map(IdempotencyKey::compact);
     let targets = bulk_targets(bulk_items(body)?)?;
     let outcome = engine.replace_documents(&tess, targets, params.expiry(), idem).await?;
     Ok(respond(StatusCode::OK, ids_json(&outcome.value), outcome.replayed))
@@ -781,7 +833,8 @@ pub async fn bulk_patch(
     principal.require(Permission::Write, &tess)?;
     let (Query(params), Json(body)) = (params?, body?);
     user_tessellation(&engine, &tess)?;
-    let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?;
+    // The response lists IDs only, so the stored result does too.
+    let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?.map(IdempotencyKey::compact);
     let targets = bulk_targets(bulk_items(body)?)?;
     let outcome = engine.patch_documents(&tess, targets, params.expiry(), idem).await?;
     Ok(respond(StatusCode::OK, ids_json(&outcome.value), outcome.replayed))

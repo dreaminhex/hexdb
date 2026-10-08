@@ -1,4 +1,8 @@
-@import "tailwindcss";
+/* Scan only the app's own files for class names. Without an explicit source,
+   Tailwind's automatic detection can walk far outside the UI (e.g. the
+   repository's Rust target/ directory), which made builds hang. */
+@import "tailwindcss" source(".");
+@source "../index.html";
 @import "tw-animate-css";
 
 /* Tailwind v4 reads theme tokens from CSS, not tailwind.config.ts. Map the

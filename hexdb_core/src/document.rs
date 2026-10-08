@@ -47,6 +47,38 @@ pub struct Document {
     pub ttl: Option<i64>, // epoch millis when the document expires
 }
 
+/// Keep only the given dotted field paths of a document's API JSON (plus
+/// `id` and `_expires_at`). Missing paths are left out; nested paths keep the
+/// enclosing objects.
+pub fn project(json: &Value, fields: &[String]) -> Value {
+    fn copy_path(from: &Value, to: &mut Map<String, Value>, path: &[&str]) {
+        let Some((first, rest)) = path.split_first() else { return };
+        let Some(value) = from.get(*first) else { return };
+        if rest.is_empty() {
+            to.insert(first.to_string(), value.clone());
+            return;
+        }
+        if !value.is_object() {
+            return;
+        }
+        let entry = to.entry(first.to_string()).or_insert_with(|| Value::Object(Map::new()));
+        if let Value::Object(inner) = entry {
+            copy_path(value, inner, rest);
+        }
+    }
+    let mut out = Map::new();
+    for key in ["id", "_expires_at"] {
+        if let Some(v) = json.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    for field in fields {
+        let path: Vec<&str> = field.split('.').collect();
+        copy_path(json, &mut out, &path);
+    }
+    Value::Object(out)
+}
+
 impl Document {
     /// True if the document has a TTL that has passed.
     pub fn is_expired(&self, now_millis: i64) -> bool {

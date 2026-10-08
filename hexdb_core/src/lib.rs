@@ -33,12 +33,12 @@ pub use engine::{
     UpdateSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
     parse_transaction, TransactionResult, TxOpKind, TxOperation, TxResult, MAX_TRANSACTION_OPS,
 };
-pub use document::{Document, FieldValue};
+pub use document::{project, Document, FieldValue};
 pub use hex::Hex;
 pub use vertex::Vertex;
 pub use wal::{WalOp, WalRecord};
 pub use metrics::{HexMeta, HexMetrics, VertexMeta, TessMetrics, NetworkMetrics, LatticeMetrics, StorageMetrics, collect};
-pub use crypt::{constant_time_eq, create_hash, decode_encryption_key, random_bytes, verify_hash, KeyRing};
+pub use crypt::{constant_time_eq, create_hash, decode_encryption_key, random_bytes, read_sealed_file, verify_hash, write_sealed_file, KeyRing};
 pub use sst::{SstFile, SstStore};
 pub use catalog::{validate_tessellation_name, TessellationInfo};
 pub use filter::{tokenize, Filter, SortKey};

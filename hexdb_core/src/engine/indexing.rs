@@ -32,10 +32,24 @@ impl HexDBEngine {
 
     /// Create an index without the write guard (replication).
     pub(crate) async fn create_index_unchecked(&self, tess: &str, def: IndexDef) -> Result<IndexInfo> {
-        let def = def.validated()?;
         if self.is_system_tessellation(tess) {
             return Err(invalid(format!("'{}' is a system tessellation; it can't be indexed.", tess)));
         }
+        self.create_index_internal(tess, def).await
+    }
+
+    /// Create an index HexDB itself relies on, on any tessellation, if it
+    /// doesn't exist yet (e.g. the users' login index).
+    pub(crate) async fn ensure_internal_index(&self, tess: &str, def: IndexDef) -> Result<()> {
+        let exists = self.list_indexes(tess).iter().any(|i| i.def.name == def.name);
+        if !exists {
+            self.create_index_internal(tess, def).await?;
+        }
+        Ok(())
+    }
+
+    async fn create_index_internal(&self, tess: &str, def: IndexDef) -> Result<IndexInfo> {
+        let def = def.validated()?;
         if !self.tessellation_exists(tess) {
             return Err(EngineError::NotFound(format!("Tessellation '{}' not found.", tess)).into());
         }
@@ -73,7 +87,7 @@ impl HexDBEngine {
                 info.indexes.retain(|d| d.name != def.name);
                 info.indexes.push(def.clone());
             }
-            if let Err(e) = catalog.save(&self.storage_dir) {
+            if let Err(e) = catalog.save(&self.storage_dir, &self.keys) {
                 drop(catalog);
                 self.remove_index_entry(tess, &def.name);
                 return Err(e);
@@ -99,7 +113,7 @@ impl HexDBEngine {
         if let Some(info) = catalog.tessellations.get_mut(tess) {
             info.indexes.retain(|d| d.name != name);
         }
-        catalog.save(&self.storage_dir)?;
+        catalog.save(&self.storage_dir, &self.keys)?;
         info!("🗑️ Dropped index '{}' on '{}'.", name, tess);
         Ok(true)
     }
@@ -169,6 +183,53 @@ impl HexDBEngine {
         let before = list.len();
         list.retain(|i| i.def.name != name);
         before != list.len()
+    }
+
+    /// An unfiltered query sorted by one field that has a single-field index:
+    /// read documents in index order and stop once the page is full. Returns
+    /// `None` (use the general path) when there's no such index, or when a
+    /// document's sort value doesn't match its index key (arrays, objects),
+    /// so results are always the same as an in-memory sort.
+    pub(crate) async fn query_sorted_by_index(
+        &self,
+        tess: &str,
+        query: &crate::engine::DocumentQuery,
+    ) -> Result<Option<crate::engine::QueryPage>> {
+        let key = &query.sort[0];
+        let (name, ordered) = {
+            let indexes = self.indexes.read().unwrap();
+            let Some(index) = indexes.by_tessellation.get(tess).and_then(|list| {
+                list.iter().find(|i| i.ready && i.def.kind == crate::index::IndexKind::Field && i.def.fields == [key.field.clone()])
+            }) else {
+                return Ok(None);
+            };
+            (index.def.name.clone(), index.ordered(key.descending))
+        };
+        let Some(ordered) = ordered else { return Ok(None) };
+        let path: Vec<String> = key.field.split('.').map(String::from).collect();
+        let want = query.offset.saturating_add(query.limit);
+        let mut seen = HashSet::new();
+        let mut documents = Vec::new();
+        let mut scanned = 0;
+        for (part, id) in ordered {
+            if documents.len() >= want {
+                break;
+            }
+            if !seen.insert(id) {
+                continue;
+            }
+            scanned += 1;
+            let Some(doc) = self.read_latest(&crate::hex::DocKey::new(tess, id)).await?.0 else { continue };
+            let json = doc.to_api_json();
+            let value = crate::filter::resolve(&json, &path).first().map(|v| (*v).clone()).unwrap_or(serde_json::Value::Null);
+            if crate::index::KeyPart::from_scalar(&value) != Some(part) {
+                return Ok(None);
+            }
+            documents.push(doc);
+        }
+        let total = self.count_documents(tess).await?;
+        let documents = documents.into_iter().skip(query.offset).take(query.limit).collect();
+        Ok(Some(crate::engine::QueryPage { documents, total, next: None, indexes: vec![name], scanned }))
     }
 
     /// Bind `$text` to the tessellation's text index fields, and ask the

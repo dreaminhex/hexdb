@@ -294,7 +294,7 @@ pub const HISTORY_INTERVAL_SECONDS: u64 = 15;
 pub const HISTORY_RETENTION_SECONDS: u64 = 6 * 60 * 60;
 
 /// One point-in-time metrics sample.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct MetricsSample {
     pub timestamp: DateTime<Utc>,
     /// Visible documents per user tessellation.
@@ -308,7 +308,9 @@ pub struct MetricsSample {
     pub queries_total: u64,
 }
 
-/// A bounded, in-memory series of metrics samples. Not persisted across restarts.
+/// A bounded series of metrics samples. Saved to `metrics-history.hxe` in the
+/// data directory (encrypted) every minute and at shutdown, and reloaded at
+/// startup.
 pub struct MetricsHistory {
     samples: std::sync::Mutex<std::collections::VecDeque<MetricsSample>>,
     capacity: usize,
@@ -328,6 +330,24 @@ impl MetricsHistory {
             samples.pop_front();
         }
         samples.push_back(sample);
+    }
+
+    /// Every sample, oldest first.
+    pub fn all(&self) -> Vec<MetricsSample> {
+        self.samples.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Replace the series (at startup), dropping samples older than the retention.
+    pub fn restore(&self, mut samples: Vec<MetricsSample>) {
+        let cutoff = Utc::now() - chrono::Duration::seconds(HISTORY_RETENTION_SECONDS as i64);
+        samples.retain(|s| s.timestamp >= cutoff);
+        let skip = samples.len().saturating_sub(self.capacity);
+        *self.samples.lock().unwrap() = samples.into_iter().skip(skip).collect();
+    }
+
+    /// The newest sample.
+    pub fn last(&self) -> Option<MetricsSample> {
+        self.samples.lock().unwrap().back().cloned()
     }
 
     /// Samples taken at or after `since`, oldest first.

@@ -122,6 +122,56 @@ impl KeyRing {
     }
 }
 
+/// Magic bytes of an encrypted metadata file.
+const SEALED_MAGIC: &[u8; 4] = b"HXE1";
+
+/// Write `plaintext` to `path` encrypted with the key ring's current key:
+/// `HXE1 | key ID (8) | nonce | ciphertext`, with the file name as
+/// authenticated data (so files can't be swapped). Written to a temporary
+/// file, synced, and renamed into place.
+pub fn write_sealed_file(path: &std::path::Path, keys: &KeyRing, plaintext: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let sealed = keys.encrypt(plaintext, name.as_bytes())?;
+    let tmp = path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp).map_err(|e| anyhow!("Failed to write {}: {}", tmp.display(), e))?;
+    file.write_all(SEALED_MAGIC)?;
+    file.write_all(&keys.current_id().to_be_bytes())?;
+    file.write_all(&sealed)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path).map_err(|e| anyhow!("Failed to replace {}: {}", path.display(), e))?;
+    Ok(())
+}
+
+/// Read a file written by [`write_sealed_file`]. `Ok(None)` if it doesn't exist.
+pub fn read_sealed_file(path: &std::path::Path, keys: &KeyRing) -> Result<Option<Vec<u8>>> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(anyhow!("Failed to read {}: {}", path.display(), e)),
+    };
+    if bytes.len() < 12 || &bytes[..4] != SEALED_MAGIC {
+        return Err(anyhow!("{} is not an encrypted HexDB file", path.display()));
+    }
+    let key_id = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    keys.decrypt(key_id, &bytes[12..], name.as_bytes()).map(Some).map_err(|e| {
+        anyhow!(
+            "{} could not be decrypted ({}). It is encrypted with key {:016x}; if storage.encryption_key changed, add the old key to storage.previous_encryption_keys.",
+            path.display(),
+            e,
+            key_id
+        )
+    })
+}
+
+/// The key ID a sealed file was written with (to tell whether it needs rewriting after a rotation).
+pub fn sealed_file_key_id(path: &std::path::Path) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    (bytes.len() >= 12 && &bytes[..4] == SEALED_MAGIC).then(|| u64::from_be_bytes(bytes[4..12].try_into().unwrap()))
+}
+
 fn decrypt_with(cipher: &Aes256Gcm, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
     if data.len() < NONCE_LEN {
         return Err(anyhow!("ciphertext too short"));
@@ -215,6 +265,23 @@ mod tests {
         let stranger = KeyRing::new(&[3u8; 32], &[]);
         assert!(stranger.decrypt_any(&sealed, b"doc-1").is_err());
         assert!(!format!("{:?}", after).contains("Aes"), "debug output names key IDs only");
+    }
+
+    #[test]
+    fn sealed_files_round_trip_and_resist_swapping() {
+        let dir = std::env::temp_dir().join(format!("hexdb-sealed-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keys = KeyRing::new(&[4u8; 32], &[]);
+        let a = dir.join("a.hxe");
+        write_sealed_file(&a, &keys, b"metadata").unwrap();
+        assert!(!std::fs::read(&a).unwrap().windows(8).any(|w| w == b"metadata"));
+        assert_eq!(read_sealed_file(&a, &keys).unwrap().unwrap(), b"metadata");
+        assert!(read_sealed_file(&dir.join("missing.hxe"), &keys).unwrap().is_none());
+        let b = dir.join("b.hxe");
+        std::fs::copy(&a, &b).unwrap();
+        assert!(read_sealed_file(&b, &keys).is_err(), "bound to its file name");
+        assert_eq!(sealed_file_key_id(&a), Some(keys.current_id()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

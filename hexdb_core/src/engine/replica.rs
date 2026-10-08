@@ -157,7 +157,12 @@ impl HexDBEngine {
             self.drop_index_unchecked(tess, &def.name)?;
         }
         for def in wanted.iter().filter(|d| !have.contains(d)) {
-            if let Err(e) = self.create_index_unchecked(tess, def.clone()).await {
+            let created = if self.is_system_tessellation(tess) {
+                self.ensure_internal_index(tess, def.clone()).await
+            } else {
+                self.create_index_unchecked(tess, def.clone()).await.map(|_| ())
+            };
+            if let Err(e) = created {
                 tracing::warn!("⚠️ Couldn't replicate index '{}' on '{}': {:#}", def.name, tess, e);
             }
         }

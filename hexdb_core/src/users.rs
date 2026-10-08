@@ -81,6 +81,16 @@ pub struct StoredUser {
     /// Sessions issued at or before this time (epoch milliseconds) are no longer valid.
     #[serde(default)]
     pub sessions_valid_after: i64,
+    /// The login in lowercase, indexed for case-insensitive lookups.
+    #[serde(default)]
+    pub login_key: String,
+}
+
+/// Name of the internal index on `users.login_key`.
+const LOGIN_INDEX: &str = "login_key";
+
+fn login_key(login: &str) -> String {
+    login.trim().to_ascii_lowercase()
 }
 
 fn never() -> i64 {
@@ -235,10 +245,7 @@ pub(crate) async fn find_by_id(engine: &HexDBEngine, id: &str) -> Result<Option<
 
 /// A user by login only (ignoring case), for sign-in.
 pub(crate) async fn find_for_login(engine: &HexDBEngine, login: &str) -> Result<Option<(Ulid, StoredUser)>> {
-    if !engine.tessellation_exists(USERS_TESSELLATION) {
-        return Ok(None);
-    }
-    Ok(all_users(engine).await?.into_iter().find(|(_, u)| u.login.eq_ignore_ascii_case(login.trim())))
+    find_by_login(engine, login).await
 }
 
 /// Note a successful sign-in (time and client address, last 10 addresses).
@@ -277,10 +284,7 @@ async fn find_user(engine: &HexDBEngine, id_or_login: &str) -> Result<Option<(Ul
             return Ok(parse_user(&doc).map(|u| (doc.id, u)));
         }
     }
-    Ok(all_users(engine)
-        .await?
-        .into_iter()
-        .find(|(_, u)| u.login.eq_ignore_ascii_case(id_or_login)))
+    find_by_login(engine, id_or_login).await
 }
 
 async fn check_roles_exist(engine: &HexDBEngine, grants: &[RoleGrant]) -> Result<()> {
@@ -298,7 +302,20 @@ fn not_found(id_or_login: &str) -> anyhow::Error {
 }
 
 fn to_json(user: &StoredUser) -> Result<Value> {
+    let mut user = user.clone();
+    user.login_key = login_key(&user.login);
     Ok(serde_json::to_value(user)?)
+}
+
+/// A user by login (ignoring case), through the login index.
+async fn find_by_login(engine: &HexDBEngine, login: &str) -> Result<Option<(Ulid, StoredUser)>> {
+    if !engine.tessellation_exists(USERS_TESSELLATION) {
+        return Ok(None);
+    }
+    let filter = crate::filter::Filter::parse(&serde_json::json!({ "login_key": login_key(login) }))?;
+    // Startup gives every user a login_key (see add_login_keys).
+    let found = engine.matching_documents(USERS_TESSELLATION, &filter).await?;
+    Ok(found.first().and_then(|doc| parse_user(doc).map(|u| (doc.id, u))))
 }
 
 /// All users.
@@ -350,6 +367,7 @@ pub async fn create_user(engine: &HexDBEngine, input: NewUser, idem: Option<Idem
         mfa_secret: None,
         mfa_backup_codes: Vec::new(),
         sessions_valid_after: 0,
+        login_key: String::new(),
     };
 
     let outcome = engine.insert_documents(USERS_TESSELLATION, vec![to_json(&user)?], None, idem).await?;
@@ -499,6 +517,13 @@ pub async fn bootstrap(engine: &HexDBEngine, security: &SecurityConfig) -> Resul
     engine.create_tessellation(ROLES_TESSELLATION, "system")?;
     engine.create_tessellation(USERS_TESSELLATION, "system")?;
     migrate_legacy(engine).await?;
+    add_login_keys(engine).await?;
+    engine
+        .ensure_internal_index(
+            USERS_TESSELLATION,
+            crate::index::IndexDef { name: LOGIN_INDEX.into(), kind: crate::index::IndexKind::Field, fields: vec!["login_key".into()], unique: false },
+        )
+        .await?;
 
     let existing: Vec<String> = list_roles(engine).await?.into_iter().map(|r| r.name).collect();
     let missing: Vec<Value> = DEFAULT_ROLES
@@ -558,6 +583,17 @@ Sign in and change this password, then delete this file.
         }
     } else if !configured_password.is_empty() {
         warn!("⚠️ security.admin_password is set but users already exist, so it is ignored. Remove it from the configuration.");
+    }
+    Ok(())
+}
+
+/// Give users stored before `login_key` existed their key.
+async fn add_login_keys(engine: &HexDBEngine) -> Result<()> {
+    let _lock = engine.users_lock.lock().await;
+    for (id, user) in all_users(engine).await? {
+        if user.login_key != login_key(&user.login) {
+            engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+        }
     }
     Ok(())
 }

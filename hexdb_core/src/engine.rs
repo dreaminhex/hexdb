@@ -42,6 +42,7 @@ use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
 mod indexing;
+mod reads;
 mod replica;
 pub use replica::{ReplicaCursor, ReplicaWrite, REPLICATION_TESSELLATION};
 mod transactions;
@@ -150,8 +151,8 @@ struct EngineState {
 
 /// The newest version of a document across memory and disk.
 enum Version {
-    Memory { seq: u64, live: bool, expired: bool, len: usize },
-    Disk { seq: u64, live: bool, expired: bool, len: usize },
+    Memory { seq: u64, live: bool, expired: bool, len: usize, ttl: Option<i64> },
+    Disk { seq: u64, live: bool, expired: bool, len: usize, ttl: Option<i64> },
 }
 
 impl Version {
@@ -215,9 +216,17 @@ pub struct HexDBEngine {
     pub lattice_keys: crate::network::lattice_auth::LatticeKeys,
     /// Nonces of discovery hellos and replication requests already seen.
     pub lattice_nonces: crate::network::lattice_auth::NonceCache,
+    /// Bumped by every change to stored data; invalidates `stats_cache`.
+    generation: AtomicU64,
+    stats_cache: std::sync::Mutex<HashMap<String, reads::CachedStats>>,
+    doc_cache: reads::DocCache,
+    /// The storage key ring (for encrypted metadata files).
+    pub(crate) keys: Arc<crate::crypt::KeyRing>,
 }
 
 const MAX_WRITE_RETRIES: usize = 16;
+/// The saved metrics history in the data directory.
+const METRICS_FILE: &str = "metrics-history.hxe";
 
 impl HexDBEngine {
     /// Open (or create) the storage directory, recover from SSTables and the
@@ -239,7 +248,7 @@ impl HexDBEngine {
         }
 
         let level = config.compression.compression_level;
-        let mut catalog = Catalog::load(&storage_dir)?.unwrap_or_default();
+        let mut catalog = Catalog::load(&storage_dir, &keys)?.unwrap_or_default();
         let sst = SstStore::open(&storage_dir, level, keys.clone())?;
 
         // Clean up tables left behind by a drop that was interrupted.
@@ -304,8 +313,9 @@ impl HexDBEngine {
             }
             applied += 1;
         }
-        if catalog_changed {
-            catalog.save(&storage_dir)?;
+        // Also rewrite a plaintext catalog (earlier builds) or one under a previous key.
+        if catalog_changed || Catalog::needs_rewrite(&storage_dir, &keys) {
+            catalog.save(&storage_dir, &keys)?;
         }
 
         let next_seq = sst
@@ -366,6 +376,10 @@ impl HexDBEngine {
             login_throttle,
             lattice_keys,
             lattice_nonces: crate::network::lattice_auth::NonceCache::default(),
+            generation: AtomicU64::new(0),
+            stats_cache: std::sync::Mutex::new(HashMap::new()),
+            doc_cache: reads::DocCache::new(ram_budget / 4),
+            keys: keys.clone(),
         };
 
         // Move recovered writes into SSTables and retire the old WAL segments.
@@ -373,6 +387,7 @@ impl HexDBEngine {
             engine.flush().await.context("Failed to flush recovered WAL records")?;
         }
         engine.rebuild_indexes().await?;
+        engine.load_metrics_history();
 
         Ok(engine)
     }
@@ -441,6 +456,32 @@ impl HexDBEngine {
             || self.tessellation_info(name).is_some_and(|info| info.kind == "system")
     }
 
+    /// Save the metrics history (encrypted) to the data directory.
+    pub fn save_metrics_history(&self) -> Result<()> {
+        let bytes = serde_json::to_vec(&self.history.all())?;
+        crate::crypt::write_sealed_file(&self.storage_dir.join(METRICS_FILE), &self.keys, &bytes)
+    }
+
+    /// Load the saved metrics history, and continue the operation counters
+    /// from the newest sample so rates stay continuous across restarts.
+    fn load_metrics_history(&self) {
+        match crate::crypt::read_sealed_file(&self.storage_dir.join(METRICS_FILE), &self.keys) {
+            Ok(Some(bytes)) => match serde_json::from_slice::<Vec<crate::metrics::MetricsSample>>(&bytes) {
+                Ok(samples) => {
+                    self.history.restore(samples);
+                    if let Some(last) = self.history.last() {
+                        self.reads_total.store(last.reads_total, Ordering::Relaxed);
+                        self.writes_total.store(last.writes_total, Ordering::Relaxed);
+                        self.queries_total.store(last.queries_total, Ordering::Relaxed);
+                    }
+                }
+                Err(e) => warn!("Ignoring an unreadable metrics history: {}", e),
+            },
+            Ok(None) => {}
+            Err(e) => warn!("Ignoring the metrics history: {:#}", e),
+        }
+    }
+
     /// SSTables not encrypted with the current key.
     pub async fn sst_files_needing_rewrite(&self) -> usize {
         self.sst.files_needing_rewrite().await
@@ -507,7 +548,7 @@ impl HexDBEngine {
                 name.to_string(),
                 TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
             );
-            catalog.save(&self.storage_dir)?;
+            catalog.save(&self.storage_dir, &self.keys)?;
         }
         Ok(())
     }
@@ -539,7 +580,7 @@ impl HexDBEngine {
             name.to_string(),
             TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
         );
-        catalog.save(&self.storage_dir)?;
+        catalog.save(&self.storage_dir, &self.keys)?;
         info!("🧩 Created tessellation '{}' ({}).", name, kind);
         Ok(true)
     }
@@ -570,12 +611,14 @@ impl HexDBEngine {
             state.next_seq += 1;
             state.hex.remove_tessellation(name);
             self.indexes.write().unwrap().by_tessellation.remove(name);
+            self.doc_cache.drop_tessellation(name);
+            self.bump_generation();
 
             let saved = {
                 let mut catalog = self.catalog.lock().unwrap();
                 catalog.tessellations.remove(name);
                 catalog.dropped.insert(name.to_string(), drop_seq);
-                catalog.save(&self.storage_dir)
+                catalog.save(&self.storage_dir, &self.keys)
             };
             // The sequence number is used either way; the feed must not stall on it.
             let change = crate::changes::Change {
@@ -620,31 +663,44 @@ impl HexDBEngine {
         Ok(doc.map(|d| (d, seq)))
     }
 
-    /// Number of visible documents in a tessellation.
+    /// Number of visible documents in a tessellation (cached; see `reads`).
     pub async fn count_documents(&self, tess: &str) -> Result<usize> {
-        Ok(self.versions(tess).await.values().filter(|v| v.visible()).count())
+        Ok(self.cached_stats(tess).await.document_count)
     }
 
-    /// Per-tessellation statistics.
+    /// Per-tessellation statistics (cached; see `reads`).
     pub async fn tessellation_stats(&self, tess: &str) -> TessellationStats {
+        self.cached_stats(tess).await
+    }
+
+    /// Compute statistics by scanning a tessellation's keys. Also returns when
+    /// the result goes stale: the earliest TTL among the counted documents.
+    async fn compute_stats(&self, tess: &str, now: i64) -> (TessellationStats, i64) {
         let mut stats = TessellationStats::default();
+        let mut valid_until = i64::MAX;
         for version in self.versions(tess).await.values() {
             if !version.visible() {
                 continue;
             }
             stats.document_count += 1;
             match version {
-                Version::Memory { len, .. } => {
+                Version::Memory { len, ttl, .. } => {
                     stats.documents_in_memory += 1;
                     stats.sizes.push(*len);
+                    if let Some(t) = ttl.filter(|t| *t > now) {
+                        valid_until = valid_until.min(t);
+                    }
                 }
-                Version::Disk { len, .. } => {
+                Version::Disk { len, ttl, .. } => {
                     stats.documents_on_disk_only += 1;
                     stats.sizes.push(*len);
+                    if let Some(t) = ttl.filter(|t| *t > now) {
+                        valid_until = valid_until.min(t);
+                    }
                 }
             }
         }
-        stats
+        (stats, valid_until)
     }
 
     /// The newest version of every document in a tessellation.
@@ -665,6 +721,7 @@ impl HexDBEngine {
                         live: !entry.tombstone,
                         expired: entry.is_expired(now),
                         len: entry.len as usize,
+                        ttl: entry.ttl,
                     },
                 )
             })
@@ -673,7 +730,7 @@ impl HexDBEngine {
             if versions.get(&key.id).is_none_or(|v| v.seq() <= meta.seq) {
                 versions.insert(
                     key.id,
-                    Version::Memory { seq: meta.seq, live: !meta.tombstone, expired: meta.is_expired(now), len: meta.len },
+                    Version::Memory { seq: meta.seq, live: !meta.tombstone, expired: meta.is_expired(now), len: meta.len, ttl: meta.ttl },
                 );
             }
         }
@@ -686,12 +743,21 @@ impl HexDBEngine {
         let now = Utc::now().timestamp_millis();
         {
             let mut state = self.state.lock().await;
+            if let Some(meta) = state.hex.meta(key) {
+                if !meta.tombstone && !meta.is_expired(now) {
+                    if let Some(doc) = self.doc_cache.get(key, meta.seq) {
+                        return Ok((Some(doc), meta.seq));
+                    }
+                }
+            }
             match state.hex.read(key) {
                 Some(Lookup::Live { bytes, seq, ttl }) => {
                     if ttl.is_some_and(|t| t <= now) {
                         return Ok((None, seq));
                     }
-                    return Ok((Some(parse_document(&bytes)?), seq));
+                    let doc = parse_document(&bytes)?;
+                    self.doc_cache.put(key, seq, &doc, bytes.len());
+                    return Ok((Some(doc), seq));
                 }
                 Some(Lookup::Tombstone { seq }) => return Ok((None, seq)),
                 Some(Lookup::Unrecoverable { seq }) => {
@@ -719,13 +785,18 @@ impl HexDBEngine {
                     if entry.is_expired(now) {
                         return Ok((None, entry.seq));
                     }
+                    if let Some(doc) = self.doc_cache.get(key, entry.seq) {
+                        return Ok((Some(doc), entry.seq));
+                    }
                     let read = {
                         let file = file.clone();
-                        tokio::task::spawn_blocking(move || file.read_entry(&entry)).await?
+                        let id = key.id;
+                        tokio::task::spawn_blocking(move || file.read_entry(&id, &entry)).await?
                     };
                     match read {
                         Ok(bytes) => {
                             let doc = parse_document(&bytes)?;
+                            self.doc_cache.put(key, entry.seq, &doc, bytes.len());
                             self.cache(key, entry.seq, entry.ttl, &bytes).await;
                             return Ok((Some(doc), entry.seq));
                         }
@@ -883,6 +954,9 @@ impl HexDBEngine {
             error!("❌ Final flush failed; unflushed writes remain in the WAL: {:#}", e);
         }
         self.wal.shutdown().await?;
+        if let Err(e) = self.save_metrics_history() {
+            warn!("Couldn't save the metrics history: {:#}", e);
+        }
         flushed.map(|_| ())
     }
 

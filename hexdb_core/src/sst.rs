@@ -10,19 +10,14 @@
 // disk on demand. Files are written to a temporary name, fsynced, and renamed
 // into place, so a crash never leaves a half-written table.
 //
-// Document bodies are encrypted with AES-256-GCM using the storage key ring
-// (version 3). The authenticated data binds each body to its document ID and
-// sequence number, so bodies can't be swapped between entries. The index
-// (IDs, sequence numbers, TTLs, offsets) is not encrypted. Version 2 files
-// (unencrypted) are still read, and compaction rewrites them encrypted, as it
-// does files written with a previous key.
+// Format (version 4, all integers big-endian). Everything but the header is
+// encrypted with AES-256-GCM using the storage key ring:
 //
-// File layout (version 3, all integers big-endian):
 //   Header (64 bytes)
 //     0x00 MAGIC "HXDB"           4
-//     0x04 VERSION (3)            2
+//     0x04 VERSION (4)            2
 //     0x06 COMPRESSION (1 = zstd) 1
-//     0x07 ENCRYPTION             1   (0 = none, 1 = AES-256-GCM)
+//     0x07 ENCRYPTION (1 = AES-256-GCM) 1
 //     0x08 entry count            8
 //     0x10 created (epoch ms)     8
 //     0x18 index offset           8
@@ -30,17 +25,30 @@
 //     0x28 index checksum         8   (first 8 bytes of BLAKE3 over the index block)
 //     0x30 max sequence number    8
 //     0x38 key ID                 8   (KeyRing::key_id of the encryption key)
-//   Entries, from 0x40, each:
-//     id (16) | flags (1: bit0 TTL, bit1 tombstone) | seq (8) | [ttl (8)] | len (4) | body
-//     body = nonce (12) | AES-256-GCM(zstd(JSON document)), AAD = id | seq
-//   Index block, sorted by id, each:
-//     id (16) | flags (1) | seq (8) | [ttl (8)] | entry offset (8) | len (4)
+//   Bodies, from 0x40: nonce (12) | AES-256-GCM(zstd(JSON document)), with
+//     the document ID and sequence number as authenticated data, so a body
+//     can't be moved to another entry. Tombstones have no body.
+//   Index block: chunks of up to 64 index records, each chunk
+//     length (4) | nonce (12) | AES-256-GCM(records), authenticated with its
+//     chunk number. A record is
+//     id (16) | flags (1: bit0 TTL, bit1 tombstone) | seq (8) | [ttl (8)] | body offset (8) | body length (4)
+//
+// Only a directory of chunks (first ID, offset, length) and a Bloom filter
+// of the IDs stay in memory, about 2 bytes per document: a lookup checks the
+// filter, finds the chunk by binary search, and reads and decrypts it (a few
+// recently used chunks are cached). Both are rebuilt when the file is opened,
+// which also verifies every chunk.
+//
+// Versions 2 (unencrypted) and 3 (encrypted bodies, plaintext index and
+// entry headers) are still read, with their whole index in memory;
+// compaction rewrites them as version 4, as it does files written with a
+// previous key.
 
 use crate::{crypt::KeyRing, document::Document, wal::sync_dir};
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -52,8 +60,14 @@ use ulid::Ulid;
 use zstd::stream::{decode_all, encode_all};
 
 const MAGIC: &[u8; 4] = b"HXDB";
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
+/// Encrypted bodies, plaintext index (read, then rewritten by compaction).
+const V3: u16 = 3;
 const LEGACY_VERSION: u16 = 2;
+/// Index records per encrypted index chunk.
+const CHUNK_RECORDS: usize = 64;
+/// Recently read index chunks kept per file.
+const CHUNK_CACHE: usize = 16;
 const ENCRYPTION_AES_GCM: u8 = 1;
 const COMPRESSION_ZSTD: u8 = 1;
 const HEADER_LEN: u64 = 64;
@@ -88,16 +102,224 @@ impl IndexEntry {
     }
 }
 
-/// An open SSTable: its path and in-memory index.
+/// A table's index. Version 4 files keep only a chunk directory and a Bloom
+/// filter in memory; older files keep every entry (sorted, compact).
+#[derive(Debug)]
+pub struct SstIndex {
+    count: usize,
+    kind: IndexKind,
+}
+
+#[derive(Debug)]
+enum IndexKind {
+    Loaded { ids: Vec<Ulid>, entries: Vec<IndexEntry> },
+    Chunked(ChunkedIndex),
+}
+
+#[derive(Debug)]
+struct ChunkedIndex {
+    /// First ID, file offset, and length of each encrypted chunk.
+    chunks: Vec<(Ulid, u64, u32)>,
+    bloom: Bloom,
+    handle: File,
+    keys: Arc<KeyRing>,
+    key_id: u64,
+    path: PathBuf,
+    cache: std::sync::Mutex<Vec<(usize, Arc<Vec<(Ulid, IndexEntry)>>)>>,
+}
+
+type Records = Arc<Vec<(Ulid, IndexEntry)>>;
+
+impl ChunkedIndex {
+    fn chunk(&self, n: usize) -> Records {
+        if let Some((_, records)) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(i, _)| *i == n) {
+            return records.clone();
+        }
+        let (_, offset, len) = self.chunks[n];
+        let records = read_chunk(&self.handle, offset, len, &self.keys, self.key_id, n).unwrap_or_else(|e| {
+            // Chunks were all verified at open; failing now means the file changed under us.
+            tracing::error!("SSTable {} index chunk {} became unreadable: {:#}", self.path.display(), n, e);
+            Vec::new()
+        });
+        let records = Arc::new(records);
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= CHUNK_CACHE {
+            cache.remove(0);
+        }
+        cache.push((n, records.clone()));
+        records
+    }
+
+    /// The chunk that would contain `id` (the last chunk starting at or before it).
+    fn chunk_for(&self, id: &Ulid) -> Option<usize> {
+        let n = self.chunks.partition_point(|(first, _, _)| first <= id);
+        n.checked_sub(1)
+    }
+}
+
+fn read_chunk(handle: &File, offset: u64, len: u32, keys: &KeyRing, key_id: u64, n: usize) -> Result<Vec<(Ulid, IndexEntry)>> {
+    let mut sealed = vec![0u8; len as usize];
+    read_exact_at(handle, &mut sealed, offset)?;
+    let plain = keys.decrypt(key_id, &sealed, &chunk_aad(n))?;
+    parse_records(&plain, None)
+}
+
+fn chunk_aad(n: usize) -> [u8; 16] {
+    let mut aad = [0u8; 16];
+    aad[..8].copy_from_slice(b"hxsindex");
+    aad[8..].copy_from_slice(&(n as u64).to_be_bytes());
+    aad
+}
+
+/// Parse index records (all of them, or exactly `count`).
+fn parse_records(bytes: &[u8], count: Option<usize>) -> Result<Vec<(Ulid, IndexEntry)>> {
+    let mut out = Vec::with_capacity(count.unwrap_or(CHUNK_RECORDS));
+    let mut cursor = Cursor::new(bytes);
+    while count.map_or((cursor.position() as usize) < bytes.len(), |c| out.len() < c) {
+        let mut id = [0u8; 16];
+        cursor.read_exact(&mut id)?;
+        let flags = cursor.read_u8()?;
+        let seq = cursor.read_u64::<BigEndian>()?;
+        let ttl = if flags & FLAG_TTL != 0 { Some(cursor.read_i64::<BigEndian>()?) } else { None };
+        let offset = cursor.read_u64::<BigEndian>()?;
+        let len = cursor.read_u32::<BigEndian>()?;
+        out.push((Ulid::from_bytes(id), IndexEntry { seq, ttl, tombstone: flags & FLAG_TOMBSTONE != 0, offset, len }));
+    }
+    Ok(out)
+}
+
+fn write_record(out: &mut Vec<u8>, id: &Ulid, entry: &IndexEntry) -> std::io::Result<()> {
+    let mut flags = 0u8;
+    if entry.ttl.is_some() {
+        flags |= FLAG_TTL;
+    }
+    if entry.tombstone {
+        flags |= FLAG_TOMBSTONE;
+    }
+    out.write_all(&id.to_bytes())?;
+    out.write_u8(flags)?;
+    out.write_u64::<BigEndian>(entry.seq)?;
+    if let Some(ttl) = entry.ttl {
+        out.write_i64::<BigEndian>(ttl)?;
+    }
+    out.write_u64::<BigEndian>(entry.offset)?;
+    out.write_u32::<BigEndian>(entry.len)
+}
+
+/// A Bloom filter over document IDs (about 1% false positives).
+#[derive(Debug)]
+struct Bloom {
+    bits: Vec<u64>,
+    hashes: u32,
+}
+
+impl Bloom {
+    fn new(count: usize) -> Self {
+        let bits = (count.max(1) * 10).next_power_of_two();
+        Bloom { bits: vec![0; bits.div_ceil(64)], hashes: 7 }
+    }
+
+    fn positions(&self, id: &Ulid) -> impl Iterator<Item = usize> + '_ {
+        let v: u128 = (*id).into();
+        let mix = |mut x: u64| {
+            x ^= x >> 33;
+            x = x.wrapping_mul(0xff51afd7ed558ccd);
+            x ^= x >> 33;
+            x = x.wrapping_mul(0xc4ceb9fe1a85ec53);
+            x ^ (x >> 33)
+        };
+        let (h1, h2) = (mix(v as u64), mix((v >> 64) as u64) | 1);
+        let m = self.bits.len() * 64;
+        (0..self.hashes as u64).map(move |i| (h1.wrapping_add(i.wrapping_mul(h2)) % m as u64) as usize)
+    }
+
+    fn insert(&mut self, id: &Ulid) {
+        let positions: Vec<usize> = self.positions(id).collect();
+        for p in positions {
+            self.bits[p / 64] |= 1 << (p % 64);
+        }
+    }
+
+    fn may_contain(&self, id: &Ulid) -> bool {
+        self.positions(id).all(|p| self.bits[p / 64] & (1 << (p % 64)) != 0)
+    }
+}
+
+impl SstIndex {
+    fn loaded(mut pairs: Vec<(Ulid, IndexEntry)>) -> Self {
+        pairs.sort_by_key(|(id, _)| *id);
+        let count = pairs.len();
+        let (ids, entries) = pairs.into_iter().unzip();
+        SstIndex { count, kind: IndexKind::Loaded { ids, entries } }
+    }
+
+    pub fn get(&self, id: &Ulid) -> Option<IndexEntry> {
+        match &self.kind {
+            IndexKind::Loaded { ids, entries } => ids.binary_search(id).ok().map(|i| entries[i]),
+            IndexKind::Chunked(c) => {
+                if !c.bloom.may_contain(id) {
+                    return None;
+                }
+                let records = c.chunk(c.chunk_for(id)?);
+                records.binary_search_by_key(id, |(i, _)| *i).ok().map(|i| records[i].1)
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Every entry in ID order.
+    pub fn iter(&self) -> Box<dyn Iterator<Item = (Ulid, IndexEntry)> + Send + '_> {
+        self.after(None)
+    }
+
+    /// Entries with IDs after `after` (all when `None`), in ID order.
+    pub fn after(&self, after: Option<Ulid>) -> Box<dyn Iterator<Item = (Ulid, IndexEntry)> + Send + '_> {
+        match &self.kind {
+            IndexKind::Loaded { ids, entries } => {
+                let start = after.map_or(0, |a| ids.partition_point(|id| *id <= a));
+                Box::new(ids[start..].iter().copied().zip(entries[start..].iter().copied()))
+            }
+            IndexKind::Chunked(c) => {
+                let first = after.and_then(|a| c.chunk_for(&a)).unwrap_or(0);
+                Box::new(
+                    (first..c.chunks.len())
+                        .flat_map(move |n| {
+                            let records = c.chunk(n);
+                            (0..records.len()).map(move |i| records[i])
+                        })
+                        .filter(move |(id, _)| after.is_none_or(|a| *id > a)),
+                )
+            }
+        }
+    }
+
+    /// Every entry, in ID order.
+    pub fn values(&self) -> impl Iterator<Item = IndexEntry> + '_ {
+        self.iter().map(|(_, e)| e)
+    }
+}
+
+/// An open SSTable: its path, in-memory index, and an open handle for reads.
 #[derive(Debug)]
 pub struct SstFile {
     pub path: PathBuf,
     pub max_seq: u64,
     pub created: i64,
     pub size_bytes: u64,
-    pub index: HashMap<Ulid, IndexEntry>,
+    pub index: SstIndex,
+    /// Kept open: entries are read at their offsets without reopening the file.
+    handle: File,
     /// ID of the key the bodies are encrypted with; `None` for unencrypted (version 2) files.
     pub key_id: Option<u64>,
+    /// File format version (2, 3 or 4).
+    pub version: u16,
     keys: Arc<KeyRing>,
 }
 
@@ -134,48 +356,51 @@ impl SstFile {
         let mut file = BufWriter::new(File::create(&tmp).with_context(|| format!("Failed to create {}", tmp.display()))?);
         file.write_all(&[0u8; HEADER_LEN as usize])?;
 
-        let mut index = Vec::with_capacity(entries.len());
+        let mut index: Vec<(Ulid, IndexEntry)> = Vec::with_capacity(entries.len());
         let mut offset = HEADER_LEN;
         for entry in &entries {
-            let mut flags = 0u8;
-            if entry.ttl.is_some() {
-                flags |= FLAG_TTL;
-            }
             let body = match &entry.data {
                 Some(data) if encrypt => keys.encrypt(&encode_all(&data[..], compression_level)?, &body_aad(&entry.id, entry.seq))?,
                 Some(data) => encode_all(&data[..], compression_level)?,
-                None => {
-                    flags |= FLAG_TOMBSTONE;
-                    Vec::new()
-                }
+                None => Vec::new(),
             };
-
-            let entry_offset = offset;
-            let mut header = Vec::with_capacity(37);
-            header.write_all(&entry.id.to_bytes())?;
-            header.write_u8(flags)?;
-            header.write_u64::<BigEndian>(entry.seq)?;
-            if let Some(ttl) = entry.ttl {
-                header.write_i64::<BigEndian>(ttl)?;
+            let record = IndexEntry { seq: entry.seq, ttl: entry.ttl, tombstone: entry.data.is_none(), offset, len: body.len() as u32 };
+            if encrypt {
+                // Version 4: bodies only; everything else is in the encrypted index.
+                file.write_all(&body)?;
+                offset += body.len() as u64;
+            } else {
+                // Version 2: a plaintext entry header before each body.
+                let mut header = Vec::with_capacity(37);
+                header.write_all(&entry.id.to_bytes())?;
+                header.write_u8(if record.ttl.is_some() { FLAG_TTL } else { 0 } | if record.tombstone { FLAG_TOMBSTONE } else { 0 })?;
+                header.write_u64::<BigEndian>(entry.seq)?;
+                if let Some(ttl) = entry.ttl {
+                    header.write_i64::<BigEndian>(ttl)?;
+                }
+                header.write_u32::<BigEndian>(body.len() as u32)?;
+                file.write_all(&header)?;
+                file.write_all(&body)?;
+                offset += (header.len() + body.len()) as u64;
             }
-            header.write_u32::<BigEndian>(body.len() as u32)?;
-            file.write_all(&header)?;
-            file.write_all(&body)?;
-            offset += (header.len() + body.len()) as u64;
-
-            index.push((entry.id, flags, entry.seq, entry.ttl, entry_offset, body.len() as u32));
+            index.push((entry.id, record));
         }
 
         let mut index_block = Vec::new();
-        for (id, flags, seq, ttl, entry_offset, len) in &index {
-            index_block.write_all(&id.to_bytes())?;
-            index_block.write_u8(*flags)?;
-            index_block.write_u64::<BigEndian>(*seq)?;
-            if let Some(ttl) = ttl {
-                index_block.write_i64::<BigEndian>(*ttl)?;
+        if encrypt {
+            for (n, chunk) in index.chunks(CHUNK_RECORDS).enumerate() {
+                let mut plain = Vec::with_capacity(chunk.len() * 45);
+                for (id, entry) in chunk {
+                    write_record(&mut plain, id, entry)?;
+                }
+                let sealed = keys.encrypt(&plain, &chunk_aad(n))?;
+                index_block.write_u32::<BigEndian>(sealed.len() as u32)?;
+                index_block.write_all(&sealed)?;
             }
-            index_block.write_u64::<BigEndian>(*entry_offset)?;
-            index_block.write_u32::<BigEndian>(*len)?;
+        } else {
+            for (id, entry) in &index {
+                write_record(&mut index_block, id, entry)?;
+            }
         }
         file.write_all(&index_block)?;
         let checksum = checksum(&index_block);
@@ -217,9 +442,9 @@ impl SstFile {
             bail!("{} is not an SSTable (bad magic header)", path.display());
         }
         let version = file.read_u16::<BigEndian>()?;
-        if version != VERSION && version != LEGACY_VERSION {
+        if ![LEGACY_VERSION, V3, VERSION].contains(&version) {
             bail!(
-                "{} is SSTable version {}, but this HexDB reads versions {} and {}. Files from older HexDB builds can't be read; move them out of the data directory.",
+                "{} is SSTable version {}, but this HexDB reads versions {} to {}. Move files from other HexDB builds out of the data directory.",
                 path.display(),
                 version,
                 LEGACY_VERSION,
@@ -263,50 +488,104 @@ impl SstFile {
             bail!("{} is corrupt (index checksum mismatch)", path.display());
         }
 
-        let mut index = HashMap::with_capacity(entry_count as usize);
-        let mut cursor = Cursor::new(&index_block[..]);
-        for _ in 0..entry_count {
-            let mut id = [0u8; 16];
-            cursor.read_exact(&mut id)?;
-            let flags = cursor.read_u8()?;
-            let seq = cursor.read_u64::<BigEndian>()?;
-            let ttl = if flags & FLAG_TTL != 0 { Some(cursor.read_i64::<BigEndian>()?) } else { None };
-            let offset = cursor.read_u64::<BigEndian>()?;
-            let len = cursor.read_u32::<BigEndian>()?;
-            index.insert(
-                Ulid::from_bytes(id),
-                IndexEntry { seq, ttl, tombstone: flags & FLAG_TOMBSTONE != 0, offset, len },
-            );
-        }
+        let handle = file.into_inner();
+        let index = if version == VERSION {
+            let key_id = key_id.ok_or_else(|| anyhow!("{} is version 4 but not encrypted", path.display()))?;
+            // Read every chunk once: verifies it, and builds the directory and Bloom filter.
+            let mut chunks = Vec::new();
+            let mut bloom = Bloom::new(entry_count as usize);
+            let mut cursor = Cursor::new(&index_block[..]);
+            let mut seen = 0usize;
+            let mut n = 0usize;
+            while (cursor.position() as usize) < index_block.len() {
+                let len = cursor.read_u32::<BigEndian>()?;
+                let start = cursor.position() as usize;
+                let end = start + len as usize;
+                if end > index_block.len() {
+                    bail!("{} is corrupt (index chunk outside the index)", path.display());
+                }
+                let plain = keys
+                    .decrypt(key_id, &index_block[start..end], &chunk_aad(n))
+                    .with_context(|| format!("{}: index chunk {} can't be decrypted", path.display(), n))?;
+                let records = parse_records(&plain, None)?;
+                let Some((first, _)) = records.first() else { bail!("{} has an empty index chunk", path.display()) };
+                chunks.push((*first, index_offset + start as u64, len));
+                for (id, _) in &records {
+                    bloom.insert(id);
+                }
+                seen += records.len();
+                cursor.set_position(end as u64);
+                n += 1;
+            }
+            if seen as u64 != entry_count {
+                bail!("{} is corrupt (index has {} entries, header says {})", path.display(), seen, entry_count);
+            }
+            SstIndex {
+                count: seen,
+                kind: IndexKind::Chunked(ChunkedIndex {
+                    chunks,
+                    bloom,
+                    handle: handle.try_clone()?,
+                    keys: keys.clone(),
+                    key_id,
+                    path: path.to_path_buf(),
+                    cache: std::sync::Mutex::new(Vec::new()),
+                }),
+            }
+        } else {
+            SstIndex::loaded(parse_records(&index_block, Some(entry_count as usize))?)
+        };
 
-        Ok(SstFile { path: path.to_path_buf(), max_seq, created, size_bytes, index, key_id, keys: keys.clone() })
+        Ok(SstFile { path: path.to_path_buf(), max_seq, created, size_bytes, index, handle, key_id, version, keys: keys.clone() })
     }
 
-    /// Read and decompress one entry's document JSON.
-    pub fn read_entry(&self, entry: &IndexEntry) -> Result<Vec<u8>> {
-        let mut file = File::open(&self.path).with_context(|| format!("Failed to open {}", self.path.display()))?;
-        file.seek(SeekFrom::Start(entry.offset))?;
-        let mut header = [0u8; 16 + 1 + 8];
-        file.read_exact(&mut header)?;
-        let id = Ulid::from_bytes(header[..16].try_into().unwrap());
-        if entry.ttl.is_some() {
-            file.seek(SeekFrom::Current(8))?;
-        }
-        let len = file.read_u32::<BigEndian>()?;
-        if len != entry.len {
-            bail!("{} is corrupt (entry length mismatch)", self.path.display());
-        }
-        let mut body = vec![0u8; len as usize];
-        file.read_exact(&mut body)?;
-        let compressed = match self.key_id {
-            Some(key_id) => self
-                .keys
-                .decrypt(key_id, &body, &body_aad(&id, entry.seq))
-                .with_context(|| format!("{}: document {} can't be decrypted", self.path.display(), id))?,
-            None => body,
+    /// Read, decrypt and decompress one entry's document JSON.
+    pub fn read_entry(&self, id: &Ulid, entry: &IndexEntry) -> Result<Vec<u8>> {
+        let compressed = if self.version == VERSION {
+            let mut body = vec![0u8; entry.len as usize];
+            read_exact_at(&self.handle, &mut body, entry.offset).with_context(|| format!("Failed to read {}", self.path.display()))?;
+            let key_id = self.key_id.unwrap_or_default();
+            self.keys
+                .decrypt(key_id, &body, &body_aad(id, entry.seq))
+                .with_context(|| format!("{}: document {} can't be decrypted", self.path.display(), id))?
+        } else {
+            // Versions 2 and 3: an entry header precedes the body.
+            let header_len = 16 + 1 + 8 + if entry.ttl.is_some() { 8 } else { 0 } + 4;
+            let mut buf = vec![0u8; header_len + entry.len as usize];
+            read_exact_at(&self.handle, &mut buf, entry.offset).with_context(|| format!("Failed to read {}", self.path.display()))?;
+            let stored_id = Ulid::from_bytes(buf[..16].try_into().unwrap());
+            let len = u32::from_be_bytes(buf[header_len - 4..header_len].try_into().unwrap());
+            if len != entry.len || stored_id != *id {
+                bail!("{} is corrupt (entry header mismatch)", self.path.display());
+            }
+            let body = buf.split_off(header_len);
+            match self.key_id {
+                Some(key_id) => self
+                    .keys
+                    .decrypt(key_id, &body, &body_aad(id, entry.seq))
+                    .with_context(|| format!("{}: document {} can't be decrypted", self.path.display(), id))?,
+                None => body,
+            }
         };
         Ok(decode_all(&compressed[..])?)
     }
+}
+
+/// Read exactly `buf.len()` bytes at `offset`, without moving a shared cursor
+/// (so concurrent reads of one file don't interfere).
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(file, buf, offset)?;
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(file, buf, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "unexpected end of file"));
+        }
+        buf = &mut buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
 }
 
 fn checksum(bytes: &[u8]) -> u64 {
@@ -412,7 +691,7 @@ impl SstStore {
         let (file, entry) = tables
             .get(tess)?
             .iter()
-            .filter_map(|f| f.index.get(id).map(|e| (f, *e)))
+            .filter_map(|f| f.index.get(id).map(|e| (f, e)))
             .max_by_key(|(_, e)| e.seq)?;
         Some(if entry.tombstone {
             DiskLookup::Tombstone { seq: entry.seq }
@@ -426,16 +705,37 @@ impl SstStore {
         let tables = self.tables.read().await;
         let mut latest: HashMap<Ulid, (Arc<SstFile>, IndexEntry)> = HashMap::new();
         for file in tables.get(tess).into_iter().flatten() {
-            for (id, entry) in &file.index {
-                match latest.get(id) {
+            for (id, entry) in file.index.iter() {
+                match latest.get(&id) {
                     Some((_, existing)) if existing.seq >= entry.seq => {}
                     _ => {
-                        latest.insert(*id, (file.clone(), *entry));
+                        latest.insert(id, (file.clone(), entry));
                     }
                 }
             }
         }
         latest
+    }
+
+    /// Up to `limit` on-disk entries of a tessellation after `after`, in ID
+    /// order, newest version per ID (tombstones included).
+    pub async fn entries_after(&self, tess: &str, after: Option<Ulid>, limit: usize) -> Vec<(Ulid, IndexEntry)> {
+        let tables = self.tables.read().await;
+        let Some(files) = tables.get(tess) else { return Vec::new() };
+        // Take `limit` from each file, merge, and keep the newest per ID: the
+        // first `limit` IDs of the merge are complete.
+        let mut merged: BTreeMap<Ulid, IndexEntry> = BTreeMap::new();
+        for file in files {
+            for (id, entry) in file.index.after(after).take(limit) {
+                match merged.get(&id) {
+                    Some(existing) if existing.seq >= entry.seq => {}
+                    _ => {
+                        merged.insert(id, entry);
+                    }
+                }
+            }
+        }
+        merged.into_iter().take(limit).collect()
     }
 
     /// Write a new SSTable for a tessellation and make it visible to readers.
@@ -494,7 +794,7 @@ impl SstStore {
     /// previous key). Compaction rewrites them.
     pub async fn files_needing_rewrite(&self) -> usize {
         let current = Some(self.keys.current_id());
-        self.tables.read().await.values().flatten().filter(|f| f.key_id != current).count()
+        self.tables.read().await.values().flatten().filter(|f| f.key_id != current || f.version != VERSION).count()
     }
 
     /// Total bytes and file count on disk.
@@ -529,12 +829,12 @@ impl SstStore {
             let mut latest: HashMap<Ulid, (Arc<SstFile>, IndexEntry)> = HashMap::new();
             let mut total_entries = 0;
             for file in &files {
-                for (id, entry) in &file.index {
+                for (id, entry) in file.index.iter() {
                     total_entries += 1;
-                    match latest.get(id) {
+                    match latest.get(&id) {
                         Some((_, existing)) if existing.seq >= entry.seq => {}
                         _ => {
-                            latest.insert(*id, (file.clone(), *entry));
+                            latest.insert(id, (file.clone(), entry));
                         }
                     }
                 }
@@ -544,7 +844,7 @@ impl SstStore {
             let drop_count = latest.values().filter(|(_, e)| droppable(e)).count();
             // Rewrite files that aren't under the current key (key rotation, or
             // files from before encryption).
-            let stale_key = files.iter().any(|f| f.key_id != Some(self.keys.current_id()));
+            let stale_key = files.iter().any(|f| f.key_id != Some(self.keys.current_id()) || f.version != VERSION);
             if files.len() < 2 && drop_count == 0 && !stale_key {
                 continue;
             }
@@ -565,7 +865,7 @@ impl SstStore {
             let new_file = tokio::task::spawn_blocking(move || -> Result<Option<SstFile>> {
                 let mut entries = Vec::with_capacity(kept.len());
                 for (file, id, entry) in kept {
-                    let data = if entry.tombstone { None } else { Some(file.read_entry(&entry)?) };
+                    let data = if entry.tombstone { None } else { Some(file.read_entry(&id, &entry)?) };
                     entries.push(SstEntry { id, seq: entry.seq, ttl: entry.ttl, data });
                 }
                 let path = write_dir.join(format!("{}.{}", Ulid::new(), SST_EXTENSION));
@@ -620,6 +920,103 @@ mod tests {
         dir
     }
 
+    /// A version 3 file (encrypted bodies, plaintext entry headers and index), as earlier builds wrote.
+    fn write_v3(path: &Path, entries: &[(Ulid, u64, &[u8])], keys: &KeyRing) {
+        let mut out = vec![0u8; HEADER_LEN as usize];
+        let mut index = Vec::new();
+        for (id, seq, data) in entries {
+            let body = keys.encrypt(&encode_all(*data, 0).unwrap(), &body_aad(id, *seq)).unwrap();
+            let offset = out.len() as u64;
+            out.extend_from_slice(&id.to_bytes());
+            out.push(0);
+            out.extend_from_slice(&seq.to_be_bytes());
+            out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            out.extend_from_slice(&body);
+            write_record(&mut index, id, &IndexEntry { seq: *seq, ttl: None, tombstone: false, offset, len: body.len() as u32 }).unwrap();
+        }
+        let index_offset = out.len() as u64;
+        out.extend_from_slice(&index);
+        let mut header = Vec::new();
+        header.extend_from_slice(MAGIC);
+        header.extend_from_slice(&V3.to_be_bytes());
+        header.push(COMPRESSION_ZSTD);
+        header.push(ENCRYPTION_AES_GCM);
+        header.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+        header.extend_from_slice(&0i64.to_be_bytes());
+        header.extend_from_slice(&index_offset.to_be_bytes());
+        header.extend_from_slice(&(index.len() as u64).to_be_bytes());
+        header.extend_from_slice(&checksum(&index).to_be_bytes());
+        header.extend_from_slice(&entries.iter().map(|e| e.1).max().unwrap().to_be_bytes());
+        header.extend_from_slice(&keys.current_id().to_be_bytes());
+        out[..HEADER_LEN as usize].copy_from_slice(&header);
+        fs::write(path, out).unwrap();
+    }
+
+    #[test]
+    fn version_4_index_is_chunked_encrypted_and_complete() {
+        let dir = temp_dir();
+        let path = dir.join("big.hxs");
+        let mut ids: Vec<Ulid> = (0..1000).map(|_| Ulid::new()).collect();
+        ids.sort();
+        let entries: Vec<SstEntry> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| SstEntry { id: *id, seq: i as u64 + 1, ttl: (i % 5 == 0).then_some(42), data: (i % 7 != 0).then(|| format!("{{\"n\":{}}}", i).into_bytes()) })
+            .collect();
+        let file = SstFile::write(&path, entries, 0, 0, &test_keys()).unwrap();
+        assert_eq!(file.version, VERSION);
+        assert_eq!(file.index.len(), 1000);
+        // No document ID appears in the file in plaintext.
+        let raw = fs::read(&path).unwrap();
+        for id in ids.iter().step_by(50) {
+            assert!(!raw.windows(16).any(|w| w == id.to_bytes()), "ID in plaintext");
+        }
+        // Every ID is found (no Bloom false negatives); unknown IDs are not.
+        for (i, id) in ids.iter().enumerate() {
+            let e = file.index.get(id).unwrap();
+            assert_eq!(e.seq, i as u64 + 1);
+            assert_eq!(e.tombstone, i % 7 == 0);
+            assert_eq!(e.ttl, (i % 5 == 0).then_some(42));
+            if !e.tombstone {
+                assert_eq!(file.read_entry(id, &e).unwrap(), format!("{{\"n\":{}}}", i).into_bytes());
+            }
+        }
+        assert!((0..200).all(|_| file.index.get(&Ulid::new()).is_none()));
+        // Ordered iteration, from the start and from any cursor, across chunks.
+        assert_eq!(file.index.iter().map(|(id, _)| id).collect::<Vec<_>>(), ids);
+        for cut in [0usize, 63, 64, 65, 500, 998, 999] {
+            let after: Vec<Ulid> = file.index.after(Some(ids[cut])).map(|(id, _)| id).collect();
+            assert_eq!(after, ids[cut + 1..].to_vec(), "after {}", cut);
+        }
+        // Reopening rebuilds the directory and filter.
+        let reopened = SstFile::open(&path, &test_keys()).unwrap();
+        assert_eq!(reopened.index.get(&ids[777]).unwrap().seq, 778);
+        // A wrong key can't open it.
+        assert!(SstFile::open(&path, &Arc::new(KeyRing::new(&[8u8; 32], &[]))).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn version_3_files_are_read_and_compacted_to_version_4() {
+        let dir = temp_dir();
+        let tess_dir = dir.join("t");
+        fs::create_dir_all(&tess_dir).unwrap();
+        let keys = test_keys();
+        let (a, b) = (Ulid::new(), Ulid::new());
+        write_v3(&tess_dir.join("old.hxs"), &[(a, 1, b"{\"v\":1}"), (b, 2, b"{\"v\":2}")], &keys);
+        let store = SstStore::open(&dir, 0, keys.clone()).unwrap();
+        let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &a).await else { panic!() };
+        assert_eq!(file.version, V3);
+        assert_eq!(file.read_entry(&a, &entry).unwrap(), b"{\"v\":1}");
+        assert_eq!(store.files_needing_rewrite().await, 1);
+        store.compact(0, 0).await.unwrap();
+        assert_eq!(store.files_needing_rewrite().await, 0);
+        let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &b).await else { panic!() };
+        assert_eq!(file.version, VERSION);
+        assert_eq!(file.read_entry(&b, &entry).unwrap(), b"{\"v\":2}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn writes_and_reads_entries() {
         let dir = temp_dir();
@@ -639,10 +1036,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(file.max_seq, 6);
-        let ea = file.index[&a];
+        let ea = file.index.get(&a).unwrap();
         assert_eq!((ea.seq, ea.ttl, ea.tombstone), (5, Some(99), false));
-        assert_eq!(file.read_entry(&ea).unwrap(), b"{\"a\":1}");
-        assert!(file.index[&b].tombstone);
+        assert_eq!(file.read_entry(&a, &ea).unwrap(), b"{\"a\":1}");
+        assert!(file.index.get(&b).unwrap().tombstone);
 
         let reopened = SstFile::open(&path, &test_keys()).unwrap();
         assert_eq!(reopened.index.len(), 2);
@@ -671,7 +1068,7 @@ mod tests {
         assert_eq!(file.key_id, Some(test_keys().current_id()));
 
         // Swap the two bodies on disk: authentication fails instead of returning the wrong document.
-        let (ea, eb) = (file.index[&a], file.index[&b]);
+        let (ea, eb) = (file.index.get(&a).unwrap(), file.index.get(&b).unwrap());
         let body = |e: &IndexEntry| (e.offset as usize + 16 + 1 + 8 + 4, e.len as usize);
         let ((oa, la), (ob, lb)) = (body(&ea), body(&eb));
         let mut tampered = raw.clone();
@@ -684,7 +1081,7 @@ mod tests {
         }
         fs::write(&path, &tampered).unwrap();
         let reopened = SstFile::open(&path, &test_keys()).unwrap();
-        assert!(reopened.read_entry(&reopened.index[&a]).is_err());
+        assert!(reopened.read_entry(&a, &reopened.index.get(&a).unwrap()).is_err());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -708,7 +1105,7 @@ mod tests {
         assert_eq!(store.files_needing_rewrite().await, 2);
         for id in [a, b] {
             let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &id).await else { panic!() };
-            assert!(file.read_entry(&entry).is_ok());
+            assert!(file.read_entry(&id, &entry).is_ok());
         }
         store.compact(0, 0).await.unwrap();
         assert_eq!(store.files_needing_rewrite().await, 0);
@@ -716,7 +1113,7 @@ mod tests {
 
         let store = SstStore::open(&dir, 0, Arc::new(KeyRing::new(&new_key, &[]))).unwrap();
         let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &b).await else { panic!() };
-        assert_eq!(file.read_entry(&entry).unwrap(), b"{\"v\":\"b\"}");
+        assert_eq!(file.read_entry(&b, &entry).unwrap(), b"{\"v\":\"b\"}");
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -1,20 +1,24 @@
 // HexDB Core Catalog
 // The catalog records which tessellations exist (including empty ones) and the
 // sequence number at which each dropped tessellation was deleted, so WAL
-// records written before the drop are ignored during recovery. It is stored as
-// `catalog.json` in the storage directory and replaced atomically on change.
+// records written before the drop are ignored during recovery. It is stored
+// encrypted as `catalog.hxe` in the storage directory and replaced atomically
+// on change.
 
+use crate::crypt::{read_sealed_file, write_sealed_file, KeyRing};
 use crate::wal::sync_dir;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
-pub const CATALOG_FILE: &str = "catalog.json";
+/// The catalog, encrypted with the storage key ring.
+pub const CATALOG_FILE: &str = "catalog.hxe";
+/// The plaintext catalog of earlier builds (migrated on first save).
+const LEGACY_CATALOG_FILE: &str = "catalog.json";
 
 /// Names that can't be used for tessellations: API routes and storage folders.
 const RESERVED_NAMES: &[&str] = &[
@@ -48,27 +52,35 @@ impl Catalog {
         storage_dir.join(CATALOG_FILE)
     }
 
-    /// Load the catalog, or `None` if it doesn't exist yet.
-    pub fn load(storage_dir: &Path) -> Result<Option<Catalog>> {
+    /// Load the catalog, or `None` if it doesn't exist yet. A plaintext
+    /// `catalog.json` from an earlier build is read, and replaced by the
+    /// encrypted file on the next save.
+    pub fn load(storage_dir: &Path, keys: &KeyRing) -> Result<Option<Catalog>> {
         let path = Self::path(storage_dir);
-        match fs::read_to_string(&path) {
-            Ok(text) => Ok(Some(
-                serde_json::from_str(&text).with_context(|| format!("{} is corrupt", path.display()))?,
-            )),
+        if let Some(bytes) = read_sealed_file(&path, keys)? {
+            return Ok(Some(serde_json::from_slice(&bytes).with_context(|| format!("{} is corrupt", path.display()))?));
+        }
+        let legacy = storage_dir.join(LEGACY_CATALOG_FILE);
+        match fs::read_to_string(&legacy) {
+            Ok(text) => Ok(Some(serde_json::from_str(&text).with_context(|| format!("{} is corrupt", legacy.display()))?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("Failed to read {}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("Failed to read {}", legacy.display())),
         }
     }
 
-    /// Write the catalog atomically (temp file, fsync, rename).
-    pub fn save(&self, storage_dir: &Path) -> Result<()> {
-        let path = Self::path(storage_dir);
-        let tmp = path.with_extension("json.tmp");
-        let mut file = fs::File::create(&tmp).with_context(|| format!("Failed to write {}", tmp.display()))?;
-        file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp, &path).with_context(|| format!("Failed to replace {}", path.display()))?;
+    /// True if the catalog needs rewriting: still plaintext, or encrypted with a previous key.
+    pub fn needs_rewrite(storage_dir: &Path, keys: &KeyRing) -> bool {
+        storage_dir.join(LEGACY_CATALOG_FILE).exists()
+            || crate::crypt::sealed_file_key_id(&Self::path(storage_dir)).is_some_and(|id| id != keys.current_id())
+    }
+
+    /// Write the catalog encrypted and atomically (temp file, fsync, rename).
+    pub fn save(&self, storage_dir: &Path, keys: &KeyRing) -> Result<()> {
+        write_sealed_file(&Self::path(storage_dir), keys, &serde_json::to_vec(self)?)?;
+        let legacy = storage_dir.join(LEGACY_CATALOG_FILE);
+        if legacy.exists() {
+            fs::remove_file(&legacy).with_context(|| format!("Failed to remove {}", legacy.display()))?;
+        }
         sync_dir(storage_dir);
         Ok(())
     }
@@ -132,17 +144,30 @@ mod tests {
     fn saves_and_loads() {
         let dir = std::env::temp_dir().join(format!("hexdb-catalog-test-{}", ulid::Ulid::new()));
         fs::create_dir_all(&dir).unwrap();
-        assert!(Catalog::load(&dir).unwrap().is_none());
+        let keys = KeyRing::new(&[1u8; 32], &[]);
+        assert!(Catalog::load(&dir, &keys).unwrap().is_none());
 
         let mut catalog = Catalog::default();
         catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1, indexes: Vec::new() });
         catalog.dropped.insert("old".into(), 42);
-        catalog.save(&dir).unwrap();
+        catalog.save(&dir, &keys).unwrap();
+        assert!(!fs::read(Catalog::path(&dir)).unwrap().windows(8).any(|w| w == b"Articles"), "encrypted");
 
-        let loaded = Catalog::load(&dir).unwrap().unwrap();
+        let loaded = Catalog::load(&dir, &keys).unwrap().unwrap();
         assert_eq!(loaded, catalog);
         assert_eq!(loaded.find_case_insensitive("articles"), Some("Articles"));
         assert_eq!(loaded.max_dropped_seq(), 42);
+
+        // A plaintext catalog from an earlier build is read, then replaced.
+        fs::remove_file(Catalog::path(&dir)).unwrap();
+        fs::write(dir.join(LEGACY_CATALOG_FILE), serde_json::to_string(&catalog).unwrap()).unwrap();
+        assert!(Catalog::needs_rewrite(&dir, &keys));
+        let migrated = Catalog::load(&dir, &keys).unwrap().unwrap();
+        assert_eq!(migrated, catalog);
+        migrated.save(&dir, &keys).unwrap();
+        assert!(!dir.join(LEGACY_CATALOG_FILE).exists());
+        assert!(!Catalog::needs_rewrite(&dir, &keys));
+        assert!(Catalog::needs_rewrite(&dir, &KeyRing::new(&[2u8; 32], &[[1u8; 32]])), "a rotated key means a rewrite");
         fs::remove_dir_all(&dir).ok();
     }
 }

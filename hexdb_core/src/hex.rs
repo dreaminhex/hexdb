@@ -10,8 +10,8 @@
 // it, so the newest version always wins regardless of load order.
 
 use crate::vertex::Vertex;
-use reed_solomon_erasure::galois_8::ReedSolomon;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::Bound;
 use ulid::Ulid;
 
 pub const DATA_SHARDS: usize = 4;
@@ -86,10 +86,70 @@ pub struct IntegrityReport {
 
 pub struct Hex {
     pub vertices: [Vertex; VERTEX_COUNT],
-    entries: HashMap<DocKey, EntryMeta>,
-    codec: ReedSolomon,
+    /// Ordered by tessellation, then ID, so one tessellation's entries are a range.
+    entries: BTreeMap<DocKey, EntryMeta>,
     clock: u64,
     dirty_bytes: usize,
+    dirty_count: usize,
+}
+
+/// The range of keys belonging to one tessellation, optionally after an ID.
+fn tessellation_range(tessellation: &str, after: Option<Ulid>) -> (Bound<DocKey>, Bound<DocKey>) {
+    let start = match after {
+        Some(id) => Bound::Excluded(DocKey::new(tessellation, id)),
+        None => Bound::Included(DocKey::new(tessellation, Ulid::nil())),
+    };
+    (start, Bound::Included(DocKey::new(tessellation, Ulid::from(u128::MAX))))
+}
+
+/// Split bytes into four data shards (zero-padded to an even length, as the
+/// codec requires) and compute two parity shards: six shards in all.
+fn encode(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let shard_len = bytes.len().div_ceil(DATA_SHARDS).max(1).next_multiple_of(2);
+    let mut shards: Vec<Vec<u8>> = (0..DATA_SHARDS)
+        .map(|i| {
+            let start = (i * shard_len).min(bytes.len());
+            let end = (start + shard_len).min(bytes.len());
+            let mut shard = bytes[start..end].to_vec();
+            shard.resize(shard_len, 0);
+            shard
+        })
+        .collect();
+    let parity = reed_solomon_simd::encode(DATA_SHARDS, PARITY_SHARDS, &shards).expect("shards have equal, even length");
+    shards.extend(parity);
+    shards
+}
+
+/// Fill in missing shards (`None`) from any four present ones.
+fn reconstruct(shards: &mut [Option<Vec<u8>>]) -> Result<(), ()> {
+    let present = shards.iter().filter(|s| s.is_some()).count();
+    if present < DATA_SHARDS {
+        return Err(());
+    }
+    if present == VERTEX_COUNT {
+        return Ok(());
+    }
+    let originals: Vec<(usize, &Vec<u8>)> = shards[..DATA_SHARDS].iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|s| (i, s))).collect();
+    let recovery: Vec<(usize, &Vec<u8>)> = shards[DATA_SHARDS..].iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|s| (i, s))).collect();
+    let restored = if originals.len() == DATA_SHARDS {
+        Default::default()
+    } else {
+        reed_solomon_simd::decode(DATA_SHARDS, PARITY_SHARDS, originals, recovery).map_err(|_| ())?
+    };
+    for (i, shard) in restored {
+        shards[i] = Some(shard);
+    }
+    // With every data shard back, recompute missing parity.
+    if shards[DATA_SHARDS..].iter().any(Option::is_none) {
+        let data: Vec<&Vec<u8>> = shards[..DATA_SHARDS].iter().map(|s| s.as_ref().unwrap()).collect();
+        let parity = reed_solomon_simd::encode(DATA_SHARDS, PARITY_SHARDS, data).map_err(|_| ())?;
+        for (i, p) in parity.into_iter().enumerate() {
+            if shards[DATA_SHARDS + i].is_none() {
+                shards[DATA_SHARDS + i] = Some(p);
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Default for Hex {
@@ -103,10 +163,10 @@ impl Hex {
     pub fn new() -> Self {
         Hex {
             vertices: std::array::from_fn(Vertex::new),
-            entries: HashMap::new(),
-            codec: ReedSolomon::new(DATA_SHARDS, PARITY_SHARDS).expect("valid Reed-Solomon parameters"),
+            entries: BTreeMap::new(),
             clock: 0,
             dirty_bytes: 0,
+            dirty_count: 0,
         }
     }
 
@@ -130,6 +190,7 @@ impl Hex {
 
         if dirty {
             self.dirty_bytes += bytes.len();
+            self.dirty_count += 1;
         }
         let last_access = self.tick();
         self.entries.insert(
@@ -141,6 +202,9 @@ impl Hex {
     /// Record a delete. Replaces any existing entry for the key.
     pub fn put_tombstone(&mut self, key: &DocKey, seq: u64, dirty: bool) {
         self.remove(key);
+        if dirty {
+            self.dirty_count += 1;
+        }
         let last_access = self.tick();
         self.entries.insert(
             key.clone(),
@@ -153,6 +217,7 @@ impl Hex {
         let meta = self.entries.remove(key)?;
         if meta.dirty {
             self.dirty_bytes = self.dirty_bytes.saturating_sub(meta.len);
+            self.dirty_count = self.dirty_count.saturating_sub(1);
         }
         if !meta.tombstone {
             for vertex in self.vertices.iter_mut() {
@@ -164,12 +229,7 @@ impl Hex {
 
     /// Drop every entry belonging to a tessellation.
     pub fn remove_tessellation(&mut self, tessellation: &str) -> usize {
-        let keys: Vec<DocKey> = self
-            .entries
-            .keys()
-            .filter(|k| k.tessellation == tessellation)
-            .cloned()
-            .collect();
+        let keys: Vec<DocKey> = self.entries.range(tessellation_range(tessellation, None)).map(|(k, _)| k.clone()).collect();
         for key in &keys {
             self.remove(key);
         }
@@ -200,12 +260,20 @@ impl Hex {
         })
     }
 
-    /// Entries (key and metadata) for one tessellation.
+    /// Entries (key and metadata) for one tessellation, in ID order.
     pub fn entries_in(&self, tessellation: &str) -> Vec<(DocKey, EntryMeta)> {
         self.entries
-            .iter()
-            .filter(|(k, _)| k.tessellation == tessellation)
+            .range(tessellation_range(tessellation, None))
             .map(|(k, m)| (k.clone(), m.clone()))
+            .collect()
+    }
+
+    /// Up to `limit` IDs of a tessellation after `after`, in ID order, with metadata.
+    pub fn ids_after(&self, tessellation: &str, after: Option<Ulid>, limit: usize) -> Vec<(Ulid, EntryMeta)> {
+        self.entries
+            .range(tessellation_range(tessellation, after))
+            .take(limit)
+            .map(|(k, m)| (k.id, m.clone()))
             .collect()
     }
 
@@ -246,6 +314,7 @@ impl Hex {
                 if meta.seq == *seq && meta.dirty {
                     meta.dirty = false;
                     self.dirty_bytes = self.dirty_bytes.saturating_sub(meta.len);
+                    self.dirty_count = self.dirty_count.saturating_sub(1);
                 }
             }
         }
@@ -316,7 +385,7 @@ impl Hex {
                 self.vertices[i].corrupt_found += 1;
             }
 
-            if self.codec.reconstruct(&mut shards).is_err() {
+            if reconstruct(&mut shards).is_err() {
                 report.unrecoverable += 1;
                 continue;
             }
@@ -347,7 +416,7 @@ impl Hex {
     }
 
     pub fn dirty_count(&self) -> usize {
-        self.entries.values().filter(|m| m.dirty).count()
+        self.dirty_count
     }
 
     /// Bytes of unflushed document data.
@@ -376,29 +445,12 @@ impl Hex {
     // -----------------------------------------------------------------------
 
     fn encode(&self, bytes: &[u8]) -> Vec<Vec<u8>> {
-        let shard_len = bytes.len().div_ceil(DATA_SHARDS).max(1);
-        let mut shards: Vec<Vec<u8>> = (0..VERTEX_COUNT)
-            .map(|i| {
-                let mut shard = if i < DATA_SHARDS {
-                    let start = (i * shard_len).min(bytes.len());
-                    let end = (start + shard_len).min(bytes.len());
-                    bytes[start..end].to_vec()
-                } else {
-                    Vec::new()
-                };
-                shard.resize(shard_len, 0);
-                shard
-            })
-            .collect();
-        self.codec
-            .encode(&mut shards)
-            .expect("shards have equal length");
-        shards
+        encode(bytes)
     }
 
     fn decode(&self, key: &DocKey, len: usize) -> Option<Vec<u8>> {
         // Fast path: all data shards intact.
-        let mut out = Vec::with_capacity(len + DATA_SHARDS);
+        let mut out = Vec::with_capacity(len + 2 * DATA_SHARDS);
         let mut intact = true;
         for vertex in &self.vertices[..DATA_SHARDS] {
             match vertex.get(key) {
@@ -415,14 +467,9 @@ impl Hex {
         }
 
         // Rebuild from any four intact shards.
-        let mut shards: Vec<Option<Vec<u8>>> =
-            self.vertices.iter().map(|v| v.intact_copy(key)).collect();
-        self.codec.reconstruct_data(&mut shards).ok()?;
-        let mut out: Vec<u8> = shards
-            .into_iter()
-            .take(DATA_SHARDS)
-            .flat_map(|s| s.unwrap_or_default())
-            .collect();
+        let mut shards: Vec<Option<Vec<u8>>> = self.vertices.iter().map(|v| v.intact_copy(key)).collect();
+        reconstruct(&mut shards).ok()?;
+        let mut out: Vec<u8> = shards.into_iter().take(DATA_SHARDS).flat_map(|s| s.unwrap_or_default()).collect();
         out.truncate(len);
         Some(out)
     }

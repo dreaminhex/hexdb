@@ -199,7 +199,15 @@ impl DocumentObject {
     }
 
     /// The document's fields.
-    async fn data(&self) -> Json<Value> {
+    async fn data(&self, #[graphql(desc = "Only these dotted field paths.")] fields: Option<Vec<String>>) -> Json<Value> {
+        if let Some(fields) = fields {
+            let mut projected = hexdb_core::project(&self.0.to_api_json(), &fields);
+            if let Value::Object(map) = &mut projected {
+                map.remove("id");
+                map.remove("_expires_at");
+            }
+            return Json(projected);
+        }
         Json(self.0.data_json())
     }
 

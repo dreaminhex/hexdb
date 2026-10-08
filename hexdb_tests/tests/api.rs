@@ -616,3 +616,26 @@ fn status_reports_operations_and_history() -> Result<()> {
     assert_eq!(server.request(Method::GET, "/status/history?minutes=soon", None, &[])?.status, StatusCode::BAD_REQUEST);
     Ok(())
 }
+
+#[test]
+fn keyed_bulk_writes_store_ids_not_documents_twice() -> Result<()> {
+    let server = TestServer::start()?;
+    let wal_bytes = |s: &TestServer| -> u64 {
+        std::fs::read_dir(s.data_dir().join("wal")).unwrap().flatten().map(|e| e.metadata().unwrap().len()).sum()
+    };
+    // Incompressible-ish payloads so sizes are meaningful after zstd.
+    let docs: Vec<Value> = (0..200)
+        .map(|i| json!({ "n": i, "blob": (0..40).map(|j| format!("{:x}", (i * 7919 + j * 104729) % 65521)).collect::<Vec<_>>().join("-") }))
+        .collect();
+    let before = wal_bytes(&server);
+    server.request(Method::POST, "/plain/_bulk", Some(&json!(docs)), &[])?;
+    let unkeyed = wal_bytes(&server) - before;
+    let key = [("Idempotency-Key", "big-batch")];
+    let first = server.request(Method::POST, "/keyed/_bulk", Some(&json!(docs)), &key)?;
+    let keyed = wal_bytes(&server) - before - unkeyed;
+    assert!(keyed < unkeyed * 13 / 10, "keyed {} vs unkeyed {} bytes", keyed, unkeyed);
+    let replay = server.request(Method::POST, "/keyed/_bulk", Some(&json!(docs)), &key)?;
+    assert!(replay.replayed());
+    assert_eq!(first.body, replay.body);
+    Ok(())
+}
