@@ -466,10 +466,10 @@ mod tests {
         assert!(hex.corrupt_for_testing(&k, 3));
         assert_eq!(hex.read(&k), Some(Lookup::Live { bytes: data.clone(), seq: 7, ttl: None }));
 
-        let report = hex.check_integrity(&[k.clone()]);
+        let report = hex.check_integrity(std::slice::from_ref(&k));
         assert_eq!(report.corrupt_shards, 2);
         assert_eq!(report.repaired_shards, 2);
-        assert_eq!(hex.check_integrity(&[k.clone()]).corrupt_shards, 0);
+        assert_eq!(hex.check_integrity(std::slice::from_ref(&k)).corrupt_shards, 0);
         assert_eq!(hex.read(&k), Some(Lookup::Live { bytes: data, seq: 7, ttl: None }));
     }
 

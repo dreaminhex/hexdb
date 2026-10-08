@@ -4,29 +4,35 @@
 //   GET /lattice/catalog                  tessellations and index definitions
 //   GET /lattice/snapshot/{tessellation}  documents with versions, paged by ID
 //   GET /lattice/changes?after=&wait=     the change feed with typed documents
+//   POST /lattice/revoke                  record a sign-out made on a replica
 //
-// Every request needs the `X-HexDB-Lattice-Token` header (see
-// `hexdb_core::replication`), and only the Overseer serves them.
+// Every request needs a valid `X-HexDB-Lattice-Signature` (fresh, single use,
+// made with the lattice key; see `hexdb_core::network::lattice_auth`), and
+// only the Overseer serves them.
 
 use crate::handlers::{ApiError, ApiResult, Engine};
 use axum::{
+    body::Bytes,
     extract::{rejection::QueryRejection, Path, Query},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode, Uri},
     response::IntoResponse,
     Json,
 };
 use hexdb_core::{
-    constant_time_eq, engine::HexDBEngine, lattice_token, replication::{ChangeBatch, SnapshotPage}, REPLICATION_TESSELLATION,
-    LATTICE_TOKEN_HEADER,
+    engine::HexDBEngine,
+    replication::{ChangeBatch, SnapshotPage},
+    LATTICE_SIGNATURE_HEADER, REPLICATION_TESSELLATION,
 };
 use serde::Deserialize;
 use std::time::Duration;
 use ulid::Ulid;
 
-fn authorize(engine: &HexDBEngine, headers: &HeaderMap) -> Result<(), ApiError> {
-    let presented = headers.get(LATTICE_TOKEN_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
-    if !constant_time_eq(presented.as_bytes(), lattice_token(&engine.config).as_bytes()) {
-        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "A valid lattice token is required."));
+fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &Uri, body: &[u8]) -> Result<(), ApiError> {
+    let presented = headers.get(LATTICE_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let target = uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path());
+    if !engine.lattice_keys.verify_request(presented, method.as_str(), target, body, &engine.lattice_nonces) {
+        tracing::warn!("🚫 Rejected a lattice request to {} without a valid signature.", uri.path());
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "A valid lattice signature is required."));
     }
     if !engine.is_writable() {
         return Err(ApiError::new(
@@ -39,14 +45,14 @@ fn authorize(engine: &HexDBEngine, headers: &HeaderMap) -> Result<(), ApiError> 
 }
 
 /// Where a full sync starts.
-pub async fn snapshot(headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
-    authorize(&engine, &headers)?;
+pub async fn snapshot(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, b"")?;
     Ok(Json(engine.snapshot_meta()).into_response())
 }
 
 /// Tessellations and index definitions (replicas poll this for new ones).
-pub async fn catalog(headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
-    authorize(&engine, &headers)?;
+pub async fn catalog(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, b"")?;
     Ok(Json(engine.snapshot_meta()).into_response())
 }
 
@@ -61,10 +67,12 @@ pub struct PageParams {
 pub async fn snapshot_page(
     Path(tess): Path<String>,
     params: Result<Query<PageParams>, QueryRejection>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     axum::extract::State(engine): Engine,
 ) -> ApiResult {
-    authorize(&engine, &headers)?;
+    authorize(&engine, &headers, &method, &uri, b"")?;
     let Query(params) = params?;
     if !engine.tessellation_exists(&tess) {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", format!("Tessellation '{}' not found.", tess)));
@@ -88,10 +96,12 @@ pub struct ChangeParams {
 /// Changes after a sequence number, with typed documents; long-polls up to `wait` seconds.
 pub async fn changes(
     params: Result<Query<ChangeParams>, QueryRejection>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     axum::extract::State(engine): Engine,
 ) -> ApiResult {
-    authorize(&engine, &headers)?;
+    authorize(&engine, &headers, &method, &uri, b"")?;
     let Query(params) = params?;
     let limit = params.limit.unwrap_or(1000).clamp(1, 10_000);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(params.wait.unwrap_or(0).min(30));
@@ -121,4 +131,31 @@ pub async fn changes(
         }
         let _ = tokio::time::timeout_at(deadline, receiver.recv()).await;
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Revocation {
+    pub session_id: String,
+    pub expires_at: i64,
+}
+
+/// Record a sign-out made on a replica (replicas can't write).
+pub async fn revoke(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let input: Revocation = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    hexdb_core::auth::revoke_session(&engine, &input.session_id, input.expires_at).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Ask the Overseer to record a sign-out made on this replica.
+pub async fn forward_revocation(engine: &HexDBEngine, session_id: &str, expires_at: i64) -> Result<(), ApiError> {
+    let body = serde_json::json!({ "session_id": session_id, "expires_at": expires_at });
+    hexdb_core::replication::post_to_overseer(engine, "/lattice/revoke", &body).await.map_err(|e| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overseer_unreachable",
+            format!("Couldn't record the sign-out with the Overseer: {:#}. Try again shortly.", e),
+        )
+    })
 }

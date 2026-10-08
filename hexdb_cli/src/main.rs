@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use hexdb_core::{load_config_from, local_base_url, HexConfig, RuntimeInfo, SHUTDOWN_TOKEN_HEADER};
+use hexdb_core::{load_config_from, runtime::local_base_url_with, HexConfig, RuntimeInfo, SHUTDOWN_TOKEN_HEADER};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -15,6 +15,12 @@ struct Cli {
     /// Path to hexdb.toml. Defaults to $HEXDB_CONFIG, ./hexdb.toml, or hexdb.toml next to the executable.
     #[arg(short, long, global = true)]
     config: Option<PathBuf>,
+
+    /// API key (or session token) for commands that need credentials, such as
+    /// `status`. Create one on the admin UI's Account page. Prefer the
+    /// HEXDB_TOKEN environment variable to keep it out of shell history.
+    #[arg(long, global = true, env = "HEXDB_TOKEN", hide_env_values = true)]
+    token: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -88,18 +94,22 @@ const REGISTRY_PATH: &str = "plugins.json";
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config.as_deref();
+    let token = cli.token.as_deref();
 
     match cli.command {
         Commands::Start { silent, server_bin } => start(config_path, silent, server_bin).await,
         Commands::Stop { timeout, force } => stop(config_path, Duration::from_secs(timeout), force).await,
         Commands::Health { url } => {
-            let base = base_url(config_path, url)?;
-            println!("{}", pretty(&get_text(&base, "/health").await?));
+            let (base, config) = base_url(config_path, url)?;
+            println!("{}", pretty(&get_text(&config, &base, "/health", token).await?));
             Ok(())
         }
         Commands::Status { url } => {
-            let base = base_url(config_path, url)?;
-            println!("{}", pretty(&get_text(&base, "/status").await?));
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb status` needs credentials: set HEXDB_TOKEN (or pass --token) to an admin's API key.");
+            }
+            println!("{}", pretty(&get_text(&config, &base, "/status", token).await?));
             Ok(())
         }
         Commands::Plugins { sub } => match sub {
@@ -117,10 +127,10 @@ async fn main() -> Result<()> {
 async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<PathBuf>) -> Result<()> {
     let config = load(config_path)?;
     let storage_dir = config.storage_dir();
-    let base = local_base_url(&config.network.api_endpoint);
+    let base = local_base_url_with(&config.network.api_endpoint, config.tls.enabled());
 
     if let Some(info) = RuntimeInfo::read(&storage_dir)? {
-        if is_healthy(&base).await {
+        if is_healthy(&config, &base).await {
             bail!("HexDB is already running (PID {}) at {}.", info.pid, base);
         }
     }
@@ -171,7 +181,7 @@ async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<Path
         if let Some(status) = child.try_wait()? {
             bail!("HexDB exited during startup ({}). See {}.", status, log_path.display());
         }
-        if is_healthy(&base).await {
+        if is_healthy(&config, &base).await {
             println!("⌬  HexDB started in the background (PID {}) at {}.", pid, base);
             println!("   Logs: {}", log_path.display());
             return Ok(());
@@ -198,14 +208,14 @@ async fn stop(config_path: Option<&Path>, timeout: Duration, force: bool) -> Res
         );
     };
 
-    if !platform::process_alive(info.pid) {
+    if !platform::process_alive(info.pid) || !is_same_server(&info) {
         RuntimeInfo::remove(&storage_dir);
         println!("HexDB (PID {}) is not running. Removed the stale runtime file.", info.pid);
         return Ok(());
     }
 
-    let base = local_base_url(&info.api_endpoint);
-    match request_shutdown(&base, &info.shutdown_token).await {
+    let base = local_base_url_with(&info.api_endpoint, info.tls);
+    match request_shutdown(&config, &base, &info.shutdown_token).await {
         Ok(()) => {
             println!("🛑 Shutdown requested. Waiting for HexDB (PID {}) to stop...", info.pid);
             if wait_for_exit(info.pid, timeout).await {
@@ -234,6 +244,15 @@ async fn stop(config_path: Option<&Path>, timeout: Duration, force: bool) -> Res
         }
     }
 
+    // Kill only a process we can positively identify as this server: PIDs are
+    // reused, and the runtime file could be stale.
+    if !is_same_server(&info) {
+        bail!(
+            "Refusing to kill PID {}: it can't be confirmed to be the HexDB server that wrote {} (different executable or start time). Stop it by hand if it is.",
+            info.pid,
+            RuntimeInfo::path(&storage_dir).display()
+        );
+    }
     platform::force_kill(info.pid)?;
     wait_for_exit(info.pid, Duration::from_secs(5)).await;
     RuntimeInfo::remove(&storage_dir);
@@ -241,8 +260,26 @@ async fn stop(config_path: Option<&Path>, timeout: Duration, force: bool) -> Res
     Ok(())
 }
 
-async fn request_shutdown(base: &str, token: &str) -> Result<()> {
-    let res = http_client()?
+/// True if `info.pid` is still the process that wrote the runtime file:
+/// same executable, started within a few seconds of the recorded time.
+fn is_same_server(info: &RuntimeInfo) -> bool {
+    if info.exe.is_empty() || info.started_at == 0 {
+        // A runtime file from an older HexDB: identity can't be checked.
+        return false;
+    }
+    match platform::process_identity(info.pid) {
+        Some((exe, started_ms)) => {
+            let same_exe = if cfg!(windows) { exe.eq_ignore_ascii_case(&info.exe) } else { exe == info.exe };
+            // The server records its start time early in main(); allow for process start-up.
+            let close_in_time = started_ms.is_none_or(|ms| (info.started_at - ms).abs() <= 10_000);
+            same_exe && close_in_time
+        }
+        None => false,
+    }
+}
+
+async fn request_shutdown(config: &HexConfig, base: &str, token: &str) -> Result<()> {
+    let res = http_client(config)?
         .post(format!("{}/shutdown", base))
         .header(SHUTDOWN_TOKEN_HEADER, token)
         .send()
@@ -299,20 +336,31 @@ fn load(config_path: Option<&Path>) -> Result<HexConfig> {
     load_config_from(config_path).map_err(|e| anyhow!("Failed to load configuration: {}", e))
 }
 
-fn base_url(config_path: Option<&Path>, url: Option<String>) -> Result<String> {
-    match url {
-        Some(url) => Ok(local_base_url(&url)),
-        None => Ok(local_base_url(&load(config_path)?.network.api_endpoint)),
+/// The server's base URL (`https://` when the config enables TLS) and the config.
+fn base_url(config_path: Option<&Path>, url: Option<String>) -> Result<(String, HexConfig)> {
+    let config = load(config_path).unwrap_or_default();
+    let endpoint = url.unwrap_or_else(|| config.network.api_endpoint.clone());
+    Ok((local_base_url_with(&endpoint, config.tls.enabled()), config))
+}
+
+/// An HTTP client that also trusts `tls.ca_file` (for private certificates).
+fn http_client(config: &HexConfig) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
+    if !config.tls.ca_file.is_empty() {
+        let pem = fs::read(&config.tls.ca_file).with_context(|| format!("Failed to read tls.ca_file {}", config.tls.ca_file))?;
+        for cert in reqwest::Certificate::from_pem_bundle(&pem)? {
+            builder = builder.add_root_certificate(cert);
+        }
     }
+    Ok(builder.build()?)
 }
 
-fn http_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder().timeout(Duration::from_secs(5)).build()?)
-}
-
-async fn get_text(base: &str, path: &str) -> Result<String> {
-    let res = http_client()?
-        .get(format!("{}{}", base, path))
+async fn get_text(config: &HexConfig, base: &str, path: &str, token: Option<&str>) -> Result<String> {
+    let mut request = http_client(config)?.get(format!("{}{}", base, path));
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let res = request
         .send()
         .await
         .map_err(|e| {
@@ -325,14 +373,20 @@ async fn get_text(base: &str, path: &str) -> Result<String> {
 
     let status = res.status();
     let body = res.text().await?;
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        bail!("{}{} needs valid credentials: set HEXDB_TOKEN (or --token) to an API key.", base, path);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        bail!("{}{} needs an administrator's API key.", base, path);
+    }
     if !status.is_success() {
         bail!("{}{} returned {}: {}", base, path, status, body);
     }
     Ok(body)
 }
 
-async fn is_healthy(base: &str) -> bool {
-    get_text(base, "/health").await.is_ok()
+async fn is_healthy(config: &HexConfig, base: &str) -> bool {
+    get_text(config, base, "/health", None).await.is_ok()
 }
 
 fn pretty(body: &str) -> String {
@@ -373,6 +427,33 @@ mod platform {
         kill(Pid::from_raw(pid as i32), Signal::SIGKILL)?;
         Ok(())
     }
+
+    /// The executable path and (on Linux) start time in epoch ms of a process.
+    pub fn process_identity(pid: u32) -> Option<(String, Option<i64>)> {
+        #[cfg(target_os = "linux")]
+        {
+            let exe = std::fs::read_link(format!("/proc/{}/exe", pid)).ok()?.display().to_string();
+            // Field 22 of /proc/<pid>/stat is the start time in clock ticks after boot.
+            let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+            let after_name = stat.rsplit_once(')')?.1;
+            let ticks: i64 = after_name.split_whitespace().nth(19)?.parse().ok()?;
+            let boot: i64 = std::fs::read_to_string("/proc/stat")
+                .ok()?
+                .lines()
+                .find_map(|l| l.strip_prefix("btime "))?
+                .trim()
+                .parse()
+                .ok()?;
+            // Linux reports USER_HZ, which is 100 on every mainstream build.
+            return Some((exe, Some(boot * 1000 + ticks * 10)));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let output = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()?;
+            let exe = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!exe.is_empty()).then_some((exe, None))
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -380,10 +461,38 @@ mod platform {
     use anyhow::{bail, Result};
     use std::process::Command;
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+    use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, TerminateProcess, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
+
+    /// The executable path and start time (epoch ms) of a process.
+    pub fn process_identity(pid: u32) -> Option<(String, Option<i64>)> {
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return None;
+            }
+            let mut buffer = [0u16; 1024];
+            let mut len = buffer.len() as u32;
+            let named = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut len);
+            let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+            let timed = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
+            CloseHandle(handle);
+            if named == 0 {
+                return None;
+            }
+            let exe = String::from_utf16_lossy(&buffer[..len as usize]);
+            // FILETIME counts 100 ns intervals since 1601-01-01.
+            let started = (timed != 0).then(|| {
+                let ticks = ((created.dwHighDateTime as i64) << 32) | created.dwLowDateTime as i64;
+                ticks / 10_000 - 11_644_473_600_000
+            });
+            Some((exe, started))
+        }
+    }
 
     /// Run the server without a console window, in its own process group so Ctrl+C here doesn't reach it.
     pub fn detach(cmd: &mut Command) {

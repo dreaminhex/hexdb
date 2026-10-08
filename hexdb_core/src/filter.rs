@@ -294,7 +294,7 @@ fn eval_op(op: &Op, values: &[&Value]) -> bool {
         }),
         Op::In(options) => options.iter().any(|o| eval_op(&Op::Eq(o.clone()), values)),
         Op::Nin(options) => !options.iter().any(|o| eval_op(&Op::Eq(o.clone()), values)),
-        Op::Exists(should) => (!values.is_empty()) == *should,
+        Op::Exists(should) => values.is_empty() != *should,
         Op::Contains(needle) => values.iter().any(|v| match (v, needle) {
             (Value::String(s), Value::String(n)) => s.contains(n.as_str()),
             (Value::Array(items), n) => items.iter().any(|item| json_eq(item, n)),
@@ -415,7 +415,7 @@ mod tests {
         assert!(check(json!({ "$not": { "status": "live" } }), &d));
         assert!(check(json!({ "id": d.id.to_string() }), &d));
         assert!(check(json!({ "views": { "_gte": 42 }, "_or": [{ "status": "draft" }] }), &d), "underscore operators");
-        assert!(check(json!({ "author": { "_name": null } }), &d) == false, "unknown _keys are fields");
+        assert!(!check(json!({ "author": { "_name": null } }), &d), "unknown _keys are fields");
         assert!(!check(json!({ "views": { "$gt": "a" } }), &d), "mixed types don't compare");
     }
 

@@ -31,7 +31,7 @@ const DEFAULT_ROLES: &[(&str, &str)] = &[
     ("writer", "Write access to specified tessellations (assumes read access)."),
     ("owner", "Full access to specified tessellations."),
 ];
-const MIN_PASSWORD_LEN: usize = 8;
+const MIN_PASSWORD_LEN: usize = 12;
 const MAX_PASSWORD_LEN: usize = 1024;
 
 /// A role granted to a user, with the tessellations it applies to ("*" for all).
@@ -78,6 +78,9 @@ pub struct StoredUser {
     pub mfa_secret: Option<String>,
     #[serde(default)]
     pub mfa_backup_codes: Vec<String>,
+    /// Sessions issued at or before this time (epoch milliseconds) are no longer valid.
+    #[serde(default)]
+    pub sessions_valid_after: i64,
 }
 
 fn never() -> i64 {
@@ -171,13 +174,29 @@ fn validate_login(login: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_password(password: &str) -> Result<()> {
+/// Passwords that are long enough but far too common.
+const COMMON_PASSWORDS: &[&str] = &[
+    "password1234", "123456789012", "qwertyuiopas", "passwordpassword", "letmein12345", "administrator",
+    "hexdbadmin1234", "changeme1234", "welcome12345", "iloveyou1234", "111111111111", "abcdefghijkl",
+];
+
+/// Password policy for new and changed passwords: 12-1024 characters, not
+/// containing the login, not one repeated character, not a common password.
+fn validate_password_for(password: &str, login: &str) -> Result<()> {
     let len = password.chars().count();
     if !(MIN_PASSWORD_LEN..=MAX_PASSWORD_LEN).contains(&len) {
         return Err(invalid(format!(
             "password must be {}-{} characters long.",
             MIN_PASSWORD_LEN, MAX_PASSWORD_LEN
         )));
+    }
+    let lower = password.to_lowercase();
+    if !login.is_empty() && lower.contains(&login.to_lowercase()) {
+        return Err(invalid("password must not contain the login."));
+    }
+    let first = password.chars().next();
+    if password.chars().all(|c| Some(c) == first) || COMMON_PASSWORDS.contains(&lower.as_str()) {
+        return Err(invalid("password is too easy to guess; choose a longer or less common one."));
     }
     Ok(())
 }
@@ -203,6 +222,52 @@ async fn all_users(engine: &HexDBEngine) -> Result<Vec<(Ulid, StoredUser)>> {
         .iter()
         .filter_map(|doc| parse_user(doc).map(|u| (doc.id, u)))
         .collect())
+}
+
+/// A user by ID only.
+pub(crate) async fn find_by_id(engine: &HexDBEngine, id: &str) -> Result<Option<(Ulid, StoredUser)>> {
+    let Ok(id) = Ulid::from_string(id) else { return Ok(None) };
+    if !engine.tessellation_exists(USERS_TESSELLATION) {
+        return Ok(None);
+    }
+    Ok(engine.get_system_document(USERS_TESSELLATION, id).await?.and_then(|doc| parse_user(&doc).map(|u| (doc.id, u))))
+}
+
+/// A user by login only (ignoring case), for sign-in.
+pub(crate) async fn find_for_login(engine: &HexDBEngine, login: &str) -> Result<Option<(Ulid, StoredUser)>> {
+    if !engine.tessellation_exists(USERS_TESSELLATION) {
+        return Ok(None);
+    }
+    Ok(all_users(engine).await?.into_iter().find(|(_, u)| u.login.eq_ignore_ascii_case(login.trim())))
+}
+
+/// Note a successful sign-in (time and client address, last 10 addresses).
+pub(crate) async fn record_login(engine: &HexDBEngine, id: Ulid, client: &str) -> Result<()> {
+    let _lock = engine.users_lock.lock().await;
+    let Some((_, mut user)) = find_by_id(engine, &id.to_string()).await? else { return Ok(()) };
+    user.last_login = Utc::now().timestamp();
+    user.login_ips.retain(|ip| ip != client);
+    user.login_ips.insert(0, client.to_string());
+    user.login_ips.truncate(10);
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    Ok(())
+}
+
+/// Change your own password: the current one must be given. All other
+/// sessions are signed out.
+pub async fn change_own_password(engine: &HexDBEngine, user_id: &str, current: &str, new: &str) -> Result<()> {
+    let _lock = engine.users_lock.lock().await;
+    let (id, mut user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;
+    if !crate::crypt::verify_hash(current, &user.password_hash) {
+        return Err(EngineError::Forbidden("The current password is wrong.".into()).into());
+    }
+    validate_password_for(new, &user.login)?;
+    user.password_hash = create_hash(new);
+    user.last_password_change = Utc::now().timestamp();
+    user.sessions_valid_after = Utc::now().timestamp_millis();
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    info!("🔑 '{}' changed their password; other sessions were signed out.", user.login);
+    Ok(())
 }
 
 /// Find a user by ID, or by login (ignoring case).
@@ -258,7 +323,7 @@ pub async fn create_user(engine: &HexDBEngine, input: NewUser, idem: Option<Idem
     }
 
     validate_login(&input.login)?;
-    validate_password(&input.password)?;
+    validate_password_for(&input.password, &input.login)?;
     validate_email(&input.email_address)?;
     check_roles_exist(engine, &input.roles).await?;
     if find_user(engine, &input.login).await?.is_some() {
@@ -284,6 +349,7 @@ pub async fn create_user(engine: &HexDBEngine, input: NewUser, idem: Option<Idem
         use_mfa: false,
         mfa_secret: None,
         mfa_backup_codes: Vec::new(),
+        sessions_valid_after: 0,
     };
 
     let outcome = engine.insert_documents(USERS_TESSELLATION, vec![to_json(&user)?], None, idem).await?;
@@ -321,10 +387,12 @@ pub async fn update_user(
         user.login = login;
     }
     if let Some(password) = changes.password {
-        validate_password(&password)?;
+        validate_password_for(&password, &user.login)?;
         user.password_hash = create_hash(&password);
         user.last_password_change = Utc::now().timestamp();
         user.password_attempts = 0;
+        // A reset signs the user out everywhere.
+        user.sessions_valid_after = Utc::now().timestamp_millis();
     }
     if let Some(email) = changes.email_address {
         validate_email(&email)?;
@@ -335,6 +403,9 @@ pub async fn update_user(
         user.roles = roles;
     }
     if let Some(locked) = changes.is_locked {
+        if locked && !user.is_locked {
+            user.sessions_valid_after = Utc::now().timestamp_millis();
+        }
         user.is_locked = locked;
     }
     if let Some(use_mfa) = changes.use_mfa {
@@ -419,10 +490,10 @@ pub async fn bootstrap(engine: &HexDBEngine, security: &SecurityConfig) -> Resul
         return Ok(());
     }
     let login = security.admin_login.trim();
-    let password = security.admin_password.trim();
+    let configured_password = security.admin_password.trim();
     let email = security.admin_email.trim();
-    if login.is_empty() || password.is_empty() || email.is_empty() {
-        return Err(anyhow!("Admin user configuration is incomplete. All fields (login, password, email) must be set."));
+    if login.is_empty() || email.is_empty() {
+        return Err(anyhow!("security.admin_login and security.admin_email must be set."));
     }
 
     engine.create_tessellation(ROLES_TESSELLATION, "system")?;
@@ -442,14 +513,51 @@ pub async fn bootstrap(engine: &HexDBEngine, security: &SecurityConfig) -> Resul
     }
 
     if all_users(engine).await?.is_empty() {
+        let generated = configured_password.is_empty();
+        let password = if generated {
+            use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+            URL_SAFE_NO_PAD.encode(crate::crypt::random_bytes(18))
+        } else {
+            validate_password_for(configured_password, login)
+                .map_err(|e| anyhow!("security.admin_password can't be used for the first administrator: {}", e))?;
+            configured_password.to_string()
+        };
         let admin = NewUser {
             login: login.to_string(),
-            password: password.to_string(),
+            password: password.clone(),
             email_address: email.to_string(),
             roles: vec![RoleGrant { name: ADMIN_ROLE.into(), permissions: vec!["*".into()] }],
         };
         create_user(engine, admin, None).await?;
-        info!("✅ Admin user '{}' added.", login);
+        if generated {
+            // Shown once, on the console and in an owner-only file; never in the log buffer.
+            let file = engine.config.storage_dir().join("initial-admin-password.txt");
+            let note = format!(
+                "HexDB created the first administrator.
+  login:    {}
+  password: {}
+Sign in and change this password, then delete this file.
+",
+                login, password
+            );
+            let saved = crate::runtime::write_private_file(&file, note.as_bytes());
+            eprintln!("
+================================================================");
+            eprintln!(" HexDB created the first administrator.");
+            eprintln!("   login:    {}", login);
+            eprintln!("   password: {}", password);
+            eprintln!(" Sign in and change it. This is the only time it is shown.");
+            eprintln!("================================================================
+");
+            match saved {
+                Ok(()) => info!("✅ Admin user '{}' added with a generated password (printed to the console and saved to {}).", login, file.display()),
+                Err(e) => warn!("⚠️ Admin user '{}' added with a generated password, printed to the console; saving it to {} failed: {:#}", login, file.display(), e),
+            }
+        } else {
+            info!("✅ Admin user '{}' added with the configured password.", login);
+        }
+    } else if !configured_password.is_empty() {
+        warn!("⚠️ security.admin_password is set but users already exist, so it is ignored. Remove it from the configuration.");
     }
     Ok(())
 }

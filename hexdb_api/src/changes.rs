@@ -13,9 +13,12 @@
 //
 // Both return 410 (`history_expired`) when the requested position is older
 // than the changes kept in memory; re-read the data and start from `last_seq`
-// of a fresh request. System tessellations (users, roles, ...) are left out.
+// of a fresh request. System tessellations (users, roles, ...) are left out,
+// and so are tessellations the caller can't read.
 
+use crate::auth::Auth;
 use crate::handlers::{ApiError, ApiResult, Engine};
+use hexdb_core::{Permission, Principal};
 use axum::{
     extract::{rejection::QueryRejection, Query},
     http::{HeaderMap, StatusCode},
@@ -29,12 +32,18 @@ use futures::stream::{self, Stream, StreamExt};
 use hexdb_core::{engine::HexDBEngine, Change, ChangeKind, HistoryExpired};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::broadcast::{self, error::RecvError};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
 const MAX_WAIT_SECONDS: u64 = 60;
+/// How often a live stream re-checks its credentials.
+const REAUTH_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,8 +67,11 @@ fn expired(e: HistoryExpired) -> ApiError {
 }
 
 /// True if the public feed shows this change.
-fn visible(engine: &HexDBEngine, change: &Change, tessellation: Option<&str>) -> bool {
+fn visible(engine: &HexDBEngine, principal: &Principal, change: &Change, tessellation: Option<&str>) -> bool {
     if tessellation.is_some_and(|t| t != change.tessellation) {
+        return false;
+    }
+    if !principal.can(Permission::Read, &change.tessellation) {
         return false;
     }
     // A dropped tessellation is no longer in the catalog; judge it by name.
@@ -70,8 +82,15 @@ fn visible(engine: &HexDBEngine, change: &Change, tessellation: Option<&str>) ->
 }
 
 /// Changes after a sequence number (see the module docs).
-pub async fn changes(params: Result<Query<ChangeParams>, QueryRejection>, axum::extract::State(engine): Engine) -> ApiResult {
+pub async fn changes(
+    params: Result<Query<ChangeParams>, QueryRejection>,
+    axum::extract::State(engine): Engine,
+    Auth(principal): Auth,
+) -> ApiResult {
     let Query(params) = params?;
+    if let Some(t) = params.tessellation.as_deref().filter(|t| !t.is_empty()) {
+        principal.require(Permission::Read, t)?;
+    }
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let tessellation = params.tessellation.as_deref().filter(|t| !t.is_empty());
     let wait = Duration::from_secs(params.wait.unwrap_or(0).min(MAX_WAIT_SECONDS));
@@ -95,7 +114,7 @@ pub async fn changes(params: Result<Query<ChangeParams>, QueryRejection>, axum::
                 break;
             }
             cursor = change.seq;
-            if visible(&engine, change, tessellation) {
+            if visible(&engine, &principal, change, tessellation) {
                 out.push(change.to_api_json());
             }
         }
@@ -114,8 +133,12 @@ pub async fn change_stream(
     params: Result<Query<ChangeParams>, QueryRejection>,
     headers: HeaderMap,
     axum::extract::State(engine): Engine,
+    Auth(principal): Auth,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let Query(params) = params?;
+    if let Some(t) = params.tessellation.as_deref().filter(|t| !t.is_empty()) {
+        principal.require(Permission::Read, t)?;
+    }
     if params.limit.is_some() || params.wait.is_some() {
         return Err(ApiError::invalid("limit and wait don't apply to the stream."));
     }
@@ -136,28 +159,53 @@ pub async fn change_stream(
 
     let filter_engine = engine.clone();
     let filter_tess = tessellation.clone();
+    let filter_principal = principal.clone();
     let backlog = stream::iter(
         backlog
             .into_iter()
-            .filter(move |c| visible(&filter_engine, c, filter_tess.as_deref()))
+            .filter(move |c| visible(&filter_engine, &filter_principal, c, filter_tess.as_deref()))
             .map(move |c| Ok(event(&c)))
             .collect::<Vec<_>>(),
     );
 
     struct Live {
         engine: Arc<HexDBEngine>,
+        principal: Principal,
+        credential: String,
+        checked: Instant,
         receiver: broadcast::Receiver<Arc<Change>>,
         tessellation: Option<String>,
         done: bool,
     }
-    let live = stream::unfold(Live { engine, receiver, tessellation, done: false }, move |mut s| async move {
+    // The stream outlives the request, so the credential is re-checked
+    // periodically: a locked user, a revoked session, or removed roles end it.
+    let credential = crate::auth::request_credential(&headers).unwrap_or_default();
+    let start = Live { engine, principal, credential, checked: Instant::now(), receiver, tessellation, done: false };
+    let live = stream::unfold(start, move |mut s| async move {
         if s.done {
             return None;
         }
         loop {
-            match s.receiver.recv().await {
+            if s.checked.elapsed() >= REAUTH_EVERY {
+                match hexdb_core::auth::authenticate(&s.engine, &s.credential).await {
+                    Ok(Some(principal)) => {
+                        s.principal = principal;
+                        s.checked = Instant::now();
+                    }
+                    _ => {
+                        s.done = true;
+                        let notice = Event::default().event("unauthorized").data("{\"message\":\"The credentials are no longer valid.\"}");
+                        return Some((Ok(notice), s));
+                    }
+                }
+            }
+            let next = match tokio::time::timeout(REAUTH_EVERY, s.receiver.recv()).await {
+                Ok(next) => next,
+                Err(_) => continue,
+            };
+            match next {
                 Ok(change) => {
-                    if visible(&s.engine, &change, s.tessellation.as_deref()) {
+                    if visible(&s.engine, &s.principal, &change, s.tessellation.as_deref()) {
                         return Some((Ok(event(&change)), s));
                     }
                 }

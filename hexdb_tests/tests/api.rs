@@ -399,10 +399,10 @@ fn user_lifecycle() -> Result<()> {
 #[test]
 fn last_admin_is_protected() -> Result<()> {
     let server = TestServer::start()?;
-    let res = server.request(Method::DELETE, "/users/hexdbadmin", None, &[])?;
+    let res = server.request(Method::DELETE, "/users/admin", None, &[])?;
     assert_eq!(res.status, StatusCode::CONFLICT);
 
-    let res = server.request(Method::PATCH, "/users/hexdbadmin", Some(&json!({ "is_locked": true })), &[])?;
+    let res = server.request(Method::PATCH, "/users/admin", Some(&json!({ "is_locked": true })), &[])?;
     assert_eq!(res.status, StatusCode::CONFLICT);
 
     // With a second admin, the first can be removed.
@@ -411,7 +411,9 @@ fn last_admin_is_protected() -> Result<()> {
         "roles": [{ "name": "admin", "permissions": ["*"] }]
     });
     assert_eq!(server.request(Method::POST, "/users", Some(&second), &[])?.status, StatusCode::CREATED);
-    assert_eq!(server.request(Method::DELETE, "/users/hexdbadmin", None, &[])?.status, StatusCode::NO_CONTENT);
+    assert_eq!(server.request(Method::DELETE, "/users/admin", None, &[])?.status, StatusCode::NO_CONTENT);
+    // Deleting the signed-in admin ends that session at once.
+    assert_eq!(server.request(Method::GET, "/users", None, &[])?.status, StatusCode::UNAUTHORIZED);
     Ok(())
 }
 
@@ -454,10 +456,9 @@ fn graphql_over_http() -> Result<()> {
     let res = server.request(Method::POST, "/graphql", Some(&json!({ "query": "{ documents(tessellation: \"users\") { total } }" })), &[])?;
     assert_eq!(res.body.pointer("/errors/0/extensions/code").and_then(Value::as_str), Some("FORBIDDEN"));
 
-    // GraphiQL is served as a fallback.
+    // GraphiQL (which loaded scripts from a CDN) is gone; the admin UI has the console.
     let page = server.get("/graphql")?;
-    assert_eq!(page.status(), StatusCode::OK);
-    assert!(page.text()?.to_lowercase().contains("graphiql"));
+    assert_eq!(page.status(), StatusCode::METHOD_NOT_ALLOWED);
     Ok(())
 }
 

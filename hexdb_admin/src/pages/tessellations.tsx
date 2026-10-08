@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
 import { api, errorMessage } from "@/lib/api"
+import { can, useAuth } from "@/lib/auth"
 import { formatBytes, formatNumber, formatTimestamp } from "@/lib/format"
 import { href, linkHandler, navigate } from "@/lib/router"
 
@@ -81,8 +82,21 @@ function CreateTessellationDialog({ open, onOpenChange, onCreated }: { open: boo
 }
 
 export function TessellationsPage() {
+  const { me } = useAuth()
   const tessellations = usePoll(api.tessellations, 10_000)
-  const status = usePoll(api.status, 10_000)
+  // Sizes come from /status (admins); other users get document counts per tessellation.
+  const status = usePoll(() => (me?.is_admin ? api.status() : Promise.resolve(undefined)), 10_000, [me?.is_admin])
+  const counts = usePoll(
+    async () =>
+      me?.is_admin
+        ? {}
+        : Object.fromEntries(
+            await Promise.all((tessellations.data ?? []).map(async (t) => [t.name, (await api.tessellation(t.name)).document_count ?? 0] as const)),
+          ),
+    10_000,
+    [me?.is_admin, tessellations.data?.length],
+  )
+  const mayCreate = me?.is_admin || me?.roles.some((r) => (r.name === "writer" || r.name === "owner") && r.permissions.length > 0)
   const [creating, setCreating] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [indexing, setIndexing] = useState<string | null>(null)
@@ -97,9 +111,11 @@ export function TessellationsPage() {
         <p className="text-muted-foreground text-sm">
           {tessellations.data ? `${rows.filter((t) => t.kind === "user").length} user · ${rows.filter((t) => t.kind !== "user").length} system` : "Loading…"}
         </p>
-        <Button className="ml-auto" size="sm" onClick={() => setCreating(true)}>
-          <IconPlus /> New tessellation
-        </Button>
+        {mayCreate && (
+          <Button className="ml-auto" size="sm" onClick={() => setCreating(true)}>
+            <IconPlus /> New tessellation
+          </Button>
+        )}
       </div>
 
       {tessellations.error && <p className="text-destructive text-sm">{tessellations.error.message}</p>}
@@ -141,10 +157,12 @@ export function TessellationsPage() {
                   <TableCell>
                     <Badge variant={user ? "outline" : "secondary"}>{t.kind}</Badge>
                   </TableCell>
-                  <TableCell className="text-right tabular-nums">{m ? formatNumber(m.document_count) : "—"}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {m ? formatNumber(m.document_count) : counts.data?.[t.name] !== undefined ? formatNumber(counts.data[t.name]) : "—"}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">{m ? formatBytes(m.total_size_bytes) : "—"}</TableCell>
                   <TableCell>
-                    {user ? (
+                    {user && (can(me, "manage", t.name) || t.indexes.length > 0) ? (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -164,7 +182,7 @@ export function TessellationsPage() {
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm">{formatTimestamp(t.created)}</TableCell>
                   <TableCell className="pr-6">
-                    {user && (
+                    {user && can(me, "manage", t.name) && (
                       <Button
                         variant="ghost"
                         size="icon"

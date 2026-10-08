@@ -67,6 +67,12 @@ impl IdempotencyKey {
         Ok(IdempotencyKey { key: key.to_string(), fingerprint: blake3::hash(request).to_hex().to_string() })
     }
 
+    /// Scope the key to one user, so users can't replay or block each other's keys.
+    pub fn scoped_to(mut self, owner: &str) -> Self {
+        self.key = format!("{}/{}", owner, self.key);
+        self
+    }
+
     fn doc_id(&self) -> Ulid {
         let hash = blake3::hash(self.key.as_bytes());
         Ulid::from_bytes(hash.as_bytes()[..16].try_into().unwrap())

@@ -19,9 +19,10 @@
 // write the Overseer acknowledged but no replica received yet is lost if the
 // Overseer fails before it comes back.
 //
-// Internal endpoints require `X-HexDB-Lattice-Token`, derived from the shared
-// storage encryption key, so only hexes configured with the same key can
-// replicate from each other.
+// Internal endpoints require a fresh, single-use request signature made with
+// the lattice key (see `network::lattice_auth`), so only hexes configured with
+// the same lattice secret can replicate from each other, and captured requests
+// can't be replayed. With `[tls]` configured, replication uses HTTPS.
 
 use crate::{
     catalog::TessellationInfo,
@@ -42,8 +43,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use ulid::Ulid;
 
-/// Header carrying the lattice token on internal replication requests.
-pub const LATTICE_TOKEN_HEADER: &str = "x-hexdb-lattice-token";
+pub use crate::network::lattice_auth::LATTICE_SIGNATURE_HEADER;
 /// Documents per snapshot page and per applied batch.
 const PAGE: usize = 500;
 /// How long a replica long-polls the Overseer for changes.
@@ -51,9 +51,57 @@ const POLL_SECONDS: u64 = 5;
 /// How often a streaming replica re-checks the Overseer's catalog (new tessellations, indexes).
 const CATALOG_EVERY: Duration = Duration::from_secs(15);
 
-/// The token hexes present to each other. Derived from the encryption key.
-pub fn lattice_token(config: &HexConfig) -> String {
-    hex::encode(blake3::derive_key("HexDB 2026 lattice replication token v1", config.storage.encryption_key.as_bytes()))
+/// An HTTP client for talking to other hexes: HTTPS-capable, trusting the
+/// system roots plus `tls.ca_file` if set.
+pub fn lattice_client(config: &HexConfig, timeout: Duration) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().use_rustls_tls().timeout(timeout).https_only(config.tls.enabled());
+    if !config.tls.ca_file.is_empty() {
+        let pem = std::fs::read(&config.tls.ca_file).with_context(|| format!("Failed to read tls.ca_file {}", config.tls.ca_file))?;
+        for cert in reqwest::Certificate::from_pem_bundle(&pem).context("tls.ca_file is not valid PEM")? {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+    Ok(builder.build()?)
+}
+
+/// The base URL of another hex's API.
+pub fn peer_base_url(peer: &crate::network::discovery::PeerHex) -> String {
+    format!("{}://{}", if peer.tls { "https" } else { "http" }, peer.api_endpoint)
+}
+
+/// Path and query of a URL, as signed.
+fn path_and_query(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => match u.query() {
+            Some(q) => format!("{}?{}", u.path(), q),
+            None => u.path().to_string(),
+        },
+        Err(_) => url.to_string(),
+    }
+}
+
+/// POST a JSON body to the Overseer's lattice API (e.g. to forward a sign-out from a replica).
+pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_json::Value) -> Result<()> {
+    let overseer = {
+        let peers = engine.peers.lock().await;
+        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone())
+    }
+    .ok_or_else(|| anyhow!("no Overseer is reachable"))?;
+    let url = format!("{}{}", peer_base_url(&overseer), path);
+    let bytes = serde_json::to_vec(body)?;
+    let signature = engine.lattice_keys.sign_request("POST", path, &bytes);
+    let response = lattice_client(&engine.config, Duration::from_secs(10))?
+        .post(&url)
+        .header(LATTICE_SIGNATURE_HEADER, signature)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(bytes)
+        .send()
+        .await
+        .with_context(|| format!("POST {}", url))?;
+    if !response.status().is_success() {
+        bail!("POST {} returned {}", url, response.status());
+    }
+    Ok(())
 }
 
 /// What replication is doing on this hex, for `/status` and the dashboard.
@@ -164,19 +212,17 @@ struct Session {
 struct Follower {
     engine: Arc<HexDBEngine>,
     client: reqwest::Client,
-    token: String,
     session: Option<Session>,
     was_leading: Option<bool>,
 }
 
 impl Follower {
     fn new(engine: Arc<HexDBEngine>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(POLL_SECONDS + 30))
-            .build()
-            .expect("HTTP client");
-        let token = lattice_token(&engine.config);
-        Follower { engine, client, token, session: None, was_leading: None }
+        let client = lattice_client(&engine.config, Duration::from_secs(POLL_SECONDS + 30)).unwrap_or_else(|e| {
+            warn!("⚠️ Replication client: {:#}. Using system certificates only.", e);
+            reqwest::Client::new()
+        });
+        Follower { engine, client, session: None, was_leading: None }
     }
 
     fn set_status(&self, update: impl FnOnce(&mut ReplicationStatus)) {
@@ -235,7 +281,7 @@ impl Follower {
 
     /// Resume from the saved cursor if it belongs to this Overseer; otherwise full sync.
     async fn start(&mut self, overseer: &LatticeMember) -> Result<Duration> {
-        let base = format!("http://{}", overseer.hex.api_endpoint);
+        let base = peer_base_url(&overseer.hex);
         self.set_status(|s| {
             s.source_id = Some(overseer.hex.id.clone());
             s.source_name = Some(overseer.hex.name.clone());
@@ -261,7 +307,7 @@ impl Follower {
         let response = self
             .client
             .get(url)
-            .header(LATTICE_TOKEN_HEADER, &self.token)
+            .header(LATTICE_SIGNATURE_HEADER, self.engine.lattice_keys.sign_request("GET", &path_and_query(url), b""))
             .send()
             .await
             .with_context(|| format!("GET {}", url))?;
@@ -276,7 +322,7 @@ impl Follower {
         match self.get(url).await? {
             Ok(value) => Ok(value),
             Err(status) if status == reqwest::StatusCode::UNAUTHORIZED => {
-                bail!("the Overseer refused the lattice token; every hex in a lattice needs the same storage.encryption_key")
+                bail!("the Overseer refused this hex's lattice signature; every hex in a lattice needs the same network.lattice_secret (or, without one, the same storage.encryption_key), and clocks within a minute of each other")
             }
             Err(status) => bail!("GET {} returned {}", url, status),
         }

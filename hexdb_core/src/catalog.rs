@@ -19,7 +19,7 @@ pub const CATALOG_FILE: &str = "catalog.json";
 /// Names that can't be used for tessellations: API routes and storage folders.
 const RESERVED_NAMES: &[&str] = &[
     "health", "status", "flush", "shutdown", "tessellation", "tessellations", "ui", "wal", "graphql",
-    "logs", "changes", "indexes", "auth", "transactions", "plugins", "lattice", "replication",
+    "logs", "changes", "indexes", "auth", "transactions", "plugins", "lattice", "replication", "compact",
 ];
 const MAX_NAME_LEN: usize = 64;
 

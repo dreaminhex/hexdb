@@ -23,6 +23,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   } catch (e) {
     throw new ApiError(0, "unreachable", `Could not reach HexDB: ${e instanceof Error ? e.message : String(e)}`)
   }
+  if (response.status === 401 && !path.startsWith("/auth/login")) {
+    // The session expired or was revoked; the app shows the sign-in screen.
+    window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+  }
   if (response.status === 204) return undefined as T
 
   const text = await response.text()
@@ -40,6 +44,28 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 const enc = encodeURIComponent
+
+/** Fired when any request comes back 401. */
+export const UNAUTHORIZED_EVENT = "hexdb:unauthorized"
+
+export interface Me {
+  user_id: string
+  login: string
+  email_address: string
+  roles: RoleGrant[]
+  is_admin: boolean
+  credential: { kind: "session"; session_id: string; expires_at: number } | { kind: "api_key"; key_id: string }
+}
+
+export interface ApiKeyInfo {
+  id: string
+  name: string
+  user_id: string
+  login: string
+  created: number
+  /** Epoch seconds, or 0 for no expiry. */
+  expires: number
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -284,6 +310,15 @@ export type UserChanges = Partial<{
 // ---------------------------------------------------------------------------
 
 export const api = {
+  me: () => request<Me>("GET", "/auth/me"),
+  login: (login: string, password: string) => request<{ user: Me; expires_at: number }>("POST", "/auth/login", { login, password }),
+  logout: () => request<void>("POST", "/auth/logout"),
+  changePassword: (current_password: string, new_password: string) =>
+    request<void>("POST", "/auth/password", { current_password, new_password }),
+  apiKeys: () => request<{ keys: ApiKeyInfo[] }>("GET", "/auth/keys").then((r) => r.keys),
+  createApiKey: (name: string, expires_in_days?: number) =>
+    request<{ key: string; info: ApiKeyInfo }>("POST", "/auth/keys", { name, expires_in_days }),
+  revokeApiKey: (id: string) => request<void>("DELETE", `/auth/keys/${enc(id)}`),
   status: () => request<Status>("GET", "/status"),
   history: (minutes: number) =>
     request<{ interval_seconds: number; samples: MetricsSample[] }>("GET", `/status/history?minutes=${minutes}`),

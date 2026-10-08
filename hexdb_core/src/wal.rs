@@ -14,8 +14,8 @@
 // Record framing: [u32 big-endian length][12-byte nonce][ciphertext].
 
 use crate::document::Document;
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -114,9 +114,9 @@ pub struct WalWriter {
 
 impl WalWriter {
     /// Start the writer thread with a new segment for records from `next_seq` on.
-    pub fn start(dir: &Path, key: &[u8], compression_level: i32, sync: bool, next_seq: u64) -> Result<Self> {
+    pub fn start(dir: &Path, keys: &crate::crypt::KeyRing, compression_level: i32, sync: bool, next_seq: u64) -> Result<Self> {
         fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+        let cipher = keys.current_cipher().clone();
         let file = open_segment(dir, next_seq)?;
 
         let (tx, rx) = mpsc::channel(4096);
@@ -314,11 +314,9 @@ fn encode_record(cipher: &Aes256Gcm, level: i32, record: &WalRecord) -> Result<V
     Ok(frame)
 }
 
-fn decode_record(cipher: &Aes256Gcm, payload: &[u8]) -> Result<WalRecord> {
-    let (nonce, ciphertext) = payload.split_at(NONCE_LEN);
-    let compressed = cipher
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
-        .map_err(|_| anyhow!("decryption failed (wrong key or corrupt record)"))?;
+/// Decrypt with the current or any previous key (records don't name their key).
+fn decode_record(keys: &crate::crypt::KeyRing, payload: &[u8]) -> Result<WalRecord> {
+    let compressed = keys.decrypt_any(payload, b"")?;
     let json = decode_all(&compressed[..])?;
     Ok(serde_json::from_slice(&json)?)
 }
@@ -369,8 +367,7 @@ pub struct ReplayStats {
 /// Read every record from every segment, oldest first, and pass it to `apply`.
 /// A partial record at the end of a segment (from a crash mid-write) ends that
 /// segment. Records that fail to decrypt or decode are skipped and counted.
-pub fn replay(dir: &Path, key: &[u8], mut apply: impl FnMut(WalRecord)) -> Result<ReplayStats> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+pub fn replay(dir: &Path, keys: &crate::crypt::KeyRing, mut apply: impl FnMut(WalRecord)) -> Result<ReplayStats> {
     let mut stats = ReplayStats::default();
     let segments = list_segments(dir)?;
     let last = segments.len().saturating_sub(1);
@@ -408,7 +405,7 @@ pub fn replay(dir: &Path, key: &[u8], mut apply: impl FnMut(WalRecord)) -> Resul
                 }
             }
 
-            match decode_record(&cipher, &payload) {
+            match decode_record(keys, &payload) {
                 Ok(record) => {
                     stats.records += 1;
                     stats.max_seq = stats.max_seq.max(record.last_seq());
@@ -490,8 +487,9 @@ mod tests {
     use crate::document::infer_fields_from_json;
     use serde_json::json;
 
-    fn key() -> Vec<u8> {
-        (0u8..32).collect()
+    fn key() -> crate::crypt::KeyRing {
+        let bytes: [u8; 32] = std::array::from_fn(|i| i as u8);
+        crate::crypt::KeyRing::new(&bytes, &[])
     }
 
     fn put(seq: u64) -> WalRecord {
@@ -559,13 +557,18 @@ mod tests {
     #[test]
     fn wrong_key_records_are_skipped() {
         let dir = temp_dir();
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key()));
-        let frame = encode_record(&cipher, 0, &put(1)).unwrap();
+        let frame = encode_record(key().current_cipher(), 0, &put(1)).unwrap();
         fs::write(segment_path(&dir, 1), frame).unwrap();
 
-        let other_key = [9u8; 32];
+        let other_key = crate::crypt::KeyRing::new(&[9u8; 32], &[]);
         let stats = replay(&dir, &other_key, |_| panic!("should not decode")).unwrap();
         assert_eq!(stats.corrupt_records, 1);
+
+        // After rotation, records under the previous key still replay.
+        let rotated = crate::crypt::KeyRing::new(&[9u8; 32], &[std::array::from_fn(|i| i as u8)]);
+        let mut seqs = Vec::new();
+        replay(&dir, &rotated, |r| seqs.push(r.seq)).unwrap();
+        assert_eq!(seqs, vec![1]);
         fs::remove_dir_all(&dir).ok();
     }
 }

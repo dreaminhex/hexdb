@@ -8,7 +8,6 @@ role = "auto" # auto | overseer | harvester | replicant
 
 [security]
 admin_login = "hexdbadmin"
-admin_password = "hexdbadmin"
 admin_email = "admin@hexdb.ai"
 
 [memory]
@@ -19,7 +18,7 @@ vertex_integrity_check_frequency = 300
 [storage]
 path = "./.hexdb"
 disk_mb = 16384
-encryption_key = "base64:eTdfrgJPvGOy7tJPI8z7CyO5Z9TT+biDWK+SCVa7OfA="
+encryption_key = "" # set in hexdb.local.toml or HEXDB_STORAGE__ENCRYPTION_KEY; generate with: echo "base64:$(openssl rand -base64 32)"
 compaction_frequency = 180
 wal_sync = true # fsync the WAL before acknowledging writes
 wal_flush_check_frequency = 60

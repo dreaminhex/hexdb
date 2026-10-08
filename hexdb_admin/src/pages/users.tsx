@@ -81,7 +81,7 @@ function RoleGrantsEditor({ roles, draft, onChange }: { roles: Role[]; draft: Gr
           )
         })}
       </div>
-      <p className="text-muted-foreground text-xs">Roles and permissions are recorded now and enforced once authentication arrives.</p>
+      <p className="text-muted-foreground text-xs">Changes take effect on the user's next request. Locking a user or resetting their password signs them out everywhere.</p>
     </div>
   )
 }
@@ -177,8 +177,8 @@ function UserDialog({
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="new-password"
               required={!user}
-              minLength={8}
-              placeholder={user ? "Leave blank to keep the current password" : "At least 8 characters"}
+              minLength={12}
+              placeholder={user ? "Leave blank to keep the current password" : "At least 12 characters, not containing the login"}
             />
           </div>
           {user && (

@@ -20,3 +20,5 @@ chrono = "0.4.41"
 tower-http = { version = "0.6.4", features = ["fs"] }
 ulid = "1.2.1"
 futures = "0.3"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

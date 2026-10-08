@@ -22,7 +22,9 @@ fn config(dir: &Path, ram_mb: u64) -> HexConfig {
 
 async fn open(dir: &Path, ram_mb: u64, key: &[u8]) -> Result<HexDBEngine> {
     let identity = HexIdentity { id: Ulid::new(), name: "Test".into(), hex_type: "Overseer".into() };
-    HexDBEngine::open(config(dir, ram_mb), identity, key).await
+    let key: [u8; 32] = key.try_into().expect("32-byte key");
+    let keys = std::sync::Arc::new(hexdb_core::KeyRing::new(&key, &[]));
+    HexDBEngine::open(config(dir, ram_mb), identity, keys).await
 }
 
 #[tokio::test]

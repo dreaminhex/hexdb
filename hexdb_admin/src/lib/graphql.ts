@@ -1,3 +1,4 @@
+import { UNAUTHORIZED_EVENT } from "@/lib/api"
 import { buildClientSchema, getIntrospectionQuery, type GraphQLSchema, type IntrospectionQuery } from "graphql"
 
 /** The GraphQL endpoint, served by the HexDB API at the site root. */
@@ -33,6 +34,7 @@ export async function executeGraphQL(
       body: JSON.stringify({ query, variables: variables ?? {}, operationName }),
     })
     const durationMs = Math.round(performance.now() - started)
+    if (response.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
     const text = await response.text()
     let body: { data?: unknown; errors?: GraphQLError[]; error?: { message: string; code?: string } } = {}
     try {

@@ -4,6 +4,7 @@ import {
   IconDashboard,
   IconFileCode2,
   IconHexagon3d,
+  IconLogout,
   IconPlug,
   IconReport,
   IconSettings,
@@ -13,6 +14,7 @@ import {
 } from "@tabler/icons-react"
 
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import {
   Sidebar,
   SidebarContent,
@@ -26,6 +28,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
 import { usePoll } from "@/hooks/use-poll"
+import { useAuth } from "@/lib/auth"
 import { href, linkHandler } from "@/lib/router"
 import { cn } from "@/lib/utils"
 
@@ -34,12 +37,14 @@ interface NavItem {
   icon: Icon
   /** In-app route; items without one aren't built yet and render disabled. */
   route?: string
+  /** Shown to administrators only. */
+  adminOnly?: boolean
 }
 
 const SECTIONS: { label?: string; items: NavItem[] }[] = [
   {
     items: [
-      { title: "Dashboard", route: "/", icon: IconDashboard },
+      { title: "Dashboard", route: "/", icon: IconDashboard, adminOnly: true },
       { title: "Queries", route: "/queries", icon: IconBrandGoogleBigQuery },
     ],
   },
@@ -53,20 +58,45 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
   {
     label: "Security",
     items: [
-      { title: "Users", route: "/users", icon: IconUserCircle },
-      { title: "Roles", route: "/roles", icon: IconUserCheck },
+      { title: "Users", route: "/users", icon: IconUserCircle, adminOnly: true },
+      { title: "Roles", route: "/roles", icon: IconUserCheck, adminOnly: true },
     ],
   },
   {
     label: "System",
-    items: [{ title: "Plugins", route: "/plugins", icon: IconPlug }],
+    items: [{ title: "Plugins", route: "/plugins", icon: IconPlug, adminOnly: true }],
   },
 ]
 
 const FOOTER_ITEMS: NavItem[] = [
-  { title: "Logs", route: "/logs", icon: IconReport },
-  { title: "Settings", icon: IconSettings },
+  { title: "Logs", route: "/logs", icon: IconReport, adminOnly: true },
+  { title: "Settings", icon: IconSettings, adminOnly: true },
 ]
+
+/** The signed-in user, with links to the account page and to sign out. */
+function SignedInUser({ active }: { active: boolean }) {
+  const { me, signOut } = useAuth()
+  if (!me) return null
+  return (
+    <div className="flex items-center gap-2 px-2">
+      <a
+        href={href("/account")}
+        onClick={linkHandler("/account")}
+        className={cn("hover:bg-sidebar-accent flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1", active && "bg-sidebar-accent")}
+        title="Account: password and API keys"
+      >
+        <IconUserCircle className="text-muted-foreground size-5 shrink-0" />
+        <span className="grid min-w-0 text-left text-sm leading-tight">
+          <span className="truncate font-medium">{me.login}</span>
+          <span className="text-muted-foreground truncate text-xs">{me.is_admin ? "Administrator" : me.roles.map((r) => r.name).join(", ") || "No roles"}</span>
+        </span>
+      </a>
+      <Button variant="ghost" size="icon" className="text-muted-foreground size-8 shrink-0" aria-label="Sign out" title="Sign out" onClick={() => void signOut()}>
+        <IconLogout />
+      </Button>
+    </div>
+  )
+}
 
 function NavLink({ item, active }: { item: NavItem; active: boolean }) {
   if (!item.route) {
@@ -116,6 +146,10 @@ function HexIdentity() {
 }
 
 export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps<typeof Sidebar> & { activeRoute?: string }) {
+  const { me } = useAuth()
+  const visible = (item: NavItem) => !item.adminOnly || !!me?.is_admin
+  const sections = SECTIONS.map((section) => ({ ...section, items: section.items.filter(visible) })).filter((s) => s.items.length > 0)
+  const footerItems = FOOTER_ITEMS.filter(visible)
   return (
     <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
@@ -129,7 +163,7 @@ export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        {SECTIONS.map((section, i) => (
+        {sections.map((section, i) => (
           <SidebarGroup key={section.label ?? i}>
             {section.label && <SidebarGroupLabel>{section.label}</SidebarGroupLabel>}
             <SidebarGroupContent>
@@ -146,7 +180,7 @@ export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps
         <SidebarGroup className="mt-auto">
           <SidebarGroupContent>
             <SidebarMenu>
-              {FOOTER_ITEMS.map((item) => (
+              {footerItems.map((item) => (
                 <SidebarMenuItem key={item.title}>
                   <NavLink item={item} active={item.route === activeRoute} />
                 </SidebarMenuItem>
@@ -156,6 +190,7 @@ export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
+        <SignedInUser active={activeRoute === "/account"} />
         <HexIdentity />
       </SidebarFooter>
     </Sidebar>

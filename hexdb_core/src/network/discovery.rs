@@ -1,8 +1,10 @@
 // HexDB lattice discovery and role election.
 //
-// Every hex runs a small TCP discovery listener. A peer connects, sends
-// `HEXDB_HELLO`, and gets back `HEXDB_IDENTITY <json>` describing the hex: its
-// lattice, role, API address, resources and replication position.
+// Every hex runs a small TCP discovery listener. A peer connects, sends an
+// authenticated hello, and gets back an authenticated `HEXDB_IDENTITY <json>`
+// describing the hex: its lattice, role, API address, resources and
+// replication position. Both sides prove they hold the lattice key (see
+// `lattice_auth`); hexes without it are ignored and learn nothing.
 //
 // A background task probes the configured seed addresses (and, by default, the
 // local discovery ports 7702-7709) every `discovery_interval_seconds`, tracks
@@ -19,12 +21,13 @@
 // Every hex applies the same rule to the same view, so they agree without a
 // consensus round. Views can briefly differ while a peer joins or leaves.
 
+use crate::network::lattice_auth::LatticeKeys;
 use crate::{HexConfig, HexDBEngine};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
     sync::watch,
 };
@@ -34,8 +37,6 @@ pub const ROLE_OVERSEER: &str = "Overseer";
 pub const ROLE_HARVESTER: &str = "Harvester";
 pub const ROLE_REPLICANT: &str = "Replicant";
 
-const HELLO: &str = "HEXDB_HELLO";
-const IDENTITY_PREFIX: &str = "HEXDB_IDENTITY ";
 const LOCAL_PORTS: std::ops::Range<u16> = 7702..7710;
 /// How long to wait for one peer to connect and identify itself.
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -75,6 +76,9 @@ pub struct PeerHex {
     /// its own latest published sequence number).
     #[serde(default)]
     pub applied_seq: u64,
+    /// True when the API is served over HTTPS.
+    #[serde(default)]
+    pub tls: bool,
 }
 
 fn default_preference() -> String {
@@ -147,6 +151,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         version: engine.version.clone(),
         replication_state: replication.0,
         applied_seq: replication.1,
+        tls: config.tls.enabled(),
     }
 }
 
@@ -169,12 +174,19 @@ pub async fn start_discovery_listener(engine: Arc<HexDBEngine>) {
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(&mut socket);
                     let mut line = String::new();
-                    let read = tokio::time::timeout(PROBE_TIMEOUT * 4, reader.read_line(&mut line)).await;
-                    if matches!(read, Ok(Ok(_))) && line.trim() == HELLO {
-                        let identity = local_identity(&engine).await;
-                        if let Ok(json) = serde_json::to_string(&identity) {
-                            let _ = socket.write_all(format!("{}{}\n", IDENTITY_PREFIX, json).as_bytes()).await;
-                        }
+                    // Hellos are one short line; don't buffer more from strangers.
+                    let read = tokio::time::timeout(PROBE_TIMEOUT * 4, (&mut reader).take(512).read_line(&mut line)).await;
+                    if !matches!(read, Ok(Ok(_))) {
+                        return;
+                    }
+                    let Some(nonce) = engine.lattice_keys.check_hello(&line, &engine.lattice_nonces) else {
+                        debug!("📡 Ignored an unauthenticated discovery hello.");
+                        return;
+                    };
+                    let identity = local_identity(&engine).await;
+                    if let Ok(json) = serde_json::to_string(&identity) {
+                        let reply = engine.lattice_keys.identity_reply(&nonce, &json);
+                        let _ = socket.write_all(format!("{}\n", reply).as_bytes()).await;
                     }
                 });
             }
@@ -202,15 +214,21 @@ fn probe_targets(config: &HexConfig) -> Vec<String> {
     targets
 }
 
-/// Send `HEXDB_HELLO` to one address and parse the reply.
-async fn probe_peer(addr: String) -> Option<PeerHex> {
+/// Send an authenticated hello to one address and verify the reply.
+async fn probe_peer(addr: String, keys: LatticeKeys) -> Option<PeerHex> {
     let mut stream = TcpStream::connect(&addr).await.ok()?;
-    stream.write_all(format!("{}\n", HELLO).as_bytes()).await.ok()?;
+    let (hello, nonce) = keys.hello();
+    stream.write_all(format!("{}\n", hello).as_bytes()).await.ok()?;
 
     let mut reader = BufReader::new(&mut stream);
     let mut line = String::new();
-    reader.read_line(&mut line).await.ok()?;
-    let payload = line.trim_end().strip_prefix(IDENTITY_PREFIX)?;
+    (&mut reader).take(64 * 1024).read_line(&mut line).await.ok()?;
+    let Some(payload) = keys.check_identity(&nonce, &line) else {
+        if !line.is_empty() {
+            warn!(%addr, "🚫 {} answered discovery without proving it holds the lattice key; ignoring it.", addr);
+        }
+        return None;
+    };
     let mut peer: PeerHex = serde_json::from_str(payload).ok()?;
 
     // A peer that advertises a loopback or wildcard address is reachable at the
@@ -227,8 +245,16 @@ async fn probe_peer(addr: String) -> Option<PeerHex> {
 
 /// Probe every target once and return the hexes in our lattice (excluding ourselves).
 pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str) -> Vec<PeerHex> {
-    let probes = probe_targets(config).into_iter().map(|addr| async move {
-        tokio::time::timeout(PROBE_TIMEOUT, probe_peer(addr)).await.ok().flatten()
+    let keys = match config.lattice_key() {
+        Ok(key) => LatticeKeys::new(&key),
+        Err(e) => {
+            warn!("❗ Discovery is disabled: {:#}", e);
+            return Vec::new();
+        }
+    };
+    let probes = probe_targets(config).into_iter().map(|addr| {
+        let keys = keys.clone();
+        async move { tokio::time::timeout(PROBE_TIMEOUT, probe_peer(addr, keys)).await.ok().flatten() }
     });
 
     let mut peers: Vec<PeerHex> = Vec::new();
@@ -348,6 +374,7 @@ mod tests {
             version: String::new(),
             replication_state: String::new(),
             applied_seq: 0,
+            tls: false,
         }
     }
 

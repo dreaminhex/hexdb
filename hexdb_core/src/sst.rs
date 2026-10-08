@@ -10,25 +10,33 @@
 // disk on demand. Files are written to a temporary name, fsynced, and renamed
 // into place, so a crash never leaves a half-written table.
 //
-// File layout (version 2, all integers big-endian):
+// Document bodies are encrypted with AES-256-GCM using the storage key ring
+// (version 3). The authenticated data binds each body to its document ID and
+// sequence number, so bodies can't be swapped between entries. The index
+// (IDs, sequence numbers, TTLs, offsets) is not encrypted. Version 2 files
+// (unencrypted) are still read, and compaction rewrites them encrypted, as it
+// does files written with a previous key.
+//
+// File layout (version 3, all integers big-endian):
 //   Header (64 bytes)
 //     0x00 MAGIC "HXDB"           4
-//     0x04 VERSION (2)            2
+//     0x04 VERSION (3)            2
 //     0x06 COMPRESSION (1 = zstd) 1
-//     0x07 reserved               1
+//     0x07 ENCRYPTION             1   (0 = none, 1 = AES-256-GCM)
 //     0x08 entry count            8
 //     0x10 created (epoch ms)     8
 //     0x18 index offset           8
 //     0x20 index size             8
 //     0x28 index checksum         8   (first 8 bytes of BLAKE3 over the index block)
 //     0x30 max sequence number    8
-//     0x38 reserved               8
+//     0x38 key ID                 8   (KeyRing::key_id of the encryption key)
 //   Entries, from 0x40, each:
-//     id (16) | flags (1: bit0 TTL, bit1 tombstone) | seq (8) | [ttl (8)] | len (4) | zstd(JSON document)
+//     id (16) | flags (1: bit0 TTL, bit1 tombstone) | seq (8) | [ttl (8)] | len (4) | body
+//     body = nonce (12) | AES-256-GCM(zstd(JSON document)), AAD = id | seq
 //   Index block, sorted by id, each:
 //     id (16) | flags (1) | seq (8) | [ttl (8)] | entry offset (8) | len (4)
 
-use crate::{document::Document, wal::sync_dir};
+use crate::{crypt::KeyRing, document::Document, wal::sync_dir};
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::{
@@ -44,7 +52,9 @@ use ulid::Ulid;
 use zstd::stream::{decode_all, encode_all};
 
 const MAGIC: &[u8; 4] = b"HXDB";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
+const LEGACY_VERSION: u16 = 2;
+const ENCRYPTION_AES_GCM: u8 = 1;
 const COMPRESSION_ZSTD: u8 = 1;
 const HEADER_LEN: u64 = 64;
 const FLAG_TTL: u8 = 0b01;
@@ -86,13 +96,36 @@ pub struct SstFile {
     pub created: i64,
     pub size_bytes: u64,
     pub index: HashMap<Ulid, IndexEntry>,
+    /// ID of the key the bodies are encrypted with; `None` for unencrypted (version 2) files.
+    pub key_id: Option<u64>,
+    keys: Arc<KeyRing>,
+}
+
+/// Authenticated data for an entry body.
+fn body_aad(id: &Ulid, seq: u64) -> [u8; 24] {
+    let mut aad = [0u8; 24];
+    aad[..16].copy_from_slice(&id.to_bytes());
+    aad[16..].copy_from_slice(&seq.to_be_bytes());
+    aad
 }
 
 impl SstFile {
     /// Write entries to a new SSTable at `path` (atomically) and open it.
     /// `seq_floor` raises the recorded max sequence number (used by compaction so
     /// the highest sequence number on disk never goes down when entries are dropped).
-    pub fn write(path: &Path, mut entries: Vec<SstEntry>, compression_level: i32, seq_floor: u64) -> Result<SstFile> {
+    pub fn write(path: &Path, entries: Vec<SstEntry>, compression_level: i32, seq_floor: u64, keys: &Arc<KeyRing>) -> Result<SstFile> {
+        Self::write_impl(path, entries, compression_level, seq_floor, keys, true)
+    }
+
+    /// `encrypt = false` writes an unencrypted version 2 file (tests of the upgrade path only).
+    fn write_impl(
+        path: &Path,
+        mut entries: Vec<SstEntry>,
+        compression_level: i32,
+        seq_floor: u64,
+        keys: &Arc<KeyRing>,
+        encrypt: bool,
+    ) -> Result<SstFile> {
         entries.sort_by_key(|e| e.id);
         let created = chrono::Utc::now().timestamp_millis();
         let max_seq = entries.iter().map(|e| e.seq).max().unwrap_or(0).max(seq_floor);
@@ -109,6 +142,7 @@ impl SstFile {
                 flags |= FLAG_TTL;
             }
             let body = match &entry.data {
+                Some(data) if encrypt => keys.encrypt(&encode_all(&data[..], compression_level)?, &body_aad(&entry.id, entry.seq))?,
                 Some(data) => encode_all(&data[..], compression_level)?,
                 None => {
                     flags |= FLAG_TOMBSTONE;
@@ -148,16 +182,16 @@ impl SstFile {
 
         let mut header = Vec::with_capacity(HEADER_LEN as usize);
         header.write_all(MAGIC)?;
-        header.write_u16::<BigEndian>(VERSION)?;
+        header.write_u16::<BigEndian>(if encrypt { VERSION } else { LEGACY_VERSION })?;
         header.write_u8(COMPRESSION_ZSTD)?;
-        header.write_u8(0)?;
+        header.write_u8(if encrypt { ENCRYPTION_AES_GCM } else { 0 })?;
         header.write_u64::<BigEndian>(entries.len() as u64)?;
         header.write_i64::<BigEndian>(created)?;
         header.write_u64::<BigEndian>(offset)?;
         header.write_u64::<BigEndian>(index_block.len() as u64)?;
         header.write_u64::<BigEndian>(checksum)?;
         header.write_u64::<BigEndian>(max_seq)?;
-        header.write_u64::<BigEndian>(0)?;
+        header.write_u64::<BigEndian>(if encrypt { keys.current_id() } else { 0 })?;
         file.seek(SeekFrom::Start(0))?;
         file.write_all(&header)?;
 
@@ -169,11 +203,11 @@ impl SstFile {
             sync_dir(dir);
         }
 
-        SstFile::open(path)
+        SstFile::open(path, keys)
     }
 
     /// Open an SSTable and load its index.
-    pub fn open(path: &Path) -> Result<SstFile> {
+    pub fn open(path: &Path, keys: &Arc<KeyRing>) -> Result<SstFile> {
         let mut file = BufReader::new(File::open(path).with_context(|| format!("Failed to open {}", path.display()))?);
         let size_bytes = file.get_ref().metadata()?.len();
 
@@ -183,11 +217,12 @@ impl SstFile {
             bail!("{} is not an SSTable (bad magic header)", path.display());
         }
         let version = file.read_u16::<BigEndian>()?;
-        if version != VERSION {
+        if version != VERSION && version != LEGACY_VERSION {
             bail!(
-                "{} is SSTable version {}, but this HexDB reads version {}. Files from older HexDB builds can't be read; move them out of the data directory.",
+                "{} is SSTable version {}, but this HexDB reads versions {} and {}. Files from older HexDB builds can't be read; move them out of the data directory.",
                 path.display(),
                 version,
+                LEGACY_VERSION,
                 VERSION
             );
         }
@@ -195,13 +230,28 @@ impl SstFile {
         if compression != COMPRESSION_ZSTD {
             bail!("{} uses unsupported compression {}", path.display(), compression);
         }
-        let _reserved = file.read_u8()?;
+        let encryption = file.read_u8()?;
         let entry_count = file.read_u64::<BigEndian>()?;
         let created = file.read_i64::<BigEndian>()?;
         let index_offset = file.read_u64::<BigEndian>()?;
         let index_size = file.read_u64::<BigEndian>()?;
         let expected_checksum = file.read_u64::<BigEndian>()?;
         let max_seq = file.read_u64::<BigEndian>()?;
+        let header_key_id = file.read_u64::<BigEndian>()?;
+        let key_id = match (version, encryption) {
+            (LEGACY_VERSION, _) | (_, 0) => None,
+            (_, ENCRYPTION_AES_GCM) => {
+                if !keys.has_key(header_key_id) {
+                    bail!(
+                        "{} is encrypted with key {:016x}, which isn't configured. Add that key to storage.previous_encryption_keys (or restore storage.encryption_key).",
+                        path.display(),
+                        header_key_id
+                    );
+                }
+                Some(header_key_id)
+            }
+            (_, other) => bail!("{} uses unsupported encryption {}", path.display(), other),
+        };
 
         if index_offset.checked_add(index_size).is_none_or(|end| end > size_bytes) {
             bail!("{} is truncated or corrupt (index outside the file)", path.display());
@@ -229,7 +279,7 @@ impl SstFile {
             );
         }
 
-        Ok(SstFile { path: path.to_path_buf(), max_seq, created, size_bytes, index })
+        Ok(SstFile { path: path.to_path_buf(), max_seq, created, size_bytes, index, key_id, keys: keys.clone() })
     }
 
     /// Read and decompress one entry's document JSON.
@@ -238,6 +288,7 @@ impl SstFile {
         file.seek(SeekFrom::Start(entry.offset))?;
         let mut header = [0u8; 16 + 1 + 8];
         file.read_exact(&mut header)?;
+        let id = Ulid::from_bytes(header[..16].try_into().unwrap());
         if entry.ttl.is_some() {
             file.seek(SeekFrom::Current(8))?;
         }
@@ -247,7 +298,14 @@ impl SstFile {
         }
         let mut body = vec![0u8; len as usize];
         file.read_exact(&mut body)?;
-        Ok(decode_all(&body[..])?)
+        let compressed = match self.key_id {
+            Some(key_id) => self
+                .keys
+                .decrypt(key_id, &body, &body_aad(&id, entry.seq))
+                .with_context(|| format!("{}: document {} can't be decrypted", self.path.display(), id))?,
+            None => body,
+        };
+        Ok(decode_all(&compressed[..])?)
     }
 }
 
@@ -266,6 +324,7 @@ pub enum DiskLookup {
 pub struct SstStore {
     base: PathBuf,
     compression_level: i32,
+    keys: Arc<KeyRing>,
     tables: RwLock<HashMap<String, Vec<Arc<SstFile>>>>,
     compaction: Mutex<()>,
 }
@@ -282,7 +341,7 @@ pub struct CompactionStats {
 impl SstStore {
     /// Open every SSTable under `base`. Leftover temporary files from an
     /// interrupted write are removed.
-    pub fn open(base: &Path, compression_level: i32) -> Result<SstStore> {
+    pub fn open(base: &Path, compression_level: i32, keys: Arc<KeyRing>) -> Result<SstStore> {
         let mut tables: HashMap<String, Vec<Arc<SstFile>>> = HashMap::new();
         if base.exists() {
             for entry in fs::read_dir(base)? {
@@ -298,10 +357,10 @@ impl SstStore {
                     let path = file?.path();
                     match path.extension().and_then(|e| e.to_str()) {
                         Some(SST_EXTENSION) => {
-                            tables.entry(tess.clone()).or_default().push(Arc::new(SstFile::open(&path)?));
+                            tables.entry(tess.clone()).or_default().push(Arc::new(SstFile::open(&path, &keys)?));
                         }
                         Some("tmp") => {
-                            warn!("ðŸ§¹ Removing incomplete SSTable {}.", path.display());
+                            warn!("🧹 Removing incomplete SSTable {}.", path.display());
                             let _ = fs::remove_file(&path);
                         }
                         _ => {}
@@ -311,10 +370,11 @@ impl SstStore {
         }
 
         let files: usize = tables.values().map(Vec::len).sum();
-        info!("ðŸ“š Opened {} SSTables across {} tessellations.", files, tables.len());
+        info!("📚 Opened {} SSTables across {} tessellations.", files, tables.len());
         Ok(SstStore {
             base: base.to_path_buf(),
             compression_level,
+            keys,
             tables: RwLock::new(tables),
             compaction: Mutex::new(()),
         })
@@ -386,9 +446,10 @@ impl SstStore {
         let dir = self.base.join(tess);
         let path = dir.join(format!("{}.{}", Ulid::new(), SST_EXTENSION));
         let level = self.compression_level;
+        let keys = self.keys.clone();
         let file = tokio::task::spawn_blocking(move || -> Result<SstFile> {
             fs::create_dir_all(&dir)?;
-            SstFile::write(&path, entries, level, 0)
+            SstFile::write(&path, entries, level, 0, &keys)
         })
         .await??;
 
@@ -423,10 +484,17 @@ impl SstStore {
             .get(tess)
             .is_some_and(|files| files.iter().any(|f| f.index.values().any(|e| e.seq <= dropped_seq)));
         if has_old {
-            warn!("ðŸ§¹ Removing SSTables left over from dropped tessellation '{}'.", tess);
+            warn!("🧹 Removing SSTables left over from dropped tessellation '{}'.", tess);
             self.drop_tessellation(tess).await?;
         }
         Ok(())
+    }
+
+    /// SSTables not encrypted with the current key (unencrypted, or a
+    /// previous key). Compaction rewrites them.
+    pub async fn files_needing_rewrite(&self) -> usize {
+        let current = Some(self.keys.current_id());
+        self.tables.read().await.values().flatten().filter(|f| f.key_id != current).count()
     }
 
     /// Total bytes and file count on disk.
@@ -474,11 +542,15 @@ impl SstStore {
 
             let droppable = |e: &IndexEntry| (e.tombstone || e.is_expired(now_millis)) && e.seq < drop_floor;
             let drop_count = latest.values().filter(|(_, e)| droppable(e)).count();
-            if files.len() < 2 && drop_count == 0 {
+            // Rewrite files that aren't under the current key (key rotation, or
+            // files from before encryption).
+            let stale_key = files.iter().any(|f| f.key_id != Some(self.keys.current_id()));
+            if files.len() < 2 && drop_count == 0 && !stale_key {
                 continue;
             }
 
             let level = self.compression_level;
+            let keys = self.keys.clone();
             let kept: Vec<(Arc<SstFile>, Ulid, IndexEntry)> = latest
                 .into_iter()
                 .filter(|(_, (_, e))| !droppable(e))
@@ -497,7 +569,7 @@ impl SstStore {
                     entries.push(SstEntry { id, seq: entry.seq, ttl: entry.ttl, data });
                 }
                 let path = write_dir.join(format!("{}.{}", Ulid::new(), SST_EXTENSION));
-                Ok(Some(SstFile::write(&path, entries, level, seq_floor)?))
+                Ok(Some(SstFile::write(&path, entries, level, seq_floor, &keys)?))
             })
             .await??;
 
@@ -513,7 +585,7 @@ impl SstStore {
             }
             for old in &files {
                 if let Err(e) = fs::remove_file(&old.path) {
-                    warn!("âš ï¸ Failed to delete compacted SSTable {}: {}", old.path.display(), e);
+                    warn!("⚠️ Failed to delete compacted SSTable {}: {}", old.path.display(), e);
                 }
             }
             sync_dir(&dir);
@@ -522,7 +594,7 @@ impl SstStore {
             stats.files_merged += files.len();
             stats.entries_kept += kept_count;
             stats.entries_dropped += total_entries - kept_count;
-            debug!("ðŸ—œï¸  Compacted {} SSTables for '{}' ({} entries kept).", files.len(), tess, kept_count);
+            debug!("🗜ï¸  Compacted {} SSTables for '{}' ({} entries kept).", files.len(), tess, kept_count);
         }
 
         Ok(stats)
@@ -537,6 +609,10 @@ pub fn parse_document(bytes: &[u8]) -> Result<Document> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_keys() -> Arc<KeyRing> {
+        Arc::new(KeyRing::new(&[7u8; 32], &[]))
+    }
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("hexdb-sst-test-{}", Ulid::new()));
@@ -558,6 +634,7 @@ mod tests {
             ],
             3,
             0,
+            &test_keys(),
         )
         .unwrap();
 
@@ -567,8 +644,79 @@ mod tests {
         assert_eq!(file.read_entry(&ea).unwrap(), b"{\"a\":1}");
         assert!(file.index[&b].tombstone);
 
-        let reopened = SstFile::open(&path).unwrap();
+        let reopened = SstFile::open(&path, &test_keys()).unwrap();
         assert_eq!(reopened.index.len(), 2);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bodies_are_encrypted_and_bound_to_their_entry() {
+        let dir = temp_dir();
+        let path = dir.join("x.hxs");
+        let secret = b"{\"card\":\"4111-1111-1111-1111\"}".to_vec();
+        let (a, b) = (Ulid::new(), Ulid::new());
+        let file = SstFile::write(
+            &path,
+            vec![
+                SstEntry { id: a, seq: 1, ttl: None, data: Some(secret.clone()) },
+                SstEntry { id: b, seq: 2, ttl: None, data: Some(b"{\"x\":1}".to_vec()) },
+            ],
+            0,
+            0,
+            &test_keys(),
+        )
+        .unwrap();
+        let raw = fs::read(&path).unwrap();
+        assert!(!raw.windows(9).any(|w| w == b"4111-1111"), "plaintext must not reach the disk");
+        assert_eq!(file.key_id, Some(test_keys().current_id()));
+
+        // Swap the two bodies on disk: authentication fails instead of returning the wrong document.
+        let (ea, eb) = (file.index[&a], file.index[&b]);
+        let body = |e: &IndexEntry| (e.offset as usize + 16 + 1 + 8 + 4, e.len as usize);
+        let ((oa, la), (ob, lb)) = (body(&ea), body(&eb));
+        let mut tampered = raw.clone();
+        let (ba, bb) = (raw[oa..oa + la].to_vec(), raw[ob..ob + lb].to_vec());
+        if la == lb {
+            tampered[oa..oa + la].copy_from_slice(&bb);
+            tampered[ob..ob + lb].copy_from_slice(&ba);
+        } else {
+            tampered[oa + 20] ^= 0x01;
+        }
+        fs::write(&path, &tampered).unwrap();
+        let reopened = SstFile::open(&path, &test_keys()).unwrap();
+        assert!(reopened.read_entry(&reopened.index[&a]).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn rotation_and_legacy_files_are_rewritten_by_compaction() {
+        let dir = temp_dir();
+        let tess_dir = dir.join("t");
+        fs::create_dir_all(&tess_dir).unwrap();
+        let (old_key, new_key) = ([1u8; 32], [2u8; 32]);
+        let old = Arc::new(KeyRing::new(&old_key, &[]));
+        let (a, b) = (Ulid::new(), Ulid::new());
+        SstFile::write(&tess_dir.join("a.hxs"), vec![SstEntry { id: a, seq: 1, ttl: None, data: Some(b"{\"v\":\"a\"}".to_vec()) }], 0, 0, &old).unwrap();
+        SstFile::write_impl(&tess_dir.join("b.hxs"), vec![SstEntry { id: b, seq: 2, ttl: None, data: Some(b"{\"v\":\"b\"}".to_vec()) }], 0, 0, &old, false).unwrap();
+
+        // Without the old key, its files are refused with a clear message.
+        let err = SstStore::open(&dir, 0, Arc::new(KeyRing::new(&new_key, &[]))).err().unwrap().to_string();
+        assert!(err.contains("previous_encryption_keys"), "{}", err);
+
+        // With it as a previous key, everything reads, and compaction moves it all to the new key.
+        let store = SstStore::open(&dir, 0, Arc::new(KeyRing::new(&new_key, &[old_key]))).unwrap();
+        assert_eq!(store.files_needing_rewrite().await, 2);
+        for id in [a, b] {
+            let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &id).await else { panic!() };
+            assert!(file.read_entry(&entry).is_ok());
+        }
+        store.compact(0, 0).await.unwrap();
+        assert_eq!(store.files_needing_rewrite().await, 0);
+        drop(store);
+
+        let store = SstStore::open(&dir, 0, Arc::new(KeyRing::new(&new_key, &[]))).unwrap();
+        let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &b).await else { panic!() };
+        assert_eq!(file.read_entry(&entry).unwrap(), b"{\"v\":\"b\"}");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -576,20 +724,20 @@ mod tests {
     fn detects_corrupt_index() {
         let dir = temp_dir();
         let path = dir.join("x.hxs");
-        SstFile::write(&path, vec![SstEntry { id: Ulid::new(), seq: 1, ttl: None, data: Some(b"{}".to_vec()) }], 0, 0)
+        SstFile::write(&path, vec![SstEntry { id: Ulid::new(), seq: 1, ttl: None, data: Some(b"{}".to_vec()) }], 0, 0, &test_keys())
             .unwrap();
         let mut bytes = fs::read(&path).unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
         fs::write(&path, bytes).unwrap();
-        assert!(SstFile::open(&path).is_err());
+        assert!(SstFile::open(&path, &test_keys()).is_err());
         fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]
     async fn newest_version_wins_and_compaction_drops_tombstones() {
         let dir = temp_dir();
-        let store = SstStore::open(&dir, 0).unwrap();
+        let store = SstStore::open(&dir, 0, test_keys()).unwrap();
         let id = Ulid::new();
         let other = Ulid::new();
 
@@ -616,7 +764,7 @@ mod tests {
         assert_eq!(store.disk_usage().await.1, 1);
 
         // Reopen from disk.
-        let reopened = SstStore::open(&dir, 0).unwrap();
+        let reopened = SstStore::open(&dir, 0, test_keys()).unwrap();
         assert_eq!(reopened.max_seq().await, 3, "max seq survives dropping the tombstone");
         fs::remove_dir_all(&dir).ok();
     }

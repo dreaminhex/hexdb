@@ -86,6 +86,10 @@ pub struct StorageMetrics {
     pub disk_bytes: u64,
     pub sstable_files: usize,
     pub next_sequence: u64,
+    /// SSTables not yet encrypted with the current key (written before
+    /// encryption, or with a previous key). Compaction rewrites them; at 0, the
+    /// previous keys can be removed from the configuration.
+    pub sstable_files_on_old_keys: usize,
 }
 
 /// Operation counters since startup.
@@ -251,6 +255,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             disk_bytes: stats.disk_bytes,
             sstable_files: stats.sst_files,
             next_sequence: stats.next_seq,
+            sstable_files_on_old_keys: engine.sst_files_needing_rewrite().await,
         },
         operations: OperationMetrics {
             reads_total: stats.reads_total,

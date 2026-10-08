@@ -21,7 +21,8 @@ export function RolesPage() {
         <a className="text-foreground underline-offset-4 hover:underline" href={href("/users")} onClick={linkHandler("/users")}>
           Users
         </a>{" "}
-        page. Enforcement arrives with authentication.
+        page. Each grant lists the tessellations it applies to (<code>*</code> for all): readers read, writers also insert, change and
+        delete documents, owners also delete the tessellation and manage its indexes, and admins can do everything.
       </p>
       {(roles.error || users.error) && <p className="text-destructive text-sm">{(roles.error ?? users.error)?.message}</p>}
       <Card className="gap-0 overflow-hidden py-0">

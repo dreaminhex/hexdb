@@ -24,6 +24,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { usePoll } from "@/hooks/use-poll"
+import { can, useAuth } from "@/lib/auth"
 import { api, type ApiDocument, errorMessage } from "@/lib/api"
 import { formatNumber, formatTimestamp } from "@/lib/format"
 import { setQueryParam, useQueryParam } from "@/lib/router"
@@ -47,6 +48,7 @@ function DocumentEditor({
   open,
   onOpenChange,
   onSaved,
+  readOnly,
 }: {
   tessellation: string
   /** null = new document. */
@@ -54,6 +56,8 @@ function DocumentEditor({
   open: boolean
   onOpenChange: (open: boolean) => void
   onSaved: () => void
+  /** The user can't write to this tessellation. */
+  readOnly: boolean
 }) {
   const [text, setText] = useState("")
   const [ttl, setTtl] = useState("")
@@ -156,18 +160,20 @@ function DocumentEditor({
           )}
 
           <SheetFooter className="flex-row">
-            {doc && (
+            {doc && !readOnly && (
               <Button variant="ghost" className="text-destructive hover:text-destructive mr-auto" onClick={() => setDeleting(true)} disabled={busy}>
                 <IconTrash /> Delete
               </Button>
             )}
             <Button variant="outline" className="ml-auto" onClick={() => onOpenChange(false)} disabled={busy}>
-              Cancel
+              {readOnly ? "Close" : "Cancel"}
             </Button>
-            <Button onClick={save} disabled={busy}>
-              {busy && <IconLoader2 className="animate-spin" />}
-              {doc ? "Save" : "Create"}
-            </Button>
+            {!readOnly && (
+              <Button onClick={save} disabled={busy}>
+                {busy && <IconLoader2 className="animate-spin" />}
+                {doc ? "Save" : "Create"}
+              </Button>
+            )}
           </SheetFooter>
         </SheetContent>
       </Sheet>
@@ -196,6 +202,7 @@ function DocumentEditor({
 // ---------------------------------------------------------------------------
 
 export function DocumentsPage() {
+  const { me } = useAuth()
   const tessellations = usePoll(api.tessellations)
   const userTessellations = (tessellations.data ?? []).filter((t) => t.kind === "user").map((t) => t.name).sort()
   const selected = useQueryParam("tessellation")
@@ -298,7 +305,7 @@ export function DocumentsPage() {
         <Button type="submit" variant="outline" size="sm">
           <IconFilter /> Apply
         </Button>
-        <Button type="button" size="sm" onClick={() => setEditing(null)} disabled={!tessellation}>
+        <Button type="button" size="sm" onClick={() => setEditing(null)} disabled={!tessellation || !can(me, "write", tessellation)}>
           <IconPlus /> New document
         </Button>
       </form>
@@ -371,6 +378,7 @@ export function DocumentsPage() {
           open={editing !== undefined}
           onOpenChange={(open) => !open && setEditing(undefined)}
           onSaved={() => void page.refresh()}
+          readOnly={!can(me, "write", tessellation)}
         />
       )}
     </div>

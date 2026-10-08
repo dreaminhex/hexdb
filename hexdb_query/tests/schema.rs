@@ -2,7 +2,7 @@
 
 use async_graphql::{Request, Variables};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use hexdb_core::{users, HexConfig, HexDBEngine, HexIdentity};
+use hexdb_core::{auth::Credential, users::{self, RoleGrant}, HexConfig, HexDBEngine, HexIdentity, Principal};
 use hexdb_query::{build_schema, HexDBSchema};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -15,14 +15,37 @@ async fn setup() -> (TempDir, Arc<HexDBEngine>, HexDBSchema) {
     config.storage.path = dir.path().join("data").to_string_lossy().into_owned();
     config.storage.encryption_key = format!("base64:{}", STANDARD.encode([3u8; 32]));
     let identity = HexIdentity { id: Ulid::new(), name: "Test".into(), hex_type: "Overseer".into() };
-    let engine = Arc::new(HexDBEngine::open(config.clone(), identity, &[3u8; 32]).await.unwrap());
+    let engine = Arc::new(HexDBEngine::open(config.clone(), identity, Arc::new(hexdb_core::KeyRing::new(&[3u8; 32], &[]))).await.unwrap());
     users::bootstrap(&engine, &config.security).await.unwrap();
     let schema = build_schema(engine.clone());
     (dir, engine, schema)
 }
 
+fn principal(roles: Vec<(&str, Vec<&str>)>) -> Principal {
+    Principal {
+        // A fixed ID: idempotency keys are scoped to the user.
+        user_id: "01J0000000000000000000TEST".into(),
+        login: "tester".into(),
+        email_address: "tester@example.com".into(),
+        roles: roles
+            .into_iter()
+            .map(|(name, perms)| RoleGrant { name: name.into(), permissions: perms.into_iter().map(String::from).collect() })
+            .collect(),
+        credential: Credential::ApiKey { key_id: "test".into() },
+    }
+}
+
+fn admin() -> Principal {
+    principal(vec![("admin", vec!["*"])])
+}
+
+/// A request made by an administrator.
+fn req(query: &str, variables: Value) -> Request {
+    Request::new(query).variables(Variables::from_json(variables)).data(admin())
+}
+
 async fn run(schema: &HexDBSchema, query: &str, variables: Value) -> Value {
-    let response = schema.execute(Request::new(query).variables(Variables::from_json(variables))).await;
+    let response = schema.execute(req(query, variables)).await;
     serde_json::to_value(response).unwrap()
 }
 
@@ -175,12 +198,12 @@ async fn mutations_are_idempotent_with_a_key() {
     let (_dir, engine, schema) = setup().await;
     let insert = r#"mutation($data: JSON!) { insertDocument(tessellation: "orders", data: $data, idempotencyKey: "order-1") { id } }"#;
 
-    let (first, replays) = hexdb_query::execute(&schema, Request::new(insert).variables(Variables::from_json(json!({ "data": { "qty": 1 } })))).await;
+    let (first, replays) = hexdb_query::execute(&schema, req(insert, json!({ "data": { "qty": 1 } }))).await;
     assert!(first.errors.is_empty(), "{:?}", first.errors);
     assert!(replays.is_empty());
     let first = serde_json::to_value(first).unwrap();
 
-    let (second, replays) = hexdb_query::execute(&schema, Request::new(insert).variables(Variables::from_json(json!({ "data": { "qty": 1 } })))).await;
+    let (second, replays) = hexdb_query::execute(&schema, req(insert, json!({ "data": { "qty": 1 } }))).await;
     let second = serde_json::to_value(second).unwrap();
     assert_eq!(replays, vec!["insertDocument".to_string()]);
     assert_eq!(second["extensions"]["idempotentReplays"], json!(["insertDocument"]));
@@ -197,13 +220,41 @@ async fn mutations_are_idempotent_with_a_key() {
         a: patchDocument(tessellation: "orders", id: $id, data: { qty: 3 }, idempotencyKey: "patch-1") { data }
         b: insertDocument(tessellation: "orders", data: { qty: 9 }, idempotencyKey: "order-2") { id }
     }"#;
-    let (_, replays) = hexdb_query::execute(&schema, Request::new(both).variables(Variables::from_json(json!({ "id": id })))).await;
+    let (_, replays) = hexdb_query::execute(&schema, req(both, json!({ "id": id }))).await;
     assert!(replays.is_empty());
-    let (again, replays) = hexdb_query::execute(&schema, Request::new(both).variables(Variables::from_json(json!({ "id": id })))).await;
+    let (again, replays) = hexdb_query::execute(&schema, req(both, json!({ "id": id }))).await;
     assert!(again.errors.is_empty(), "{:?}", again.errors);
     assert_eq!(replays, vec!["a".to_string(), "b".to_string()]);
     assert_eq!(engine.count_documents("orders").await.unwrap(), 2);
 
     drop(schema);
     engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn requests_need_a_principal_with_permission() {
+    let (_dir, _engine, schema) = setup().await;
+    let anonymous = serde_json::to_value(schema.execute(Request::new("{ tessellations { name } }")).await).unwrap();
+    assert_eq!(error_code(&anonymous), Some("UNAUTHENTICATED"), "{}", anonymous);
+
+    run(&schema, r#"mutation { insertDocument(tessellation: "notes", data: { a: 1 }) { id } }"#, json!({})).await;
+    run(&schema, r#"mutation { insertDocument(tessellation: "secret", data: { a: 1 }) { id } }"#, json!({})).await;
+
+    let reader = principal(vec![("reader", vec!["notes"])]);
+    let as_reader = |q: &str| Request::new(q).data(reader.clone());
+    let list = serde_json::to_value(schema.execute(as_reader("{ tessellations { name } }")).await).unwrap();
+    assert_eq!(list["data"]["tessellations"], json!([{ "name": "notes" }]), "only readable tessellations are listed: {}", list);
+
+    for (query, code) in [
+        (r#"{ count(tessellation: "notes") }"#, None),
+        (r#"{ count(tessellation: "secret") }"#, Some("FORBIDDEN")),
+        (r#"{ users { login } }"#, Some("FORBIDDEN")),
+        (r#"{ status }"#, Some("FORBIDDEN")),
+        (r#"mutation { insertDocument(tessellation: "notes", data: {}) { id } }"#, Some("FORBIDDEN")),
+        (r#"mutation { deleteTessellation(name: "notes") }"#, Some("FORBIDDEN")),
+        (r#"mutation { transaction(operations: [{op: "get", tessellation: "secret", id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}]) { writes } }"#, Some("FORBIDDEN")),
+    ] {
+        let res = serde_json::to_value(schema.execute(as_reader(query)).await).unwrap();
+        assert_eq!(error_code(&res), code, "{} -> {}", query, res);
+    }
 }

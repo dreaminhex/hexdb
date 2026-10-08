@@ -26,6 +26,9 @@ use tempfile::TempDir;
 
 /// A fixed AES-256 key (bytes 0..32) used by every test server.
 pub const TEST_ENCRYPTION_KEY: &str = "base64:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+/// The administrator every test server is created with.
+pub const TEST_ADMIN_LOGIN: &str = "admin";
+pub const TEST_ADMIN_PASSWORD: &str = "Correct horse battery 2026";
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -93,7 +96,11 @@ pub struct TestServer {
     child: Option<Child>,
     base_url: String,
     launches: u32,
+    /// Sends the admin's session token with every request.
     client: Client,
+    /// Sends no credentials.
+    anon: Client,
+    token: Option<String>,
     options: TestOptions,
 }
 
@@ -114,6 +121,21 @@ pub struct TestOptions {
     pub discovery_interval_seconds: Option<u64>,
     /// Extra TOML appended to the config (whole sections only).
     pub extra_toml: String,
+    /// Don't configure an admin password (HexDB generates one) and don't sign in.
+    pub no_admin_password: bool,
+    /// Serve HTTPS with this certificate: (PEM chain, PEM key). The
+    /// certificate is also trusted as the CA, by the harness and by the server
+    /// when it talks to other hexes.
+    pub tls: Option<(String, String)>,
+    /// Storage key (default: [`TEST_ENCRYPTION_KEY`]) and previous keys.
+    pub encryption_key: Option<String>,
+    pub previous_encryption_keys: Vec<String>,
+}
+
+/// A self-signed certificate for localhost and 127.0.0.1: (PEM cert, PEM key).
+pub fn self_signed_certificate() -> Result<(String, String)> {
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
+    Ok((cert.cert.pem(), cert.key_pair.serialize_pem()))
 }
 
 impl TestServer {
@@ -131,8 +153,12 @@ impl TestServer {
             base_url: String::new(),
             launches: 0,
             client: Client::builder().timeout(Duration::from_secs(10)).build()?,
+            anon: Client::builder().timeout(Duration::from_secs(10)).build()?,
+            token: None,
             options,
         };
+        server.client = server.client_builder()?.build()?;
+        server.anon = server.client_builder()?.build()?;
         server.launch()?;
         Ok(server)
     }
@@ -240,14 +266,31 @@ vertex_integrity_check_frequency = 3600
 path = "./data"
 disk_mb = 1024
 encryption_key = "{key}"
+previous_encryption_keys = [{previous}]
 compaction_frequency = 3600
 wal_flush_check_frequency = 3600
 
 [ui]
 path = "./no-ui"
+
+[security]
+admin_login = "{admin}"
+admin_password = "{password}"
+admin_email = "admin@example.com"
 "#,
-            key = TEST_ENCRYPTION_KEY
+            key = self.options.encryption_key.as_deref().unwrap_or(TEST_ENCRYPTION_KEY),
+            previous = self.options.previous_encryption_keys.iter().map(|k| format!("\"{}\"", k)).collect::<Vec<_>>().join(", "),
+            admin = TEST_ADMIN_LOGIN,
+            password = if self.options.no_admin_password { "" } else { TEST_ADMIN_PASSWORD },
         ) + &self.options.extra_toml;
+        let config = match &self.options.tls {
+            Some((cert, key)) => {
+                fs::write(self.dir().join("cert.pem"), cert)?;
+                fs::write(self.dir().join("key.pem"), key)?;
+                config + "\n[tls]\ncert_file = \"./cert.pem\"\nkey_file = \"./key.pem\"\nca_file = \"./cert.pem\"\n"
+            }
+            None => config,
+        };
         let config_path = self.dir().join("hexdb.toml");
         fs::write(&config_path, config)?;
 
@@ -275,7 +318,8 @@ path = "./no-ui"
         }
 
         self.child = Some(cmd.spawn().context("Failed to start hexdb_api")?);
-        self.base_url = format!("http://127.0.0.1:{}", api);
+        let scheme = if self.options.tls.is_some() { "https" } else { "http" };
+        self.base_url = format!("{}://127.0.0.1:{}", scheme, api);
 
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         loop {
@@ -288,6 +332,9 @@ path = "./no-ui"
                 );
             }
             if self.health_ok() {
+                if !self.options.no_admin_password {
+                    self.sign_in()?;
+                }
                 return Ok(());
             }
             if Instant::now() > deadline {
@@ -298,8 +345,104 @@ path = "./no-ui"
         }
     }
 
+    /// A client builder that trusts this server's test certificate, if any.
+    fn client_builder(&self) -> Result<reqwest::blocking::ClientBuilder> {
+        let mut builder = Client::builder().timeout(Duration::from_secs(10));
+        if let Some((cert, _)) = &self.options.tls {
+            builder = builder.add_root_certificate(reqwest::Certificate::from_pem(cert.as_bytes())?);
+        }
+        Ok(builder)
+    }
+
+    /// Sign in as the test administrator and send that session with every
+    /// request. Replicas only have users after their first sync, so retry.
+    fn sign_in(&mut self) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let res = self
+                .anon
+                .post(self.url("/auth/login"))
+                .json(&serde_json::json!({ "login": TEST_ADMIN_LOGIN, "password": TEST_ADMIN_PASSWORD, "return_token": true }))
+                .send()?;
+            if res.status().is_success() {
+                let body: Value = res.json()?;
+                let token = body["token"].as_str().ok_or_else(|| anyhow!("login returned no token: {}", body))?.to_string();
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", token).parse()?);
+                self.client = self.client_builder()?.default_headers(headers).build()?;
+                self.token = Some(token);
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                bail!("Could not sign in as the test admin: {} {}", res.status(), res.text().unwrap_or_default());
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// Change the options used by the next [`launch`](Self::launch).
+    pub fn set_options(&mut self, options: TestOptions) {
+        self.options = options;
+    }
+
+    /// The test administrator's session token.
+    pub fn token(&self) -> &str {
+        self.token.as_deref().unwrap_or_default()
+    }
+
+    /// Send a request with the given bearer token (`None`: no credentials).
+    pub fn request_as(
+        &self,
+        token: Option<&str>,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        headers: &[(&str, &str)],
+    ) -> Result<ApiResponse> {
+        let mut builder = self.anon.request(method, self.url(path));
+        if let Some(token) = token {
+            builder = builder.bearer_auth(token);
+        }
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        if let Some(body) = body {
+            builder = builder.json(body);
+        }
+        let res = builder.send()?;
+        let status = res.status();
+        let headers = res.headers().clone();
+        let text = res.text()?;
+        let body = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
+        Ok(ApiResponse { status, headers, body })
+    }
+
+    /// Create a user with these roles and return an API key for them.
+    pub fn user_with_roles(&self, login: &str, roles: Value) -> Result<String> {
+        let password = "Sturdy test passphrase 2026".to_string();
+        let res = self.request(
+            Method::POST,
+            "/users",
+            Some(&serde_json::json!({ "login": login, "password": password, "email_address": format!("{}@example.com", login), "roles": roles })),
+            &[],
+        )?;
+        if !res.status.is_success() {
+            bail!("Creating user {} returned {}: {}", login, res.status, res.body);
+        }
+        let login_res = self.request_as(
+            None,
+            Method::POST,
+            "/auth/login",
+            Some(&serde_json::json!({ "login": login, "password": password, "return_token": true })),
+            &[],
+        )?;
+        let session = login_res.body["token"].as_str().ok_or_else(|| anyhow!("no token: {}", login_res.body))?.to_string();
+        let key = self.request_as(Some(&session), Method::POST, "/auth/keys", Some(&serde_json::json!({ "name": "test" })), &[])?;
+        key.body["key"].as_str().map(String::from).ok_or_else(|| anyhow!("no key: {}", key.body))
+    }
+
     fn health_ok(&self) -> bool {
-        self.client
+        self.anon
             .get(self.url("/health"))
             .send()
             .map(|r| r.status().is_success())

@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail};
 use axum::{serve, Router};
 use hexdb_api::{handlers::ShutdownHandle, init::init_security, routes::app_router};
 use hexdb_core::{
-    config::CONFIG_FILE_NAME, decode_encryption_key, discover_peers, init_logging, load_config_from,
+    config::CONFIG_FILE_NAME, discover_peers, init_logging, load_config_from,
     spawn_compaction_task, spawn_flush_task, spawn_ttl_sweep_task,
     elect, parse_preference, spawn_discovery_task, spawn_metrics_task, spawn_vertex_monitoring_task,
     start_discovery_listener, LatticeMember, ROLE_OVERSEER,
@@ -23,6 +23,9 @@ const HEX_NAMES: &str = include_str!("../data/names.txt");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let started_at = chrono::Utc::now().timestamp_millis();
+    // Several TLS crypto providers are compiled in; choose one explicitly.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let config_arg = parse_args()?;
 
     // Initialize logging
@@ -55,13 +58,18 @@ async fn main() -> anyhow::Result<()> {
         "⚙️  Effective configuration"
     );
 
-    // Ensure the WAL encryption key is set and that it can be decoded.
-    let key = decode_encryption_key(&config.storage.encryption_key)
-        .unwrap_or_else(|e| {
-            error!("❌ {}", e);
-            std::process::exit(1);
-        })
-        .to_vec();
+    // The storage key ring (current and previous keys) and the lattice key must be valid.
+    let keys = Arc::new(config.key_ring().unwrap_or_else(|e| {
+        error!("❌ {:#}", e);
+        std::process::exit(1);
+    }));
+    if let Err(e) = config.lattice_key() {
+        error!("❌ {:#}", e);
+        std::process::exit(1);
+    }
+    if config.network.lattice_secret.trim().is_empty() {
+        info!("🔑 network.lattice_secret is not set; hexes authenticate each other with a key derived from storage.encryption_key.");
+    }
 
     let storage_dir = config.storage_dir();
 
@@ -104,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         replication_state: String::new(),
         applied_seq: 0,
+        tls: config.tls.enabled(),
     };
     let role = elect(&provisional, &peers);
     match peers.iter().find(|p| p.role == ROLE_OVERSEER) {
@@ -121,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
         name: name.clone(),
         hex_type: role.clone(),
     };
-    let engine = match HexDBEngine::open(config.clone(), identity, &key).await {
+    let engine = match HexDBEngine::open(config.clone(), identity, keys.clone()).await {
         Ok(engine) => Arc::new(engine),
         Err(e) => {
             error!("❌ Failed to open storage: {:#}", e);
@@ -201,7 +210,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // The runtime file lets the CLI find this process and stop it gracefully.
-    let runtime = RuntimeInfo::for_current_process(&config.network.api_endpoint)?;
+    let tls = config.tls.enabled();
+    let runtime = RuntimeInfo::for_current_process(&config.network.api_endpoint, started_at, tls)?;
     let shutdown_handle = ShutdownHandle {
         token: Arc::new(runtime.shutdown_token.clone()),
         trigger: shutdown_tx.clone(),
@@ -236,24 +246,42 @@ async fn main() -> anyhow::Result<()> {
         let _ = signal_tx.send(());
     });
 
-    // Bind the server to the specified address and port.
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|e| anyhow!("Failed to bind {}: {}", addr, e))?;
+    // Handlers see the client's address (sign-in throttling and audit logs).
+    let service = app.into_make_service_with_connect_info::<SocketAddr>();
 
-    if RuntimeInfo::path(&storage_dir).exists() {
-        warn!("⚠️ Replacing an existing runtime file. A previous HexDB process may not have shut down cleanly.");
-    }
-    let runtime_path = runtime.write(&storage_dir)?;
-    info!("📝 Runtime file written to {}.", runtime_path.display());
-
-    info!("💽  HexDB API is listening at http://{}", addr);
-    let result = serve(listener, app.into_make_service())
-        .with_graceful_shutdown(async move {
+    let result: anyhow::Result<()> = if tls {
+        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&config.tls.cert_file, &config.tls.key_file)
+            .await
+            .map_err(|e| anyhow!("Failed to load tls.cert_file / tls.key_file: {}", e))?;
+        let handle = axum_server::Handle::new();
+        let stopper = handle.clone();
+        tokio::spawn(async move {
             let _ = shutdown_rx.changed().await;
             info!("🛑 HexDB is shutting down gracefully...");
-        })
-        .await;
+            stopper.graceful_shutdown(Some(Duration::from_secs(30)));
+        });
+        let server = axum_server::bind_rustls(addr, rustls).handle(handle.clone());
+        write_runtime(&runtime, &storage_dir)?;
+        info!("💽  HexDB API is listening at https://{}", addr);
+        server.serve(service).await.map_err(|e| anyhow!("HTTPS server failed on {}: {}", addr, e))
+    } else {
+        // Bind the server to the specified address and port.
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|e| anyhow!("Failed to bind {}: {}", addr, e))?;
+        write_runtime(&runtime, &storage_dir)?;
+        if !addr.ip().is_loopback() {
+            warn!("⚠️ The API is reachable from the network over plain HTTP. Configure [tls] so passwords and data are encrypted in transit.");
+        }
+        info!("💽  HexDB API is listening at http://{}", addr);
+        serve(listener, service)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.changed().await;
+                info!("🛑 HexDB is shutting down gracefully...");
+            })
+            .await
+            .map_err(Into::into)
+    };
 
     // In-flight requests have finished; flush everything and stop the WAL writer.
     info!("💾 Flushing to SSTables before exit...");
@@ -263,6 +291,15 @@ async fn main() -> anyhow::Result<()> {
     stopped?;
     info!("👋 HexDB stopped.");
 
+    Ok(())
+}
+
+fn write_runtime(runtime: &RuntimeInfo, storage_dir: &std::path::Path) -> anyhow::Result<()> {
+    if RuntimeInfo::path(storage_dir).exists() {
+        warn!("⚠️ Replacing an existing runtime file. A previous HexDB process may not have shut down cleanly.");
+    }
+    let runtime_path = runtime.write(storage_dir)?;
+    info!("📝 Runtime file written to {}.", runtime_path.display());
     Ok(())
 }
 

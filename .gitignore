@@ -36,3 +36,7 @@ hexdb.pid
 # Local notes
 /TODO.md
 plugins/**/changes.ndjson
+
+# Local secrets (see hexdb_core config: hexdb.local.toml)
+**/hexdb.local.toml
+**/initial-admin-password.txt

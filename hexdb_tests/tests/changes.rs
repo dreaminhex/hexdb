@@ -108,7 +108,10 @@ fn server_sent_events_stream_backlog_and_live_changes() -> Result<()> {
     server.insert("other", &json!({ "n": 0 }))?;
 
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build()?;
-    let response = client.get(server.url(&format!("/changes/stream?after={}&tessellation=notes", cursor))).send()?;
+    let response = client
+        .get(server.url(&format!("/changes/stream?after={}&tessellation=notes", cursor)))
+        .bearer_auth(server.token())
+        .send()?;
     assert_eq!(response.status().as_u16(), 200);
     assert!(response.headers()["content-type"].to_str()?.starts_with("text/event-stream"));
 

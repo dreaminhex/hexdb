@@ -212,7 +212,7 @@ pub fn init_logging(service_name: &str) {
         .with_thread_names(true)
         .with_timer(fmt::time::UtcTime::rfc_3339())
         .with_writer(std::io::stdout)
-        .with_ansi(atty::is(atty::Stream::Stdout))
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .pretty();
 
     // The filter applies to both outputs, so RUST_LOG controls what the UI sees too.

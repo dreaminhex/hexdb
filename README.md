@@ -119,24 +119,30 @@ Or you can simply run the API directly using `cargo` from the repository root.
 cargo run -p hexdb_api
 ```
 
-### 4. Check Health and Status
+### 4. Sign In
+
+On first start with no users, HexDB creates the administrator named by `security.admin_login`. If `security.admin_password` is empty (recommended), HexDB generates a password, prints it once on the console, and saves it to `initial-admin-password.txt` in the data directory (readable by your user only). Sign in at the UI, change it on the **Account** page, and delete that file. Every API request needs credentials; see [Security](#-security).
+
+### 5. Check Health and Status
 
 ```bash
-hexdb health
-hexdb status
+hexdb health                       # public: just says the server is up
+HEXDB_TOKEN=hxk_... hexdb status   # needs an admin's API key (Account page > API keys)
 
 curl http://localhost:7700/health
+curl -H "Authorization: Bearer hxk_..." http://localhost:7700/status
 ```
 
 To load sample data (articles, products, customers, orders, and sessions that expire after 15 minutes), run this with Node.js 18+ while the server is running. It skips tessellations that already have documents, so it's safe to re-run.
 
 ```bash
-node scripts/seed.mjs
+HEXDB_TOKEN=hxk_... node scripts/seed.mjs
+# or: HEXDB_USER=hexdbadmin HEXDB_PASSWORD=... node scripts/seed.mjs
 ```
 
-### 5. Access the UI
+### 6. Access the UI
 
-Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/). The admin UI has:
+Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/) and sign in. Administrators see every page; other users see Queries, Tessellations and Documents, limited to what their roles allow. The admin UI has:
 
 - **Dashboard**: live document, memory, disk and operation stats; an activity chart (documents per tessellation, operations per minute, or storage over the last 15 minutes to 6 hours); vertex health; the lattice with each hex's role and replication state; and per-tessellation sizes. On a replica, a banner names the Overseer. "Flush to disk" writes unflushed data to SSTables.
 - **Queries**: a GraphQL console with schema-aware autocomplete, validation, example queries (including aggregations, full-text search, and transactions), history, and JSON or table results. Press Ctrl+Enter (⌘+Enter on macOS) to run.
@@ -145,14 +151,15 @@ Browse to [http://localhost:7700/ui/](http://localhost:7700/ui/). The admin UI h
 - **Users** and **Roles**: manage accounts and role grants.
 - **Plugins**: loaded plugins, their state, and what they've delivered.
 - **Logs**: the server's recent log, tailed live, with level, module and text filters.
+- **Account** (your name at the bottom of the sidebar): change your password and create or revoke API keys.
 
 The sun/moon button in the header switches between light, dark and system themes.
 
 For UI development, run `npm run dev` in `hexdb_admin` while a HexDB server is running; every request outside `/ui/` is proxied to `http://127.0.0.1:7700` (override with `HEXDB_API`).
 
-### 6. Stop the Node
+### 7. Stop the Node
 
-`hexdb stop` asks the server to shut down gracefully, using a one-time token the server writes to `hexdb.pid` in its data directory. Use `--force` to kill a server that won't stop.
+`hexdb stop` asks the server to shut down gracefully, using a one-time token the server writes to `hexdb.pid` in its data directory (readable by your user only). Use `--force` to kill a server that won't stop; it only kills a process it can confirm is that server (same executable and start time), so a stale file can't take down an unrelated process that reused the PID.
 
 ```bash
 hexdb stop
@@ -170,6 +177,41 @@ cargo test -p hexdb_tests -- --ignored     # known bugs (see TODO.md); these cur
 
 Lattice tests start several servers that discover each other on loopback, replicate, and fail over. Set `HEXDB_TEST_KEEP=1` to keep each test's directory (config, data, and `server.log`) for inspection. Failed tests always keep theirs and print the server log tail.
 
+## 🔐 Security
+
+**Authentication.** Every API request needs credentials except `GET /health`, `POST /auth/login`, the admin UI's static files, and the hex-to-hex `/lattice/*` endpoints, which use their own signatures. Requests to any other path without credentials get 401, including paths that don't exist.
+
+- **Sessions** come from `POST /auth/login` (`{"login", "password"}`). The token is set as an `HttpOnly`, `SameSite=Strict` cookie (`Secure` over HTTPS), so page scripts can't read it. Scripts can ask for it in the body with `"return_token": true` and send it as `Authorization: Bearer hxs.…`. Sessions last `security.session_hours` and work on every hex in the lattice.
+- **API keys** (`hxk_…`) are for scripts, the CLI (`HEXDB_TOKEN`), and services. Create them on the Account page or with `POST /auth/keys` (`{"name", "expires_in_days"}`). The key is shown once; HexDB stores only a keyed hash. A key acts with its user's current roles. List them with `GET /auth/keys` and revoke them with `DELETE /auth/keys/{id}`.
+- `GET /auth/me` returns the signed-in user. `POST /auth/logout` revokes the session. `POST /auth/password` (`{"current_password", "new_password"}`) changes your password.
+- **Revocation.** Signing out revokes that session. Changing or resetting a password, or locking the user, signs that user out everywhere. Deleting a user ends their sessions and keys. Roles are read on every request, so role changes apply at once.
+- **Brute force.** After `security.max_failed_logins` failures for a login, or from one address, within `lockout_minutes`, sign-in is refused with 429. Unknown logins take as long as wrong passwords and return the same message, so logins can't be enumerated.
+
+**Authorization.** Roles are granted per tessellation; `permissions` lists names, or `*` for all.
+
+| Role | Can |
+| --- | --- |
+| `reader` | Read documents: get, list, query, count, aggregate, and the change feed |
+| `writer` | Everything a reader can, plus insert, replace, patch and delete documents (inserting creates the tessellation) |
+| `owner` | Everything a writer can, plus delete the tessellation and manage its indexes |
+| `admin` | Everything, including users and roles, status, logs, plugins, flush, compact and shutdown |
+
+Transactions need read or write permission on every tessellation they touch. Lists (tessellations, the change feed, GraphQL) only include tessellations you can read. Idempotency keys are scoped to the user.
+
+**Browsers.** Cookie-authenticated changes must come from the same origin (CSRF protection), and cross-site sign-in is refused. Responses carry `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a Content Security Policy (the admin UI loads nothing from other origins). API responses are `Cache-Control: no-store`. No CORS headers are sent, so other sites can't read responses.
+
+**Transport.** Set `[tls] cert_file` and `key_file` to serve HTTPS. HSTS is then sent, the session cookie is `Secure`, and hexes replicate over HTTPS, trusting `tls.ca_file` for private certificates. Without TLS, HexDB warns when it listens on a non-loopback address. Proxies' `X-Forwarded-For` isn't trusted, so sign-in throttling and audit logs use the TCP peer address.
+
+**Encryption at rest.** WAL records and SSTable document bodies are encrypted with AES-256-GCM. Each SSTable body is bound to its document ID and version, so bodies can't be swapped between entries. SSTable indexes (document IDs, versions, TTLs), `catalog.json` (tessellation and index names), and memory are not encrypted.
+
+To **rotate the key**, set a new `storage.encryption_key` and move the old one to `storage.previous_encryption_keys`, then restart. Old data stays readable, new data uses the new key, and compaction (scheduled, or `POST /compact`) re-encrypts old SSTables. When `/status` shows `storage.sstable_files_on_old_keys: 0`, remove the old key. A server whose data needs a key that isn't configured refuses to start rather than lose data.
+
+**Between hexes.** Discovery is a mutual challenge-response with the lattice key: a hex answers only an authenticated, fresh, never-seen hello, and accepts only answers bound to its own challenge. Strangers learn nothing, and nobody without the key can pose as an Overseer. Every `/lattice/*` request carries a signature over its method, path, query, body and a timestamp, valid for 60 seconds and once. User sessions and API keys are never accepted there.
+
+**Local files.** `hexdb.pid` (the shutdown token) and `initial-admin-password.txt` are written readable by the owner only: mode 0600 on Unix, and on Windows with inherited permissions removed, leaving only the current user and SYSTEM. The admin password is never written to the log.
+
+**Audit.** Every write, and every refused (401/403) request, is logged with the user and client address. Sign-ins, failed sign-ins, sign-outs, password changes and key changes are logged too. Passwords, tokens and keys never are.
+
 ## API Operations
 
 Documents are plain JSON. Responses add `id` and, when a TTL is set, `_expires_at`; both are ignored if sent in a request body. Errors look like this:
@@ -178,14 +220,20 @@ Documents are plain JSON. Responses add `id` and, when a TTL is set, `_expires_a
 { "error": { "code": "not_found", "message": "Document 01J... not found in 'articles'." } }
 ```
 
-| Status | Code                     | Meaning                                                     |
-| ------ | ------------------------ | ----------------------------------------------------------- |
-| 400    | `invalid_request`        | Malformed JSON, bad parameters, or invalid values           |
-| 403    | `forbidden`              | System tessellations (`users`, `roles`) via document routes |
-| 404    | `not_found`              | Unknown document, tessellation, user or role                |
-| 409    | `conflict`               | Already exists, or an idempotent request is in progress     |
-| 413    | `payload_too_large`      | Body over 2 MB (32 MB for bulk endpoints)                   |
-| 422    | `idempotency_key_reused` | The `Idempotency-Key` was used with a different request     |
+| Status | Code                     | Meaning                                                                      |
+| ------ | ------------------------ | ---------------------------------------------------------------------------- |
+| 400    | `invalid_request`        | Malformed JSON, bad parameters, or invalid values                            |
+| 401    | `unauthorized`           | No credentials, or an expired, revoked or invalid session or API key         |
+| 403    | `forbidden`              | Your roles don't allow it, or a system tessellation via document routes      |
+| 403    | `cross_origin`           | A cookie-authenticated change from another site (CSRF protection)            |
+| 404    | `not_found`              | Unknown document, tessellation, user or role                                 |
+| 409    | `conflict`               | Already exists, a failed precondition, or an idempotent request in progress  |
+| 413    | `payload_too_large`      | Body over 2 MB (32 MB for bulk endpoints)                                    |
+| 421    | `read_only_replica`      | A write sent to a Harvester or Replicant                                     |
+| 422    | `idempotency_key_reused` | The `Idempotency-Key` was used with a different request                      |
+| 429    | `rate_limited`           | Too many failed sign-ins; see `Retry-After`                                  |
+
+Examples below leave out credentials for brevity: add `-H "Authorization: Bearer <API key>"` to each.
 
 ### Documents
 
@@ -274,7 +322,7 @@ curl http://localhost:7700/roles
 curl http://localhost:7700/roles/admin
 ```
 
-PUT on a user replaces its editable fields and requires `email_address` and `roles`. Roles and permissions aren't enforced yet; requests are not authenticated.
+PUT on a user replaces its editable fields and requires `email_address` and `roles`. Managing users and roles requires the admin role. Passwords must be at least 12 characters and not contain the login. Resetting a password or locking a user signs that user out everywhere.
 
 ### Filters
 
@@ -307,7 +355,7 @@ Dotted paths reach into nested objects, and a condition on an array field matche
 
 ### GraphQL
 
-`POST /graphql` accepts standard GraphQL requests (`{"query", "variables", "operationName"}`). `GET /graphql` serves GraphiQL. The admin UI's **Queries** page is the main way to explore it.
+`POST /graphql` accepts standard GraphQL requests (`{"query", "variables", "operationName"}`) with the same credentials and permissions as REST. The admin UI's **Queries** page is the console (GraphiQL was removed: it loaded scripts from a CDN).
 
 ```graphql
 query Recent($filter: JSON) {
@@ -335,7 +383,7 @@ query Recent($filter: JSON) {
 | `changes(after, tessellation, limit)` | `createIndex`, `dropIndex` |
 | `users`, `user(idOrLogin)`, `roles`, `status` | |
 
-Document mutations take an optional `idempotencyKey` argument; replayed mutations are listed in the response's `extensions.idempotentReplays` and the HTTP response carries `Idempotent-Replayed: true`. Documents expose their fields through the `JSON` scalar (`data`, `json`, or `field(path)`). Without `sort`, results come in ID order and `next` pages forward via `after`; with `sort`, page with `offset`. Errors include `extensions.code` (`NOT_FOUND`, `INVALID_REQUEST`, `FORBIDDEN`, `CONFLICT`, ...). System tessellations aren't reachable through document fields.
+Document mutations take an optional `idempotencyKey` argument; replayed mutations are listed in the response's `extensions.idempotentReplays` and the HTTP response carries `Idempotent-Replayed: true`. Documents expose their fields through the `JSON` scalar (`data`, `json`, or `field(path)`). Without `sort`, results come in ID order and `next` pages forward via `after`; with `sort`, page with `offset`. Errors include `extensions.code` (`UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`, `INVALID_REQUEST`, `CONFLICT`, ...). System tessellations aren't reachable through document fields.
 
 ### Aggregations
 
@@ -441,6 +489,7 @@ curl http://localhost:7700/health
 curl http://localhost:7700/status
 curl "http://localhost:7700/status/history?minutes=60"   # metrics samples every 15 s, kept for 6 hours
 curl -X POST http://localhost:7700/flush    # write unflushed data to SSTables
+curl -X POST http://localhost:7700/compact  # merge SSTables now (also re-encrypts after a key rotation)
 curl http://localhost:7700/plugins          # loaded plugins and their delivery state
 ```
 
@@ -458,7 +507,7 @@ Hexes with the same `network.lattice_name` that can reach each other's discovery
 | Harvester | A read replica: keeps a full copy by following the Overseer, and serves reads. Can be elected Overseer. |
 | Replicant | A standby copy that follows the Overseer like a Harvester but is never elected. Use it for backups or to rebuild Harvesters. |
 
-A new replica copies a snapshot from the Overseer, then streams its changes; `/status` shows `replication.state` (`streaming`, `syncing`, ...) and `lag`. Writes sent to a replica fail with 421 (`read_only_replica`) and name the Overseer's address. If the Overseer stops answering for about three discovery rounds, the remaining hexes elect a new one and the others re-sync from it. Replication is asynchronous: a write the Overseer acknowledged but no replica received is lost if the Overseer fails before it comes back. Hexes in a lattice must share `storage.encryption_key`, which also authenticates replication between them.
+A new replica copies a snapshot from the Overseer, then streams its changes; `/status` shows `replication.state` (`streaming`, `syncing`, ...) and `lag`. Writes sent to a replica fail with 421 (`read_only_replica`) and name the Overseer's address. If the Overseer stops answering for about three discovery rounds, the remaining hexes elect a new one and the others re-sync from it. Replication is asynchronous: a write the Overseer acknowledged but no replica received is lost if the Overseer fails before it comes back. Hexes authenticate each other with `network.lattice_secret` (or, if it's empty, a key derived from `storage.encryption_key`), which every hex in a lattice must share: discovery is a mutual challenge-response, and every replication request is signed, fresh, and single use. With `[tls]` configured, replication runs over HTTPS. See [Security](#-security).
 
 ```toml
 [network]
@@ -486,11 +535,33 @@ The development configuration is [hexdb_api/hexdb.toml](hexdb_api/hexdb.toml). T
 
 Relative paths in the file (`storage.path`, `ui.path`) are resolved against the config file's directory. Missing values fall back to built-in defaults, and any value can be overridden with an environment variable named `HEXDB_<SECTION>__<FIELD>`, for example `HEXDB_NETWORK__API_ENDPOINT=0.0.0.0:7700`.
 
+Secrets don't belong in `hexdb.toml`. Put them in `hexdb.local.toml` next to it (read after it, and git-ignored), or in environment variables:
+
+```toml
+# hexdb.local.toml
+[storage]
+encryption_key = "base64:..."
+[network]
+lattice_secret = "base64:..."   # optional; shared by every hex in the lattice
+```
+
 `storage.encryption_key` is required and must be 32 random bytes, base64-encoded with a `base64:` prefix:
 
 ```bash
 echo "base64:$(openssl rand -base64 32)"
 ```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `security.admin_login`, `admin_email` | `hexdbadmin` | The first administrator, created when there are no users |
+| `security.admin_password` | empty | Generated and shown once when empty; ignored once users exist |
+| `security.session_hours` | 12 | How long a sign-in lasts |
+| `security.max_failed_logins` | 5 | Failed sign-ins per login and per address before sign-in pauses |
+| `security.lockout_minutes` | 15 | How long sign-in pauses |
+| `storage.previous_encryption_keys` | `[]` | Old keys still accepted for reading (key rotation) |
+| `network.lattice_secret` | derived | Shared secret that authenticates hexes to each other |
+| `tls.cert_file`, `tls.key_file` | empty | PEM certificate chain and key; set both to serve HTTPS |
+| `tls.ca_file` | empty | Extra CA certificate(s) trusted when connecting to other hexes |
 
 ## Terminology
 
@@ -544,7 +615,9 @@ A lattice is a networked group of hexes with one Overseer. A single hex is the O
 - ✅ Configuration (endpoints, lattice, RAM and disk budgets, compression, plugins)
 - ✅ Typed storage of JSON values (strings, integers up to 128-bit, floats, booleans, RFC 3339 datetimes, arrays, objects)
 - ✅ Write-ahead logging and crash recovery
-- ✅ Encryption at rest for the WAL (AES-256-GCM)
+- ✅ Authentication (sessions, API keys) and role-based authorization across REST, GraphQL and the UI
+- ✅ Encryption at rest (AES-256-GCM WAL and SSTables) with key rotation
+- ✅ TLS (HTTPS API and replication), authenticated lattice discovery and replication
 - ✅ Compression (Zstandard)
 - ✅ SSTables (long-term storage), compaction, WAL rotation
 - ✅ TTL (per-document expiry)
@@ -553,7 +626,7 @@ A lattice is a networked group of hexes with one Overseer. A single hex is the O
 
 ### In-Progress
 
-- Authentication and enforcement of roles and permissions (Phase 7). Requests are not authenticated yet.
+- Security hardening follow-ups (see TODO.md): request timeouts, MFA, audit log persistence.
 
 ### Planned
 
@@ -592,26 +665,26 @@ Every write gets a sequence number. Deletes are recorded as tombstones. When sev
 
 Each record is `[u32 length][12-byte nonce][ciphertext]`. The ciphertext is AES-256-GCM over the Zstandard-compressed JSON record `{ "seq": ..., "op": { "Put": <document> } | { "Delete": { "tessellation", "id" } } }`.
 
-### SSTable Header Structure (version 2)
+### SSTable Header Structure (version 3)
 
 All integers are big-endian.
 
 | Offset | Field                   | Size     |
 | ------ | ----------------------- | -------- |
 | 0x00   | MAGIC (`HXDB`)          | 4 bytes  |
-| 0x04   | VERSION (2)             | 2 bytes  |
+| 0x04   | VERSION (3)             | 2 bytes  |
 | 0x06   | COMPRESSION TYPE (zstd) | 1 byte   |
-| 0x07   | Reserved                | 1 byte   |
+| 0x07   | ENCRYPTION (1 = AES-256-GCM) | 1 byte   |
 | 0x08   | Entry Count             | 8 bytes  |
 | 0x10   | Created Timestamp (ms)  | 8 bytes  |
 | 0x18   | Index Offset            | 8 bytes  |
 | 0x20   | Index Size              | 8 bytes  |
 | 0x28   | Index Checksum          | 8 bytes  |
 | 0x30   | Max Sequence Number     | 8 bytes  |
-| 0x38   | Reserved                | 8 bytes  |
+| 0x38   | Key ID                  | 8 bytes  |
 | 0x40   | Start of data           | ...      |
 
-The index checksum is the first 8 bytes of a BLAKE3 hash of the index block.
+The index checksum is the first 8 bytes of a BLAKE3 hash of the index block. The key ID identifies the encryption key without revealing it. Version 2 files (from before encryption) have no encryption and are still read; compaction rewrites them as version 3.
 
 ### SSTable Entry and Index Records
 
@@ -623,4 +696,4 @@ The index checksum is the first 8 bytes of a BLAKE3 hash of the index block.
 | TTL          | 8 bytes  | ✓     | ✓     | only if bit 0 is set; epoch milliseconds  |
 | Entry Offset | 8 bytes  |       | ✓     |                                           |
 | Length       | 4 bytes  | ✓     | ✓     | compressed body length (0 for tombstones) |
-| Body         | Length   | ✓     |       | Zstandard-compressed JSON document        |
+| Body         | Length   | ✓     |       | 12-byte nonce + AES-256-GCM of the Zstandard-compressed JSON document; authenticated data is the ID and sequence |

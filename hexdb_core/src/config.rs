@@ -30,6 +30,8 @@ pub struct HexConfig {
     pub identity: IdentityConfig,
     #[serde(default)]
     pub plugins: PluginsConfig,
+    #[serde(default)]
+    pub tls: TlsConfig,
 
     /// The config file this configuration was loaded from, if any.
     #[serde(skip)]
@@ -54,6 +56,11 @@ pub struct NetworkConfig {
     /// Seconds between discovery rounds.
     #[serde(default = "default_discovery_interval")]
     pub discovery_interval_seconds: u64,
+    /// Shared secret (`base64:<32 bytes>`) that authenticates hexes to each
+    /// other (discovery and replication). Every hex in a lattice needs the same
+    /// value. When empty, it is derived from `storage.encryption_key`.
+    #[serde(default)]
+    pub lattice_secret: String,
     /// Host other hexes should use to reach this one, when the endpoints bind 0.0.0.0.
     #[serde(default)]
     pub advertise_host: Option<String>,
@@ -71,8 +78,14 @@ pub struct StorageConfig {
     /// Data directory. Relative paths are resolved against the config file's directory.
     pub path: String,
     pub disk_mb: u64,
-    /// AES-256 key for the WAL, formatted as `base64:<32 bytes base64-encoded>`.
+    /// AES-256 key for data at rest (WAL and SSTables), formatted as
+    /// `base64:<32 bytes base64-encoded>`. Keep it out of version control: put
+    /// it in `hexdb.local.toml` or the `HEXDB_STORAGE__ENCRYPTION_KEY` variable.
     pub encryption_key: String,
+    /// Keys used before the current one. Data written with them stays readable;
+    /// compaction re-encrypts it with the current key, after which they can be removed.
+    #[serde(default)]
+    pub previous_encryption_keys: Vec<String>,
     pub compaction_frequency: u64, // seconds
     pub wal_flush_check_frequency: u64, // seconds
     /// fsync the WAL before acknowledging writes. Disabling it is faster, but a
@@ -83,9 +96,55 @@ pub struct StorageConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SecurityConfig {
+    /// The first administrator, created when there are no users.
     pub admin_login: String,
+    /// Password for the first administrator. Leave empty to have HexDB
+    /// generate one and print it once at first start. Ignored once users exist.
+    #[serde(default)]
     pub admin_password: String,
     pub admin_email: String,
+    /// How long a sign-in session lasts.
+    #[serde(default = "default_session_hours")]
+    pub session_hours: u64,
+    /// Failed sign-ins (per login, and per client address) before sign-in is
+    /// refused for `lockout_minutes`.
+    #[serde(default = "default_max_failed_logins")]
+    pub max_failed_logins: u32,
+    #[serde(default = "default_lockout_minutes")]
+    pub lockout_minutes: u64,
+}
+
+fn default_session_hours() -> u64 {
+    12
+}
+
+fn default_max_failed_logins() -> u32 {
+    5
+}
+
+fn default_lockout_minutes() -> u64 {
+    15
+}
+
+/// HTTPS for the API (and for replication between hexes).
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct TlsConfig {
+    /// PEM certificate chain. HTTPS is on when this and `key_file` are set.
+    #[serde(default)]
+    pub cert_file: String,
+    /// PEM private key.
+    #[serde(default)]
+    pub key_file: String,
+    /// Extra PEM CA certificate(s) to trust when connecting to other hexes
+    /// (for private or self-signed certificates).
+    #[serde(default)]
+    pub ca_file: String,
+}
+
+impl TlsConfig {
+    pub fn enabled(&self) -> bool {
+        !self.cert_file.is_empty() && !self.key_file.is_empty()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -166,12 +225,16 @@ impl Default for HexConfig {
                 peers: Vec::new(),
                 scan_local_ports: true,
                 discovery_interval_seconds: 10,
+                lattice_secret: String::new(),
                 advertise_host: None,
             },
             security: SecurityConfig {
                 admin_login: "hexdbadmin".into(),
-                admin_password: "hexdbadmin1234".into(),
+                admin_password: String::new(),
                 admin_email: "admin@hexdb".into(),
+                session_hours: default_session_hours(),
+                max_failed_logins: default_max_failed_logins(),
+                lockout_minutes: default_lockout_minutes(),
             },
             memory: MemoryConfig {
                 ram_mb: 1024,
@@ -182,6 +245,7 @@ impl Default for HexConfig {
                 path: "./.hexdb".into(),
                 disk_mb: 8192,
                 encryption_key: String::new(), // must be supplied by config or environment
+                previous_encryption_keys: Vec::new(),
                 compaction_frequency: 1800, // 30 minutes
                 wal_flush_check_frequency: 60, // 1 minute
                 wal_sync: true,
@@ -192,6 +256,7 @@ impl Default for HexConfig {
             ui: UiConfig::default(),
             identity: IdentityConfig::default(),
             plugins: PluginsConfig::default(),
+            tls: TlsConfig::default(),
             source: None,
         }
     }
@@ -206,6 +271,39 @@ impl HexConfig {
     /// The resolved admin UI directory.
     pub fn ui_dir(&self) -> PathBuf {
         PathBuf::from(&self.ui.path)
+    }
+
+    /// The storage key ring: `storage.encryption_key` plus `previous_encryption_keys`.
+    pub fn key_ring(&self) -> anyhow::Result<crate::crypt::KeyRing> {
+        let current = crate::crypt::decode_encryption_key(&self.storage.encryption_key)?;
+        let previous = self
+            .storage
+            .previous_encryption_keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                crate::crypt::decode_encryption_key(k)
+                    .map_err(|e| anyhow::anyhow!("storage.previous_encryption_keys[{}]: {}", i, e))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(crate::crypt::KeyRing::new(&current, &previous))
+    }
+
+    /// The key hexes use to authenticate each other: `network.lattice_secret`,
+    /// or a key derived from `storage.encryption_key` when that is empty.
+    pub fn lattice_key(&self) -> anyhow::Result<[u8; 32]> {
+        if !self.network.lattice_secret.trim().is_empty() {
+            return crate::crypt::decode_encryption_key(&self.network.lattice_secret)
+                .map_err(|e| anyhow::anyhow!("network.lattice_secret: {}", e.to_string().replace("storage.encryption_key", "network.lattice_secret")));
+        }
+        let storage = crate::crypt::decode_encryption_key(&self.storage.encryption_key)?;
+        Ok(blake3::derive_key("HexDB 2026 lattice key v1", &storage))
+    }
+
+    /// The key that signs session tokens. Derived from the lattice key, so a
+    /// session works on every hex of the lattice.
+    pub fn session_key(&self) -> anyhow::Result<[u8; 32]> {
+        Ok(blake3::derive_key("HexDB 2026 session signing key v1", &self.lattice_key()?))
     }
 }
 
@@ -232,6 +330,10 @@ pub fn load_config_from(explicit: Option<&Path>) -> Result<HexConfig, config::Co
 
     if let Some(path) = &file {
         builder = builder.add_source(config::File::from(path.as_path()).required(true));
+        // Secrets live in an optional, git-ignored `hexdb.local.toml` beside the config file.
+        if let Some(local) = local_config_path(path) {
+            builder = builder.add_source(config::File::from(local.as_path()).required(true));
+        }
     }
 
     let cfg = builder
@@ -252,9 +354,23 @@ pub fn load_config_from(explicit: Option<&Path>) -> Result<HexConfig, config::Co
     };
     hex_config.storage.path = resolve_path(&base, &hex_config.storage.path);
     hex_config.ui.path = resolve_path(&base, &hex_config.ui.path);
+    for path in [&mut hex_config.tls.cert_file, &mut hex_config.tls.key_file, &mut hex_config.tls.ca_file] {
+        if !path.is_empty() {
+            *path = resolve_path(&base, path);
+        }
+    }
     hex_config.source = file;
 
     Ok(hex_config)
+}
+
+/// Name of the optional secrets file read after the main config file.
+pub const LOCAL_CONFIG_FILE_NAME: &str = "hexdb.local.toml";
+
+/// `hexdb.local.toml` next to a config file, if it exists.
+pub fn local_config_path(config_file: &Path) -> Option<PathBuf> {
+    let candidate = config_file.parent()?.join(LOCAL_CONFIG_FILE_NAME);
+    candidate.is_file().then_some(candidate)
 }
 
 /// Locate the config file according to the search order documented on [`load_config_from`].
@@ -323,6 +439,29 @@ mod tests {
         assert_eq!(cfg.storage.encryption_key, "base64:abc");
         assert_eq!(cfg.source.as_deref(), Some(absolute(&file).as_path()));
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn local_file_overrides_secrets() {
+        let dir = std::env::temp_dir().join(format!("hexdb-config-test-{}", ulid::Ulid::new()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hexdb.toml");
+        fs::write(&file, "[storage]
+path = \"./data\"
+encryption_key = \"\"
+[security]
+admin_login = \"root\"
+admin_email = \"r@x\"
+").unwrap();
+        fs::write(dir.join(LOCAL_CONFIG_FILE_NAME), "[storage]
+encryption_key = \"base64:secret\"
+").unwrap();
+
+        let cfg = load_config_from(Some(&file)).unwrap();
+        assert_eq!(cfg.storage.encryption_key, "base64:secret");
+        assert_eq!(cfg.security.admin_login, "root", "the main file still applies");
+        assert!(cfg.security.admin_password.is_empty(), "no built-in default password");
         fs::remove_dir_all(&dir).ok();
     }
 

@@ -69,6 +69,12 @@ pub enum EngineError {
     Conflict(String),
     /// This hex is a read-only replica; writes go to the Overseer.
     ReadOnly(String),
+    /// No valid credentials (401).
+    Unauthorized(String),
+    /// Authenticated, but not allowed (403).
+    Forbidden(String),
+    /// Too many attempts; retry after this many seconds (429).
+    RateLimited(String, u64),
 }
 
 impl fmt::Display for EngineError {
@@ -78,6 +84,9 @@ impl fmt::Display for EngineError {
             | EngineError::Invalid(m)
             | EngineError::Conflict(m)
             | EngineError::ReadOnly(m)
+            | EngineError::Unauthorized(m)
+            | EngineError::Forbidden(m)
+            | EngineError::RateLimited(m, _)
             | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }
@@ -200,6 +209,12 @@ pub struct HexDBEngine {
     pub replication: std::sync::Mutex<crate::replication::ReplicationStatus>,
     /// Loaded plugins and their delivery state.
     pub plugins: crate::plugins::PluginRegistry,
+    /// Failed sign-ins, for throttling.
+    pub login_throttle: crate::auth::LoginThrottle,
+    /// Keys that authenticate hexes to each other.
+    pub lattice_keys: crate::network::lattice_auth::LatticeKeys,
+    /// Nonces of discovery hellos and replication requests already seen.
+    pub lattice_nonces: crate::network::lattice_auth::NonceCache,
 }
 
 const MAX_WRITE_RETRIES: usize = 16;
@@ -208,7 +223,7 @@ impl HexDBEngine {
     /// Open (or create) the storage directory, recover from SSTables and the
     /// WAL, and start the WAL writer. Anything recovered from the WAL is flushed
     /// to SSTables before this returns.
-    pub async fn open(config: HexConfig, identity: HexIdentity, key: &[u8]) -> Result<Self> {
+    pub async fn open(config: HexConfig, identity: HexIdentity, keys: Arc<crate::crypt::KeyRing>) -> Result<Self> {
         let storage_dir = config.storage_dir();
         let wal_dir = storage_dir.join("wal");
         std::fs::create_dir_all(&storage_dir)
@@ -225,7 +240,7 @@ impl HexDBEngine {
 
         let level = config.compression.compression_level;
         let mut catalog = Catalog::load(&storage_dir)?.unwrap_or_default();
-        let sst = SstStore::open(&storage_dir, level)?;
+        let sst = SstStore::open(&storage_dir, level, keys.clone())?;
 
         // Clean up tables left behind by a drop that was interrupted.
         for (tess, &dropped_seq) in &catalog.dropped {
@@ -245,10 +260,10 @@ impl HexDBEngine {
 
         // Replay the WAL.
         let mut records = Vec::new();
-        let replay = wal::replay(&wal_dir, key, |r| records.push(r))?;
+        let replay = wal::replay(&wal_dir, &keys, |r| records.push(r))?;
         if replay.corrupt_records > 0 {
             bail!(
-                "{} WAL record(s) in {} could not be decrypted or decoded. This usually means storage.encryption_key has changed. HexDB will not start, so the records aren't discarded.",
+                "{} WAL record(s) in {} could not be decrypted or decoded. This usually means storage.encryption_key changed without the old key being added to storage.previous_encryption_keys. HexDB will not start, so the records aren't discarded.",
                 replay.corrupt_records,
                 wal_dir.display()
             );
@@ -313,9 +328,11 @@ impl HexDBEngine {
             next_seq
         );
 
-        let wal = WalWriter::start(&wal_dir, key, level, config.storage.wal_sync, next_seq)?;
+        let wal = WalWriter::start(&wal_dir, &keys, level, config.storage.wal_sync, next_seq)?;
         let ram_budget = (config.memory.ram_mb as usize).saturating_mul(1024 * 1024).max(1024 * 1024);
 
+        let login_throttle = crate::auth::LoginThrottle::new(config.security.max_failed_logins, config.security.lockout_minutes);
+        let lattice_keys = crate::network::lattice_auth::LatticeKeys::new(&config.lattice_key()?);
         let engine = HexDBEngine {
             id: identity.id,
             name: identity.name,
@@ -346,6 +363,9 @@ impl HexDBEngine {
             overseer_endpoint: std::sync::RwLock::new(None),
             replication: std::sync::Mutex::new(crate::replication::ReplicationStatus::default()),
             plugins: crate::plugins::PluginRegistry::default(),
+            login_throttle,
+            lattice_keys,
+            lattice_nonces: crate::network::lattice_auth::NonceCache::default(),
         };
 
         // Move recovered writes into SSTables and retire the old WAL segments.
@@ -421,6 +441,11 @@ impl HexDBEngine {
             || self.tessellation_info(name).is_some_and(|info| info.kind == "system")
     }
 
+    /// SSTables not encrypted with the current key.
+    pub async fn sst_files_needing_rewrite(&self) -> usize {
+        self.sst.files_needing_rewrite().await
+    }
+
     /// True if this hex accepts writes (it is the Overseer of its lattice).
     pub fn is_writable(&self) -> bool {
         self.role() == crate::network::discovery::ROLE_OVERSEER
@@ -441,6 +466,37 @@ impl HexDBEngine {
             None => format!("This hex is a {} (a read-only replica) and no Overseer is reachable right now; try again shortly.", self.role()),
         })
         .into())
+    }
+
+    /// Read a document from a system tessellation (`None` if the tessellation
+    /// or document doesn't exist).
+    pub(crate) async fn get_system_document(&self, tess: &str, id: Ulid) -> Result<Option<Document>> {
+        if !self.tessellation_exists(tess) {
+            return Ok(None);
+        }
+        Ok(self.read_latest(&DocKey::new(tess, id)).await?.0)
+    }
+
+    /// Write a document into a system tessellation (created if missing).
+    /// `ttl` is an expiry in epoch milliseconds. Only on the Overseer.
+    pub(crate) async fn put_system_document(&self, tess: &str, id: Ulid, data: serde_json::Value, ttl: Option<i64>) -> Result<()> {
+        self.ensure_writable()?;
+        self.ensure_system_tessellation(tess)?;
+        let fields = crate::document::infer_fields_from_json(&data);
+        let doc = Document { id, tessellation: tess.to_string(), data: fields, ttl };
+        let item = writes::BatchItem { key: DocKey::new(tess, id), op: WalOp::Put(doc), expected_seq: None };
+        self.commit(vec![item]).await.map(|_| ())
+    }
+
+    /// Delete a document from a system tessellation.
+    pub(crate) async fn delete_system_document(&self, tess: &str, id: Ulid) -> Result<()> {
+        self.ensure_writable()?;
+        if !self.tessellation_exists(tess) {
+            return Ok(());
+        }
+        let op = WalOp::Delete { tessellation: tess.to_string(), id };
+        let item = writes::BatchItem { key: DocKey::new(tess, id), op, expected_seq: None };
+        self.commit(vec![item]).await.map(|_| ())
     }
 
     /// Create a system tessellation if missing, bypassing user-facing name rules.

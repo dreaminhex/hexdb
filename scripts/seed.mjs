@@ -3,13 +3,38 @@
 //
 // Usage (Node.js 18+, no dependencies), with the server running:
 //
-//     node scripts/seed.mjs
-//     HEXDB=http://127.0.0.1:7700 node scripts/seed.mjs      # another server
+//     HEXDB_TOKEN=hxk_... node scripts/seed.mjs                      # an API key (Account page)
+//     HEXDB_USER=hexdbadmin HEXDB_PASSWORD=... node scripts/seed.mjs  # or sign in
+//     HEXDB=http://127.0.0.1:7700 ...                                 # another server
+//
+// The user needs write access to the tessellations (an admin, or a writer on "*").
 //
 // Each tessellation is inserted in one atomic batch and skipped if it already has
 // documents, so re-running is safe and only fills in what is missing (e.g. the
 // sessions once they expire). Delete a tessellation to reseed it.
 const BASE = process.env.HEXDB ?? "http://127.0.0.1:7700"
+
+async function credentials() {
+  if (process.env.HEXDB_TOKEN) return process.env.HEXDB_TOKEN
+  const login = process.env.HEXDB_USER
+  const password = process.env.HEXDB_PASSWORD
+  if (!login || !password) {
+    console.error("Set HEXDB_TOKEN to an API key, or HEXDB_USER and HEXDB_PASSWORD to sign in.")
+    process.exit(1)
+  }
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ login, password, return_token: true }),
+  })
+  const body = await res.json()
+  if (!res.ok) {
+    console.error(`Sign-in failed: ${body.error?.message ?? res.status}`)
+    process.exit(1)
+  }
+  return body.token
+}
+const AUTH = { Authorization: `Bearer ${await credentials()}` }
 
 let state = 20261007
 const rand = () => ((state = (state * 1664525 + 1013904223) >>> 0) / 2 ** 32)
@@ -28,7 +53,7 @@ const person = () => {
 }
 
 async function count(tess) {
-  const res = await fetch(`${BASE}/${tess}/count`)
+  const res = await fetch(`${BASE}/${tess}/count`, { headers: AUTH })
   if (res.status === 404) return 0
   if (!res.ok) throw new Error(`${tess}: ${res.status} ${await res.text()}`)
   return (await res.json()).count
@@ -43,7 +68,7 @@ async function bulk(tess, docs, { ttl } = {}) {
   }
   const res = await fetch(`${BASE}/${tess}/_bulk${ttl ? `?ttl=${ttl}` : ""}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...AUTH },
     body: JSON.stringify(docs),
   })
   const body = await res.json()
@@ -56,7 +81,7 @@ async function bulk(tess, docs, { ttl } = {}) {
 async function existingCustomerIds(list) {
   const res = await fetch(`${BASE}/customers/_query`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...AUTH },
     body: JSON.stringify({ limit: 1000 }),
   })
   const byEmail = new Map((await res.json()).documents.map((d) => [d.email, d.id]))

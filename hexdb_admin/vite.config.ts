@@ -20,7 +20,17 @@ export default defineConfig({
     // Forward everything outside the UI base path (/ui/) to a running HexDB server,
     // including document routes like /articles/{id}.
     proxy: {
-      "^/(?!ui(/|$)).*": { target: api, changeOrigin: true },
+      "^/(?!ui(/|$)).*": {
+        target: api,
+        changeOrigin: true,
+        // HexDB only accepts cookie-authenticated changes from its own origin;
+        // present the proxied requests as coming from the API's origin.
+        configure: (proxy) => {
+          proxy.on("proxyReq", (request) => {
+            if (request.getHeader("origin")) request.setHeader("origin", api)
+          })
+        },
+      },
     },
   },
 })
