@@ -15,7 +15,9 @@
 // With `?ai=true` and an Anthropic API key (`[ai]` in hexdb.toml), the
 // shapes, the existing indexes and the documents' field names and types (no
 // values) are also sent to Claude for a second opinion, returned separately.
-// Shapes are kept in memory per hex and reset at restart.
+// Shapes are kept per hex, saved with the metrics history
+// (`query-stats.hxe`, encrypted) so they survive restarts; shapes not seen for
+// 30 days are dropped when they're loaded.
 
 use crate::{
     engine::HexDBEngine,
@@ -29,9 +31,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Shapes kept per tessellation (the least used are forgotten first).
 const MAX_SHAPES: usize = 200;
+/// Saved shapes older than this are dropped when loaded.
+const SHAPE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// What a filter (and sort) asks of the fields, without the values.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Shape {
     /// Fields compared for equality ($eq, $in).
     pub equality: BTreeSet<String>,
@@ -77,7 +81,7 @@ impl Shape {
 }
 
 /// Totals for one shape.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShapeStats {
     pub shape: Shape,
     pub count: u64,
@@ -122,6 +126,24 @@ impl QueryStats {
 
     pub fn forget(&self, tess: &str) {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).remove(tess);
+    }
+
+    /// Every tessellation's shapes, for saving.
+    pub(crate) fn snapshot(&self) -> HashMap<String, Vec<ShapeStats>> {
+        let all = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        all.iter().map(|(tess, shapes)| (tess.clone(), shapes.values().cloned().collect())).collect()
+    }
+
+    /// Restore saved shapes, dropping those not seen recently.
+    pub(crate) fn restore(&self, saved: HashMap<String, Vec<ShapeStats>>) {
+        let cutoff = chrono::Utc::now().timestamp_millis() - SHAPE_RETENTION_MS;
+        let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for (tess, shapes) in saved {
+            let kept: HashMap<Shape, ShapeStats> = shapes.into_iter().filter(|s| s.last_seen >= cutoff).map(|s| (s.shape.clone(), s)).collect();
+            if !kept.is_empty() {
+                all.insert(tess, kept);
+            }
+        }
     }
 }
 

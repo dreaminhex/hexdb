@@ -182,6 +182,9 @@ pub struct ListParams {
     pub after: Option<String>,
     /// Comma-separated field paths to return (default: all fields).
     pub fields: Option<String>,
+    /// `false` skips counting every match (`total` is null), so sorted and
+    /// filtered queries stop reading once the page is full.
+    pub total: Option<bool>,
 }
 
 /// JSON body for `POST /{tessellation}/_query`, for filters too long for a URL.
@@ -196,6 +199,8 @@ pub struct QueryRequest {
     pub after: Option<String>,
     /// Field paths to return: `["name", "address.city"]` or `"name,address.city"`.
     pub fields: Option<FieldList>,
+    /// `false` skips counting every match (`total` is null).
+    pub total: Option<bool>,
 }
 
 /// Field paths as a list or a comma-separated string.
@@ -270,6 +275,7 @@ async fn run_query(
     offset: Option<usize>,
     after: Option<&str>,
     fields: Option<Vec<String>>,
+    with_total: bool,
 ) -> ApiResult {
     existing_tessellation(engine, tess)?;
     let limit = limit.unwrap_or(DEFAULT_PAGE_SIZE);
@@ -286,6 +292,7 @@ async fn run_query(
         offset: offset.unwrap_or(0),
         limit,
         after,
+        with_total,
     };
 
     let page = engine.query_documents(tess, &query).await?;
@@ -490,6 +497,32 @@ pub async fn flush(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
         "wal_segments_deleted": stats.wal_segments_deleted,
     }))
     .into_response())
+}
+
+/// Options for `POST /backup`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupRequest {
+    /// Folder name inside the backup directory (default: time and sequence).
+    pub name: Option<String>,
+}
+
+/// Write a consistent backup of this hex's data while it keeps running.
+pub async fn backup(State(engine): Engine, Auth(principal): Auth, body: Option<Json<BackupRequest>>) -> ApiResult {
+    principal.require_action(Action::Maintenance)?;
+    let request = body.map(|Json(b)| b).unwrap_or_default();
+    let info = engine.backup(request.name.as_deref()).await?;
+    engine
+        .audit(&principal.login, "maintenance.backup", &engine.name, json!({ "name": info.name, "sequence": info.sequence, "files": info.files }))
+        .await;
+    Ok((StatusCode::CREATED, Json(json!(info))).into_response())
+}
+
+/// Backups in the backup directory, newest first.
+pub async fn list_backups(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_action(Action::Maintenance)?;
+    let backups = engine.list_backups()?;
+    Ok(Json(json!({ "directory": engine.backup_dir().display().to_string(), "backups": backups })).into_response())
 }
 
 /// Compact SSTables now. Also re-encrypts files written with a previous key.
@@ -823,7 +856,7 @@ pub async fn list_docs(
     let filter = parse_filter_param(params.filter.as_deref())?;
     let sort = parse_sort_text(params.sort.as_deref().unwrap_or(""))?;
     let fields = params.fields.as_deref().map(split_fields);
-    run_query(&engine, &tess, &filter, sort, params.limit, params.offset, params.after.as_deref(), fields).await
+    run_query(&engine, &tess, &filter, sort, params.limit, params.offset, params.after.as_deref(), fields, params.total.unwrap_or(true)).await
 }
 
 /// Query documents with a JSON body:
@@ -842,7 +875,7 @@ pub async fn query_docs(
         None => Vec::new(),
     };
     let fields = request.fields.map(FieldList::paths);
-    run_query(&engine, &tess, &request.filter, sort, request.limit, request.offset, request.after.as_deref(), fields).await
+    run_query(&engine, &tess, &request.filter, sort, request.limit, request.offset, request.after.as_deref(), fields, request.total.unwrap_or(true)).await
 }
 
 /// Count documents, optionally only those matching `?filter=<JSON>`.

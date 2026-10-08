@@ -2,6 +2,7 @@ import { useMemo, useState } from "react"
 import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts"
 import {
   IconAlertTriangle,
+  IconArchive,
   IconCircleCheck,
   IconDatabase,
   IconDeviceFloppy,
@@ -579,6 +580,21 @@ export function OverviewPage() {
   const status = usePoll(api.status, 5_000)
   const history = usePoll(() => api.history(Number(minutes)), 15_000, [minutes])
   const [flushing, setFlushing] = useState(false)
+  const [backingUp, setBackingUp] = useState(false)
+  const { me } = useAuth()
+  const maintenance = has(me, "maintenance")
+
+  const backup = async () => {
+    setBackingUp(true)
+    try {
+      const result = await api.backup()
+      toast.success(`Backed up ${formatNumber(result.files)} files (${formatBytes(result.bytes)}) to ${result.path}.`)
+    } catch (e) {
+      toast.error(`Backup failed: ${errorMessage(e)}`)
+    } finally {
+      setBackingUp(false)
+    }
+  }
 
   const flush = async () => {
     setFlushing(true)
@@ -621,9 +637,16 @@ export function OverviewPage() {
         <Button variant="outline" size="sm" onClick={() => void status.refresh()}>
           <IconRefresh /> Refresh
         </Button>
-        <Button variant="outline" size="sm" onClick={flush} disabled={flushing}>
-          {flushing ? <IconLoader2 className="animate-spin" /> : <IconDeviceFloppy />} Flush to disk
-        </Button>
+        {maintenance && (
+          <>
+            <Button variant="outline" size="sm" onClick={flush} disabled={flushing}>
+              {flushing ? <IconLoader2 className="animate-spin" /> : <IconDeviceFloppy />} Flush to disk
+            </Button>
+            <Button variant="outline" size="sm" onClick={backup} disabled={backingUp} title="Write a consistent backup to storage.backup_path">
+              {backingUp ? <IconLoader2 className="animate-spin" /> : <IconArchive />} Back up
+            </Button>
+          </>
+        )}
       </div>
       {status.data.replication && status.data.replication.state !== "leading" && (
         <div className="px-4 lg:px-6">

@@ -4,9 +4,16 @@
 // store and each SSTable's sorted index from the cursor, so a page costs about
 // its own size instead of a scan of every key.
 //
-// Counts and per-tessellation statistics are cached until the next write
-// (any commit bumps a generation counter) or until the earliest TTL among the
-// counted documents passes, whichever comes first.
+// Document counts are cached per tessellation and kept exact by commits: each
+// write adds or removes one depending on whether the document was visible
+// before it, so a busy tessellation isn't rescanned for every page's total.
+// A count is recomputed only when first needed, after its tessellation is
+// dropped, or once the earliest TTL among the counted documents passes.
+//
+// Each tessellation also has a write generation. Other statistics (sizes for
+// `/status`) are cached until their tessellation's generation moves, so writes
+// to one tessellation don't invalidate another's figures. A count computed
+// while a commit was running is stored only if the generation didn't move.
 //
 // Parsed documents are cached by (key, version), so repeated reads of the same
 // version skip shard decoding and JSON parsing. The cache holds at most a
@@ -89,6 +96,27 @@ impl DocCache {
     }
 }
 
+/// Write generations and cached document counts, per tessellation.
+#[derive(Default)]
+pub(crate) struct Counts {
+    generations: HashMap<String, u64>,
+    cached: HashMap<String, CachedCount>,
+}
+
+struct CachedCount {
+    count: usize,
+    /// Epoch ms when a counted document expires (the count is stale after it).
+    valid_until: i64,
+}
+
+/// How a commit changed one tessellation's count: the difference, and the
+/// earliest TTL among the documents it made visible.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct CountDelta {
+    pub(crate) delta: i64,
+    pub(crate) earliest_ttl: Option<i64>,
+}
+
 /// Cached statistics for one tessellation.
 #[derive(Clone)]
 pub(crate) struct CachedStats {
@@ -105,24 +133,76 @@ impl HexDBEngine {
         self.generation.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn bump_generation(&self) {
+    /// A tessellation's write generation.
+    fn tess_generation(&self, tess: &str) -> u64 {
+        self.counts.lock().unwrap().generations.get(tess).copied().unwrap_or(0)
+    }
+
+    /// Tessellations whose count is cached (a commit computes deltas for these).
+    pub(crate) fn counted_tessellations(&self) -> std::collections::HashSet<String> {
+        self.counts.lock().unwrap().cached.keys().cloned().collect()
+    }
+
+    /// Record that these tessellations changed: bump their generations and
+    /// apply count deltas. A cached count without a delta is dropped (it may
+    /// have been stored after the commit decided which counts to adjust).
+    pub(crate) fn note_writes(&self, touched: &[String], deltas: &HashMap<String, CountDelta>) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+        let mut counts = self.counts.lock().unwrap();
+        for tess in touched {
+            *counts.generations.entry(tess.clone()).or_default() += 1;
+            match (counts.cached.get_mut(tess), deltas.get(tess)) {
+                (Some(cached), Some(d)) => {
+                    cached.count = (cached.count as i64 + d.delta).max(0) as usize;
+                    if let Some(t) = d.earliest_ttl {
+                        cached.valid_until = cached.valid_until.min(t);
+                    }
+                }
+                (Some(_), None) => {
+                    counts.cached.remove(tess);
+                }
+                (None, _) => {}
+            }
+        }
+    }
+
+    /// Visible documents in a tessellation: the cached count, or a fresh one.
+    pub(crate) async fn cached_count(&self, tess: &str) -> usize {
+        let now = Utc::now().timestamp_millis();
+        let generation = {
+            let counts = self.counts.lock().unwrap();
+            if let Some(c) = counts.cached.get(tess) {
+                if now < c.valid_until {
+                    return c.count;
+                }
+            }
+            counts.generations.get(tess).copied().unwrap_or(0)
+        };
+        let stats = self.cached_stats(tess).await;
+        let valid_until = self.stats_cache.lock().unwrap().get(tess).map(|c| c.valid_until).unwrap_or(i64::MIN);
+        let mut counts = self.counts.lock().unwrap();
+        if counts.generations.get(tess).copied().unwrap_or(0) == generation && now < valid_until {
+            counts.cached.insert(tess.to_string(), CachedCount { count: stats.document_count, valid_until });
+        }
+        stats.document_count
     }
 
     /// Statistics for a tessellation, from the cache when it's still valid.
     pub(crate) async fn cached_stats(&self, tess: &str) -> TessellationStats {
         let now = Utc::now().timestamp_millis();
-        let generation = self.generation.load(Ordering::SeqCst);
+        let generation = self.tess_generation(tess);
         if let Some(cached) = self.stats_cache.lock().unwrap().get(tess) {
             if cached.generation == generation && now < cached.valid_until {
                 return cached.stats.clone();
             }
         }
         let (stats, valid_until) = self.compute_stats(tess, now).await;
-        self.stats_cache
-            .lock()
-            .unwrap()
-            .insert(tess.to_string(), CachedStats { generation, valid_until, stats: stats.clone() });
+        if self.tess_generation(tess) == generation {
+            self.stats_cache
+                .lock()
+                .unwrap()
+                .insert(tess.to_string(), CachedStats { generation, valid_until, stats: stats.clone() });
+        }
         stats
     }
 

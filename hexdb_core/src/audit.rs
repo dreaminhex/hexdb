@@ -212,10 +212,11 @@ impl HexDBEngine {
                     offset: query.offset.unwrap_or(0),
                     limit: query.limit.unwrap_or(100).clamp(1, 1000),
                     after: None,
+                    with_total: true,
                 },
             )
             .await?;
         let events = page.documents.iter().filter_map(|d| serde_json::from_value(d.data_json()).ok()).collect();
-        Ok((events, page.total))
+        Ok((events, page.total.unwrap_or(0)))
     }
 }

@@ -61,6 +61,8 @@ ROUTES = [
     ("get", "/plugins", "Server", "Plugins and their delivery state (plugins permission)", {"responses": ok()}),
     ("post", "/flush", "Server", "Flush memory to SSTables (maintenance permission)", {"responses": ok()}),
     ("post", "/compact", "Server", "Compact SSTables (maintenance permission)", {"responses": ok()}),
+    ("post", "/backup", "Server", "Write a consistent backup while running (maintenance permission)", {"requestBody": body({"type": "object", "properties": {"name": {"type": "string"}}}), "responses": ok("Created", status="201")}),
+    ("get", "/backups", "Server", "Backups in the backup directory (maintenance permission)", {"responses": ok()}),
     ("post", "/shutdown", "Server", "Shut down gracefully (shutdown token or admin)", {"responses": {"202": {"description": "Shutting down"}}}),
     ("get", "/openapi.json", "Server", "This description", {"security": [], "responses": ok()}),
     # Tessellations
@@ -79,10 +81,10 @@ ROUTES = [
     ("delete", "/tessellations/{name}/schemas", "Schemas", "Remove every schema version (manage)", {"parameters": [NAME], "responses": no_content()}),
     ("post", "/tessellations/{name}/schemas/check", "Schemas", "Check a schema without registering it", {"parameters": [NAME], "requestBody": body(), "responses": ok()}),
     # Documents
-    ("get", "/{tessellation}", "Documents", "List documents (?filter=&sort=&limit=&offset=&after=&fields=)", {"parameters": [TESS] + [param(n, "query") for n in ("filter", "sort", "limit", "offset", "after", "fields")], "responses": ok()}),
+    ("get", "/{tessellation}", "Documents", "List documents (?filter=&sort=&limit=&offset=&after=&fields=&total=)", {"parameters": [TESS] + [param(n, "query") for n in ("filter", "sort", "limit", "offset", "after", "fields", "total")], "responses": ok()}),
     ("post", "/{tessellation}", "Documents", "Insert a document", {"parameters": [TESS, TTL, IDEM], "requestBody": body(), "responses": ok("Created", status="201")}),
     ("get", "/{tessellation}/count", "Documents", "Count documents (?filter=)", {"parameters": [TESS, param("filter", "query")], "responses": ok()}),
-    ("post", "/{tessellation}/_query", "Documents", "Query: filter, sort, paging, projection", {"parameters": [TESS], "requestBody": body({"type": "object", "properties": {"filter": OBJ, "sort": {}, "limit": {"type": "integer"}, "offset": {"type": "integer"}, "after": {"type": "string"}, "fields": {}}}), "responses": ok()}),
+    ("post", "/{tessellation}/_query", "Documents", "Query: filter, sort, paging, projection", {"parameters": [TESS], "requestBody": body({"type": "object", "properties": {"filter": OBJ, "sort": {}, "limit": {"type": "integer"}, "offset": {"type": "integer"}, "after": {"type": "string"}, "fields": {}, "total": {"type": "boolean", "description": "false skips counting every match (total is null)"}}}), "responses": ok()}),
     ("post", "/{tessellation}/_aggregate", "Documents", "Group and aggregate", {"parameters": [TESS], "requestBody": body(description="{\"filter\", \"group_by\", \"aggregates\": {\"total\": {\"$sum\": \"price\"}}, \"sort\", \"limit\"}"), "responses": ok()}),
     ("post", "/{tessellation}/_bulk", "Documents", "Insert up to 1000 documents atomically", {"parameters": [TESS, TTL, IDEM], "requestBody": body({"type": "array", "items": OBJ}), "responses": ok("Created", status="201")}),
     ("put", "/{tessellation}/_bulk", "Documents", "Replace several documents atomically", {"parameters": [TESS, IDEM], "requestBody": body({"type": "array", "items": OBJ}), "responses": ok()}),

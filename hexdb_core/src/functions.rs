@@ -321,7 +321,8 @@ fn query_from(body: &Value) -> Result<(DocumentQuery, Vec<String>)> {
     let limit = body.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 1000) as usize;
     let offset = body.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
     let fields: Vec<String> = body.get("fields").and_then(Value::as_array).map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect()).unwrap_or_default();
-    Ok((DocumentQuery { filter, sort, offset, limit, after: None }, fields))
+    let with_total = body.get("total").and_then(Value::as_bool).unwrap_or(true);
+    Ok((DocumentQuery { filter, sort, offset, limit, after: None, with_total }, fields))
 }
 
 // ---------------------------------------------------------------------------

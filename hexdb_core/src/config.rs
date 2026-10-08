@@ -126,6 +126,11 @@ pub struct StorageConfig {
     /// Most disk space the change history may use, in MB.
     #[serde(default = "default_change_history_mb")]
     pub change_history_mb: u64,
+    /// Where `POST /backup` writes backups. Empty: `backups` next to the data
+    /// directory. Must be outside the data directory; on the same file system,
+    /// SSTables are hard-linked instead of copied.
+    #[serde(default)]
+    pub backup_path: String,
 }
 
 fn default_change_history_hours() -> u64 {
@@ -398,6 +403,7 @@ impl Default for HexConfig {
                 wal_sync: true,
                 change_history_hours: default_change_history_hours(),
                 change_history_mb: default_change_history_mb(),
+                backup_path: String::new(),
             },
             compression: CompressionConfig {
                 compression_level: 0,
@@ -420,6 +426,15 @@ impl HexConfig {
     /// The resolved data directory.
     pub fn storage_dir(&self) -> PathBuf {
         PathBuf::from(&self.storage.path)
+    }
+
+    /// The resolved backup directory (see `storage.backup_path`).
+    pub fn backup_dir(&self) -> PathBuf {
+        if !self.storage.backup_path.is_empty() {
+            return PathBuf::from(&self.storage.backup_path);
+        }
+        let data = crate::config::absolute(&self.storage_dir());
+        data.parent().map(|p| p.join("backups")).unwrap_or_else(|| PathBuf::from("backups"))
     }
 
     /// The resolved admin UI directory.
@@ -549,6 +564,9 @@ pub fn load_config_from(explicit: Option<&Path>) -> Result<HexConfig, config::Co
     };
     hex_config.storage.path = resolve_path(&base, &hex_config.storage.path);
     hex_config.ui.path = resolve_path(&base, &hex_config.ui.path);
+    if !hex_config.storage.backup_path.is_empty() {
+        hex_config.storage.backup_path = resolve_path(&base, &hex_config.storage.backup_path);
+    }
     for path in [&mut hex_config.tls.cert_file, &mut hex_config.tls.key_file, &mut hex_config.tls.ca_file] {
         if !path.is_empty() {
             *path = resolve_path(&base, path);

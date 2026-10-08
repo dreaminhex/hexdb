@@ -1110,6 +1110,86 @@
         }
       }
     },
+    "/backup": {
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Write a consistent backup while running (maintenance permission)",
+        "operationId": "post_backup",
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/backups": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Backups in the backup directory (maintenance permission)",
+        "operationId": "get_backups",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/shutdown": {
       "post": {
         "tags": [
@@ -1810,7 +1890,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "List documents (?filter=&sort=&limit=&offset=&after=&fields=)",
+        "summary": "List documents (?filter=&sort=&limit=&offset=&after=&fields=&total=)",
         "operationId": "get_tessellation",
         "parameters": [
           {
@@ -1869,6 +1949,15 @@
           },
           {
             "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "total",
             "in": "query",
             "required": false,
             "description": "",
@@ -2065,7 +2154,11 @@
                   "after": {
                     "type": "string"
                   },
-                  "fields": {}
+                  "fields": {},
+                  "total": {
+                    "type": "boolean",
+                    "description": "false skips counting every match (total is null)"
+                  }
                 }
               }
             }

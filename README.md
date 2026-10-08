@@ -21,7 +21,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon sharding that repairs corrupted memory.
-- **Operations.** An admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, and drivers for Node.js, Python and .NET.
+- **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, and drivers for Node.js, Python and .NET.
 
 ## Quick start
 
@@ -81,6 +81,7 @@ hexdb stop [--force]             stop it gracefully
 hexdb health                     is it up?
 hexdb status                     status and metrics (needs HEXDB_TOKEN)
 hexdb secret                     print a new random key
+hexdb backup [--name N] [--list] back up the running server (needs HEXDB_TOKEN)
 hexdb plugins add|remove|list    manage the plugin registry
 hexdb lattice spawn --count 2    start more hexes on this machine that join its lattice
 hexdb lattice list|stop          list or stop them (stop --remove deletes their data)
@@ -94,7 +95,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 
 | Page | What it does |
 | --- | --- |
-| Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, and "Add a hex" for joining new servers |
+| Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, and "Add a hex" for joining new servers; flush and back up |
 | Queries | A GraphQL console with schema-aware completion, examples and history |
 | Tessellations | Create and delete tessellations; manage indexes (with analyzer choice and index suggestions) and schemas |
 | Documents | Browse with filters and sorting; create, edit and delete documents |
@@ -151,4 +152,3 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 
 - Every hex holds a full copy of the data. Horizontal partitioning (sharding across hexes) isn't implemented.
 - There's no SQL interface, so no ODBC or JDBC driver yet.
-- The query advisor's statistics and the in-memory change feed reset at restart. The on-disk change history covers the gap for consumers.

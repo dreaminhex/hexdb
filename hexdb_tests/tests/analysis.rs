@@ -64,12 +64,14 @@ const STATUSES: [&str; 3] = ["draft", "live", "gone"];
 
 #[test]
 fn the_advisor_suggests_indexes_from_observed_queries() -> Result<()> {
-    let server = TestServer::start()?;
+    let mut server = TestServer::start()?;
     let docs: Vec<Value> = (0..300).map(|i| json!({ "status": STATUSES[i % 3], "views": i, "author": format!("a{}", i % 50) })).collect();
     server.request(Method::POST, "/posts/_bulk", Some(&Value::Array(docs)), &[])?;
     for i in 0..12 {
         server.request(Method::POST, "/posts/_query", Some(&json!({ "filter": { "author": format!("a{}", i), "views": { "$gt": 10 } } })), &[])?;
     }
+    // What the advisor saw survives a restart.
+    server.restart()?;
     let advice = server.request(Method::GET, "/tessellations/posts/advice", None, &[])?;
     assert_eq!(advice.status, 200, "{}", advice.body);
     assert_eq!(advice.body["queries_observed"], 12);

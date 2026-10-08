@@ -621,6 +621,16 @@ pub struct CompactionStats {
 }
 
 impl SstStore {
+    /// Every live SSTable as (tessellation, path), for a backup, with
+    /// compaction held off until the returned guard is dropped (so no listed
+    /// file is deleted while it's being copied).
+    pub(crate) async fn hold_tables(&self) -> (tokio::sync::MutexGuard<'_, ()>, Vec<(String, PathBuf)>) {
+        let guard = self.compaction.lock().await;
+        let tables = self.tables.read().await;
+        let files = tables.iter().flat_map(|(tess, files)| files.iter().map(move |f| (tess.clone(), f.path.clone()))).collect();
+        (guard, files)
+    }
+
     /// Open every SSTable under `base`. Leftover temporary files from an
     /// interrupted write are removed.
     pub fn open(base: &Path, compression_level: i32, keys: Arc<KeyRing>) -> Result<SstStore> {

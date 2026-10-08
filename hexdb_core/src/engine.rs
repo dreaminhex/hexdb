@@ -41,6 +41,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
+pub(crate) mod backup;
 mod indexing;
 mod reads;
 mod history;
@@ -248,8 +249,10 @@ pub struct HexDBEngine {
     pub lattice_keys: crate::network::lattice_auth::LatticeKeys,
     /// Nonces of discovery hellos and replication requests already seen.
     pub lattice_nonces: crate::network::lattice_auth::NonceCache,
-    /// Bumped by every change to stored data; invalidates `stats_cache`.
+    /// Bumped by every change to stored data (the role cache keys on it).
     generation: AtomicU64,
+    /// Per-tessellation write generations and document counts (see `reads`).
+    counts: std::sync::Mutex<reads::Counts>,
     stats_cache: std::sync::Mutex<HashMap<String, reads::CachedStats>>,
     doc_cache: reads::DocCache,
     /// The storage key ring (for encrypted metadata files).
@@ -276,6 +279,8 @@ pub struct HexDBEngine {
 const MAX_WRITE_RETRIES: usize = 16;
 /// The saved metrics history in the data directory.
 const METRICS_FILE: &str = "metrics-history.hxe";
+/// The query advisor's saved statistics.
+const QUERY_STATS_FILE: &str = "query-stats.hxe";
 
 impl HexDBEngine {
     /// Open (or create) the storage directory, recover from SSTables and the
@@ -443,6 +448,7 @@ impl HexDBEngine {
             lattice_keys,
             lattice_nonces: crate::network::lattice_auth::NonceCache::default(),
             generation: AtomicU64::new(0),
+            counts: std::sync::Mutex::new(reads::Counts::default()),
             stats_cache: std::sync::Mutex::new(HashMap::new()),
             doc_cache: reads::DocCache::new(ram_budget / 4),
             keys: keys.clone(),
@@ -565,15 +571,27 @@ impl HexDBEngine {
             || self.tessellation_info(name).is_some_and(|info| info.kind == "system")
     }
 
-    /// Save the metrics history (encrypted) to the data directory.
+    /// Save the metrics history and the query advisor's statistics
+    /// (encrypted) to the data directory.
     pub fn save_metrics_history(&self) -> Result<()> {
         let bytes = serde_json::to_vec(&self.history.all())?;
-        crate::crypt::write_sealed_file(&self.storage_dir.join(METRICS_FILE), &self.keys, &bytes)
+        crate::crypt::write_sealed_file(&self.storage_dir.join(METRICS_FILE), &self.keys, &bytes)?;
+        let stats = serde_json::to_vec(&self.query_stats.snapshot())?;
+        crate::crypt::write_sealed_file(&self.storage_dir.join(QUERY_STATS_FILE), &self.keys, &stats)
     }
 
     /// Load the saved metrics history, and continue the operation counters
-    /// from the newest sample so rates stay continuous across restarts.
+    /// from the newest sample so rates stay continuous across restarts. Also
+    /// load the query advisor's statistics.
     fn load_metrics_history(&self) {
+        match crate::crypt::read_sealed_file(&self.storage_dir.join(QUERY_STATS_FILE), &self.keys) {
+            Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
+                Ok(saved) => self.query_stats.restore(saved),
+                Err(e) => warn!("Ignoring unreadable query statistics: {}", e),
+            },
+            Ok(None) => {}
+            Err(e) => warn!("Ignoring unreadable query statistics: {:#}", e),
+        }
         match crate::crypt::read_sealed_file(&self.storage_dir.join(METRICS_FILE), &self.keys) {
             Ok(Some(bytes)) => match serde_json::from_slice::<Vec<crate::metrics::MetricsSample>>(&bytes) {
                 Ok(samples) => {
@@ -732,7 +750,8 @@ impl HexDBEngine {
             state.hex.remove_tessellation(name);
             self.indexes.write().unwrap().by_tessellation.remove(name);
             self.doc_cache.drop_tessellation(name);
-            self.bump_generation();
+            self.query_stats.forget(name);
+            self.note_writes(&[name.to_string()], &HashMap::new());
 
             let saved = {
                 let mut catalog = self.catalog.lock().unwrap();
@@ -783,9 +802,10 @@ impl HexDBEngine {
         Ok(doc.map(|d| (d, seq)))
     }
 
-    /// Number of visible documents in a tessellation (cached; see `reads`).
+    /// Number of visible documents in a tessellation (cached and kept up to
+    /// date by commits; see `reads`).
     pub async fn count_documents(&self, tess: &str) -> Result<usize> {
-        Ok(self.cached_stats(tess).await.document_count)
+        Ok(self.cached_count(tess).await)
     }
 
     /// Per-tessellation statistics (cached; see `reads`).

@@ -2,6 +2,7 @@
 name = "hexdb_api"
 version = "0.1.0"
 edition = "2021"
+description = "HexDB server: a document database with REST, GraphQL, replication and an admin UI"
 
 [dependencies]
 hexdb_core = { path = "../hexdb_core" }

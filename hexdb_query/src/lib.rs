@@ -141,7 +141,7 @@ fn parse_after(after: Option<ID>) -> GqlResult<Option<Ulid>> {
 }
 
 async fn query_page(
-    engine: &HexDBEngine,
+    ctx: &Context<'_>,
     tess: &str,
     filter: Option<Json<Value>>,
     sort: Option<Vec<SortInput>>,
@@ -149,22 +149,27 @@ async fn query_page(
     offset: Option<i32>,
     after: Option<ID>,
 ) -> GqlResult<DocumentPage> {
+    let engine = engine(ctx);
     existing_tessellation(engine, tess)?;
     let limit = limit.unwrap_or(100);
     if limit < 0 || limit as usize > MAX_PAGE_SIZE {
         return Err(gql_error("INVALID_REQUEST", format!("limit must be 0-{}.", MAX_PAGE_SIZE)));
     }
+    // Count every match only if the client asked for `total`; otherwise a
+    // sorted or filtered query can stop once its page is full.
+    let with_total = ctx.look_ahead().field("total").exists();
     let query = DocumentQuery {
         filter: parse_filter(filter)?,
         sort: sort.unwrap_or_default().into_iter().map(Into::into).collect(),
         offset: offset.unwrap_or(0).max(0) as usize,
         limit: limit as usize,
         after: parse_after(after)?,
+        with_total,
     };
     let page = engine.query_documents(tess, &query).await.map_err(to_gql)?;
     Ok(DocumentPage {
         documents: page.documents.into_iter().map(DocumentObject).collect(),
-        total: page.total,
+        total: page.total.unwrap_or(0),
         next: page.next.map(|id| ID(id.to_string())),
         indexes_used: page.indexes,
         scanned: page.scanned,
@@ -239,7 +244,7 @@ impl DocumentObject {
 #[derive(SimpleObject)]
 pub struct DocumentPage {
     pub documents: Vec<DocumentObject>,
-    /// Documents matching the filter, across all pages.
+    /// Documents matching the filter, across all pages (counted only when selected).
     pub total: usize,
     /// Pass as `after` for the next page (unsorted queries only).
     pub next: Option<ID>,
@@ -338,7 +343,7 @@ impl TessellationObject {
         after: Option<ID>,
     ) -> GqlResult<DocumentPage> {
         require(ctx, Permission::Read, &self.name)?;
-        query_page(engine(ctx), &self.name, filter, sort, limit, offset, after).await
+        query_page(ctx, &self.name, filter, sort, limit, offset, after).await
     }
 }
 
@@ -518,7 +523,7 @@ impl QueryRoot {
         after: Option<ID>,
     ) -> GqlResult<DocumentPage> {
         require(ctx, Permission::Read, &tessellation)?;
-        query_page(engine(ctx), &tessellation, filter, sort, limit, offset, after).await
+        query_page(ctx, &tessellation, filter, sort, limit, offset, after).await
     }
 
     /// Number of documents, optionally only those matching a filter.

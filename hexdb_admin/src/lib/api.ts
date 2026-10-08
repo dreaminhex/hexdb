@@ -582,6 +582,7 @@ export const api = {
     return request<LogPage>("GET", `/logs?${params}`)
   },
   flush: () => request<{ entries: number; tessellations: number }>("POST", "/flush"),
+  backup: (name?: string) => request<{ name: string; path: string; sequence: number; files: number; linked: number; bytes: number; millis: number }>("POST", "/backup", name ? { name } : {}),
 
   tessellations: () => request<{ tessellations: Tessellation[] }>("GET", "/tessellations").then((r) => r.tessellations),
   tessellation: (name: string) => request<Tessellation>("GET", `/tessellations/${enc(name)}`),

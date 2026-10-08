@@ -267,3 +267,73 @@ fn index_snapshots_load_at_startup_and_catch_up_after_a_crash() -> Result<()> {
     assert_eq!(query(&server, "posts", json!({ "status": "live" }))?, expected_status);
     Ok(())
 }
+
+/// One page of a sorted query: the IDs in order, `total`, and the indexes used.
+fn sorted_page(server: &TestServer, tess: &str, body: &Value) -> Result<(Vec<String>, Value, Vec<String>)> {
+    let res = server.request(Method::POST, &format!("/{}/_query", tess), Some(body), &[])?;
+    assert_eq!(res.status.as_u16(), 200, "{} -> {}", body, res.body);
+    let ids = res.body["documents"].as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap().to_string()).collect();
+    let used = res.body["plan"]["indexes"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    Ok((ids, res.body["total"].clone(), used))
+}
+
+#[test]
+fn sorted_queries_walk_the_sort_index_and_match_in_memory_sorting() -> Result<()> {
+    let server = TestServer::start()?;
+    // Ranks repeat (ties), some are missing or null, and groups give filters something to do.
+    let docs: Vec<Value> = (0..240)
+        .map(|i| {
+            let group = ["a", "b", "c"][i % 3];
+            let mut doc = json!({ "n": i, "rank": (i * 7) % 23, "group": group });
+            if i % 17 == 0 {
+                doc.as_object_mut().unwrap().remove("rank");
+            }
+            if i % 29 == 0 {
+                doc["rank"] = Value::Null;
+            }
+            doc
+        })
+        .collect();
+    assert_eq!(server.request(Method::POST, "/ranked/_bulk", Some(&json!(docs)), &[])?.status.as_u16(), 201);
+    assert_eq!(create_index(&server, "ranked", json!({ "fields": ["group"] }))?.status.as_u16(), 201);
+
+    let mut queries = Vec::new();
+    for filter in [json!({}), json!({ "group": "b" }), json!({ "n": { "$gte": 100 } }), json!({ "group": { "$in": ["a", "c"] }, "n": { "$lt": 200 } })] {
+        for sort in ["rank", "-rank", "rank,-n", "-rank,group,n"] {
+            for (offset, limit) in [(0, 10), (5, 20), (60, 25), (230, 50)] {
+                queries.push(json!({ "filter": filter, "sort": sort, "offset": offset, "limit": limit }));
+            }
+        }
+    }
+
+    // Before the index exists every query sorts in memory: the reference answers.
+    let mut expected = Vec::new();
+    for q in &queries {
+        expected.push(sorted_page(&server, "ranked", q)?);
+    }
+    assert_eq!(create_index(&server, "ranked", json!({ "fields": ["rank"] }))?.status.as_u16(), 201);
+
+    for (q, (ids, total, _)) in queries.iter().zip(&expected) {
+        // With the total: the same page and total (filtered queries still sort in memory).
+        let (with_total, counted, _) = sorted_page(&server, "ranked", q)?;
+        assert_eq!(&with_total, ids, "{}", q);
+        assert_eq!(&counted, total, "{}", q);
+        // Without it: the same page, read through the sort index, and no total.
+        let mut fast = q.clone();
+        fast["total"] = json!(false);
+        let (page, no_total, used) = sorted_page(&server, "ranked", &fast)?;
+        assert_eq!(&page, ids, "{}", fast);
+        assert!(no_total.is_null(), "{}: total {}", fast, no_total);
+        assert!(used.contains(&"rank".to_string()), "{} used {:?}", fast, used);
+    }
+
+    // Unsorted, filtered, without a total: the same page in ID order, read only as far as needed.
+    let all = sorted_page(&server, "ranked", &json!({ "filter": { "group": "c" }, "limit": 1000 }))?.0;
+    let res = server.request(Method::POST, "/ranked/_query", Some(&json!({ "filter": { "group": "c" }, "limit": 10, "total": false })), &[])?;
+    let page: Vec<String> = res.body["documents"].as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(page, all[..10].to_vec());
+    assert!(res.body["total"].is_null());
+    assert_eq!(res.body["next"], json!(all[9]));
+    assert!(res.body["plan"]["scanned"].as_u64().unwrap() <= 11, "{}", res.body);
+    Ok(())
+}

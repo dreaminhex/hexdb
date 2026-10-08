@@ -24,7 +24,7 @@ const LEGACY_CATALOG_FILE: &str = "catalog.json";
 const RESERVED_NAMES: &[&str] = &[
     "health", "status", "flush", "shutdown", "tessellation", "tessellations", "ui", "wal", "graphql",
     "logs", "changes", "indexes", "auth", "transactions", "plugins", "lattice", "replication", "compact",
-    "audit", "settings", "join", "streams", "functions", "schedules", "analyzers", "schemas", "openapi",
+    "audit", "settings", "join", "streams", "functions", "schedules", "analyzers", "schemas", "openapi", "backup", "backups",
 ];
 const MAX_NAME_LEN: usize = 64;
 

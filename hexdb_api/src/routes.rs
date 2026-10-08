@@ -90,6 +90,8 @@ pub fn app_router(
         .route("/lattice/throttle", post(crate::lattice::throttle))
         .route("/transactions", post(transaction).layer(DefaultBodyLimit::max(body_limit)))
         .route("/flush", post(flush))
+        .route("/backup", post(backup))
+        .route("/backups", get(list_backups))
         .route("/compact", post(compact))
         .route("/shutdown", post(shutdown))
 

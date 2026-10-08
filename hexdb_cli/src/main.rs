@@ -74,6 +74,18 @@ enum Commands {
     },
     /// Print a new random key for storage.encryption_key or network.lattice_secret
     Secret,
+    /// Back up the running server's data (needs a token with the maintenance permission)
+    Backup {
+        /// Folder name for the backup (default: date, time and sequence number)
+        #[arg(long)]
+        name: Option<String>,
+        /// List existing backups instead of making one
+        #[arg(long)]
+        list: bool,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long)]
+        url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -160,6 +172,25 @@ async fn main() -> Result<()> {
         }
         Commands::Secret => {
             println!("{}", lattice::new_secret());
+            Ok(())
+        }
+        Commands::Backup { name, list, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb backup` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key with the maintenance permission.");
+            }
+            if list {
+                println!("{}", pretty(&get_text(&config, &base, "/backups", token).await?));
+                return Ok(());
+            }
+            let body = serde_json::json!({ "name": name });
+            let text = request_text(&config, &base, reqwest::Method::POST, "/backup", token, Some(&body)).await?;
+            let info: serde_json::Value = serde_json::from_str(&text)?;
+            println!(
+                "Backed up {} file(s), {} bytes, up to sequence {} to {}",
+                info["files"], info["bytes"], info["sequence"], info["path"].as_str().unwrap_or_default()
+            );
+            println!("To restore: stop the server, point storage.path at that folder (same encryption keys), and start it.");
             Ok(())
         }
     }
@@ -401,9 +432,23 @@ fn http_client(config: &HexConfig) -> Result<reqwest::Client> {
 }
 
 async fn get_text(config: &HexConfig, base: &str, path: &str, token: Option<&str>) -> Result<String> {
-    let mut request = http_client(config)?.get(format!("{}{}", base, path));
+    request_text(config, base, reqwest::Method::GET, path, token, None).await
+}
+
+async fn request_text(
+    config: &HexConfig,
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&serde_json::Value>,
+) -> Result<String> {
+    let mut request = http_client(config)?.request(method, format!("{}{}", base, path));
     if let Some(token) = token {
         request = request.bearer_auth(token);
+    }
+    if let Some(body) = body {
+        request = request.json(body);
     }
     let res = request
         .send()
@@ -422,7 +467,7 @@ async fn get_text(config: &HexConfig, base: &str, path: &str, token: Option<&str
         bail!("{}{} needs valid credentials: set HEXDB_TOKEN (or --token) to an API key.", base, path);
     }
     if status == reqwest::StatusCode::FORBIDDEN {
-        bail!("{}{} needs an administrator's API key.", base, path);
+        bail!("{}{} isn't allowed with this API key (check its user's roles).", base, path);
     }
     if !status.is_success() {
         bail!("{}{} returned {}: {}", base, path, status, body);

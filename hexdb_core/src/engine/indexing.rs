@@ -338,10 +338,19 @@ impl HexDBEngine {
     /// `None` (use the general path) when there's no such index, or when a
     /// document's sort value doesn't match its index key (arrays, objects),
     /// so results are always the same as an in-memory sort.
+    /// Answer a sorted query by walking the first sort key's field index in
+    /// order: candidates outside the plan are skipped without being read, the
+    /// filter is checked on the rest, and reading stops once the page (plus
+    /// any documents tied with its last one on the first key, which the other
+    /// sort keys order) is complete. `None` when no suitable index exists or
+    /// the index disagrees with a document (the caller falls back to sorting
+    /// in memory). Counts the total only for unfiltered queries.
     pub(crate) async fn query_sorted_by_index(
         &self,
         tess: &str,
         query: &crate::engine::DocumentQuery,
+        filter: &crate::filter::Filter,
+        plan: Option<&Plan>,
     ) -> Result<Option<crate::engine::QueryPage>> {
         let key = &query.sort[0];
         let (name, ordered) = {
@@ -356,28 +365,40 @@ impl HexDBEngine {
         let Some(ordered) = ordered else { return Ok(None) };
         let path: Vec<String> = key.field.split('.').map(String::from).collect();
         let want = query.offset.saturating_add(query.limit);
+        let ties_matter = query.sort.len() > 1;
         let mut seen = HashSet::new();
         let mut documents = Vec::new();
+        let mut last_part = None;
         let mut scanned = 0;
         for (part, id) in ordered {
-            if documents.len() >= want {
+            if documents.len() >= want && (!ties_matter || last_part.as_ref() != Some(&part)) {
                 break;
             }
-            if !seen.insert(id) {
+            if !seen.insert(id) || plan.is_some_and(|p| !p.candidates.contains(&id)) {
                 continue;
             }
             scanned += 1;
             let Some(doc) = self.read_latest(&crate::hex::DocKey::new(tess, id)).await?.0 else { continue };
             let json = doc.to_api_json();
             let value = crate::filter::resolve(&json, &path).first().map(|v| (*v).clone()).unwrap_or(serde_json::Value::Null);
-            if crate::index::KeyPart::from_scalar(&value) != Some(part) {
+            if crate::index::KeyPart::from_scalar(&value).as_ref() != Some(&part) {
                 return Ok(None);
             }
+            if !filter.matches(&doc) {
+                continue;
+            }
             documents.push(doc);
+            last_part = Some(part);
         }
-        let total = self.count_documents(tess).await?;
+        // Documents tied on the first key are ordered by the remaining keys.
+        crate::filter::sort_documents(&mut documents, &query.sort);
+        let total = if query.with_total && query.filter.is_empty() { Some(self.count_documents(tess).await?) } else { None };
+        let mut indexes = plan.map(|p| p.indexes.clone()).unwrap_or_default();
+        if !indexes.contains(&name) {
+            indexes.push(name);
+        }
         let documents = documents.into_iter().skip(query.offset).take(query.limit).collect();
-        Ok(Some(crate::engine::QueryPage { documents, total, next: None, indexes: vec![name], scanned }))
+        Ok(Some(crate::engine::QueryPage { documents, total, next: None, indexes, scanned }))
     }
 
     /// Bind `$text` to the tessellation's text index fields, and ask the

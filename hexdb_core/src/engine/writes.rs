@@ -30,7 +30,7 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use ulid::Ulid;
 
 /// System tessellation holding idempotency records.
@@ -128,11 +128,15 @@ pub struct DocumentQuery {
     pub limit: usize,
     /// Return documents with IDs after this one (ID order only).
     pub after: Option<Ulid>,
+    /// Count every match for `total`. Without it, a query can stop reading
+    /// once its page is full (much faster for sorted or filtered queries on
+    /// large tessellations), and `total` is `None`.
+    pub with_total: bool,
 }
 
 impl Default for DocumentQuery {
     fn default() -> Self {
-        DocumentQuery { filter: Filter::all(), sort: Vec::new(), offset: 0, limit: 100, after: None }
+        DocumentQuery { filter: Filter::all(), sort: Vec::new(), offset: 0, limit: 100, after: None, with_total: true }
     }
 }
 
@@ -158,8 +162,9 @@ impl Document {
 #[derive(Debug, Clone)]
 pub struct QueryPage {
     pub documents: Vec<Document>,
-    /// Number of documents matching the filter, across all pages.
-    pub total: usize,
+    /// Number of documents matching the filter, across all pages
+    /// (`None` when the query was run without `with_total`).
+    pub total: Option<usize>,
     /// Pass as `after` for the next page (ID order only); `None` on the last page.
     pub next: Option<Ulid>,
     /// Indexes the query used (empty: every document was scanned).
@@ -307,7 +312,8 @@ impl HexDBEngine {
         let page = self.query_documents_inner(tess, query).await?;
         if !tess.starts_with('_') && !self.is_system_tessellation(tess) {
             let shape = crate::advisor::Shape::of(&query.filter, &query.sort);
-            self.query_stats.record(tess, shape, page.scanned, page.total, started.elapsed().as_secs_f64() * 1000.0, &page.indexes);
+            let matched = page.total.unwrap_or(page.documents.len());
+            self.query_stats.record(tess, shape, page.scanned, matched, started.elapsed().as_secs_f64() * 1000.0, &page.indexes);
         }
         Ok(page)
     }
@@ -335,18 +341,44 @@ impl HexDBEngine {
                 }
             }
             let next = if more { documents.last().map(|d| d.id) } else { None };
-            let total = self.count_documents(tess).await?;
+            let total = if query.with_total { Some(self.count_documents(tess).await?) } else { None };
             return Ok(QueryPage { documents, total, next, indexes: Vec::new(), scanned });
         }
 
-        // No filter, one sort key with a field index: walk the index in order.
-        if query.filter.is_empty() && query.sort.len() == 1 && query.after.is_none() {
-            if let Some(page) = self.query_sorted_by_index(tess, query).await? {
+        let (filter, plan) = self.prepare_filter(tess, &query.filter);
+
+        // Sorted by a field with an index: walk the index in order and stop
+        // once the page is full. With a filter that only pays off when the
+        // total isn't needed (counting it reads every match anyway).
+        if !query.sort.is_empty() && query.after.is_none() && (query.filter.is_empty() || !query.with_total) {
+            if let Some(page) = self.query_sorted_by_index(tess, query, &filter, plan.as_ref()).await? {
                 return Ok(page);
             }
         }
 
-        let (filter, plan) = self.prepare_filter(tess, &query.filter);
+        // Filtered, in ID order, without a total: stop once the page is full.
+        if query.sort.is_empty() && !query.with_total {
+            let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
+            let ids = self.candidate_ids(tess, plan, query.after).await;
+            let want = query.offset.saturating_add(query.limit).saturating_add(1);
+            let (mut matched, mut scanned) = (Vec::new(), 0);
+            for id in ids {
+                if matched.len() == want {
+                    break;
+                }
+                scanned += 1;
+                if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
+                    if filter.matches(&doc) {
+                        matched.push(doc);
+                    }
+                }
+            }
+            let more = matched.len() > query.offset + query.limit;
+            let documents: Vec<Document> = matched.into_iter().skip(query.offset).take(query.limit).collect();
+            let next = if more { documents.last().map(|d| d.id) } else { None };
+            return Ok(QueryPage { documents, total: None, next, indexes, scanned });
+        }
+
         let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
         // Every candidate is checked so `total` covers all pages; `after`
         // only decides where the returned page starts.
@@ -375,7 +407,7 @@ impl HexDBEngine {
         } else {
             None
         };
-        Ok(QueryPage { documents, total, next, indexes, scanned })
+        Ok(QueryPage { documents, total: Some(total), next, indexes, scanned })
     }
 
     /// IDs to read for a query, in ID order: the planner's candidates, or
@@ -453,7 +485,7 @@ impl HexDBEngine {
             return self.count_documents(tess).await;
         }
         let query = DocumentQuery { filter: filter.clone(), limit: 0, ..DocumentQuery::default() };
-        Ok(self.query_documents(tess, &query).await?.total)
+        Ok(self.query_documents(tess, &query).await?.total.unwrap_or(0))
     }
 
     // -----------------------------------------------------------------------
@@ -1017,6 +1049,7 @@ impl HexDBEngine {
             if !replicated {
                 self.check_unique(&items)?;
             }
+            let deltas = self.count_deltas(&state, &prepared).await;
             let count = items.len() as u64;
             let now = Utc::now();
             let changes: Vec<Change> = items
@@ -1052,7 +1085,10 @@ impl HexDBEngine {
                     None => state.hex.put_tombstone(key, seq, true),
                 }
             }
-            self.bump_generation();
+            let mut written: Vec<String> = prepared.iter().map(|(key, _, _)| key.tessellation.clone()).collect();
+            written.sort();
+            written.dedup();
+            self.note_writes(&written, &deltas);
             {
                 let mut indexes = self.indexes.write().unwrap();
                 for change in &changes.0 {
@@ -1153,6 +1189,50 @@ impl HexDBEngine {
     }
 
     /// Sequence number of a document's newest version (0 if it never existed).
+    /// How a batch changes the cached counts: for each write to a counted
+    /// tessellation, whether the document was visible before and after.
+    /// Called under the state lock, before the batch is applied.
+    async fn count_deltas(&self, state: &super::EngineState, prepared: &[Prepared]) -> HashMap<String, super::reads::CountDelta> {
+        let counted = self.counted_tessellations();
+        let mut deltas: HashMap<String, super::reads::CountDelta> = HashMap::new();
+        if counted.is_empty() {
+            return deltas;
+        }
+        let now = Utc::now().timestamp_millis();
+        // A batch may hold several versions of one document (replication).
+        let mut within: HashMap<&DocKey, bool> = HashMap::new();
+        for (key, bytes, ttl) in prepared {
+            if !counted.contains(&key.tessellation) {
+                continue;
+            }
+            let before = match within.get(key) {
+                Some(visible) => *visible,
+                None => self.visible_at(state, key, now).await,
+            };
+            let after = bytes.is_some() && ttl.is_none_or(|t| t > now);
+            within.insert(key, after);
+            let d = deltas.entry(key.tessellation.clone()).or_default();
+            d.delta += after as i64 - before as i64;
+            if after {
+                if let Some(t) = ttl {
+                    d.earliest_ttl = Some(d.earliest_ttl.map_or(*t, |e| e.min(*t)));
+                }
+            }
+        }
+        deltas
+    }
+
+    /// Whether a document's newest version is visible (not deleted or expired).
+    async fn visible_at(&self, state: &super::EngineState, key: &DocKey, now: i64) -> bool {
+        match state.hex.meta(key) {
+            Some(meta) => !meta.tombstone && !meta.is_expired(now),
+            None => match self.sst.lookup(&key.tessellation, &key.id).await {
+                Some(crate::sst::DiskLookup::Live { entry, .. }) => !entry.is_expired(now),
+                _ => false,
+            },
+        }
+    }
+
     async fn current_seq(&self, state: &super::EngineState, key: &DocKey) -> u64 {
         match state.hex.meta(key) {
             Some(meta) => meta.seq,

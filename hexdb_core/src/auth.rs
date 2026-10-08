@@ -175,7 +175,7 @@ impl Action {
             Action::Logs => "View the server log.",
             Action::Audit => "View the audit trail.",
             Action::Plugins => "View plugins and their delivery state.",
-            Action::Maintenance => "Flush and compact storage.",
+            Action::Maintenance => "Flush, compact and back up storage.",
             Action::Admin => "Everything, including users, roles, settings and shutdown.",
         }
     }

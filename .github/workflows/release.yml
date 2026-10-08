@@ -43,7 +43,7 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, archive: tar.gz }
           - { os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz }
-          - { os: macos-13, target: x86_64-apple-darwin, archive: tar.gz }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, archive: tar.gz }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
     runs-on: ${{ matrix.os }}
     steps:
@@ -62,15 +62,18 @@ jobs:
           cargo build --release --target ${{ matrix.target }} -p hexdb_api -p hexdb_cli
       - name: Package
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
         run: |
-          name="hexdb-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="hexdb-${GITHUB_REF_NAME}-${TARGET}"
           mkdir -p "$name"
-          exe=""; [[ "${{ matrix.target }}" == *windows* ]] && exe=".exe"
-          cp "target/${{ matrix.target }}/release/hexdb_api$exe" "target/${{ matrix.target }}/release/hexdb$exe" "$name/"
+          exe=""; [[ "$TARGET" == *windows* ]] && exe=".exe"
+          cp "target/$TARGET/release/hexdb_api$exe" "target/$TARGET/release/hexdb$exe" "$name/"
           cp -r ui "$name/ui"
           cp packaging/hexdb.toml "$name/hexdb.toml"
           cp README.md MANUAL.md "$name/"
-          if [ "${{ matrix.archive }}" = zip ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+          if [ "$ARCHIVE" = zip ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.target }}
@@ -105,7 +108,7 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: cd dist && sha256sum hexdb-* *.deb > SHA256SUMS
+        run: cd dist && sha256sum -- hexdb-* *.deb > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

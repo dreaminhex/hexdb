@@ -208,3 +208,99 @@ async fn legacy_users_and_roles_are_migrated() -> Result<()> {
     assert_eq!(roles.len(), 6, "the built-in roles: {:?}", roles);
     engine.shutdown().await
 }
+
+/// Every visible document, by paging through the tessellation (independent of the count cache).
+async fn scanned_count(engine: &HexDBEngine, tess: &str) -> Result<usize> {
+    let mut total = 0;
+    let mut after = None;
+    loop {
+        let page = engine.list_documents(tess, after, 100).await?;
+        total += page.documents.len();
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return Ok(total),
+        }
+    }
+}
+
+#[tokio::test]
+async fn counts_stay_exact_through_every_kind_of_write() -> Result<()> {
+    let dir = TempDir::new()?;
+    let engine = std::sync::Arc::new(open(dir.path(), 64, &KEY).await?);
+    let check = |label: &'static str| {
+        let engine = engine.clone();
+        async move {
+            let counted = engine.count_documents("items").await?;
+            let scanned = scanned_count(&engine, "items").await?;
+            assert_eq!(counted, scanned, "after {}", label);
+            anyhow::Ok(())
+        }
+    };
+
+    let mut ids = Vec::new();
+    for i in 0..60 {
+        ids.push(engine.insert_json("items", json!({ "n": i, "kind": if i % 2 == 0 { "even" } else { "odd" } }), None).await?.id.to_string());
+    }
+    check("inserts").await?;
+    // Some documents only on disk, so the "was it visible" check reads SSTables.
+    engine.flush().await?;
+    engine.enforce_memory_budget().await;
+    for id in &ids[0..10] {
+        engine.delete_document("items", id, None).await?;
+    }
+    check("deletes").await?;
+    for id in &ids[0..3] {
+        engine.delete_document("items", id, None).await?;
+    }
+    check("deleting deleted documents").await?;
+    for id in &ids[10..15] {
+        engine.replace_document("items", id, json!({ "replaced": true }), None, None).await?;
+    }
+    check("replaces").await?;
+    engine.update_where("items", &json!({ "kind": "odd" }), &json!({ "seen": true }), None, None).await?;
+    check("update by filter").await?;
+    let ops = hexdb_core::parse_transaction(&json!([
+        { "op": "insert", "tessellation": "items", "data": { "from": "tx" } },
+        { "op": "delete", "tessellation": "items", "id": ids[20] },
+    ]))?;
+    engine.transaction(&ops, None).await?;
+    check("a transaction").await?;
+
+    // A document that expires: counted until it does, then not.
+    let soon = chrono::Utc::now().timestamp_millis() + 1500;
+    engine.insert_json("items", json!({ "short": true }), Some(soon)).await?;
+    check("an expiring insert").await?;
+    tokio::time::sleep(Duration::from_millis(1700)).await;
+    check("the expiry").await?;
+
+    // Concurrent writers and counters.
+    let mut tasks = Vec::new();
+    for w in 0..4 {
+        let engine = engine.clone();
+        tasks.push(tokio::spawn(async move {
+            for i in 0..25 {
+                let doc = engine.insert_json("items", json!({ "w": w, "i": i }), None).await?;
+                if i % 3 == 0 {
+                    engine.delete_document("items", &doc.id.to_string(), None).await?;
+                }
+                engine.count_documents("items").await?;
+            }
+            anyhow::Ok(())
+        }));
+    }
+    for task in tasks {
+        task.await??;
+    }
+    check("concurrent writes").await?;
+
+    // Dropping the tessellation resets its count.
+    engine.delete_tessellation("items").await?;
+    engine.insert_json("items", json!({ "again": true }), None).await?;
+    check("drop and recreate").await?;
+    assert_eq!(engine.count_documents("items").await?, 1);
+
+    match std::sync::Arc::try_unwrap(engine) {
+        Ok(engine) => engine.shutdown().await,
+        Err(_) => anyhow::bail!("engine still shared"),
+    }
+}

@@ -109,6 +109,7 @@ hexdb stop             # graceful: drains the WAL and flushes to SSTables
 hexdb stop --force     # kill a server that won't stop (unflushed writes come back from the WAL)
 hexdb health
 HEXDB_TOKEN=hxk_... hexdb status
+HEXDB_TOKEN=hxk_... hexdb backup        # a consistent backup while running; --list shows them
 ```
 
 `hexdb start` runs the `hexdb_api` binary found next to the CLI (or on `PATH`, or `--server-bin`). The server writes `hexdb.pid` to its data directory: its PID, endpoint, executable, start time and a one-time shutdown token. The file is readable by its owner only. `hexdb stop` posts the token to `POST /shutdown`. `--force` kills the process only if its executable and start time match the file, so a stale file can't kill an unrelated process that reused the PID.
@@ -141,7 +142,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - An activity chart: documents per tessellation, operations per minute, or storage, over 15 minutes to 6 hours.
 - Vertex health: a hexagon of the six shards.
 - The lattice card: each hex's role, address, replication state and lag. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
-- A per-tessellation table. On a replica, a banner names the Overseer. "Flush to disk" writes unflushed data to SSTables.
+- A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#21-operations)).
 
 **Queries.** A GraphQL console with schema-aware completion and validation, variables, examples, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
 
@@ -312,7 +313,8 @@ curl -X POST http://localhost:7700/articles/_query -H "Content-Type: application
 curl -G http://localhost:7700/articles/count --data-urlencode 'filter={"published":false}'
 ```
 
-- Pages hold up to 1,000 documents (default 100). Responses include `total`.
+- Pages hold up to 1,000 documents (default 100). Responses include `total`, the number of matches across all pages.
+- `total=false` (query string) or `"total": false` (body) skips counting every match: `total` is `null`, and a filtered or sorted query stops reading once its page is full. Use it for large tessellations when you only need the page.
 - Without `sort`, results come in ID order (creation order), and `next` goes in `after` for the next page. This cursor paging is stable under concurrent writes.
 - With `sort`, page with `offset`. `sort` is `"-views,title"` (a leading `-` means descending) or an array of `{field, descending}`.
 - Responses include `plan`: `{"indexes": [...], "scanned": n}` shows which indexes were used and how many documents were examined.
@@ -321,7 +323,9 @@ curl -G http://localhost:7700/articles/count --data-urlencode 'filter={"publishe
 
 1. The planner looks for indexes that can narrow the candidates: equality, `$in`, ranges and `$startsWith` on field indexes, and `$text` on the text index. It intersects (for `$and`) or unions (for `$or`) their ID sets. With no usable index, every document in the tessellation is a candidate.
 2. Each candidate is read (from memory, or from disk through the SSTable index) and the full filter is checked. Indexes only ever produce a superset, so results are identical with or without them.
-3. Matches are sorted in memory if `sort` was given, then paged.
+3. Matches are sorted, then paged.
+
+Sorting uses an index when the first sort key has a single-field index. HexDB walks that index in order, reading only planner candidates, and stops once the page is full; documents tied on the first key are ordered by the remaining keys. That applies to unfiltered queries, and to filtered ones run with `total=false`. A filtered query that needs `total` reads every match anyway, so it sorts in memory. Unfiltered pages without a sort read only the page itself, and their `total` comes from the maintained count.
 
 The advisor records each query's shape for index suggestions; see [section 11](#11-indexes-and-the-query-advisor).
 
@@ -404,6 +408,7 @@ query Recent($filter: JSON) {
 - Document fields are exposed through the `JSON` scalar: `data`, `json`, or `field(path)`.
 - Document mutations take an optional `idempotencyKey`. Replays are listed in `extensions.idempotentReplays`, and the HTTP response carries `Idempotent-Replayed: true`.
 - Errors carry `extensions.code` (`UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`, `INVALID_REQUEST`, `CONFLICT`, ...).
+- `total` is counted only when the query selects it, so leave it out to make sorted and filtered pages cheaper.
 - Requests are limited to depth 16 and complexity 10,000.
 - Streams, functions, schemas and settings are REST-only.
 
@@ -530,7 +535,7 @@ api_key_env = "ANTHROPIC_API_KEY"   # the environment variable holding the key
 model = "claude-sonnet-5-5"
 ```
 
-Query statistics live in memory per hex and reset at restart. Needs `manage` on the tessellation.
+Query statistics are kept per hex and saved with the metrics history (`query-stats.hxe`), so they survive restarts. Shapes not seen for 30 days are dropped. Needs `manage` on the tessellation.
 
 ## 12. Schemas
 
@@ -959,7 +964,7 @@ A role is a set of permissions:
 | `logs` | The server log | no |
 | `audit` | The audit trail | no |
 | `plugins` | Plugins and their delivery state | no |
-| `maintenance` | Flush and compact | no |
+| `maintenance` | Flush, compact and back up | no |
 | `admin` | Everything: users, roles, settings, functions, schedules, joining hexes, shutdown | no |
 
 Built-in roles:
@@ -970,7 +975,7 @@ Built-in roles:
 | `reader` | `read` |
 | `writer` | `read`, `write` |
 | `owner` | `read`, `write`, `manage` |
-| `operator` | `status`, `logs`, `plugins`, `maintenance` |
+| `operator` | `status`, `logs`, `plugins`, `maintenance` (including backups) |
 | `auditor` | `status`, `audit` |
 
 Administrators create custom roles from any set of permissions:
@@ -998,7 +1003,7 @@ HexDB records security-relevant events as documents in the `_audit` system tesse
 | Accounts | `auth.*` (sign-in, failures, sign-out, password, MFA, API keys), `user.*`, `role.*` |
 | Data structure | `tessellation.*`, `index.*`, `schema.*` |
 | Features | `stream.*`, `function.*`, `schedule.*` |
-| Operations | `maintenance.*`, `settings.update`, `server.shutdown`, `lattice.join_info` |
+| Operations | `maintenance.*` (flush, compact, backup), `settings.update`, `server.shutdown`, `lattice.join_info` |
 | Refusals | `access.denied` |
 
 Each event holds the actor, the action, the target, the outcome, the client address and details. Passwords, tokens and keys are never recorded. Events expire after `security.audit_retention_days` (90; 0 keeps them forever).
@@ -1169,6 +1174,10 @@ Memory holds the newest version of every unflushed document plus an LRU cache of
 3. The highest sequence number wins. Tombstones and expired documents read as not found.
 4. The result is cached.
 
+### Counts
+
+Each tessellation's document count is cached and kept exact by commits. Under the state lock, a commit checks whether each document it writes was visible before (memory, then the SSTable Bloom filter and index) and adjusts the count by the difference. A count is computed from the key index only when first needed, after its tessellation is dropped, or once the earliest TTL among its documents passes. So unfiltered totals, `GET /tessellations/{name}`, and the dashboard's per-tessellation figures don't rescan a busy tessellation after every write. Other statistics (sizes for `/status`) are cached per tessellation until that tessellation changes.
+
 ### Flush and compaction
 
 **Flush.** Every `wal_flush_check_frequency` seconds, when memory needs room, and at shutdown, dirty entries are written to new SSTables (`<tessellation>/<ulid>.hxs`). Each file is written to a temporary name, fsynced and renamed into place. Then:
@@ -1206,6 +1215,7 @@ Any two of the six vertices can be lost or corrupted without losing data. The da
 ├── catalog.hxe                tessellations, index definitions, schemas, history ID, lattice name (sealed)
 ├── settings.hxe               runtime settings changed from the UI or API (sealed)
 ├── metrics-history.hxe        6 hours of metrics samples (sealed)
+├── query-stats.hxe            the query advisor's statistics (sealed)
 ├── hexdb.pid                  the running server's PID, endpoint and shutdown token (owner-only)
 ├── initial-admin-password.txt only until you delete it
 ├── wal/
@@ -1305,6 +1315,7 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 | `storage.wal_flush_check_frequency` | 60 | Seconds between flush checks |
 | `storage.compaction_frequency` | 1800 | Seconds between compactions |
 | `storage.change_history_hours`, `change_history_mb` | 24, 512 | Change history kept on disk |
+| `storage.backup_path` | `backups` next to the data directory | Where backups are written; must be outside the data directory |
 | `memory.ram_mb` | 1024 | Memory budget for documents |
 | `memory.ttl_scan_frequency` | 600 | Seconds between expiry sweeps |
 | `memory.vertex_integrity_check_frequency` | 300 | Seconds between vertex checks |
@@ -1333,17 +1344,25 @@ curl "http://localhost:7700/status/history?minutes=60"  # a metrics sample every
 curl "http://localhost:7700/logs?level=warn&limit=100"  # recent log records; ?after= tails, ?q= searches, ?target= filters by module
 curl -X POST http://localhost:7700/flush                # write unflushed data to SSTables
 curl -X POST http://localhost:7700/compact              # merge SSTables now
+curl -X POST http://localhost:7700/backup -d '{"name": "nightly-1"}' -H "Content-Type: application/json"
+curl http://localhost:7700/backups                      # backups in storage.backup_path
 curl http://localhost:7700/plugins
 curl http://localhost:7700/openapi.json                 # the REST API as OpenAPI 3.1
 ```
 
 **Logging.** The server keeps its last 5,000 log records in memory for `/logs` and the Logs page. `RUST_LOG` sets the level for the console and the in-memory log. Writes, errors and background tasks log at info; reads at debug; refused requests at warn.
 
-**Backups.** There's no online backup command yet. Options:
-- Run a Replicant and back up its data directory while it's stopped.
-- Stop a hex, copy its data directory, and restart it.
+**Backups.** `POST /backup` (or `hexdb backup`, both needing the `maintenance` permission) writes a consistent copy of the data directory while the hex keeps serving reads and writes:
 
-Either way, back up `storage.encryption_key` separately: the data is useless without it.
+1. The backup holds off flushes and compaction, fixes a sequence number, rotates the WAL so every write up to that number is in a closed segment, and captures the catalog.
+2. SSTables are immutable, so they're hard-linked into the backup when it's on the same file system (copied otherwise). The closed WAL segments, index snapshots and encrypted metadata are copied.
+3. The backup is built in `<name>.partial/` and renamed when complete, with a plaintext `backup.json` manifest (time, sequence number, file count; no names or data).
+
+Writes continue throughout, but flushes wait until the backup finishes; with hard links that's moments. `GET /backups` (or `hexdb backup --list`) lists backups. A backup name may contain letters, digits, `-` and `_`; without one, the name is the time and sequence number.
+
+Restoring: stop the hex (or start a new one), point `storage.path` at the backup folder (or copy it into the data directory), and start it with the same encryption keys. Recovery replays the copied WAL on top of the SSTables, exactly as after a crash at the backup's sequence number. The restored data gets a new change history ID, so replicas take a full sync from it and plugins start at its end, rather than mistaking it for the original's history.
+
+Hard-linked backups share disk blocks with the live data, so they don't protect against losing the disk: copy backup folders to other storage. Back up `storage.encryption_key` separately too; the data is useless without it. A Replicant is another option: a live copy you can back up while it's stopped.
 
 **Upgrades.** Stop the hex, replace the binaries and the UI, and start it. Data in older formats is read and rewritten by compaction. In a lattice, upgrade replicas first, then the Overseer. A failover moves the Overseer role while it's down.
 
@@ -1377,7 +1396,7 @@ There's no ODBC or JDBC driver: both need a SQL dialect, which HexDB doesn't hav
 
 **Why did my write return 503 but the data is there?** With `replication.min_acks` set, the write committed on the Overseer, but not enough replicas confirmed within `ack_timeout_ms`. Retry with the same idempotency key to be safe.
 
-**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
+**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
 
 **A replica is far behind or keeps re-syncing.**
 1. Check the Logs page on the replica, filtered by `hexdb_core::replication`.
