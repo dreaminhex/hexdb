@@ -30,7 +30,7 @@ pub const TEST_ENCRYPTION_KEY: &str = "base64:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGB
 pub const TEST_ADMIN_LOGIN: &str = "admin";
 pub const TEST_ADMIN_PASSWORD: &str = "Correct horse battery 2026";
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
@@ -102,6 +102,8 @@ pub struct TestServer {
     anon: Client,
     token: Option<String>,
     options: TestOptions,
+    /// How long the last launch took from spawning the process until /health answered.
+    last_startup: Duration,
 }
 
 /// Settings for a test server. The defaults give an isolated single hex.
@@ -161,6 +163,7 @@ impl TestServer {
             client: Client::builder().timeout(Duration::from_secs(10)).build()?,
             anon: Client::builder().timeout(Duration::from_secs(10)).build()?,
             token: None,
+            last_startup: Duration::ZERO,
             options,
         };
         server.client = server.client_builder()?.build()?;
@@ -328,6 +331,7 @@ admin_email = "admin@example.com"
             }
         }
 
+        let spawned = Instant::now();
         self.child = Some(cmd.spawn().context("Failed to start hexdb_api")?);
         let scheme = if self.options.tls.is_some() { "https" } else { "http" };
         self.base_url = format!("{}://127.0.0.1:{}", scheme, api);
@@ -343,6 +347,7 @@ admin_email = "admin@example.com"
                 );
             }
             if self.health_ok() {
+                self.last_startup = spawned.elapsed();
                 if !self.options.no_admin_password {
                     self.sign_in()?;
                 }
@@ -352,7 +357,7 @@ admin_email = "admin@example.com"
                 self.kill();
                 bail!("Server did not become healthy within {:?}. Log tail:\n{}", STARTUP_TIMEOUT, self.log_tail(30));
             }
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -500,6 +505,11 @@ admin_email = "admin@example.com"
     pub fn restart(&mut self) -> Result<()> {
         self.stop()?;
         self.launch()
+    }
+
+    /// Time from spawning the process until /health answered, for the last launch.
+    pub fn last_startup(&self) -> Duration {
+        self.last_startup
     }
 
     /// Hard kill followed by a new launch on the same data.

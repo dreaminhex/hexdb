@@ -215,5 +215,18 @@ fn catalog_columns_come_from_schemas_and_samples() -> Result<()> {
         { "name": "sku", "type": "string", "nullable": false, "source": "schema" },
     ]));
     assert_eq!(server.request(Method::GET, "/sql/columns?table=nothing", None, &[])?.status.as_u16(), 404);
+
+    // Result columns take the schema's types, and an empty SELECT * still lists them.
+    server.insert("products", &json!({ "sku": "a-1", "price": 3 }))?;
+    let res = sql(&server, json!({ "sql": "SELECT sku, price FROM products" }))?;
+    assert_eq!(res.body["columns"], json!([{ "name": "sku", "type": "string" }, { "name": "price", "type": "number" }]));
+    let res = sql(&server, json!({ "sql": "SELECT * FROM products WHERE sku = 'none'" }))?;
+    assert_eq!(rows(&res), json!([]));
+    assert_eq!(res.body["columns"], json!([
+        { "name": "id", "type": "string" },
+        { "name": "dims", "type": "null" },
+        { "name": "price", "type": "number" },
+        { "name": "sku", "type": "string" },
+    ]));
     Ok(())
 }

@@ -10,12 +10,13 @@
 // disk on demand. Files are written to a temporary name, fsynced, and renamed
 // into place, so a crash never leaves a half-written table.
 //
-// Format (version 4, all integers big-endian). Everything but the header is
+// Format (version 5, all integers big-endian; version 4 is the same layout
+// with documents in the earlier type-tagged JSON form). Everything but the header is
 // encrypted with AES-256-GCM using the storage key ring:
 //
 //   Header (64 bytes)
 //     0x00 MAGIC "HXDB"           4
-//     0x04 VERSION (4)            2
+//     0x04 VERSION (5)            2
 //     0x06 COMPRESSION (1 = zstd) 1
 //     0x07 ENCRYPTION (1 = AES-256-GCM) 1
 //     0x08 entry count            8
@@ -57,10 +58,13 @@ use std::{
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 use ulid::Ulid;
-use zstd::stream::{decode_all, encode_all};
+use crate::compress::{compress as encode_all, decompress};
 
 const MAGIC: &[u8; 4] = b"HXDB";
-const VERSION: u16 = 4;
+const VERSION: u16 = 5;
+/// Same layout as `VERSION`; its documents may be in the earlier type-tagged
+/// form, so compaction rewrites these files (upgrading every body).
+const V4: u16 = 4;
 /// Encrypted bodies, plaintext index (read, then rewritten by compaction).
 const V3: u16 = 3;
 const LEGACY_VERSION: u16 = 2;
@@ -445,7 +449,7 @@ impl SstFile {
             bail!("{} is not an SSTable (bad magic header)", path.display());
         }
         let version = file.read_u16::<BigEndian>()?;
-        if ![LEGACY_VERSION, V3, VERSION].contains(&version) {
+        if ![LEGACY_VERSION, V3, V4, VERSION].contains(&version) {
             bail!(
                 "{} is SSTable version {}, but this HexDB reads versions {} to {}. Move files from other HexDB builds out of the data directory.",
                 path.display(),
@@ -492,8 +496,8 @@ impl SstFile {
         }
 
         let handle = file.into_inner();
-        let index = if version == VERSION {
-            let key_id = key_id.ok_or_else(|| anyhow!("{} is version 4 but not encrypted", path.display()))?;
+        let index = if version >= V4 {
+            let key_id = key_id.ok_or_else(|| anyhow!("{} is version {} but not encrypted", path.display(), version))?;
             // Read every chunk once: verifies it, and builds the directory and Bloom filter.
             let mut chunks = Vec::new();
             let mut bloom = Bloom::new(entry_count as usize);
@@ -544,7 +548,7 @@ impl SstFile {
 
     /// Read, decrypt and decompress one entry's document JSON.
     pub fn read_entry(&self, id: &Ulid, entry: &IndexEntry) -> Result<Vec<u8>> {
-        let compressed = if self.version == VERSION {
+        let compressed = if self.version >= V4 {
             let mut body = vec![0u8; entry.len as usize];
             read_exact_at(&self.handle, &mut body, entry.offset).with_context(|| format!("Failed to read {}", self.path.display()))?;
             let key_id = self.key_id.unwrap_or_default();
@@ -570,7 +574,7 @@ impl SstFile {
                 None => body,
             }
         };
-        Ok(decode_all(&compressed[..])?)
+        Ok(decompress(&compressed[..])?)
     }
 }
 
@@ -888,7 +892,7 @@ impl SstStore {
             let new_file = tokio::task::spawn_blocking(move || -> Result<Option<SstFile>> {
                 let mut entries = Vec::with_capacity(kept.len());
                 for (file, id, entry) in kept {
-                    let data = if entry.tombstone { None } else { Some(file.read_entry(&id, &entry)?) };
+                    let data = if entry.tombstone { None } else { Some(crate::document::upgrade_stored(file.read_entry(&id, &entry)?)) };
                     entries.push(SstEntry { id, seq: entry.seq, ttl: entry.ttl, data });
                 }
                 let path = write_dir.join(format!("{}.{}", Ulid::new(), SST_EXTENSION));
@@ -948,7 +952,7 @@ mod tests {
         let mut out = vec![0u8; HEADER_LEN as usize];
         let mut index = Vec::new();
         for (id, seq, data) in entries {
-            let body = keys.encrypt(&encode_all(*data, 0).unwrap(), &body_aad(id, *seq)).unwrap();
+            let body = keys.encrypt(&encode_all(data, 0).unwrap(), &body_aad(id, *seq)).unwrap();
             let offset = out.len() as u64;
             out.extend_from_slice(&id.to_bytes());
             out.push(0);
@@ -1020,7 +1024,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn version_3_files_are_read_and_compacted_to_version_4() {
+    async fn version_3_files_are_read_and_compacted_to_the_current_version() {
         let dir = temp_dir();
         let tess_dir = dir.join("t");
         fs::create_dir_all(&tess_dir).unwrap();
@@ -1037,6 +1041,42 @@ mod tests {
         let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &b).await else { panic!() };
         assert_eq!(file.version, VERSION);
         assert_eq!(file.read_entry(&b, &entry).unwrap(), b"{\"v\":2}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn version_4_files_are_compacted_with_documents_in_the_plain_form() {
+        let dir = temp_dir();
+        let tess_dir = dir.join("t");
+        fs::create_dir_all(&tess_dir).unwrap();
+        let keys = test_keys();
+        let id = Ulid::new();
+        // A document in the earlier type-tagged form, in a file marked version 4.
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "id": id.to_string(), "tessellation": "t",
+            "data": { "name": { "type": "String", "value": "Ada" }, "n": { "type": "Integer", "value": 3 } },
+            "ttl": null
+        }))
+        .unwrap();
+        let path = tess_dir.join("old.hxs");
+        SstFile::write(&path, vec![SstEntry { id, seq: 1, ttl: None, data: Some(legacy.clone()) }], 0, 0, &keys).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[4..6].copy_from_slice(&V4.to_be_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        let store = SstStore::open(&dir, 0, keys.clone()).unwrap();
+        let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &id).await else { panic!() };
+        assert_eq!(file.version, V4);
+        let doc = parse_document(&file.read_entry(&id, &entry).unwrap()).unwrap();
+        assert_eq!(doc.data_json(), serde_json::json!({ "name": "Ada", "n": 3 }));
+        assert_eq!(store.files_needing_rewrite().await, 1);
+
+        store.compact(0, 0).await.unwrap();
+        let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &id).await else { panic!() };
+        assert_eq!(file.version, VERSION);
+        let upgraded = file.read_entry(&id, &entry).unwrap();
+        assert!(!crate::document::is_legacy_stored(&upgraded) && upgraded.len() < legacy.len(), "{}", String::from_utf8_lossy(&upgraded));
+        assert_eq!(parse_document(&upgraded).unwrap(), doc);
         fs::remove_dir_all(&dir).ok();
     }
 

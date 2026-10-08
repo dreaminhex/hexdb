@@ -4,6 +4,8 @@ members = [
     "hexdb_api",
     "hexdb_cli",
     "hexdb_query",
-    "hexdb_tests"
+    "hexdb_tests",
+    "drivers/odbc",
+    "bench"
 ]
 resolver = "2"

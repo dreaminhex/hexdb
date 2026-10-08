@@ -135,3 +135,22 @@ fn forwarded_addresses_are_trusted_only_from_configured_proxies() -> Result<()> 
     assert_eq!(fail_logins(&server, "ghost-b", "198.51.100.2", 1)?, vec![429], "a spoofed header doesn't escape the throttle");
     Ok(())
 }
+
+#[test]
+fn single_document_writes_accept_documents_up_to_the_document_limit() -> Result<()> {
+    let server = TestServer::start_with(TestOptions { extra_toml: "\n[limits]\nmax_document_kb = 4096\n".into(), ..TestOptions::default() })?;
+    // 3 MB: over axum's 2 MB default body limit, under max_document_kb.
+    let big = "x".repeat(3 * 1024 * 1024);
+    let res = server.request(Method::POST, "/files", Some(&json!({ "blob": big })), &[])?;
+    assert_eq!(res.status.as_u16(), 201, "{}", res.body);
+    let id = res.body["id"].as_str().unwrap().to_string();
+    let res = server.request(Method::PUT, &format!("/files/{}", id), Some(&json!({ "blob": big, "v": 2 })), &[])?;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    let res = server.request(Method::PATCH, &format!("/files/{}", id), Some(&json!({ "blob": big, "v": 3 })), &[])?;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    // Over the document limit: refused by the engine with its own error.
+    let res = server.request(Method::POST, "/files", Some(&json!({ "blob": "x".repeat(5 * 1024 * 1024) })), &[])?;
+    assert_eq!(res.status.as_u16(), 413);
+    assert_eq!(res.error_code(), Some("document_too_large"), "{}", res.body);
+    Ok(())
+}

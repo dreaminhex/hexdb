@@ -16,7 +16,7 @@ use crate::handlers::*;
 pub const UI_PREFIX: &str = "/ui";
 const UI_ROOT: &str = "/ui/";
 
-/// Request body limit for bulk endpoints (`limits.max_request_mb`; other endpoints use axum's 2 MB default).
+/// Request body limit for bulk endpoints (`limits.max_request_mb`). Single-document writes allow at least `limits.max_document_kb`; other endpoints use axum's 2 MB default.
 pub fn bulk_body_limit(engine: &HexDBEngine) -> usize {
     (engine.config.limits.max_request_mb.max(1) as usize).saturating_mul(1024 * 1024)
 }
@@ -30,6 +30,9 @@ pub fn app_router(
     shutdown_handle: ShutdownHandle,
 ) -> Router {
     let body_limit = bulk_body_limit(&engine);
+    // Single-document writes may carry a document up to limits.max_document_kb
+    // (checked by the engine); allow at least that much body, with room for JSON.
+    let document_limit = body_limit.max((engine.config.limits.max_document_kb as usize + 64).saturating_mul(1024));
     // Static segments (health, users, _bulk, ...) take priority over the
     // `{tessellation}` and `{id}` parameters, so these names are reserved.
     let mut router = Router::new()
@@ -124,7 +127,7 @@ pub fn app_router(
         .route("/roles/{name}", get(get_role).put(update_role).patch(update_role).delete(delete_role))
 
         // Documents
-        .route("/{tessellation}", get(list_docs).post(insert_doc))
+        .route("/{tessellation}", get(list_docs).post(insert_doc).layer(DefaultBodyLimit::max(document_limit)))
         .route("/{tessellation}/count", get(count_docs))
         .route(
             "/{tessellation}/_query",
@@ -149,7 +152,10 @@ pub fn app_router(
             "/{tessellation}/_update",
             post(update_where).layer(DefaultBodyLimit::max(body_limit)),
         )
-        .route("/{tessellation}/{id}", get(get_doc).put(replace_doc).patch(patch_doc).delete(delete_doc));
+        .route(
+            "/{tessellation}/{id}",
+            get(get_doc).put(replace_doc).patch(patch_doc).delete(delete_doc).layer(DefaultBodyLimit::max(document_limit)),
+        );
 
     // Admin UI routes and static assets. Unknown paths under /ui fall back to
     // index.html so client-side routes work.

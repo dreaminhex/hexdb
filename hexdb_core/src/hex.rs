@@ -115,10 +115,19 @@ fn encode(bytes: &[u8]) -> Vec<Vec<u8>> {
             shard
         })
         .collect();
-    let parity = reed_solomon_simd::encode(DATA_SHARDS, PARITY_SHARDS, &shards).expect("shards have equal, even length");
-    shards.extend(parity);
+    if shard_len < LARGE_SHARD {
+        shards.extend(crate::erasure::encode(&shards));
+    } else {
+        let parity = reed_solomon_simd::encode(DATA_SHARDS, PARITY_SHARDS, &shards).expect("shards have equal, even length");
+        shards.extend(parity);
+    }
     shards
 }
+
+/// Shards this long or longer use reed-solomon-simd (fastest on large
+/// shards); shorter ones use the table-driven code in `erasure` (no per-call
+/// setup). Both encoding and repair choose by shard length.
+const LARGE_SHARD: usize = 16 * 1024;
 
 /// Fill in missing shards (`None`) from any four present ones.
 fn reconstruct(shards: &mut [Option<Vec<u8>>]) -> Result<(), ()> {
@@ -128,6 +137,10 @@ fn reconstruct(shards: &mut [Option<Vec<u8>>]) -> Result<(), ()> {
     }
     if present == VERTEX_COUNT {
         return Ok(());
+    }
+    let len = shards.iter().flatten().next().map(Vec::len).unwrap_or(0);
+    if len < LARGE_SHARD {
+        return crate::erasure::reconstruct(shards);
     }
     let originals: Vec<(usize, &Vec<u8>)> = shards[..DATA_SHARDS].iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|s| (i, s))).collect();
     let recovery: Vec<(usize, &Vec<u8>)> = shards[DATA_SHARDS..].iter().enumerate().filter_map(|(i, s)| s.as_ref().map(|s| (i, s))).collect();
@@ -518,6 +531,20 @@ mod tests {
         assert_eq!(report.repaired_shards, 2);
         assert_eq!(hex.check_integrity(std::slice::from_ref(&k)).corrupt_shards, 0);
         assert_eq!(hex.read(&k), Some(Lookup::Live { bytes: data, seq: 7, ttl: None }));
+    }
+
+    #[test]
+    fn large_documents_use_the_simd_code_and_repair_too() {
+        let mut hex = Hex::new();
+        let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let k = key(2);
+        hex.put(&k, 3, None, &data, true);
+        for pair in [(0, 1), (2, 5), (4, 5)] {
+            assert!(hex.corrupt_for_testing(&k, pair.0));
+            assert!(hex.corrupt_for_testing(&k, pair.1));
+            assert_eq!(hex.read(&k), Some(Lookup::Live { bytes: data.clone(), seq: 3, ttl: None }));
+            assert_eq!(hex.check_integrity(std::slice::from_ref(&k)).repaired_shards, 2);
+        }
     }
 
     #[test]

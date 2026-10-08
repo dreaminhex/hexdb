@@ -101,23 +101,35 @@ fn scripts_run_in_python_and_typescript() -> Result<()> {
     assert!(started.elapsed() < Duration::from_secs(8));
 
     // TypeScript and JavaScript need Node.js (22.6 or later for TypeScript).
-    if !std::process::Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
+    let node = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().trim_start_matches('v').to_string());
+    let Some(node) = node else {
         eprintln!("Node.js not found; skipping the TypeScript and JavaScript scripts");
         return Ok(());
+    };
+    let mut parts = node.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let version = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if version >= (22, 6) {
+        create(&server, json!({
+            "name": "double", "kind": "script", "runtime": "typescript",
+            "params": [{ "name": "n", "type": "number", "required": true }],
+            "code": concat!(
+                "interface Input { params: { n: number } }\n",
+                "const chunks: Buffer[] = []\n",
+                "for await (const chunk of process.stdin) chunks.push(chunk as Buffer)\n",
+                "const input: Input = JSON.parse(Buffer.concat(chunks).toString())\n",
+                "console.log(JSON.stringify({ doubled: input.params.n * 2 }))\n",
+            ),
+        }))?;
+        let res = run(&server, None, "double", json!({ "n": 21 }))?;
+        assert_eq!(res.body["result"]["doubled"], 42, "{}", res.body);
+    } else {
+        eprintln!("Node.js {} is older than 22.6; skipping the TypeScript script", node);
     }
-    create(&server, json!({
-        "name": "double", "kind": "script", "runtime": "typescript",
-        "params": [{ "name": "n", "type": "number", "required": true }],
-        "code": concat!(
-            "interface Input { params: { n: number } }\n",
-            "const chunks: Buffer[] = []\n",
-            "for await (const chunk of process.stdin) chunks.push(chunk as Buffer)\n",
-            "const input: Input = JSON.parse(Buffer.concat(chunks).toString())\n",
-            "console.log(JSON.stringify({ doubled: input.params.n * 2 }))\n",
-        ),
-    }))?;
-    let res = run(&server, None, "double", json!({ "n": 21 }))?;
-    assert_eq!(res.body["result"]["doubled"], 42, "{}", res.body);
 
     // Failures are reported.
     create(&server, json!({ "name": "boom", "kind": "script", "runtime": "javascript", "code": "throw new Error('kaboom')" }))?;

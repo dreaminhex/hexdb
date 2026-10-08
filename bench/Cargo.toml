@@ -1,0 +1,15 @@
+[package]
+name = "hexdb_bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Measures HexDB: binary sizes, compression, encryption, Reed-Solomon repair, crash recovery, failover, and read/write speed."
+
+[dependencies]
+hexdb_core = { path = "../hexdb_core" }
+hexdb_tests = { path = "../hexdb_tests" }
+anyhow = "1.0"
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+ulid = "1.2.1"
+base64 = "0.22.1"

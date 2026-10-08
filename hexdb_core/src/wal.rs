@@ -37,7 +37,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use ulid::Ulid;
-use zstd::stream::{decode_all, encode_all};
+use crate::compress::{compress as encode_all, decompress as decode_all};
 
 const NONCE_LEN: usize = 12;
 const MAX_RECORD_LEN: usize = 256 * 1024 * 1024;

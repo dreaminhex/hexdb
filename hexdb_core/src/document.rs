@@ -39,12 +39,114 @@ pub enum FieldValue {
 pub type CompactFields = BTreeMap<String, FieldValue>;
 
 // Core document stored in a tessellation
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+//
+// Stored (in memory, the WAL, SSTables and replication) as
+// `{"id", "tessellation", "json": {...plain fields...}, "ttl"}`. Types are
+// inferred again when it's read, which is lossless (see the top of this
+// file). Documents written by earlier versions carry type-tagged fields under
+// `data` instead (`{"type": "String", "value": "..."}`, about three times the
+// size); both are read.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Document {
     pub id: Ulid,
     pub tessellation: String,
     pub data: CompactFields,
     pub ttl: Option<i64>, // epoch millis when the document expires
+}
+
+/// True if stored document bytes use the earlier type-tagged form (no
+/// `"json":` field near the start, where the current form puts it).
+pub fn is_legacy_stored(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(300)];
+    !head.windows(7).any(|w| w == b"\"json\":")
+}
+
+/// Stored document bytes in the current form (unchanged if they already are,
+/// or if they can't be parsed).
+pub fn upgrade_stored(bytes: Vec<u8>) -> Vec<u8> {
+    if !is_legacy_stored(&bytes) {
+        return bytes;
+    }
+    match serde_json::from_slice::<Document>(&bytes).and_then(|d| serde_json::to_vec(&d)) {
+        Ok(upgraded) => upgraded,
+        Err(_) => bytes,
+    }
+}
+
+/// A value written as plain JSON, without building a `Value` first.
+struct Plain<'a>(&'a FieldValue);
+
+impl Serialize for Plain<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        match self.0 {
+            FieldValue::Null => serializer.serialize_unit(),
+            FieldValue::String(s) | FieldValue::DateTime(s) => serializer.serialize_str(s),
+            FieldValue::Integer(i) => serializer.serialize_i64(*i),
+            FieldValue::Boolean(b) => serializer.serialize_bool(*b),
+            FieldValue::Array(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(&Plain(item))?;
+                }
+                seq.end()
+            }
+            FieldValue::Object(map) => PlainFields(map).serialize(serializer),
+            // Floats, large integers, decimals and binary: exactly as to_json writes them.
+            other => other.to_json().serialize(serializer),
+        }
+    }
+}
+
+/// A field map written as a plain JSON object.
+struct PlainFields<'a>(&'a CompactFields);
+
+impl Serialize for PlainFields<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (k, v) in self.0 {
+            map.serialize_entry(k, &Plain(v))?;
+        }
+        map.end()
+    }
+}
+
+impl Serialize for Document {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("Document", 4)?;
+        s.serialize_field("id", &self.id)?;
+        s.serialize_field("tessellation", &self.tessellation)?;
+        s.serialize_field("json", &PlainFields(&self.data))?;
+        s.serialize_field("ttl", &self.ttl)?;
+        s.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Document {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Stored {
+            id: Ulid,
+            tessellation: String,
+            /// Plain fields (current format).
+            #[serde(default)]
+            json: Option<Value>,
+            /// Type-tagged fields (earlier versions).
+            #[serde(default)]
+            data: Option<CompactFields>,
+            #[serde(default)]
+            ttl: Option<i64>,
+        }
+        let stored = Stored::deserialize(deserializer)?;
+        let data = match (stored.json, stored.data) {
+            (Some(json), _) => infer_fields_from_json(&json),
+            (None, Some(data)) => data,
+            (None, None) => CompactFields::new(),
+        };
+        Ok(Document { id: stored.id, tessellation: stored.tessellation, data, ttl: stored.ttl })
+    }
 }
 
 /// Keep only the given dotted field paths of a document's API JSON (plus
@@ -231,6 +333,26 @@ mod tests {
         assert!(matches!(fields["when"], FieldValue::DateTime(_)));
         assert_eq!(fields["n"], FieldValue::Integer(1));
         assert_eq!(fields["f"], FieldValue::Float(1.5));
+    }
+
+    #[test]
+    fn documents_are_stored_as_plain_json_and_old_tagged_ones_still_read() {
+        let doc = Document {
+            id: Ulid::new(),
+            tessellation: "t".into(),
+            data: infer_fields_from_json(&json!({ "name": "Ada", "n": 1, "f": 2.5, "big": 18446744073709551615u64, "when": "2024-05-01T12:30:00Z", "tags": ["a", null], "o": { "type": "String", "value": "x" } })),
+            ttl: Some(9),
+        };
+        let bytes = serde_json::to_vec(&doc).unwrap();
+        let stored: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stored["json"]["name"], json!("Ada"), "plain, not type-tagged");
+        assert_eq!(serde_json::from_slice::<Document>(&bytes).unwrap(), doc);
+
+        // The earlier type-tagged format.
+        let old = json!({ "id": doc.id, "tessellation": "t", "data": serde_json::to_value(&doc.data).unwrap(), "ttl": 9 });
+        assert_eq!(old["data"]["name"], json!({ "type": "String", "value": "Ada" }));
+        assert_eq!(serde_json::from_value::<Document>(old.clone()).unwrap(), doc);
+        assert!(bytes.len() * 2 < serde_json::to_vec(&old).unwrap().len(), "plain storage is much smaller");
     }
 
     #[test]

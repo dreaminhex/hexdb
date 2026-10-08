@@ -948,6 +948,8 @@ impl HexDBEngine {
                     match read {
                         Ok(bytes) => {
                             let doc = parse_document(&bytes)?;
+                            // Documents from older files go into memory in the current, smaller form.
+                            let bytes = if crate::document::is_legacy_stored(&bytes) { serde_json::to_vec(&doc)? } else { bytes };
                             self.doc_cache.put(key, entry.seq, &doc, bytes.len());
                             self.cache(key, entry.seq, entry.ttl, &bytes).await;
                             return Ok((Some(doc), entry.seq));

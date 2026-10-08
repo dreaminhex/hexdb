@@ -1,6 +1,6 @@
 # HexDB drivers
 
-Client libraries for HexDB's REST API. Each one covers the same ground:
+Client libraries for HexDB's REST API, plus an Entity Framework Core provider and an ODBC driver (below). The Node.js, Python and .NET drivers cover the same ground:
 
 - documents: insert, get, replace, patch, delete;
 - queries with filters, sorting and paging;
@@ -16,6 +16,7 @@ Client libraries for HexDB's REST API. Each one covers the same ground:
 | Python | [python](python) | `hexdb` (PyPI) | Python 3.9+; standard library only |
 | .NET (C#, F#) | [dotnet](dotnet) | `HexDB.Client` (NuGet) | .NET 8+ |
 | Entity Framework Core | [dotnet/HexDB.EntityFrameworkCore](dotnet/HexDB.EntityFrameworkCore) | `HexDB.EntityFrameworkCore` (NuGet) | .NET 8+, EF Core 8 |
+| ODBC | [odbc](odbc) | release archives (`odbc/`) | 64-bit Windows, Linux (unixODBC) |
 
 The three drivers authenticate with an API key (create one on the admin UI's Account page) or by signing in with a login and password. They retry `429` and `503` answers for reads, and for writes that carry an idempotency key.
 
@@ -70,6 +71,6 @@ node drivers/testing/server.mjs python -m unittest discover -s drivers/python/te
 node drivers/testing/server.mjs dotnet test drivers/dotnet
 ```
 
-## ODBC and JDBC
+## ODBC
 
-HexDB answers read-only SQL at `POST /sql` (see the [manual](../MANUAL.md#10-sql)). An ODBC driver that sends statements there over HTTP is planned. Until then, tools that support REST or JSON sources, such as Power BI, Tableau Web Data Connectors and Grafana's JSON data source, can read HexDB directly.
+The [ODBC driver](odbc) sends SQL to `POST /sql` (see the [manual](../MANUAL.md#10-sql)) over HTTP, so tools that read through ODBC can query HexDB. See [odbc/README.md](odbc/README.md) to install it and connect. There's no JDBC driver.

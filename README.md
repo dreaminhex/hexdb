@@ -21,7 +21,27 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon sharding that repairs corrupted memory.
-- **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, and an Entity Framework Core provider.
+- **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, an Entity Framework Core provider, and an ODBC driver.
+
+## Performance
+
+Measured with `cargo run --release -p hexdb_bench` on a laptop (Intel Core i9-12900H, Windows 11, Samsung 980 PRO NVMe SSD), with one server and its client on the same machine. Every write is in the write-ahead log and fsynced before it's acknowledged. The full report, with how each number is taken, is in [bench/results/windows-full.md](bench/results/windows-full.md); run the benchmark to measure your own hardware.
+
+| Area | Result |
+| --- | --- |
+| **Size** | 38 MB server, 9 MB CLI, 3 MB ODBC driver, 2 MB admin UI (52 MB in all) |
+| **Writes** | 31,000 documents/s in bulk (1,000 per request); single writes 2.5 ms median, 1,700/s from 8 clients |
+| **Reads** | 0.18 ms median by ID; 13,600/s from 8 clients |
+| **Queries** | Indexed lookup in 100,000 documents: 0.8 ms median. `SELECT COUNT(*)`: 0.4 ms |
+| **Memory** | 1.5x the JSON size: four data and two parity shards per document |
+| **Disk** | Structured JSON compresses to 16% of its size (a 10 MB document takes 1.6 MB); small documents average 81% after encryption and per-document overhead |
+| **Encryption** | AES-256-GCM: 890 MB/s encrypting, 1,150 MB/s decrypting, on one core |
+| **10 MB documents** | Written in 600 ms and read in 190 ms (structured JSON); 94 ms and 28 ms for data that doesn't compress |
+| **Vertex failure** | Documents stay readable with two of six vertices lost; rebuilding a lost vertex for 100,000 documents takes 0.4 s |
+| **Crash recovery** | Restart after a kill: 0.5 s with data in SSTables; 2.6 s replaying 100,000 unflushed writes from the WAL |
+| **Failover** | A new Overseer takes writes 2.6 s after the old one dies with `network.discovery_interval_seconds = 1`, or 31 s with the default of 10 s (a hex is declared lost after three missed rounds) |
+
+Documents over 1 MB need `limits.max_document_kb` raised (up to 64 MB).
 
 ## Quick start
 
@@ -247,6 +267,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | Python | [drivers/python](drivers/python) | Python 3.9+, standard library only |
 | .NET | [drivers/dotnet](drivers/dotnet) | .NET 8+ |
 | Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | .NET 8+, EF Core 8 |
+| ODBC | [drivers/odbc](drivers/odbc) | Windows, Linux (unixODBC); 64-bit |
 
 See [drivers/README.md](drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](hexdb_api/openapi.json)).
 
@@ -283,5 +304,5 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 ## Limitations
 
 - Every hex holds a full copy of the data. Horizontal partitioning (sharding across hexes) isn't implemented.
-- SQL is read-only and covers single-tessellation `SELECT`s: no joins, subqueries or expressions over fields. There's no ODBC or JDBC driver yet; an ODBC driver over `POST /sql` is planned.
+- SQL is read-only and covers single-tessellation `SELECT`s: no joins, subqueries or expressions over fields. The ODBC driver inherits those limits. It's tested with pyodbc (unixODBC and the Windows driver manager), not yet with desktop tools such as Excel or Power BI. There's no JDBC driver.
 - The Entity Framework Core provider maps one entity type to one tessellation. It doesn't support relationships, owned types, inheritance or explicit transactions (see [MANUAL.md](MANUAL.md#entity-framework-core)).

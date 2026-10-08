@@ -2,7 +2,8 @@ name: Release
 
 # Push a tag like v0.2.0 to build and publish:
 #   - archives for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows
-#     (x86_64) with hexdb_api, the hexdb CLI, the admin UI and a sample config,
+#     (x86_64) with hexdb_api, the hexdb CLI, the admin UI, the ODBC driver and
+#     a sample config,
 #     plus SHA-256 checksums, on the GitHub release;
 #   - a .deb package for Debian/Ubuntu (systemd service included);
 #   - a multi-arch container image on GitHub Container Registry;
@@ -59,7 +60,7 @@ jobs:
         shell: bash
         run: |
           test -f Cargo.lock || cargo generate-lockfile
-          cargo build --release --target ${{ matrix.target }} -p hexdb_api -p hexdb_cli
+          cargo build --release --target ${{ matrix.target }} -p hexdb_api -p hexdb_cli -p hexdb_odbc
       - name: Package
         shell: bash
         env:
@@ -73,6 +74,13 @@ jobs:
           cp -r ui "$name/ui"
           cp packaging/hexdb.toml "$name/hexdb.toml"
           cp README.md MANUAL.md "$name/"
+          # The ODBC driver library (and, on Windows, its installer script).
+          mkdir -p "$name/odbc"
+          case "$TARGET" in
+            *windows*) cp "target/$TARGET/release/hexdb_odbc.dll" drivers/odbc/install-windows.ps1 "$name/odbc/" ;;
+            *apple*) cp "target/$TARGET/release/libhexdb_odbc.dylib" "$name/odbc/" ;;
+            *) cp "target/$TARGET/release/libhexdb_odbc.so" "$name/odbc/" ;;
+          esac
           if [ "$ARCHIVE" = zip ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
       - uses: actions/upload-artifact@v4
         with:

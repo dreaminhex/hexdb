@@ -174,7 +174,7 @@ impl HexDBEngine {
         let keys = self.keys.clone();
         let loaded = tokio::task::spawn_blocking(move || -> Result<Option<IndexSnapshot>> {
             let Some(bytes) = crate::crypt::read_sealed_file(&path, &keys)? else { return Ok(None) };
-            let json = zstd::stream::decode_all(&bytes[..])?;
+            let json = crate::compress::decompress(&bytes[..])?;
             Ok(Some(serde_json::from_slice(&json)?))
         })
         .await;
@@ -262,7 +262,7 @@ impl HexDBEngine {
                 let dir = base.join(&snapshot.tessellation);
                 std::fs::create_dir_all(&dir)?;
                 let json = serde_json::to_vec(snapshot)?;
-                let compressed = zstd::stream::encode_all(&json[..], 1)?;
+                let compressed = crate::compress::compress(&json[..], 1)?;
                 crate::crypt::write_sealed_file(&dir.join(format!("{}.hxi", snapshot.def.name)), &keys, &compressed)?;
             }
             // Remove snapshots of indexes (and tessellations) that no longer exist.

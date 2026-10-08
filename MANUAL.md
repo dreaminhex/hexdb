@@ -452,7 +452,7 @@ GraphQL: `aggregate(tessellation: "orders", groupBy: ["status"], aggregates: { n
 
 ## 10. SQL
 
-`POST /sql` runs a read-only SQL `SELECT`. It's translated into the query or aggregation the REST API already runs, so indexes, permissions, row filters and field masks all apply the same way. BI tools and the planned ODBC driver use it; the `hexdb sql` command prints its results as a table.
+`POST /sql` runs a read-only SQL `SELECT`. It's translated into the query or aggregation the REST API already runs, so indexes, permissions, row filters and field masks all apply the same way. BI tools and the [ODBC driver](#odbc) use it; the `hexdb sql` command prints its results as a table.
 
 ```bash
 curl -X POST http://localhost:7700/sql -H "Authorization: Bearer $HEXDB_API_KEY" -H "Content-Type: application/json" -d '{
@@ -1426,6 +1426,8 @@ Every document held in memory is split into six shards with Reed-Solomon coding 
 
 Any two of the six vertices can be lost or corrupted without losing data. The dashboard's vertex hexagon shows each vertex's shards, bytes and repairs. This protects against memory corruption. Durability comes from the WAL and SSTables.
 
+A document in memory takes about 1.5 times its JSON size: four data shards plus two parity shards. Shards under 16 KB use a table-driven Reed-Solomon code over GF(256), which has no per-call setup; larger shards use reed-solomon-simd. Shards live only in memory, so the code can change between versions without affecting stored data.
+
 ### Data layout
 
 ```text
@@ -1466,6 +1468,8 @@ Any two of the six vertices can be lost or corrupted without losing data. The da
 
 Each body is `nonce (12) | AES-256-GCM(zstd(JSON document))`, with the document ID and sequence number as authenticated data. Tombstones have no body.
 
+**Stored document.** `{"id", "tessellation", "json": {fields as plain JSON}, "ttl"}`, in memory, WAL records, SSTable bodies and replication. Field types are inferred again when it's read, which is lossless. Versions before 0.2 stored each field with a type tag (`"data": {"name": {"type": "String", "value": "..."}}`), about three times larger. Both forms are read, and compaction rewrites old SSTables in the new form. In a lattice, upgrade replicas before the Overseer, as usual: upgraded hexes read both forms, but older hexes can't read the new one.
+
 The index block is a series of chunks of up to 64 records. Each chunk is `length (4) | nonce (12) | AES-256-GCM(records)`, authenticated with its chunk number. A record is `id (16) | flags (1: bit 0 TTL, bit 1 tombstone) | seq (8) | [ttl (8)] | body offset (8) | body length (4)`.
 
 Only the chunk directory (each chunk's first ID, offset and length) and a Bloom filter of the IDs stay in memory, about 2 bytes per document.
@@ -1482,6 +1486,7 @@ Versions 2 (unencrypted) and 3 (encrypted bodies, plaintext index) are still rea
 | --- | --- | --- |
 | Document size | 1 MB of JSON | `limits.max_document_kb` (live) |
 | Bulk, query, transaction and GraphQL bodies | 32 MB | `limits.max_request_mb` |
+| Single-document writes (`POST /{tessellation}`, `PUT` and `PATCH` of `/{tessellation}/{id}`) | The larger of 32 MB and `limits.max_document_kb` | Follows those two settings, as they are at startup |
 | Other request bodies | 2 MB | fixed |
 | Documents per bulk request | 10,000 | fixed |
 | Operations per transaction | 1,000 | fixed |
@@ -1594,15 +1599,16 @@ Hard-linked backups share disk blocks with the live data, so they don't protect 
 | Python | [drivers/python](drivers/python) | `pip install hexdb` (3.9+, no dependencies) |
 | .NET | [drivers/dotnet](drivers/dotnet) | `dotnet add package HexDB.Client` (.NET 8+) |
 | Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 8+, EF Core 8) |
+| ODBC | [drivers/odbc](drivers/odbc) | Release archives (`odbc/`), or `cargo build --release -p hexdb_odbc` |
 
-Each driver covers:
+The Node.js, Python and .NET drivers each cover:
 - documents, queries, counts, aggregations and upserts;
 - transactions and idempotency keys;
 - the change feed;
 - streams with consumer groups;
 - functions and GraphQL.
 
-They authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
+The Entity Framework Core provider and the ODBC driver, described below, build on them or on SQL. The three client drivers authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
 
 ### Entity Framework Core
 
@@ -1690,9 +1696,39 @@ Concurrency tokens (`[ConcurrencyCheck]` or `.IsConcurrencyToken()`) become an `
 - Explicit transactions: `BeginTransaction` throws, because each `SaveChanges` is already one transaction.
 - Migrations.
 
-### ODBC and JDBC
+### ODBC
 
-There's no ODBC or JDBC driver yet. An ODBC driver that sends statements to [`POST /sql`](#10-sql) is planned. Until then, tools with REST or JSON data sources (Power BI, Tableau Web Data Connectors, Grafana's JSON data source) can read HexDB directly.
+The ODBC driver ([drivers/odbc](drivers/odbc)) lets applications that read data through ODBC (reporting tools, spreadsheets, pyodbc, R) query HexDB. It sends SQL to [`POST /sql`](#10-sql) over HTTP or HTTPS, so it supports what HexDB's SQL supports and nothing more: read-only `SELECT`s on one tessellation. Permissions, row filters and field masks apply as for any other client.
+
+Build it with `cargo build --release -p hexdb_odbc` (release archives include it in `odbc/`), then register it:
+- **Windows:** run `drivers/odbc/install-windows.ps1` from an elevated PowerShell.
+- **Linux and macOS:** add it to unixODBC's `odbcinst.ini`.
+
+Then connect with a connection string or a DSN:
+
+```text
+Driver={HexDB};Server=http://127.0.0.1:7700;ApiKey=hxk_...
+```
+
+**Connection keys.**
+- `Server` and `ApiKey` (or `UID` and `PWD` to sign in) are the essentials.
+- `PageSize` sets rows per request (default 1,000).
+- `MaxStringLength` sets the size reported for text columns (default 4,000).
+- `Timeout` sets seconds per request (default 60).
+- `CAFile` gives certificates to trust for HTTPS.
+
+**Behavior.**
+- **Types.**
+  - Booleans are reported as `SQL_BIT`, integers as `SQL_BIGINT`, other numbers as `SQL_DOUBLE`, and text as `SQL_WVARCHAR`.
+  - Objects and arrays are `SQL_WLONGVARCHAR` holding JSON.
+  - A column's type comes from the tessellation's schema when there is one, otherwise from the first page of results.
+- **Catalog.** Tessellations are tables in no catalog or schema, and `id` is each one's primary key.
+- **Escapes.** ODBC escape sequences for dates and timestamps become string literals.
+- **Cursors.** Forward-only and read-only.
+
+See [drivers/odbc/README.md](drivers/odbc/README.md) for installation on each platform, every connection key, conversions and limits.
+
+The driver is tested with pyodbc through unixODBC on Linux and through the Windows driver manager (in CI). Desktop tools such as Excel and Power BI haven't been tested with it yet. There's no JDBC driver.
 
 ## 24. FAQ
 

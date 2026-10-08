@@ -1396,7 +1396,7 @@ impl HexDBEngine {
             }
             Body::Documents { filter, sort, columns } => {
                 if want == 0 {
-                    (doc_names(columns, &[]), Vec::new(), false, None)
+                    (self.empty_doc_names(tess, columns).await?, Vec::new(), false, None)
                 } else {
                     let request = DocumentQuery {
                         filter: Filter::parse(filter)?,
@@ -1408,7 +1408,9 @@ impl HexDBEngine {
                     };
                     let result = self.query_documents(tess, &request).await?;
                     let documents: Vec<Value> = result.documents.iter().map(|d| d.to_api_json()).collect();
-                    let names = doc_names(columns, &documents);
+                    // An empty page still describes `*` with the tessellation's columns,
+                    // so clients see the same columns whether or not rows match.
+                    let names = if documents.is_empty() { self.empty_doc_names(tess, columns).await? } else { doc_names(columns, &documents) };
                     let rows = documents.iter().map(|d| doc_row(columns, &names, d)).collect::<Vec<_>>();
                     let more = rows.len() == want && remaining != Some(want);
                     (names, rows, more, if sort.is_empty() { result.next } else { None })
@@ -1468,12 +1470,71 @@ impl HexDBEngine {
             (true, Some(id)) => Some(format!("a{}:{}", returned, id)),
             (true, None) => Some(format!("o{}", returned)),
         };
+        // A column that reads a field the schema types gets that type;
+        // others are typed by this page's values.
+        let fields = column_fields(&query.body, &names);
+        let schema = self.schemas(tess).into_iter().max_by_key(|s| s.version);
         let columns = names
             .into_iter()
             .enumerate()
-            .map(|(i, name)| SqlColumn { name, kind: column_type(rows.iter().map(|r| &r[i])) })
+            .map(|(i, name)| {
+                let declared = match fields[i].as_deref() {
+                    Some("id") => Some("string"),
+                    Some(f) => schema.as_ref().and_then(|s| s.fields.get(f)).and_then(|rule| scalar_kind(rule.kind)),
+                    None => None,
+                };
+                SqlColumn { name, kind: declared.unwrap_or_else(|| column_type(rows.iter().map(|r| &r[i]))) }
+            })
             .collect();
         Ok(SqlResult { columns, rows, next })
+    }
+
+    /// Column names when no document came back: `*` lists the tessellation's columns.
+    async fn empty_doc_names(&self, tess: &str, columns: &[DocColumn]) -> Result<Vec<String>> {
+        if !columns.iter().any(|c| matches!(c, DocColumn::All)) {
+            return Ok(doc_names(columns, &[]));
+        }
+        let known: Map<String, Value> = self.sql_columns(tess).await?.into_iter().map(|c| (c.name, Value::Null)).collect();
+        Ok(doc_names(columns, &[Value::Object(known)]))
+    }
+}
+
+/// The field each output column reads (`None` for values and aggregates).
+fn column_fields(body: &Body, names: &[String]) -> Vec<Option<String>> {
+    match body {
+        Body::Constant(values) => vec![None; values.len()],
+        Body::Aggregate { columns, .. } => columns
+            .iter()
+            .map(|(_, source)| match source {
+                Source::Key(k) if !k.starts_with("$agg") => Some(k.clone()),
+                _ => None,
+            })
+            .collect(),
+        Body::Documents { columns, .. } => {
+            let mut fields = Vec::with_capacity(names.len());
+            let expanded = names.len() + 1 - columns.len();
+            for column in columns {
+                match column {
+                    DocColumn::Field { path, .. } => fields.push(Some(path.join("."))),
+                    DocColumn::Constant { .. } => fields.push(None),
+                    DocColumn::All => {
+                        let start = fields.len();
+                        fields.extend(names[start..start + expanded].iter().map(|n| Some(n.clone())));
+                    }
+                }
+            }
+            fields
+        }
+    }
+}
+
+fn scalar_kind(kind: crate::schema::FieldType) -> Option<&'static str> {
+    match kind {
+        crate::schema::FieldType::String => Some("string"),
+        crate::schema::FieldType::Number => Some("number"),
+        crate::schema::FieldType::Integer => Some("integer"),
+        crate::schema::FieldType::Boolean => Some("boolean"),
+        _ => None,
     }
 }
 

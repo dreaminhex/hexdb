@@ -314,8 +314,10 @@ fn logs_metrics_otlp_and_source_plugins() -> Result<()> {
 
     // The source plugin wrote through the API as its own user, only where allowed.
     wait_until(Duration::from_secs(15), "the source plugin", || Ok(server.count("ingested").unwrap_or(0) == 1))?;
-    let logs = server.request(Method::GET, "/logs?q=source%20wrote&limit=10", None, &[])?;
-    assert!(logs.body.to_string().contains("forbidden -> 403"), "{}", logs.body);
+    // Its refused write is logged just after the allowed one.
+    wait_until(Duration::from_secs(10), "the refused write in the log", || {
+        Ok(server.request(Method::GET, "/logs?q=source%20wrote&limit=10", None, &[])?.body.to_string().contains("forbidden -> 403"))
+    })?;
     let user = server.request(Method::GET, "/users/plugin-test-source", None, &[])?;
     assert_eq!(user.body["roles"][0]["name"], "writer", "{}", user.body);
 

@@ -31,6 +31,8 @@ pub mod streams;
 pub mod functions;
 pub mod triggers;
 pub mod sql;
+pub mod compress;
+pub mod erasure;
 pub mod network {
     pub mod discovery;
     pub mod lattice_auth;

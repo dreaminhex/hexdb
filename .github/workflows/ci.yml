@@ -85,6 +85,42 @@ jobs:
         run: node drivers/testing/server.mjs python -m unittest discover -s drivers/python/tests -t drivers/python -v
       - name: .NET
         run: node drivers/testing/server.mjs dotnet test drivers/dotnet
+      - name: ODBC (unixODBC, pyodbc)
+        run: |
+          sudo apt-get install -y unixodbc
+          pip install pyodbc
+          cargo build -p hexdb_odbc
+          node drivers/testing/server.mjs python drivers/odbc/tests/pyodbc_smoke.py
+
+  odbc-windows:
+    name: ODBC (Windows driver manager)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        shell: bash
+        run: |
+          test -f Cargo.lock || cargo generate-lockfile
+          cargo build -p hexdb_api -p hexdb_odbc
+      # Hosted runners are elevated, so the driver can be registered.
+      - name: Install the driver
+        shell: pwsh
+        run: ./drivers/odbc/install-windows.ps1 -Dll target/debug/hexdb_odbc.dll
+      - name: pyodbc
+        shell: bash
+        env:
+          HEXDB_ODBC_DRIVER: HexDB
+        run: |
+          pip install pyodbc
+          node drivers/testing/server.mjs python drivers/odbc/tests/pyodbc_smoke.py
 
   admin-ui:
     name: Admin UI
