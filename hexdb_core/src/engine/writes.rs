@@ -136,6 +136,24 @@ impl Default for DocumentQuery {
     }
 }
 
+/// What an upsert did; `ids` follow the order of the request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpsertSummary {
+    pub inserted: usize,
+    pub replaced: usize,
+    pub ids: Vec<String>,
+}
+
+impl Document {
+    /// Queue this document as a put that requires the stored version `seq`
+    /// (0: must not exist); returns its ID.
+    fn with_expected(self, seq: u64, items: &mut Vec<BatchItem>) -> Ulid {
+        let id = self.id;
+        items.push(BatchItem { key: DocKey::new(&self.tessellation, id), op: WalOp::Put(self), expected_seq: Some(seq) });
+        id
+    }
+}
+
 /// One page of query results.
 #[derive(Debug, Clone)]
 pub struct QueryPage {
@@ -285,6 +303,16 @@ impl HexDBEngine {
     /// Without `sort`, results are in ID order and `next` can be passed as
     /// `after` for the following page; with `sort`, page with `offset`.
     pub async fn query_documents(&self, tess: &str, query: &DocumentQuery) -> Result<QueryPage> {
+        let started = std::time::Instant::now();
+        let page = self.query_documents_inner(tess, query).await?;
+        if !tess.starts_with('_') && !self.is_system_tessellation(tess) {
+            let shape = crate::advisor::Shape::of(&query.filter, &query.sort);
+            self.query_stats.record(tess, shape, page.scanned, page.total, started.elapsed().as_secs_f64() * 1000.0, &page.indexes);
+        }
+        Ok(page)
+    }
+
+    async fn query_documents_inner(&self, tess: &str, query: &DocumentQuery) -> Result<QueryPage> {
         self.queries_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if query.after.is_some() && !query.sort.is_empty() {
             return Err(invalid("after can't be combined with sort; use offset to page sorted results."));
@@ -401,7 +429,21 @@ impl HexDBEngine {
     /// Group and summarize the documents that match the aggregation's filter.
     pub async fn aggregate(&self, tess: &str, aggregation: &crate::aggregate::Aggregation) -> Result<crate::aggregate::AggregateResult> {
         self.queries_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let documents = self.matching_documents(tess, &aggregation.filter).await?;
+        let started = std::time::Instant::now();
+        let (filter, plan) = self.prepare_filter(tess, &aggregation.filter);
+        let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
+        let ids = self.candidate_ids(tess, plan, None).await;
+        let scanned = ids.len();
+        let mut documents = Vec::new();
+        for id in ids {
+            if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
+                if filter.matches(&doc) {
+                    documents.push(doc);
+                }
+            }
+        }
+        let shape = crate::advisor::Shape::of(&aggregation.filter, &[]);
+        self.query_stats.record(tess, shape, scanned, documents.len(), started.elapsed().as_secs_f64() * 1000.0, &indexes);
         aggregation.run(&documents)
     }
 
@@ -444,6 +486,84 @@ impl HexDBEngine {
 
         let fields = &fields;
         self.run_write(idem, move || Box::pin(self.plan_insert(tess, fields, ttl))).await
+    }
+
+    /// Insert or replace documents by key fields (for example an ID from
+    /// another system): a document whose key fields equal an existing
+    /// document's replaces it, keeping that document's ID; the rest are
+    /// inserted. Atomic. Upserts on one hex are serialized; a unique index on
+    /// the key fields also guards against duplicates from concurrent writers.
+    pub async fn upsert_documents(
+        &self,
+        tess: &str,
+        key: &[String],
+        docs: Vec<Value>,
+        ttl: Option<i64>,
+        idem: Option<IdempotencyKey>,
+    ) -> Result<Outcome<UpsertSummary>> {
+        validate_tess(tess)?;
+        check_bulk_size(docs.len())?;
+        if key.is_empty() || key.len() > 4 || key.iter().any(|k| k.is_empty() || k == "id" || k.starts_with('_')) {
+            return Err(invalid("key: 1-4 field names (not id or fields starting with '_')."));
+        }
+        let paths: Vec<Vec<String>> = key.iter().map(|k| k.split('.').map(String::from).collect()).collect();
+        let mut seen = HashSet::new();
+        let mut prepared = Vec::with_capacity(docs.len());
+        for (i, json) in docs.iter().enumerate() {
+            let what = format!("documents[{}]", i);
+            let fields = object_fields(json, &what)?;
+            let mut condition = serde_json::Map::new();
+            for (name, path) in key.iter().zip(&paths) {
+                let values = crate::filter::resolve(json, path);
+                match values.as_slice() {
+                    [value] if !value.is_null() && !value.is_array() && !value.is_object() => {
+                        condition.insert(name.clone(), (*value).clone());
+                    }
+                    _ => return Err(invalid(format!("{}: key field '{}' must be present with a single scalar value.", what, name))),
+                }
+            }
+            if !seen.insert(Value::Object(condition.clone()).to_string()) {
+                return Err(invalid(format!("{}: another document in this request has the same key.", what)));
+            }
+            let described = Value::Object(condition.clone()).to_string();
+            prepared.push((Filter::parse(&Value::Object(condition))?, fields, described));
+        }
+        self.ensure_tessellation(tess)?;
+        let _serial = self.upsert_lock.lock().await;
+        let prepared = &prepared;
+        self.run_write(idem, move || Box::pin(self.plan_upsert(tess, prepared, ttl))).await
+    }
+
+    async fn plan_upsert(&self, tess: &str, prepared: &[(Filter, CompactFields, String)], ttl: Option<i64>) -> Result<(Vec<BatchItem>, UpsertSummary)> {
+        let mut summary = UpsertSummary::default();
+        let mut items = Vec::with_capacity(prepared.len());
+        for (filter, fields, described) in prepared {
+            let matches = self.matching_documents(tess, filter).await?;
+            if matches.len() > 1 {
+                return Err(EngineError::Conflict(format!(
+                    "{} documents in '{}' have the key {}; an upsert key must identify one document.",
+                    matches.len(),
+                    tess,
+                    described
+                ))
+                .into());
+            }
+            let doc = match matches.into_iter().next() {
+                Some(existing) => {
+                    let key = DocKey::new(tess, existing.id);
+                    let (_, seq) = self.read_latest(&key).await?;
+                    summary.replaced += 1;
+                    Document { id: existing.id, tessellation: tess.to_string(), data: fields.clone(), ttl: ttl.or(existing.ttl) }
+                        .with_expected(seq, &mut items)
+                }
+                None => {
+                    summary.inserted += 1;
+                    Document { id: Ulid::new(), tessellation: tess.to_string(), data: fields.clone(), ttl }.with_expected(0, &mut items)
+                }
+            };
+            summary.ids.push(doc.to_string());
+        }
+        Ok((items, summary))
     }
 
     /// Replace the fields of one document. The TTL is kept unless a new one is given.
@@ -843,17 +963,30 @@ impl HexDBEngine {
             }
         }
 
+        let mut items = items;
+        if !replicated {
+            self.apply_schemas(&mut items)?;
+        }
         let user_writes = items.iter().filter(|i| i.key.tessellation != IDEMPOTENCY_TESSELLATION).count() as u64;
+        let touched: Vec<String> = if replicated {
+            Vec::new()
+        } else {
+            let mut t: Vec<String> = items.iter().map(|i| i.key.tessellation.clone()).collect();
+            t.dedup();
+            t
+        };
 
-        fn prepare(item: &BatchItem) -> Result<(DocKey, Option<Vec<u8>>, Option<i64>)> {
+        fn prepare(item: &BatchItem) -> Result<Prepared> {
             match &item.op {
                 WalOp::Put(doc) => Ok((item.key.clone(), Some(serde_json::to_vec(doc)?), doc.ttl)),
                 WalOp::Delete { .. } => Ok((item.key.clone(), None, None)),
                 WalOp::Batch(_) => Err(anyhow!("Nested batches are not supported")),
             }
         }
-        let mut prepared: Vec<(DocKey, Option<Vec<u8>>, Option<i64>)> = items.iter().map(prepare).collect::<Result<_>>()?;
-        let mut items = items;
+        let mut prepared: Vec<Prepared> = items.iter().map(prepare).collect::<Result<_>>()?;
+        if !replicated {
+            self.check_limits(&prepared)?;
+        }
 
         let (ack, first, changes) = {
             let mut state = self.state.lock().await;
@@ -909,7 +1042,7 @@ impl HexDBEngine {
             let op = if ops.len() == 1 { ops.pop().unwrap() } else { WalOp::Batch(ops) };
 
             // Queue to the WAL first so nothing is applied if the WAL is unavailable.
-            let ack = self.wal.append(WalRecord { seq: first, op }).await?;
+            let ack = self.wal.append(WalRecord { seq: first, op, time: Utc::now().timestamp_millis() }).await?;
             state.next_seq += count;
             let changes = (changes, count);
             for (i, (key, bytes, ttl)) in prepared.iter().enumerate() {
@@ -943,7 +1076,42 @@ impl HexDBEngine {
         }
         self.changes.complete(first, count, changes);
         self.writes_total.fetch_add(user_writes, std::sync::atomic::Ordering::Relaxed);
+        if !replicated {
+            let touched: Vec<&str> = touched.iter().map(String::as_str).collect();
+            self.wait_for_acks(first + count - 1, &touched).await?;
+        }
         Ok(Some(first))
+    }
+
+    /// Refuse documents over `limits.max_document_kb`, and writes that add
+    /// data while the data directory is over `storage.disk_mb`.
+    fn check_limits(&self, prepared: &[Prepared]) -> Result<()> {
+        let live = self.live();
+        let max = live.max_document_kb.saturating_mul(1024) as usize;
+        for (key, bytes, _) in prepared {
+            if let Some(bytes) = bytes {
+                if bytes.len() > max && !key.tessellation.starts_with('_') {
+                    return Err(EngineError::TooLarge(format!(
+                        "A document in '{}' is {} KB; the limit is {} KB (limits.max_document_kb).",
+                        key.tessellation,
+                        bytes.len().div_ceil(1024),
+                        live.max_document_kb
+                    ))
+                    .into());
+                }
+            }
+        }
+        let adds_data = prepared.iter().any(|(key, bytes, _)| bytes.is_some() && !key.tessellation.starts_with('_'));
+        let used = self.disk_used_bytes();
+        if adds_data && used > live.disk_mb.saturating_mul(1024 * 1024) {
+            return Err(EngineError::DiskFull(format!(
+                "The data directory uses {} MB, over its {} MB limit (storage.disk_mb). Delete data, or raise the limit on the Settings page.",
+                used / (1024 * 1024),
+                live.disk_mb
+            ))
+            .into());
+        }
+        Ok(())
     }
 
     /// Fail with a conflict if a write would break a unique index.
@@ -992,3 +1160,6 @@ impl HexDBEngine {
         }
     }
 }
+
+/// A write ready for the WAL: its key, serialized document (None to delete), and TTL.
+type Prepared = (DocKey, Option<Vec<u8>>, Option<i64>);

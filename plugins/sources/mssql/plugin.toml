@@ -1,0 +1,24 @@
+# Ingests rows from a SQL Server table into a tessellation and keeps them in
+# sync, using a rowversion column to find changed rows (no clock problems).
+# Rows are upserted by their primary key, stored as `source_id`.
+#
+# Setup: `npm install` in this folder and set the [env] values. A unique
+# index on source_id in the target tessellation is recommended.
+id = "@sources/mssql"
+name = "SQL Server source"
+type = "source"
+version = "1.0.0"
+description = "Copies a SQL Server table into a tessellation and keeps it in sync."
+command = ["node", "index.mjs"]
+
+[access]
+role = "writer"
+tessellations = ["orders"]
+
+[env]
+MSSQL_CONNECTION = "Server=localhost,1433;Database=app;User Id=sa;Password=...;Encrypt=true;TrustServerCertificate=true"
+MSSQL_TABLE = "dbo.Orders"
+MSSQL_KEY = "OrderId"
+MSSQL_ROWVERSION = "RowVer"     # a rowversion (timestamp) column
+TARGET = "orders"
+POLL_SECONDS = "10"

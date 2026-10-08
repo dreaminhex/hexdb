@@ -1,0 +1,59 @@
+# A three-hex HexDB lattice on one machine:
+#
+#   export HEXDB_LATTICE_SECRET="base64:$(openssl rand -base64 32)"
+#   docker compose up -d
+#   docker compose logs hex1 | grep password     # the generated admin password
+#
+# The admin UI is at http://localhost:7700/ui (hex1); the other hexes answer
+# on 7710 and 7720. Each hex has its own storage key and volume; the lattice
+# secret is shared. Stop one (docker compose stop hex1) to watch a failover.
+#
+# The fallback storage keys below are fixed values for trying this out only:
+# for real data set HEX1_KEY, HEX2_KEY and HEX3_KEY (hexdb secret prints one).
+
+x-hex: &hex
+  build: .
+  image: hexdb:local
+  restart: unless-stopped
+  environment: &env
+    HEXDB_NETWORK__LATTICE_NAME: "Compose Lattice"
+    HEXDB_NETWORK__LATTICE_SECRET: ${HEXDB_LATTICE_SECRET:?set HEXDB_LATTICE_SECRET (see the top of this file)}
+    HEXDB_NETWORK__PEERS: "hex1:7702,hex2:7702,hex3:7702"
+
+services:
+  hex1:
+    <<: *hex
+    hostname: hex1
+    ports: ["7700:7700"]
+    volumes: ["hex1:/var/lib/hexdb"]
+    environment:
+      <<: *env
+      HEXDB_NETWORK__ADVERTISE_HOST: hex1
+      HEXDB_STORAGE__ENCRYPTION_KEY: ${HEX1_KEY:-base64:MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE=}
+      HEXDB_MEMORY__RAM_MB: "2048"
+
+  hex2:
+    <<: *hex
+    hostname: hex2
+    ports: ["7710:7700"]
+    volumes: ["hex2:/var/lib/hexdb"]
+    environment:
+      <<: *env
+      HEXDB_NETWORK__ADVERTISE_HOST: hex2
+      HEXDB_STORAGE__ENCRYPTION_KEY: ${HEX2_KEY:-base64:MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjI=}
+
+  hex3:
+    <<: *hex
+    hostname: hex3
+    ports: ["7720:7700"]
+    volumes: ["hex3:/var/lib/hexdb"]
+    environment:
+      <<: *env
+      HEXDB_NETWORK__ADVERTISE_HOST: hex3
+      HEXDB_STORAGE__ENCRYPTION_KEY: ${HEX3_KEY:-base64:MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=}
+      HEXDB_IDENTITY__ROLE: replicant
+
+volumes:
+  hex1:
+  hex2:
+  hex3:

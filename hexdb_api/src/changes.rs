@@ -11,10 +11,11 @@
 //       The same changes as Server-Sent Events (`event: change`, `id: <seq>`),
 //       live. Reconnecting clients resume from the `Last-Event-ID` header.
 //
-// Both return 410 (`history_expired`) when the requested position is older
-// than the changes kept in memory; re-read the data and start from `last_seq`
-// of a fresh request. System tessellations (users, roles, ...) are left out,
-// and so are tessellations the caller can't read.
+// Recent changes come from memory; older ones from the change history on disk
+// (`storage.change_history_hours`). Both return 410 (`history_expired`) when
+// the requested position is older than that history; re-read the data and
+// start from `last_seq` of a fresh request. System tessellations (users,
+// roles, ...) are left out, and so are tessellations the caller can't read.
 
 use crate::auth::Auth;
 use crate::handlers::{ApiError, ApiResult, Engine};
@@ -42,6 +43,8 @@ use tokio::sync::broadcast::{self, error::RecvError};
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
 const MAX_WAIT_SECONDS: u64 = 60;
+/// Changes a stream sends from the on-disk history before going live.
+const MAX_DISK_BACKLOG: usize = 50_000;
 /// How often a live stream re-checks its credentials.
 const REAUTH_EVERY: Duration = Duration::from_secs(30);
 
@@ -101,10 +104,33 @@ pub async fn changes(
         Ok(Json(json!({
             "changes": changes,
             "last_seq": cursor,
-            "available_after": engine.changes.available_after(),
+            "available_after": engine.history_available_after(),
         }))
         .into_response())
     };
+    // Older than the in-memory feed: read pages of the history on disk.
+    if cursor < engine.changes.available_after() {
+        let mut out = Vec::new();
+        for _ in 0..16 {
+            let page = engine.changes_after(cursor, limit).await.map_err(expired)?;
+            if page.is_empty() {
+                break;
+            }
+            for change in &page {
+                if out.len() == limit {
+                    break;
+                }
+                cursor = change.seq;
+                if visible(&engine, &principal, change, tessellation) {
+                    out.push(change.to_api_json());
+                }
+            }
+            if !out.is_empty() || cursor >= engine.changes.available_after() {
+                break;
+            }
+        }
+        return respond(out, cursor);
+    }
     loop {
         // Subscribe before reading so a change published in between isn't missed.
         let (backlog, mut receiver) = engine.changes.follow(cursor).map_err(expired)?;
@@ -146,8 +172,19 @@ pub async fn change_stream(
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok());
-    let after = resume.or(params.after).unwrap_or_else(|| engine.changes.published_seq());
-    let (backlog, receiver) = engine.changes.follow(after).map_err(expired)?;
+    let mut after = resume.or(params.after).unwrap_or_else(|| engine.changes.published_seq());
+    // A cursor older than the in-memory feed: send the history from disk
+    // first (up to MAX_DISK_BACKLOG changes; a client further behind resumes
+    // from the last ID it got).
+    let mut disk_backlog: Vec<Arc<Change>> = Vec::new();
+    while after < engine.changes.available_after() && disk_backlog.len() < MAX_DISK_BACKLOG {
+        let page = engine.changes_after(after, MAX_LIMIT).await.map_err(expired)?;
+        let Some(last) = page.last() else { break };
+        after = last.seq;
+        disk_backlog.extend(page);
+    }
+    let (memory_backlog, receiver) = engine.changes.follow(after).map_err(expired)?;
+    let backlog: Vec<Arc<Change>> = disk_backlog.into_iter().chain(memory_backlog).collect();
     let tessellation = params.tessellation.filter(|t| !t.is_empty());
 
     let event = |change: &Change| {

@@ -43,13 +43,17 @@ use ulid::Ulid;
 
 mod indexing;
 mod reads;
+mod history;
+mod schemas;
 mod replica;
-pub use replica::{ReplicaCursor, ReplicaWrite, REPLICATION_TESSELLATION};
+pub use replica::{ReplicaCursor, ReplicaWrite, REPLICATION_TESSELLATION, SKIP_ACKS};
+pub use schemas::MigrationStatus;
+pub use history::ChangeReader;
 mod transactions;
 mod writes;
 pub use transactions::{parse_transaction, TransactionResult, TxOpKind, TxOperation, TxResult, MAX_TRANSACTION_OPS};
 pub use writes::{
-    DocumentQuery, IdempotencyKey, ListPage, Outcome, QueryPage, UpdateSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
+    DocumentQuery, IdempotencyKey, ListPage, Outcome, QueryPage, UpdateSummary, UpsertSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
 };
 
 /// The identity of this hex within its lattice, decided before the engine is built.
@@ -72,10 +76,22 @@ pub enum EngineError {
     ReadOnly(String),
     /// No valid credentials (401).
     Unauthorized(String),
+    /// The write committed, but not enough replicas confirmed it in time (503).
+    ReplicationTimeout(String),
+    /// A document is larger than `limits.max_document_kb` (413).
+    TooLarge(String),
+    /// A document doesn't fit its tessellation's schema (422).
+    SchemaViolation(String),
+    /// The data directory is over `storage.disk_mb` (507).
+    DiskFull(String),
+    /// This hex doesn't see enough of the lattice to accept writes (503).
+    NoQuorum(String),
     /// Authenticated, but not allowed (403).
     Forbidden(String),
     /// Too many attempts; retry after this many seconds (429).
     RateLimited(String, u64),
+    /// The password was right, but the account also needs a one-time code (401).
+    MfaRequired(String),
 }
 
 impl fmt::Display for EngineError {
@@ -88,6 +104,12 @@ impl fmt::Display for EngineError {
             | EngineError::Unauthorized(m)
             | EngineError::Forbidden(m)
             | EngineError::RateLimited(m, _)
+            | EngineError::MfaRequired(m)
+            | EngineError::ReplicationTimeout(m)
+            | EngineError::TooLarge(m)
+            | EngineError::SchemaViolation(m)
+            | EngineError::DiskFull(m)
+            | EngineError::NoQuorum(m)
             | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }
@@ -195,6 +217,16 @@ pub struct HexDBEngine {
     inflight: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Serializes user-management writes (e.g. so two users can't claim one login).
     pub(crate) users_lock: Mutex<()>,
+    /// Schema migrations in progress (or finished), per tessellation.
+    pub(crate) schema_jobs: std::sync::Mutex<HashMap<String, schemas::MigrationStatus>>,
+    /// Running stream sources and destinations (see `crate::streams`).
+    pub stream_tasks: crate::streams::StreamTasks,
+    /// Monotonic IDs for stream messages.
+    pub(crate) stream_ids: std::sync::Mutex<ulid::Generator>,
+    /// Query shapes, for the query advisor.
+    pub query_stats: crate::advisor::QueryStats,
+    /// Serializes upserts, so two can't both insert the same key.
+    pub(crate) upsert_lock: Mutex<()>,
     pub(crate) reads_total: AtomicU64,
     pub(crate) writes_total: AtomicU64,
     pub(crate) queries_total: AtomicU64,
@@ -222,6 +254,23 @@ pub struct HexDBEngine {
     doc_cache: reads::DocCache,
     /// The storage key ring (for encrypted metadata files).
     pub(crate) keys: Arc<crate::crypt::KeyRing>,
+    /// The last TOTP step each user signed in with on this hex (replay protection
+    /// that also works on replicas, which can't write it to the user record).
+    pub(crate) mfa_steps: std::sync::Mutex<HashMap<Ulid, i64>>,
+    /// Names this data directory's sequence of changes (see `Catalog::history_id`).
+    history_id: String,
+    /// Settings that can change while running (see `crate::settings`).
+    live: std::sync::RwLock<crate::settings::LiveSettings>,
+    /// Bytes the data directory uses (refreshed by the metrics task and after flushes).
+    pub(crate) disk_used: AtomicU64,
+    /// Set once indexes are loaded at startup; snapshots are saved only after.
+    pub(crate) indexes_loaded: std::sync::atomic::AtomicBool,
+    /// How far each replica has applied this hex's changes (from its polls).
+    pub(crate) replica_progress: std::sync::Mutex<HashMap<String, replica::Progress>>,
+    /// Woken when a replica reports progress (writes waiting for acks).
+    pub(crate) progress_notify: tokio::sync::Notify,
+    /// Role permissions, with the generation they were read at.
+    pub(crate) role_cache: std::sync::Mutex<Option<(u64, Arc<crate::auth::RoleDefinitions>)>>,
 }
 
 const MAX_WRITE_RETRIES: usize = 16;
@@ -250,18 +299,29 @@ impl HexDBEngine {
         let level = config.compression.compression_level;
         let mut catalog = Catalog::load(&storage_dir, &keys)?.unwrap_or_default();
         let sst = SstStore::open(&storage_dir, level, keys.clone())?;
+        let mut history_created = false;
+        if catalog.history_id.is_empty() {
+            catalog.history_id = Ulid::new().to_string();
+            history_created = true;
+        }
+        let history_id = catalog.history_id.clone();
+        // Remember the lattice name (generated or configured) for the next start.
+        let lattice_changed = !config.network.lattice_name.is_empty() && catalog.lattice_name != config.network.lattice_name;
+        if lattice_changed {
+            catalog.lattice_name = config.network.lattice_name.clone();
+        }
 
         // Clean up tables left behind by a drop that was interrupted.
         for (tess, &dropped_seq) in &catalog.dropped {
             sst.purge_dropped(tess, dropped_seq).await?;
         }
         // Register tessellations found on disk but missing from the catalog.
-        let mut catalog_changed = false;
+        let mut catalog_changed = history_created || lattice_changed;
         for tess in sst.tessellations().await {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new() },
                 );
                 catalog_changed = true;
             }
@@ -307,7 +367,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new() },
                 );
                 catalog_changed = true;
             }
@@ -342,7 +402,8 @@ impl HexDBEngine {
         let ram_budget = (config.memory.ram_mb as usize).saturating_mul(1024 * 1024).max(1024 * 1024);
 
         let login_throttle = crate::auth::LoginThrottle::new(config.security.max_failed_logins, config.security.lockout_minutes);
-        let lattice_keys = crate::network::lattice_auth::LatticeKeys::new(&config.lattice_key()?);
+        let lattice_keys = crate::network::lattice_auth::LatticeKeys::with_previous(&config.lattice_keys()?);
+        let live_settings = crate::settings::LiveSettings::from_config(&config);
         let engine = HexDBEngine {
             id: identity.id,
             name: identity.name,
@@ -364,6 +425,11 @@ impl HexDBEngine {
             flush_threshold: ram_budget / 4,
             inflight: std::sync::Mutex::new(std::collections::HashSet::new()),
             users_lock: Mutex::new(()),
+            upsert_lock: Mutex::new(()),
+            query_stats: Default::default(),
+            stream_tasks: Default::default(),
+            stream_ids: std::sync::Mutex::new(ulid::Generator::new()),
+            schema_jobs: std::sync::Mutex::new(HashMap::new()),
             reads_total: AtomicU64::new(0),
             writes_total: AtomicU64::new(0),
             queries_total: AtomicU64::new(0),
@@ -380,6 +446,14 @@ impl HexDBEngine {
             stats_cache: std::sync::Mutex::new(HashMap::new()),
             doc_cache: reads::DocCache::new(ram_budget / 4),
             keys: keys.clone(),
+            role_cache: std::sync::Mutex::new(None),
+            history_id,
+            indexes_loaded: std::sync::atomic::AtomicBool::new(false),
+            live: std::sync::RwLock::new(live_settings),
+            disk_used: AtomicU64::new(0),
+            replica_progress: std::sync::Mutex::new(HashMap::new()),
+            progress_notify: tokio::sync::Notify::new(),
+            mfa_steps: std::sync::Mutex::new(HashMap::new()),
         };
 
         // Move recovered writes into SSTables and retire the old WAL segments.
@@ -388,8 +462,43 @@ impl HexDBEngine {
         }
         engine.rebuild_indexes().await?;
         engine.load_metrics_history();
+        engine.refresh_disk_usage().await;
 
         Ok(engine)
+    }
+
+    /// The storage key ring.
+    pub fn keys(&self) -> Arc<crate::crypt::KeyRing> {
+        self.keys.clone()
+    }
+
+    /// The configuration as the config file (and environment) give it now,
+    /// without the runtime overrides.
+    pub fn file_config(&self) -> HexConfig {
+        crate::config::load_config_from(self.config.source.as_deref()).unwrap_or_default()
+    }
+
+    /// The current live settings.
+    pub fn live(&self) -> crate::settings::LiveSettings {
+        self.live.read().unwrap().clone()
+    }
+
+    /// Replace the live settings (after `PUT /settings`).
+    pub fn set_live(&self, settings: crate::settings::LiveSettings) {
+        *self.live.write().unwrap() = settings;
+    }
+
+    /// Measure the data directory again.
+    pub async fn refresh_disk_usage(&self) {
+        let dir = self.storage_dir.clone();
+        if let Ok(bytes) = tokio::task::spawn_blocking(move || dir_size(&dir)).await {
+            self.disk_used.store(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Bytes the data directory used at the last measurement.
+    pub fn disk_used_bytes(&self) -> u64 {
+        self.disk_used.load(Ordering::Relaxed)
     }
 
     /// This hex's current lattice role.
@@ -495,7 +604,7 @@ impl HexDBEngine {
     /// Fail with `EngineError::ReadOnly` unless this hex accepts writes.
     pub fn ensure_writable(&self) -> Result<()> {
         if self.is_writable() {
-            return Ok(());
+            return self.check_quorum();
         }
         let overseer = self.overseer_endpoint.read().unwrap().clone();
         Err(EngineError::ReadOnly(match overseer {
@@ -530,6 +639,17 @@ impl HexDBEngine {
     }
 
     /// Delete a document from a system tessellation.
+    /// Write several documents to a system tessellation in one commit.
+    pub(crate) async fn put_system_documents(&self, tess: &str, docs: Vec<Document>) -> Result<()> {
+        self.ensure_writable()?;
+        self.ensure_system_tessellation(tess)?;
+        let items = docs
+            .into_iter()
+            .map(|doc| writes::BatchItem { key: DocKey::new(tess, doc.id), op: WalOp::Put(doc), expected_seq: None })
+            .collect();
+        self.commit(items).await.map(|_| ())
+    }
+
     pub(crate) async fn delete_system_document(&self, tess: &str, id: Ulid) -> Result<()> {
         self.ensure_writable()?;
         if !self.tessellation_exists(tess) {
@@ -546,7 +666,7 @@ impl HexDBEngine {
         if !catalog.tessellations.contains_key(name) {
             catalog.tessellations.insert(
                 name.to_string(),
-                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
+                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new() },
             );
             catalog.save(&self.storage_dir, &self.keys)?;
         }
@@ -578,7 +698,7 @@ impl HexDBEngine {
         }
         catalog.tessellations.insert(
             name.to_string(),
-            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new() },
+            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new() },
         );
         catalog.save(&self.storage_dir, &self.keys)?;
         info!("🧩 Created tessellation '{}' ({}).", name, kind);
@@ -887,8 +1007,15 @@ impl HexDBEngine {
             }
         }
 
-        stats.wal_segments_deleted = wal::delete_segments_before(&self.wal_dir, new_segment)?;
+        stats.wal_segments_deleted = if self.keeps_change_history() {
+            wal::archive_segments_before(&self.wal_dir, new_segment)?
+        } else {
+            wal::delete_segments_before(&self.wal_dir, new_segment)?
+        };
         self.wal_floor.store(new_segment, Ordering::SeqCst);
+        self.prune_change_history().await;
+        self.save_index_snapshots().await;
+        self.refresh_disk_usage().await;
         info!("💾 Flushed {} entries across {} tessellation(s) to SSTables.", stats.entries, stats.tessellations);
         Ok(stats)
     }
@@ -953,6 +1080,10 @@ impl HexDBEngine {
         if let Err(e) = &flushed {
             error!("❌ Final flush failed; unflushed writes remain in the WAL: {:#}", e);
         }
+        // A flush with nothing to write doesn't save index snapshots; save them anyway.
+        if matches!(&flushed, Ok(stats) if stats.entries == 0) {
+            self.save_index_snapshots().await;
+        }
         self.wal.shutdown().await?;
         if let Err(e) = self.save_metrics_history() {
             warn!("Couldn't save the metrics history: {:#}", e);
@@ -998,4 +1129,18 @@ impl HexDBEngine {
     pub async fn corrupt_shard_for_testing(&self, tess: &str, id: Ulid, vertex: usize) -> bool {
         self.state.lock().await.hex.corrupt_for_testing(&DocKey::new(tess, id), vertex)
     }
+}
+
+/// Total size of the files under a directory.
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    for entry in entries.flatten() {
+        match entry.metadata() {
+            Ok(meta) if meta.is_dir() => total += dir_size(&entry.path()),
+            Ok(meta) => total += meta.len(),
+            Err(_) => {}
+        }
+    }
+    total
 }

@@ -32,6 +32,19 @@ pub struct HexConfig {
     pub plugins: PluginsConfig,
     #[serde(default)]
     pub tls: TlsConfig,
+    #[serde(default)]
+    pub limits: LimitsConfig,
+    #[serde(default)]
+    pub replication: ReplicationConfig,
+    /// Script runtimes for functions (see `crate::functions`).
+    #[serde(default)]
+    pub functions: crate::functions::FunctionsConfig,
+    /// The AI query advisor's model and key (see `crate::advisor`).
+    #[serde(default)]
+    pub ai: crate::advisor::AiConfig,
+    /// Custom text analyzers (see `crate::analysis`).
+    #[serde(default)]
+    pub analyzers: std::collections::BTreeMap<String, crate::analysis::AnalyzerConfig>,
 
     /// The config file this configuration was loaded from, if any.
     #[serde(skip)]
@@ -46,6 +59,10 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing)]
     pub query_endpoint: Option<String>,
     pub discovery_endpoint: String,
+    /// The lattice this hex belongs to; hexes only join a lattice with the
+    /// same name. Leave empty on the first hex to have one generated (it is
+    /// saved in the data directory); give every other hex the same name.
+    #[serde(default)]
     pub lattice_name: String,
     /// Discovery endpoints (`host:port`) of other hexes to probe, e.g. on other machines.
     #[serde(default)]
@@ -61,6 +78,15 @@ pub struct NetworkConfig {
     /// value. When empty, it is derived from `storage.encryption_key`.
     #[serde(default)]
     pub lattice_secret: String,
+    /// Lattice secrets used before `lattice_secret`. Hexes still accept them
+    /// (for discovery, replication and sessions) so the secret can be rotated
+    /// one hex at a time; remove them once every hex has the new secret.
+    #[serde(default)]
+    pub previous_lattice_secrets: Vec<String>,
+    /// Reverse proxies (IP addresses or CIDR ranges) whose `X-Forwarded-For`
+    /// header is trusted for the client address. Empty: the TCP peer is the client.
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
     /// Host other hexes should use to reach this one, when the endpoints bind 0.0.0.0.
     #[serde(default)]
     pub advertise_host: Option<String>,
@@ -92,6 +118,22 @@ pub struct StorageConfig {
     /// power loss or OS crash can lose recently acknowledged writes.
     #[serde(default = "default_true")]
     pub wal_sync: bool,
+    /// Hours of change history kept on disk (retired WAL segments), so
+    /// replicas, plugins and `/changes` clients can resume after being away.
+    /// 0 deletes retired segments instead.
+    #[serde(default = "default_change_history_hours")]
+    pub change_history_hours: u64,
+    /// Most disk space the change history may use, in MB.
+    #[serde(default = "default_change_history_mb")]
+    pub change_history_mb: u64,
+}
+
+fn default_change_history_hours() -> u64 {
+    24
+}
+
+fn default_change_history_mb() -> u64 {
+    512
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -112,6 +154,13 @@ pub struct SecurityConfig {
     pub max_failed_logins: u32,
     #[serde(default = "default_lockout_minutes")]
     pub lockout_minutes: u64,
+    /// Days to keep audit events (0 keeps them forever).
+    #[serde(default = "default_audit_retention_days")]
+    pub audit_retention_days: u64,
+}
+
+fn default_audit_retention_days() -> u64 {
+    90
 }
 
 fn default_session_hours() -> u64 {
@@ -144,6 +193,100 @@ pub struct TlsConfig {
 impl TlsConfig {
     pub fn enabled(&self) -> bool {
         !self.cert_file.is_empty() && !self.key_file.is_empty()
+    }
+}
+
+/// How writes are replicated and where they may be made.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ReplicationConfig {
+    /// Replicas that must have applied a write before the Overseer
+    /// acknowledges it (0: asynchronous replication).
+    #[serde(default)]
+    pub min_acks: usize,
+    /// How long a write waits for `min_acks`. On timeout the write stays
+    /// committed and the client gets 503 `replication_timeout`.
+    #[serde(default = "default_ack_timeout_ms")]
+    pub ack_timeout_ms: u64,
+    /// Replicas pass writes on to the Overseer instead of refusing them with 421.
+    #[serde(default = "default_true")]
+    pub forward_writes: bool,
+    /// Hexes (including itself) the Overseer must see to accept writes. With
+    /// a majority of the lattice here (e.g. 2 of 3), a hex cut off from the
+    /// others stops taking writes, so a network partition can't leave two
+    /// Overseers accepting conflicting writes. 0 turns the check off.
+    #[serde(default)]
+    pub quorum: usize,
+}
+
+fn default_ack_timeout_ms() -> u64 {
+    5000
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        ReplicationConfig { min_acks: 0, ack_timeout_ms: default_ack_timeout_ms(), forward_writes: true, quorum: 0 }
+    }
+}
+
+/// Limits that protect the server from slow or abusive clients.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LimitsConfig {
+    /// Open connections the API accepts at once; more wait to be accepted.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    /// Open connections from one client address; more are closed.
+    #[serde(default = "default_max_connections_per_client")]
+    pub max_connections_per_client: usize,
+    /// Seconds a request may take (reading the body included). Long polls and
+    /// streams (the change feed) are exempt and have their own limits.
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout_seconds: u64,
+    /// Seconds a client has to send a request's headers (and to finish the
+    /// TLS handshake), and how long an idle keep-alive connection stays open.
+    #[serde(default = "default_header_timeout")]
+    pub header_timeout_seconds: u64,
+    /// Largest document accepted, in KB of JSON.
+    #[serde(default = "default_max_document_kb")]
+    pub max_document_kb: u64,
+    /// Largest request body for bulk writes, queries, transactions and GraphQL, in MB.
+    #[serde(default = "default_max_request_mb")]
+    pub max_request_mb: u64,
+}
+
+fn default_max_document_kb() -> u64 {
+    1024
+}
+
+fn default_max_request_mb() -> u64 {
+    32
+}
+
+fn default_max_connections() -> usize {
+    1024
+}
+
+fn default_max_connections_per_client() -> usize {
+    128
+}
+
+fn default_request_timeout() -> u64 {
+    60
+}
+
+fn default_header_timeout() -> u64 {
+    10
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        LimitsConfig {
+            max_connections: default_max_connections(),
+            max_connections_per_client: default_max_connections_per_client(),
+            request_timeout_seconds: default_request_timeout(),
+            header_timeout_seconds: default_header_timeout(),
+            max_document_kb: default_max_document_kb(),
+            max_request_mb: default_max_request_mb(),
+        }
     }
 }
 
@@ -221,11 +364,14 @@ impl Default for HexConfig {
                 api_endpoint: "127.0.0.1:7700".into(),
                 query_endpoint: None,
                 discovery_endpoint: "127.0.0.1:7702".into(),
-                lattice_name: "Nebula Prime".into(),
+                // Empty: use the name saved in the data directory, or generate one.
+                lattice_name: String::new(),
                 peers: Vec::new(),
                 scan_local_ports: true,
                 discovery_interval_seconds: 10,
                 lattice_secret: String::new(),
+                previous_lattice_secrets: Vec::new(),
+                trusted_proxies: Vec::new(),
                 advertise_host: None,
             },
             security: SecurityConfig {
@@ -235,6 +381,7 @@ impl Default for HexConfig {
                 session_hours: default_session_hours(),
                 max_failed_logins: default_max_failed_logins(),
                 lockout_minutes: default_lockout_minutes(),
+                audit_retention_days: default_audit_retention_days(),
             },
             memory: MemoryConfig {
                 ram_mb: 1024,
@@ -249,6 +396,8 @@ impl Default for HexConfig {
                 compaction_frequency: 1800, // 30 minutes
                 wal_flush_check_frequency: 60, // 1 minute
                 wal_sync: true,
+                change_history_hours: default_change_history_hours(),
+                change_history_mb: default_change_history_mb(),
             },
             compression: CompressionConfig {
                 compression_level: 0,
@@ -257,6 +406,11 @@ impl Default for HexConfig {
             identity: IdentityConfig::default(),
             plugins: PluginsConfig::default(),
             tls: TlsConfig::default(),
+            limits: LimitsConfig::default(),
+            replication: ReplicationConfig::default(),
+            analyzers: Default::default(),
+            ai: Default::default(),
+            functions: Default::default(),
             source: None,
         }
     }
@@ -300,10 +454,45 @@ impl HexConfig {
         Ok(blake3::derive_key("HexDB 2026 lattice key v1", &storage))
     }
 
+    /// Every lattice key this hex accepts, the current one first:
+    /// `lattice_key()`, then `previous_lattice_secrets` (the word "derived"
+    /// stands for the key derived from `storage.encryption_key`, to move from
+    /// it to an explicit secret), then, without a `lattice_secret`, the keys
+    /// derived from `storage.previous_encryption_keys`.
+    pub fn lattice_keys(&self) -> anyhow::Result<Vec<[u8; 32]>> {
+        let derive = |key: &[u8; 32]| blake3::derive_key("HexDB 2026 lattice key v1", key);
+        let mut keys = vec![self.lattice_key()?];
+        let add = |key: [u8; 32], keys: &mut Vec<[u8; 32]>| {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        };
+        for (i, secret) in self.network.previous_lattice_secrets.iter().enumerate() {
+            let key = if secret.trim() == "derived" {
+                derive(&crate::crypt::decode_encryption_key(&self.storage.encryption_key)?)
+            } else {
+                crate::crypt::decode_encryption_key(secret)
+                    .map_err(|e| anyhow::anyhow!("network.previous_lattice_secrets[{}]: {}", i, e.to_string().replace("storage.encryption_key", "the secret")))?
+            };
+            add(key, &mut keys);
+        }
+        if self.network.lattice_secret.trim().is_empty() {
+            for previous in &self.storage.previous_encryption_keys {
+                add(derive(&crate::crypt::decode_encryption_key(previous)?), &mut keys);
+            }
+        }
+        Ok(keys)
+    }
+
     /// The key that signs session tokens. Derived from the lattice key, so a
     /// session works on every hex of the lattice.
     pub fn session_key(&self) -> anyhow::Result<[u8; 32]> {
         Ok(blake3::derive_key("HexDB 2026 session signing key v1", &self.lattice_key()?))
+    }
+
+    /// Session keys accepted when verifying (one per lattice key, current first).
+    pub fn session_keys(&self) -> anyhow::Result<Vec<[u8; 32]>> {
+        Ok(self.lattice_keys()?.iter().map(|k| blake3::derive_key("HexDB 2026 session signing key v1", k)).collect())
     }
 }
 
@@ -341,7 +530,13 @@ pub fn load_config_from(explicit: Option<&Path>) -> Result<HexConfig, config::Co
             config::Environment::with_prefix("HEXDB")
                 .prefix_separator("_")
                 .separator("__")
-                .try_parsing(true),
+                .try_parsing(true)
+                // Lists from the environment are comma-separated.
+                .list_separator(",")
+                .with_list_parse_key("network.peers")
+                .with_list_parse_key("network.trusted_proxies")
+                .with_list_parse_key("network.previous_lattice_secrets")
+                .with_list_parse_key("storage.previous_encryption_keys"),
         )
         .build()?;
 

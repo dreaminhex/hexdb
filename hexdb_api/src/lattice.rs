@@ -91,6 +91,8 @@ pub struct ChangeParams {
     pub after: u64,
     pub wait: Option<u64>,
     pub limit: Option<usize>,
+    /// The polling replica's hex ID; `after` doubles as its acknowledgement.
+    pub hex: Option<String>,
 }
 
 /// Changes after a sequence number, with typed documents; long-polls up to `wait` seconds.
@@ -105,14 +107,25 @@ pub async fn changes(
     let Query(params) = params?;
     let limit = params.limit.unwrap_or(1000).clamp(1, 10_000);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(params.wait.unwrap_or(0).min(30));
+    let gone = |e: hexdb_core::HistoryExpired| {
+        ApiError::new(
+            StatusCode::GONE,
+            "history_expired",
+            format!("Changes after {} are no longer kept; take a new snapshot.", e.available_after),
+        )
+    };
+    if let Some(hex) = params.hex.as_deref() {
+        engine.record_replica_progress(hex, params.after);
+    }
+    // A replica further behind than the in-memory feed reads the history on disk.
+    if params.after < engine.changes.available_after() {
+        let taken = engine.changes_after(params.after, limit).await.map_err(gone)?;
+        let last_seq = taken.last().map_or(params.after, |c| c.seq);
+        let changes = taken.iter().filter(|c| c.tessellation != REPLICATION_TESSELLATION).map(|c| (**c).clone()).collect();
+        return Ok(Json(ChangeBatch { source_id: engine.history_id(), changes, last_seq, published_seq: engine.changes.published_seq() }).into_response());
+    }
     loop {
-        let (backlog, mut receiver) = engine.changes.follow(params.after).map_err(|e| {
-            ApiError::new(
-                StatusCode::GONE,
-                "history_expired",
-                format!("Changes after {} are no longer kept; take a new snapshot.", e.available_after),
-            )
-        })?;
+        let (backlog, mut receiver) = engine.changes.follow(params.after).map_err(gone)?;
         if !backlog.is_empty() || tokio::time::Instant::now() >= deadline {
             let taken: Vec<_> = backlog.into_iter().take(limit).collect();
             let last_seq = taken.last().map_or(params.after, |c| c.seq);
@@ -122,7 +135,7 @@ pub async fn changes(
                 .map(|c| (**c).clone())
                 .collect();
             return Ok(Json(ChangeBatch {
-                source_id: engine.id.to_string(),
+                source_id: engine.history_id(),
                 changes,
                 last_seq,
                 published_seq: engine.changes.published_seq(),
@@ -145,6 +158,36 @@ pub async fn revoke(method: Method, uri: Uri, headers: HeaderMap, axum::extract:
     authorize(&engine, &headers, &method, &uri, &body)?;
     let input: Revocation = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
     hexdb_core::auth::revoke_session(&engine, &input.session_id, input.expires_at).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThrottleUpdate {
+    #[serde(default)]
+    pub fail: Vec<String>,
+    #[serde(default)]
+    pub clear: Vec<String>,
+}
+
+/// Record sign-in failures (or a success) seen on a replica.
+pub async fn throttle(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let input: ThrottleUpdate = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    if input.fail.len() > 4 || input.clear.len() > 4 {
+        return Err(ApiError::invalid("Too many keys."));
+    }
+    let fail: Vec<&str> = input.fail.iter().map(String::as_str).collect();
+    let clear: Vec<&str> = input.clear.iter().map(String::as_str).collect();
+    hexdb_core::auth::record_throttle(&engine, &fail, &clear).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Store an audit event recorded on a replica.
+pub async fn audit(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let event: hexdb_core::AuditEvent = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    engine.store_audit(&event).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

@@ -1,0 +1,31 @@
+# An AI tokenizer: for each new or changed document in the listed
+# tessellations, asks Claude for the document's keywords and named entities
+# and stores them in a `keywords` field. A text index on `keywords` (or on
+# your text fields plus `keywords`) then finds documents by concepts and
+# synonyms their text doesn't literally contain.
+#
+# It runs beside the database, not inside a commit: writes are never slowed
+# down, and keywords appear a moment after a document is saved. Documents it
+# has already enriched (same text) are skipped, so its own updates don't loop.
+#
+# Setup: set ANTHROPIC_API_KEY in the server's environment (it is passed
+# through below, so it never sits in this file), list the tessellations and
+# fields, and enable the plugin. No npm install needed.
+id = "@enrichers/ai-keywords"
+name = "AI keywords"
+type = "stream"
+version = "1.0.0"
+description = "Adds AI-extracted keywords and entities to documents, for full-text search."
+command = ["node", "index.mjs"]
+tessellations = ["articles"]
+pass_env = ["ANTHROPIC_API_KEY"]
+
+[access]
+role = "writer"
+tessellations = ["articles"]
+
+[env]
+TEXT_FIELDS = "title,body"       # fields to read
+KEYWORDS_FIELD = "keywords"      # field to write
+MODEL = "claude-haiku-4-5"
+MAX_KEYWORDS = "12"

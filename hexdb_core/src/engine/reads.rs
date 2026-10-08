@@ -100,6 +100,11 @@ pub(crate) struct CachedStats {
 
 impl HexDBEngine {
     /// Note that data changed: cached counts and statistics are stale.
+    /// The current write generation (changes whenever stored data changes).
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn bump_generation(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
     }

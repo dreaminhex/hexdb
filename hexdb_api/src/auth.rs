@@ -6,7 +6,7 @@
 // exposed by accident. Handlers then check permissions with the `Auth`
 // extractor (see `hexdb_core::auth` for the permission model).
 //
-// Public: GET /health, POST /auth/login, the admin UI's static files, the
+// Public: GET /health, GET /openapi.json, POST /auth/login, the admin UI's static files, the
 // hex-to-hex /lattice/* endpoints (they verify the lattice signature
 // themselves), and POST /shutdown (it verifies the shutdown token, or an
 // admin session).
@@ -24,7 +24,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use hexdb_core::{auth as core_auth, engine::HexDBEngine, users, Principal, SESSION_COOKIE};
+use hexdb_core::{auth as core_auth, engine::HexDBEngine, users, AuditEvent, Principal, SESSION_COOKIE};
 use serde::Deserialize;
 use serde_json::json;
 use std::{net::SocketAddr, sync::Arc};
@@ -70,6 +70,7 @@ fn is_public(method: &Method, path: &str) -> bool {
         || path == "/ui"
         || path.starts_with("/ui/")
         || (path == "/health" && method == Method::GET)
+        || (path == "/openapi.json" && method == Method::GET)
         || (path == "/auth/login" && method == Method::POST)
         || (path == "/shutdown" && method == Method::POST)
         || path.starts_with("/lattice/")
@@ -115,12 +116,12 @@ fn unsafe_method(method: &Method) -> bool {
     !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
 }
 
-/// The client's address (the TCP peer; proxies' X-Forwarded-For isn't trusted).
+/// The client's address (see `crate::client` for trusted proxies).
 pub fn client_address(parts: &axum::http::Extensions) -> String {
-    parts
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|c| c.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".into())
+    match parts.get::<crate::client::ClientIp>() {
+        Some(ip) => ip.0.clone(),
+        None => parts.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip().to_string()).unwrap_or_else(|| "unknown".into()),
+    }
 }
 
 /// Authenticate every request; refuse non-public routes without credentials.
@@ -135,6 +136,10 @@ pub async fn authenticate(State(engine): State<Arc<HexDBEngine>>, mut request: R
         (None, None) => (None, Via::Bearer),
     };
 
+    // A replica forwarding a write already checked its origin; the Origin
+    // names the replica, not this hex.
+    let forwarded = request.extensions().get::<crate::forward::Forwarded>().is_some();
+
     // A cross-site page must not be able to sign a browser in (login CSRF).
     if path == "/auth/login" && headers.get(header::ORIGIN).is_some() && !same_origin(headers) {
         return ApiError::new(StatusCode::FORBIDDEN, "cross_origin", "Cross-origin sign-in is not allowed.").into_response();
@@ -143,7 +148,7 @@ pub async fn authenticate(State(engine): State<Arc<HexDBEngine>>, mut request: R
     if let Some(token) = token {
         match core_auth::authenticate(&engine, &token).await {
             Ok(Some(principal)) => {
-                if via == Via::Cookie && unsafe_method(&method) && !same_origin(request.headers()) {
+                if via == Via::Cookie && unsafe_method(&method) && !forwarded && !same_origin(request.headers()) {
                     return ApiError::new(
                         StatusCode::FORBIDDEN,
                         "cross_origin",
@@ -239,6 +244,8 @@ fn me_json(principal: &Principal) -> serde_json::Value {
         "login": principal.login,
         "email_address": principal.email_address,
         "roles": principal.roles,
+        "grants": principal.grants,
+        "permissions": principal.global_permissions(),
         "is_admin": principal.is_admin(),
         "credential": principal.credential,
     })
@@ -249,6 +256,9 @@ fn me_json(principal: &Principal) -> serde_json::Value {
 pub struct LoginRequest {
     pub login: String,
     pub password: String,
+    /// With MFA on: the current code from the authenticator app, or a backup code.
+    #[serde(default)]
+    pub code: Option<String>,
     /// Also return the token in the body (for scripts). Browsers should rely
     /// on the HttpOnly cookie so page scripts never see the token.
     #[serde(default)]
@@ -259,12 +269,11 @@ pub struct LoginRequest {
 /// `"return_token": true` the token is also in the body.
 pub async fn login(
     State(engine): Engine,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client::ClientIp(client): crate::client::ClientIp,
     body: Result<Json<LoginRequest>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
     let Json(input) = body?;
-    let client = peer.ip().to_string();
-    let signed_in = core_auth::login(&engine, &input.login, &input.password, &client).await?;
+    let signed_in = core_auth::login(&engine, &input.login, &input.password, input.code.as_deref(), &client).await?;
     let max_age = signed_in.claims.exp - chrono::Utc::now().timestamp();
     let mut body = json!({
         "user": me_json(&signed_in.principal),
@@ -281,7 +290,7 @@ pub async fn login(
 }
 
 /// Sign out: revokes this session (a no-op for API keys) and clears the cookie.
-pub async fn logout(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+pub async fn logout(State(engine): Engine, Auth(principal): Auth, crate::client::ClientIp(client): crate::client::ClientIp) -> ApiResult {
     if let core_auth::Credential::Session { session_id, expires_at } = &principal.credential {
         if engine.is_writable() {
             core_auth::revoke_session(&engine, session_id, *expires_at).await?;
@@ -289,6 +298,7 @@ pub async fn logout(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
             crate::lattice::forward_revocation(&engine, session_id, *expires_at).await?;
         }
         info!("🔒 '{}' signed out.", principal.login);
+        engine.record_audit(AuditEvent::new(&principal.login, "auth.logout", &principal.login).client(&client)).await;
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(header::SET_COOKIE, clear_cookie(&engine));
@@ -312,7 +322,7 @@ pub struct PasswordChange {
 pub async fn change_password(
     State(engine): Engine,
     Auth(principal): Auth,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    crate::client::ClientIp(client): crate::client::ClientIp,
     body: Result<Json<PasswordChange>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
     let Json(input) = body?;
@@ -322,12 +332,93 @@ pub async fn change_password(
     if matches!(principal.credential, core_auth::Credential::Session { .. }) {
         // The new session must be issued strictly after the cut-off (milliseconds).
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        let (token, claims) = core_auth::issue_session(&engine.config.session_key()?, &principal.user_id, engine.config.security.session_hours);
+        let (token, claims) = core_auth::issue_session(&engine.config.session_key()?, &principal.user_id, engine.live().session_hours);
         let max_age = claims.exp - chrono::Utc::now().timestamp();
         response.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&engine, &token, max_age));
-        info!(client = %peer.ip(), "🔑 '{}' changed their password.", principal.login);
+        info!(%client, "🔑 '{}' changed their password.", principal.login);
+    }
+    engine.record_audit(AuditEvent::new(&principal.login, "auth.password_change", &principal.login).client(&client)).await;
+    Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// Multi-factor authentication (see hexdb_core::mfa)
+// ---------------------------------------------------------------------------
+
+/// Whether MFA is on for the signed-in user, and how many backup codes are left.
+pub async fn mfa_status(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    let (enabled, backup_codes_left, pending) = users::mfa_status(&engine, &principal.user_id).await?;
+    Ok(Json(json!({ "enabled": enabled, "backup_codes_left": backup_codes_left, "enrolling": pending })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MfaSetup {
+    pub password: String,
+}
+
+/// Start enrolling an authenticator app: returns the secret and an `otpauth://` URI.
+pub async fn mfa_setup(State(engine): Engine, Auth(principal): Auth, body: Result<Json<MfaSetup>, axum::extract::rejection::JsonRejection>) -> ApiResult {
+    let Json(input) = body?;
+    let (secret, uri) = users::mfa_setup(&engine, &principal.user_id, &input.password).await?;
+    Ok(Json(json!({ "secret": secret, "otpauth_uri": uri })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MfaCode {
+    pub code: String,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// Confirm enrolment with a code; returns the backup codes (shown once).
+/// Other sessions are signed out, and this one gets a new cookie.
+pub async fn mfa_enable(
+    State(engine): Engine,
+    Auth(principal): Auth,
+    crate::client::ClientIp(client): crate::client::ClientIp,
+    body: Result<Json<MfaCode>, axum::extract::rejection::JsonRejection>,
+) -> ApiResult {
+    let Json(input) = body?;
+    let codes = users::mfa_enable(&engine, &principal.user_id, &input.code).await?;
+    engine.record_audit(AuditEvent::new(&principal.login, "auth.mfa_enable", &principal.login).client(&client)).await;
+    let mut response = Json(json!({ "backup_codes": codes })).into_response();
+    if matches!(principal.credential, core_auth::Credential::Session { .. }) {
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let (token, claims) = core_auth::issue_session(&engine.config.session_key()?, &principal.user_id, engine.live().session_hours);
+        let max_age = claims.exp - chrono::Utc::now().timestamp();
+        response.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&engine, &token, max_age));
     }
     Ok(response)
+}
+
+/// Turn MFA off: `{"password", "code"}`.
+pub async fn mfa_disable(
+    State(engine): Engine,
+    Auth(principal): Auth,
+    crate::client::ClientIp(client): crate::client::ClientIp,
+    body: Result<Json<MfaCode>, axum::extract::rejection::JsonRejection>,
+) -> ApiResult {
+    let Json(input) = body?;
+    let password = input.password.ok_or_else(|| ApiError::invalid("password is required."))?;
+    users::mfa_disable(&engine, &principal.user_id, &password, &input.code).await?;
+    engine.record_audit(AuditEvent::new(&principal.login, "auth.mfa_disable", &principal.login).client(&client)).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Replace the backup codes: `{"password", "code"}`.
+pub async fn mfa_backup_codes(
+    State(engine): Engine,
+    Auth(principal): Auth,
+    crate::client::ClientIp(client): crate::client::ClientIp,
+    body: Result<Json<MfaCode>, axum::extract::rejection::JsonRejection>,
+) -> ApiResult {
+    let Json(input) = body?;
+    let password = input.password.ok_or_else(|| ApiError::invalid("password is required."))?;
+    let codes = users::mfa_new_backup_codes(&engine, &principal.user_id, &password, &input.code).await?;
+    engine.record_audit(AuditEvent::new(&principal.login, "auth.mfa_backup_codes", &principal.login).client(&client)).await;
+    Ok(Json(json!({ "backup_codes": codes })).into_response())
 }
 
 #[derive(Deserialize)]

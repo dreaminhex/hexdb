@@ -158,7 +158,11 @@ fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
     big.insert("doomed", &json!({ "x": 1 }))?;
 
     let medium = TestServer::start_with(cluster.options(1, 2048, "auto"))?;
-    let replicant = TestServer::start_with(cluster.options(2, 8192, "replicant"))?;
+    // The replicant refuses writes instead of forwarding them.
+    let replicant = TestServer::start_with(TestOptions {
+        extra_toml: "\n[replication]\nforward_writes = false\n".into(),
+        ..cluster.options(2, 8192, "replicant")
+    })?;
     for replica in [&medium, &replicant] {
         // The full sync copies tessellations one at a time; wait for it to finish.
         wait_until(Duration::from_secs(30), "the full sync", || {
@@ -207,14 +211,26 @@ fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
         Ok(r["state"] == "streaming" && r["lag"] == 0)
     })?;
 
-    // Replicas refuse writes and point at the Overseer.
-    let res = medium.request(Method::POST, "/notes", Some(&json!({ "x": 1 })), &[])?;
+    // A replica forwards writes to the Overseer (REST and GraphQL mutations).
+    let res = medium.request(Method::POST, "/notes", Some(&json!({ "via": "replica" })), &[])?;
+    assert_eq!(res.status.as_u16(), 201, "{}", res.body);
+    assert!(res.headers.get("x-hexdb-forwarded-to").is_some());
+    let forwarded_id = res.body["id"].as_str().unwrap().to_string();
+    assert!(doc_on(&big, "notes", &forwarded_id)?.is_some(), "written on the Overseer");
+    wait_until(Duration::from_secs(10), "the forwarded write to replicate back", || Ok(doc_on(&medium, "notes", &forwarded_id)?.is_some()))?;
+    let gql = medium.request(Method::POST, "/graphql", Some(&json!({ "query": "mutation { insertDocument(tessellation: \"notes\", data: {}) { id } }" })), &[])?;
+    assert!(gql.body["data"]["insertDocument"]["id"].is_string(), "{}", gql.body);
+    let read = medium.request(Method::POST, "/graphql", Some(&json!({ "query": "{ count(tessellation: \"notes\") }" })), &[])?;
+    assert!(read.headers.get("x-hexdb-forwarded-to").is_none(), "queries stay local");
+
+    // With forwarding off, a replica refuses writes and points at the Overseer.
+    let res = replicant.request(Method::POST, "/notes", Some(&json!({ "x": 1 })), &[])?;
     assert_eq!(res.status.as_u16(), 421, "{}", res.body);
     assert_eq!(res.error_code(), Some("read_only_replica"));
     assert!(res.body["error"]["message"].as_str().unwrap().contains(&big.url("").trim_start_matches("http://").trim_end_matches('/').to_string()));
-    let res = medium.request(Method::POST, "/tessellations", Some(&json!({ "name": "nope" })), &[])?;
+    let res = replicant.request(Method::POST, "/tessellations", Some(&json!({ "name": "nope" })), &[])?;
     assert_eq!(res.status.as_u16(), 421);
-    let gql = medium.request(Method::POST, "/graphql", Some(&json!({ "query": "mutation { insertDocument(tessellation: \"notes\", data: {}) { id } }" })), &[])?;
+    let gql = replicant.request(Method::POST, "/graphql", Some(&json!({ "query": "mutation { insertDocument(tessellation: \"notes\", data: {}) { id } }" })), &[])?;
     assert_eq!(gql.body["errors"][0]["extensions"]["code"], "READ_ONLY_REPLICA", "{}", gql.body);
 
     // Fail over: the medium hex leads, accepts writes, and the replicant follows it.
@@ -230,7 +246,9 @@ fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
     wait_until(Duration::from_secs(30), "the old Overseer to resync", || Ok(doc_on(&big, "notes", &after_failover)?.is_some()))?;
     assert_eq!(role(&big)?, "Harvester");
     assert_eq!(count_on(&big, "notes")?, count_on(&medium, "notes")?);
+    // Its writes now go to the new Overseer.
     let res = big.request(Method::POST, "/notes", Some(&json!({ "x": 1 })), &[])?;
-    assert_eq!(res.status.as_u16(), 421);
+    assert_eq!(res.status.as_u16(), 201, "{}", res.body);
+    assert!(doc_on(&medium, "notes", res.body["id"].as_str().unwrap())?.is_some());
     Ok(())
 }

@@ -1,0 +1,25 @@
+# HexDB configuration (Debian/Ubuntu package). Put secrets in
+# /etc/hexdb/hexdb.local.toml (mode 600, owned by hexdb), for example:
+#
+#   [storage]
+#   encryption_key = "base64:..."     # generate with: hexdb secret
+#
+# then: sudo systemctl enable --now hexdb
+
+[network]
+api_endpoint = "127.0.0.1:7700"
+discovery_endpoint = "127.0.0.1:7702"
+
+[security]
+admin_login = "hexdbadmin"
+admin_email = "admin@localhost"
+
+[storage]
+path = "/var/lib/hexdb"
+disk_mb = 16384
+
+[ui]
+path = "/usr/share/hexdb/ui"
+
+[plugins]
+registry = "/etc/hexdb/plugins.json"

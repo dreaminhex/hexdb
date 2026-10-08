@@ -1,0 +1,26 @@
+# Imports JSON documents from an S3 bucket (or any S3-compatible store: MinIO,
+# Cloudflare R2, Backblaze B2). Each object under PREFIX holding a JSON array,
+# a JSON object or JSON lines is imported once; imported keys are remembered in
+# s3-state.json in this folder. With KEY_FIELD set, documents are upserted by
+# that field; otherwise they are inserted.
+#
+# Setup: `npm install` in this folder; credentials from the usual AWS sources.
+id = "@sources/s3"
+name = "S3 import"
+type = "source"
+version = "1.0.0"
+description = "Imports JSON and JSON-lines files from an S3 bucket."
+command = ["node", "index.mjs"]
+
+[access]
+role = "writer"
+tessellations = ["imports"]
+
+[env]
+AWS_REGION = "us-east-1"
+S3_BUCKET = "my-bucket"
+S3_PREFIX = "exports/"
+# S3_ENDPOINT = "http://localhost:9000"   # MinIO and other S3-compatible stores
+TARGET = "imports"
+KEY_FIELD = ""                            # e.g. "id" in the source data
+POLL_SECONDS = "60"

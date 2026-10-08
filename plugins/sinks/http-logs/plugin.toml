@@ -1,0 +1,17 @@
+# Ships HexDB's log to any HTTP log intake that accepts a JSON array of
+# records: Seq, Vector, Fluent Bit, Logstash, a Loki push gateway, a custom
+# service... Records are POSTed in batches of up to batch_size, as soon as
+# they are written.
+id = "@sinks/http-logs"
+name = "HTTP log shipping"
+type = "logs"
+version = "1.0.0"
+description = "POSTs batches of log records as JSON."
+
+[logs]
+level = "warn"
+
+[webhook]
+url = "http://localhost:5341/api/events/raw"
+batch_size = 200
+# headers = { "X-Seq-ApiKey" = "..." }

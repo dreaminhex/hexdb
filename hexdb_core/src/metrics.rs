@@ -205,8 +205,19 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             lag: None,
         });
     }
-    // Lag relative to the Overseer (this hex's own view of it is freshest when it leads).
-    if let Some(head) = lattice_hexes.iter().find(|h| h.role == crate::network::discovery::ROLE_OVERSEER && h.status == "active").map(|h| h.applied_seq) {
+    // On the Overseer, replicas' positions are exact: each poll for changes
+    // acknowledges everything before it.
+    if engine.is_writable() {
+        let head = engine.changes.published_seq();
+        for hex in lattice_hexes.iter_mut().filter(|h| !h.is_self) {
+            if let Some(applied) = engine.replica_applied(&hex.id) {
+                hex.applied_seq = applied;
+                hex.lag = Some(head.saturating_sub(applied));
+            }
+        }
+    }
+    // Elsewhere, lag relative to the Overseer from the last discovery round.
+    else if let Some(head) = lattice_hexes.iter().find(|h| h.role == crate::network::discovery::ROLE_OVERSEER && h.status == "active").map(|h| h.applied_seq) {
         for hex in lattice_hexes.iter_mut().filter(|h| h.role != crate::network::discovery::ROLE_OVERSEER && h.status == "active") {
             if matches!(hex.replication_state.as_str(), "streaming" | "syncing") {
                 hex.lag = Some(head.saturating_sub(hex.applied_seq));

@@ -22,17 +22,18 @@ async fn setup() -> (TempDir, Arc<HexDBEngine>, HexDBSchema) {
 }
 
 fn principal(roles: Vec<(&str, Vec<&str>)>) -> Principal {
-    Principal {
+    Principal::new(
         // A fixed ID: idempotency keys are scoped to the user.
-        user_id: "01J0000000000000000000TEST".into(),
-        login: "tester".into(),
-        email_address: "tester@example.com".into(),
-        roles: roles
+        "01J0000000000000000000TEST".into(),
+        "tester".into(),
+        "tester@example.com".into(),
+        roles
             .into_iter()
-            .map(|(name, perms)| RoleGrant { name: name.into(), permissions: perms.into_iter().map(String::from).collect() })
+            .map(|(name, tess)| RoleGrant { name: name.into(), tessellations: tess.into_iter().map(String::from).collect() })
             .collect(),
-        credential: Credential::ApiKey { key_id: "test".into() },
-    }
+        Credential::ApiKey { key_id: "test".into() },
+        &hexdb_core::RoleDefinitions::builtin(),
+    )
 }
 
 fn admin() -> Principal {
@@ -172,9 +173,10 @@ async fn errors_carry_codes_and_system_data_is_protected() {
     assert_eq!(error_code(&res), Some("FORBIDDEN"));
 
     // Users and roles are available, without secrets.
-    let res = run(&schema, "{ users { login roles { name permissions } } roles { name } }", json!({})).await;
+    let res = run(&schema, "{ users { login roles { name tessellations } } roles { name permissions builtin } }", json!({})).await;
     assert_eq!(res["data"]["users"][0]["login"], "hexdbadmin");
-    assert_eq!(res["data"]["roles"].as_array().unwrap().len(), 4);
+    assert_eq!(res["data"]["roles"].as_array().unwrap().len(), 6, "the built-in roles");
+    assert!(res["data"]["roles"].as_array().unwrap().iter().all(|r| r["builtin"] == true));
 
     let res = run(&schema, "{ users { passwordHash } }", json!({})).await;
     assert!(res.get("errors").is_some(), "password hashes are not in the schema");

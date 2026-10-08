@@ -4,6 +4,9 @@ import {
   IconDashboard,
   IconFileCode2,
   IconHexagon3d,
+  IconListCheck,
+  IconMathFunction,
+  IconArrowsSplit,
   IconLogout,
   IconPlug,
   IconReport,
@@ -28,7 +31,8 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
 import { usePoll } from "@/hooks/use-poll"
-import { useAuth } from "@/lib/auth"
+import type { Action } from "@/lib/api"
+import { has, useAuth } from "@/lib/auth"
 import { href, linkHandler } from "@/lib/router"
 import { cn } from "@/lib/utils"
 
@@ -37,14 +41,14 @@ interface NavItem {
   icon: Icon
   /** In-app route; items without one aren't built yet and render disabled. */
   route?: string
-  /** Shown to administrators only. */
-  adminOnly?: boolean
+  /** Shown only to users with this permission. */
+  requires?: Action
 }
 
 const SECTIONS: { label?: string; items: NavItem[] }[] = [
   {
     items: [
-      { title: "Dashboard", route: "/", icon: IconDashboard, adminOnly: true },
+      { title: "Dashboard", route: "/", icon: IconDashboard, requires: "status" },
       { title: "Queries", route: "/queries", icon: IconBrandGoogleBigQuery },
     ],
   },
@@ -53,24 +57,27 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
     items: [
       { title: "Tessellations", route: "/tessellations", icon: IconHexagon3d },
       { title: "Documents", route: "/documents", icon: IconFileCode2 },
+      { title: "Streams", route: "/streams", icon: IconArrowsSplit },
+      { title: "Functions", route: "/functions", icon: IconMathFunction },
     ],
   },
   {
     label: "Security",
     items: [
-      { title: "Users", route: "/users", icon: IconUserCircle, adminOnly: true },
-      { title: "Roles", route: "/roles", icon: IconUserCheck, adminOnly: true },
+      { title: "Users", route: "/users", icon: IconUserCircle, requires: "admin" },
+      { title: "Roles", route: "/roles", icon: IconUserCheck, requires: "admin" },
+      { title: "Audit Trail", route: "/audit", icon: IconListCheck, requires: "audit" },
     ],
   },
   {
     label: "System",
-    items: [{ title: "Plugins", route: "/plugins", icon: IconPlug, adminOnly: true }],
+    items: [{ title: "Plugins", route: "/plugins", icon: IconPlug, requires: "plugins" }],
   },
 ]
 
 const FOOTER_ITEMS: NavItem[] = [
-  { title: "Logs", route: "/logs", icon: IconReport, adminOnly: true },
-  { title: "Settings", icon: IconSettings, adminOnly: true },
+  { title: "Logs", route: "/logs", icon: IconReport, requires: "logs" },
+  { title: "Settings", route: "/settings", icon: IconSettings, requires: "admin" },
 ]
 
 /** The signed-in user, with links to the account page and to sign out. */
@@ -147,7 +154,7 @@ function HexIdentity() {
 
 export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps<typeof Sidebar> & { activeRoute?: string }) {
   const { me } = useAuth()
-  const visible = (item: NavItem) => !item.adminOnly || !!me?.is_admin
+  const visible = (item: NavItem) => !item.requires || has(me, item.requires)
   const sections = SECTIONS.map((section) => ({ ...section, items: section.items.filter(visible) })).filter((s) => s.items.length > 0)
   const footerItems = FOOTER_ITEMS.filter(visible)
   return (

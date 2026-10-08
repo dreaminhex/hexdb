@@ -1,0 +1,28 @@
+[Unit]
+Description=HexDB document database
+Documentation=https://github.com/dreaminhex/hexdb
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hexdb
+Group=hexdb
+ExecStart=/usr/bin/hexdb_api --config /etc/hexdb/hexdb.toml
+# Graceful shutdown flushes to disk; give it time.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/hexdb
+StateDirectory=hexdb
+ConfigurationDirectory=hexdb
+
+[Install]
+WantedBy=multi-user.target

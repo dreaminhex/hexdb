@@ -37,8 +37,10 @@ pub(crate) enum Node {
     Or(Vec<Node>),
     Not(Box<Node>),
     Field { path: Vec<String>, ops: Vec<Op> },
-    /// Every term must appear as a word in `fields` (all string fields when `None`).
-    Text { terms: Vec<String>, fields: Option<Vec<Vec<String>>> },
+    /// Every term must appear as a word in `fields` (all string fields when
+    /// `None`). Terms come from `query` through the analyzer (the standard
+    /// one until the tessellation's text index supplies its own).
+    Text { query: String, terms: Vec<String>, fields: Option<Vec<Vec<String>>>, analyzer: Option<Box<crate::analysis::Analyzer>> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +95,47 @@ impl Filter {
         matches!(&self.0, Node::And(nodes) if nodes.is_empty())
     }
 
+    /// What the filter asks of which fields, without the values (for the query advisor).
+    pub fn shape(&self) -> crate::advisor::Shape {
+        fn path(p: &[String]) -> String {
+            p.join(".")
+        }
+        fn other(node: &Node, shape: &mut crate::advisor::Shape) {
+            match node {
+                Node::And(nodes) | Node::Or(nodes) => nodes.iter().for_each(|n| other(n, shape)),
+                Node::Not(node) => other(node, shape),
+                Node::Field { path: p, .. } => {
+                    shape.other.insert(path(p));
+                }
+                Node::Text { .. } => shape.text = true,
+            }
+        }
+        fn top(node: &Node, shape: &mut crate::advisor::Shape) {
+            match node {
+                Node::And(nodes) => nodes.iter().for_each(|n| top(n, shape)),
+                Node::Field { path: p, ops } => {
+                    for op in ops {
+                        let set = match op {
+                            Op::Eq(_) | Op::In(_) => &mut shape.equality,
+                            Op::Cmp(..) | Op::StartsWith(_) => &mut shape.range,
+                            _ => &mut shape.other,
+                        };
+                        set.insert(path(p));
+                    }
+                }
+                Node::Text { .. } => shape.text = true,
+                // Inside $or/$not no single index applies.
+                Node::Or(_) | Node::Not(_) => other(node, shape),
+            }
+        }
+        let mut shape = crate::advisor::Shape::default();
+        top(&self.0, &mut shape);
+        // A field both pinned and ranged counts as pinned.
+        let equality = shape.equality.clone();
+        shape.range.retain(|f| !equality.contains(f));
+        shape
+    }
+
     /// True if the filter uses `$text`.
     pub fn has_text(&self) -> bool {
         fn walk(node: &Node) -> bool {
@@ -106,19 +149,30 @@ impl Filter {
         walk(&self.0)
     }
 
-    /// Restrict `$text` conditions to these fields (a text index's fields).
-    pub fn with_text_fields(&self, fields: &[String]) -> Filter {
-        fn walk(node: &Node, fields: &[Vec<String>]) -> Node {
+    /// Restrict `$text` conditions to these fields (a text index's fields),
+    /// analyzed as the index analyzes them.
+    pub fn with_text_index(&self, fields: &[String], analyzer: &crate::analysis::Analyzer) -> Filter {
+        fn walk(node: &Node, fields: &[Vec<String>], analyzer: &crate::analysis::Analyzer) -> Node {
             match node {
-                Node::And(nodes) => Node::And(nodes.iter().map(|n| walk(n, fields)).collect()),
-                Node::Or(nodes) => Node::Or(nodes.iter().map(|n| walk(n, fields)).collect()),
-                Node::Not(node) => Node::Not(Box::new(walk(node, fields))),
+                Node::And(nodes) => Node::And(nodes.iter().map(|n| walk(n, fields, analyzer)).collect()),
+                Node::Or(nodes) => Node::Or(nodes.iter().map(|n| walk(n, fields, analyzer)).collect()),
+                Node::Not(node) => Node::Not(Box::new(walk(node, fields, analyzer))),
                 Node::Field { .. } => node.clone(),
-                Node::Text { terms, .. } => Node::Text { terms: terms.clone(), fields: Some(fields.to_vec()) },
+                Node::Text { query, .. } => Node::Text {
+                    query: query.clone(),
+                    terms: analyzer.query_tokens(query),
+                    fields: Some(fields.to_vec()),
+                    analyzer: Some(Box::new(analyzer.clone())),
+                },
             }
         }
         let paths: Vec<Vec<String>> = fields.iter().map(|f| f.split('.').map(String::from).collect()).collect();
-        Filter(walk(&self.0, &paths))
+        Filter(walk(&self.0, &paths, analyzer))
+    }
+
+    /// Restrict `$text` conditions to these fields, with the standard analyzer.
+    pub fn with_text_fields(&self, fields: &[String]) -> Filter {
+        self.with_text_index(fields, &crate::analysis::Analyzer::standard())
     }
 }
 
@@ -185,7 +239,7 @@ fn parse_object(map: &Map<String, Value>) -> Result<Node> {
                 if terms.is_empty() {
                     return Err(invalid(format!("{} needs at least one word.", key)));
                 }
-                Node::Text { terms, fields: None }
+                Node::Text { query: text.to_string(), terms, fields: None, analyzer: None }
             }
             Some(_) => return Err(invalid(format!("unknown or misplaced operator {}.", key))),
             None => {
@@ -258,13 +312,20 @@ fn eval(node: &Node, json: &Value) -> bool {
             let values = resolve(json, path);
             ops.iter().all(|op| eval_op(op, &values))
         }
-        Node::Text { terms, fields } => {
+        Node::Text { terms, fields, analyzer, .. } => {
+            // A query of only ignored words (e.g. English stop words) matches nothing.
+            if terms.is_empty() {
+                return false;
+            }
             let mut texts = Vec::new();
             match fields {
                 Some(paths) => paths.iter().flat_map(|p| resolve(json, p)).for_each(|v| strings(v, &mut texts)),
                 None => strings(json, &mut texts),
             }
-            let words: std::collections::HashSet<String> = texts.iter().flat_map(|t| tokenize(t)).collect();
+            let words: std::collections::HashSet<String> = match analyzer {
+                Some(analyzer) => texts.iter().flat_map(|t| analyzer.index_tokens(t)).collect(),
+                None => texts.iter().flat_map(|t| tokenize(t)).collect(),
+            };
             terms.iter().all(|t| words.contains(t))
         }
     }

@@ -1,0 +1,26 @@
+# Ingests rows from a PostgreSQL table into a tessellation and keeps them in
+# sync: every POLL_SECONDS it reads rows changed since the last run (by an
+# "updated at" column) and upserts them by their primary key, which is stored
+# in each document as `source_id`.
+#
+# Setup: `npm install` in this folder, set the [env] values, and create a
+# unique index on source_id in the target tessellation for safety:
+#   POST /tessellations/<target>/indexes {"fields": ["source_id"], "unique": true}
+id = "@sources/postgres"
+name = "PostgreSQL source"
+type = "source"
+version = "1.0.0"
+description = "Copies a PostgreSQL table into a tessellation and keeps it in sync."
+command = ["node", "index.mjs"]
+
+[access]
+role = "writer"
+tessellations = ["customers"]
+
+[env]
+PG_CONNECTION = "postgres://user:password@localhost:5432/app"
+PG_TABLE = "customers"
+PG_KEY = "id"                    # primary key column -> source_id
+PG_UPDATED_AT = "updated_at"     # timestamp column used to find changes
+TARGET = "customers"
+POLL_SECONDS = "10"

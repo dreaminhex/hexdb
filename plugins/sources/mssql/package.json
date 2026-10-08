@@ -1,0 +1,10 @@
+{
+  "name": "hexdb-plugin-mssql-source",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Syncs a SQL Server table into HexDB.",
+  "dependencies": {
+    "mssql": "^11.0.1"
+  }
+}

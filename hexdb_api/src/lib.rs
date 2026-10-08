@@ -4,3 +4,8 @@ pub mod auth;
 pub mod changes;
 pub mod lattice;
 pub mod init;
+pub mod server;
+pub mod client;
+pub mod forward;
+pub mod streams;
+pub mod functions;

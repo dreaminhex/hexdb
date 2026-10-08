@@ -3,7 +3,7 @@
 /// It initializes the server, sets up the necessary components, and starts
 /// the server to listen for incoming requests.
 use anyhow::{anyhow, bail};
-use axum::{serve, Router};
+use axum::Router;
 use hexdb_api::{handlers::ShutdownHandle, init::init_security, routes::app_router};
 use hexdb_core::{
     config::CONFIG_FILE_NAME, discover_peers, init_logging, load_config_from,
@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("▶️  HexDB is starting...");
 
-    let config = load_config_from(config_arg.as_deref()).unwrap_or_else(|e| {
+    let mut config = load_config_from(config_arg.as_deref()).unwrap_or_else(|e| {
         error!("❌ Failed to load configuration: {}", e);
         std::process::exit(1);
     });
@@ -63,8 +63,40 @@ async fn main() -> anyhow::Result<()> {
         error!("❌ {:#}", e);
         std::process::exit(1);
     }));
+    // Settings changed from the admin UI (saved in the data directory) override the file.
+    match hexdb_core::settings::load_overrides(&config.storage_dir(), &keys) {
+        Ok(overrides) if !overrides.is_empty() => {
+            if let Err(e) = hexdb_core::settings::apply(&mut config, &overrides) {
+                error!("❌ The saved settings in {} are invalid: {:#}", hexdb_core::settings::SETTINGS_FILE, e);
+                std::process::exit(1);
+            }
+            info!("⚙️ Applied {} saved setting(s): {}.", overrides.len(), overrides.keys().cloned().collect::<Vec<_>>().join(", "));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            error!("❌ Couldn't read the saved settings: {:#}", e);
+            std::process::exit(1);
+        }
+    }
+    // The lattice name: configured, saved from an earlier start, or new.
+    match hexdb_core::network::discovery::resolve_lattice_name(&config, &keys) {
+        Ok((name, generated)) => {
+            if generated {
+                info!("🌌 No lattice name configured; this hex starts a new lattice, '{}'. Give other hexes network.lattice_name = \"{}\" to join it.", name, name);
+            }
+            config.network.lattice_name = name;
+        }
+        Err(e) => {
+            error!("❌ {:#}", e);
+            std::process::exit(1);
+        }
+    }
     if let Err(e) = config.lattice_key() {
         error!("❌ {:#}", e);
+        std::process::exit(1);
+    }
+    if let Err(e) = hexdb_api::client::TrustedProxies::parse(&config.network.trusted_proxies) {
+        error!("❌ {}", e);
         std::process::exit(1);
     }
     if config.network.lattice_secret.trim().is_empty() {
@@ -155,6 +187,10 @@ async fn main() -> anyhow::Result<()> {
     // Initialize security settings & create defaults if not present.
     info!("🔐 Initializing security settings...");
     init_security(engine.clone()).await?;
+    // Finish schema migrations an earlier run left unfinished.
+    if engine.is_writable() {
+        engine.resume_schema_migrations().await;
+    }
 
     // Create channels for shutdown signals
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
@@ -198,6 +234,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Plugins consume the change feed while this hex is the Overseer.
     hexdb_core::spawn_plugins(engine.clone(), shutdown_rx.clone());
+
+    // Stream sources and destinations run on the Overseer too, as do schedules.
+    hexdb_core::streams::spawn_streams(engine.clone(), shutdown_rx.clone());
+    hexdb_core::functions::spawn_scheduler(engine.clone(), shutdown_rx.clone());
 
     // Follow the Overseer whenever this hex isn't one.
     hexdb_core::spawn_replication_task(engine.clone(), shutdown_rx.clone());
@@ -246,42 +286,26 @@ async fn main() -> anyhow::Result<()> {
         let _ = signal_tx.send(());
     });
 
-    // Handlers see the client's address (sign-in throttling and audit logs).
-    let service = app.into_make_service_with_connect_info::<SocketAddr>();
-
-    let result: anyhow::Result<()> = if tls {
-        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&config.tls.cert_file, &config.tls.key_file)
-            .await
-            .map_err(|e| anyhow!("Failed to load tls.cert_file / tls.key_file: {}", e))?;
-        let handle = axum_server::Handle::new();
-        let stopper = handle.clone();
-        tokio::spawn(async move {
-            let _ = shutdown_rx.changed().await;
-            info!("🛑 HexDB is shutting down gracefully...");
-            stopper.graceful_shutdown(Some(Duration::from_secs(30)));
-        });
-        let server = axum_server::bind_rustls(addr, rustls).handle(handle.clone());
-        write_runtime(&runtime, &storage_dir)?;
-        info!("💽  HexDB API is listening at https://{}", addr);
-        server.serve(service).await.map_err(|e| anyhow!("HTTPS server failed on {}: {}", addr, e))
+    let acceptor = if tls {
+        Some(hexdb_api::server::tls_acceptor(&config.tls).unwrap_or_else(|e| {
+            error!("❌ {:#}", e);
+            std::process::exit(1);
+        }))
     } else {
-        // Bind the server to the specified address and port.
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| anyhow!("Failed to bind {}: {}", addr, e))?;
-        write_runtime(&runtime, &storage_dir)?;
-        if !addr.ip().is_loopback() {
-            warn!("⚠️ The API is reachable from the network over plain HTTP. Configure [tls] so passwords and data are encrypted in transit.");
-        }
-        info!("💽  HexDB API is listening at http://{}", addr);
-        serve(listener, service)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx.changed().await;
-                info!("🛑 HexDB is shutting down gracefully...");
-            })
-            .await
-            .map_err(Into::into)
+        None
     };
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow!("Failed to bind {}: {}", addr, e))?;
+    write_runtime(&runtime, &storage_dir)?;
+    if !tls && !addr.ip().is_loopback() {
+        warn!("⚠️ The API is reachable from the network over plain HTTP. Configure [tls] so passwords and data are encrypted in transit.");
+    }
+    info!("💽  HexDB API is listening at {}://{}", if tls { "https" } else { "http" }, addr);
+    let result = hexdb_api::server::serve(listener, app, acceptor, &config.limits, async move {
+        let _ = shutdown_rx.changed().await;
+    })
+    .await;
 
     // In-flight requests have finished; flush everything and stop the WAL writer.
     info!("💾 Flushing to SSTables before exit...");

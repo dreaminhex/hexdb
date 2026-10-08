@@ -1,12 +1,12 @@
 {
-  "@streams/kafka": {
-    "path": "./plugins/streams/kafka",
-    "type": "stream",
-    "enabled": false
-  },
-  "@examples/change-logger": {
-    "path": "./plugins/examples/change-logger",
-    "type": "stream",
-    "enabled": false
-  }
+  "@examples/change-logger": { "path": "./plugins/examples/change-logger", "type": "stream", "enabled": false },
+  "@streams/kafka": { "path": "./plugins/streams/kafka", "type": "stream", "enabled": false },
+  "@streams/kinesis": { "path": "./plugins/streams/kinesis", "type": "stream", "enabled": false },
+  "@sinks/otlp": { "path": "./plugins/sinks/otlp", "type": "metrics", "enabled": false },
+  "@sinks/log-file": { "path": "./plugins/sinks/log-file", "type": "logs", "enabled": false },
+  "@sinks/http-logs": { "path": "./plugins/sinks/http-logs", "type": "logs", "enabled": false },
+  "@sources/postgres": { "path": "./plugins/sources/postgres", "type": "source", "enabled": false },
+  "@sources/mssql": { "path": "./plugins/sources/mssql", "type": "source", "enabled": false },
+  "@sources/s3": { "path": "./plugins/sources/s3", "type": "source", "enabled": false },
+  "@enrichers/ai-keywords": { "path": "./plugins/enrichers/ai-keywords", "type": "stream", "enabled": false }
 }

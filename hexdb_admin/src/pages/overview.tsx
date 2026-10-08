@@ -7,10 +7,12 @@ import {
   IconDeviceFloppy,
   IconHexagons,
   IconLoader2,
+  IconPlus,
   IconRefresh,
 } from "@tabler/icons-react"
 import { toast } from "sonner"
 
+import { JoinDialog } from "@/components/join-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -27,6 +29,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { usePoll } from "@/hooks/use-poll"
 import { api, errorMessage, type MetricsSample, type Status, type VertexStatus } from "@/lib/api"
+import { has, useAuth } from "@/lib/auth"
 import { formatBytes, formatDuration, formatNumber, formatPercent } from "@/lib/format"
 import { href, linkHandler } from "@/lib/router"
 import { cn } from "@/lib/utils"
@@ -393,6 +396,8 @@ function VertexCard({ vertices }: { vertices: VertexStatus[] }) {
 function LatticeCard({ status }: { status: Status }) {
   const { lattice } = status.network
   const active = lattice.hexes.filter((h) => h.status === "active").length
+  const { me } = useAuth()
+  const [joining, setJoining] = useState(false)
   return (
     <Card>
       <CardHeader>
@@ -402,6 +407,14 @@ function LatticeCard({ status }: { status: Status }) {
         <CardDescription>
           {lattice.name} · {active} of {lattice.hexes.length} hex{lattice.hexes.length === 1 ? "" : "es"} active
         </CardDescription>
+        {has(me, "admin") && (
+          <CardAction>
+            <Button variant="outline" size="sm" onClick={() => setJoining(true)}>
+              <IconPlus /> Add a hex
+            </Button>
+          </CardAction>
+        )}
+        <JoinDialog open={joining} onOpenChange={setJoining} />
       </CardHeader>
       <CardContent className="space-y-2">
         {lattice.hexes.map((hex) => (
@@ -432,7 +445,7 @@ function LatticeCard({ status }: { status: Status }) {
         ))}
         {lattice.hexes.length === 1 ? (
           <p className="text-muted-foreground pt-1 text-xs">
-            No peers discovered. Add seed addresses to network.peers in hexdb.toml to join other hexes.
+            No peers discovered. Use Add a hex for the settings a new hex needs, or add seed addresses to network.peers in hexdb.toml.
           </p>
         ) : (
           <p className="text-muted-foreground pt-1 text-xs">

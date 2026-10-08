@@ -58,7 +58,12 @@ fn to_gql(e: anyhow::Error) -> async_graphql::Error {
         Some(EngineError::Conflict(m)) => gql_error("CONFLICT", m.clone()),
         Some(EngineError::Unprocessable(m)) => gql_error("UNPROCESSABLE", m.clone()),
         Some(EngineError::ReadOnly(m)) => gql_error("READ_ONLY_REPLICA", m.clone()),
-        Some(EngineError::Unauthorized(m)) => gql_error("UNAUTHENTICATED", m.clone()),
+        Some(EngineError::Unauthorized(m)) | Some(EngineError::MfaRequired(m)) => gql_error("UNAUTHENTICATED", m.clone()),
+        Some(EngineError::ReplicationTimeout(m)) => gql_error("REPLICATION_TIMEOUT", m.clone()),
+        Some(EngineError::NoQuorum(m)) => gql_error("NO_QUORUM", m.clone()),
+        Some(EngineError::TooLarge(m)) => gql_error("DOCUMENT_TOO_LARGE", m.clone()),
+        Some(EngineError::SchemaViolation(m)) => gql_error("SCHEMA_VIOLATION", m.clone()),
+        Some(EngineError::DiskFull(m)) => gql_error("DISK_FULL", m.clone()),
         Some(EngineError::Forbidden(m)) => gql_error("FORBIDDEN", m.clone()),
         Some(EngineError::RateLimited(m, _)) => gql_error("RATE_LIMITED", m.clone()),
         None => {
@@ -85,6 +90,10 @@ fn require(ctx: &Context<'_>, permission: Permission, tessellation: &str) -> Gql
 
 fn require_admin(ctx: &Context<'_>) -> GqlResult<()> {
     principal(ctx)?.require_admin().map_err(to_gql)
+}
+
+fn require_action(ctx: &Context<'_>, action: hexdb_core::Action) -> GqlResult<()> {
+    principal(ctx)?.require_action(action).map_err(to_gql)
 }
 
 /// Validate a tessellation name for document access, refusing system tessellations.
@@ -249,6 +258,8 @@ pub struct IndexObject {
     pub kind: String,
     pub fields: Vec<String>,
     pub unique: bool,
+    /// Text indexes: the analyzer ("standard" unless set).
+    pub analyzer: Option<String>,
     /// Documents indexed.
     pub documents: usize,
     /// Distinct keys (field index) or words (text index).
@@ -266,6 +277,7 @@ impl From<hexdb_core::IndexInfo> for IndexObject {
             },
             fields: info.def.fields,
             unique: info.def.unique,
+            analyzer: (info.def.kind == hexdb_core::IndexKind::Text).then(|| info.def.analyzer.clone().unwrap_or_else(|| "standard".into())),
             documents: info.documents,
             keys: info.keys,
             ready: info.ready,
@@ -305,7 +317,7 @@ impl TessellationObject {
     async fn document_count(&self, ctx: &Context<'_>, filter: Option<Json<Value>>) -> GqlResult<usize> {
         let engine = engine(ctx);
         if engine.is_system_tessellation(&self.name) {
-            require_admin(ctx)?;
+            require_action(ctx, hexdb_core::Action::Status)?;
         } else {
             require(ctx, Permission::Read, &self.name)?;
         }
@@ -380,16 +392,16 @@ pub struct UpdateResult {
     pub modified: usize,
 }
 
-/// A role granted to a user.
+/// A role granted to a user, on these tessellations ("*" for all).
 #[derive(SimpleObject)]
 pub struct RoleGrantObject {
     pub name: String,
-    pub permissions: Vec<String>,
+    pub tessellations: Vec<String>,
 }
 
 impl From<RoleGrant> for RoleGrantObject {
     fn from(g: RoleGrant) -> Self {
-        RoleGrantObject { name: g.name, permissions: g.permissions }
+        RoleGrantObject { name: g.name, tessellations: g.tessellations }
     }
 }
 
@@ -429,11 +441,21 @@ pub struct RoleObject {
     pub id: ID,
     pub name: String,
     pub description: String,
+    /// The permissions the role holds (read, write, manage, status, logs, audit, plugins, maintenance, admin).
+    pub permissions: Vec<String>,
+    /// Built-in roles can't be changed.
+    pub builtin: bool,
 }
 
 impl From<RoleView> for RoleObject {
     fn from(r: RoleView) -> Self {
-        RoleObject { id: ID(r.id), name: r.name, description: r.description }
+        RoleObject {
+            id: ID(r.id),
+            name: r.name,
+            description: r.description,
+            permissions: r.permissions.iter().map(|a| a.name().to_string()).collect(),
+            builtin: r.builtin,
+        }
     }
 }
 
@@ -468,7 +490,7 @@ impl QueryRoot {
     async fn tessellation(&self, ctx: &Context<'_>, name: String) -> GqlResult<Option<TessellationObject>> {
         let engine = engine(ctx);
         if engine.is_system_tessellation(&name) {
-            require_admin(ctx)?;
+            require_action(ctx, hexdb_core::Action::Status)?;
         } else {
             require(ctx, Permission::Read, &name)?;
         }
@@ -613,7 +635,7 @@ impl QueryRoot {
 
     /// Server status and metrics (the same data as GET /status).
     async fn status(&self, ctx: &Context<'_>) -> GqlResult<Json<Value>> {
-        require_admin(ctx)?;
+        require_action(ctx, hexdb_core::Action::Status)?;
         let meta = collect(engine(ctx)).await;
         Ok(Json(serde_json::to_value(meta).map_err(|e| gql_error("INTERNAL", e.to_string()))?))
     }
@@ -843,6 +865,7 @@ impl MutationRoot {
         let info = engine
             .tessellation_info(&name)
             .ok_or_else(|| gql_error("INTERNAL", "Tessellation vanished."))?;
+        engine.audit(&principal(ctx)?.login, "tessellation.create", &name, serde_json::json!({})).await;
         Ok(TessellationObject { name, info })
     }
 
@@ -857,6 +880,7 @@ impl MutationRoot {
         #[graphql(desc = "Defaults to the field names joined with _.")] name: Option<String>,
         #[graphql(desc = "\"field\" (default) or \"text\".")] kind: Option<String>,
         #[graphql(default)] unique: bool,
+        #[graphql(desc = "Text indexes: the analyzer (standard, simple, whitespace, keyword, english, ngram, autocomplete, or a custom one).")] analyzer: Option<String>,
     ) -> GqlResult<IndexObject> {
         require(ctx, Permission::Manage, &tessellation)?;
         let engine = engine(ctx);
@@ -866,8 +890,12 @@ impl MutationRoot {
             "text" => hexdb_core::IndexKind::Text,
             other => return Err(gql_error("INVALID_REQUEST", format!("Unknown index kind '{}'; use field or text.", other))),
         };
-        let def = hexdb_core::IndexDef { name: name.unwrap_or_default(), kind, fields, unique };
-        Ok(engine.create_index(&tessellation, def).await.map_err(to_gql)?.into())
+        let def = hexdb_core::IndexDef { name: name.unwrap_or_default(), kind, fields, unique, analyzer };
+        let info = engine.create_index(&tessellation, def).await.map_err(to_gql)?;
+        engine
+            .audit(&principal(ctx)?.login, "index.create", &tessellation, serde_json::json!({ "index": info.def.name, "fields": info.def.fields }))
+            .await;
+        Ok(info.into())
     }
 
     /// Drop an index. Returns false if it didn't exist.
@@ -875,7 +903,11 @@ impl MutationRoot {
         require(ctx, Permission::Manage, &tessellation)?;
         let engine = engine(ctx);
         existing_tessellation(engine, &tessellation)?;
-        engine.drop_index(&tessellation, &name).map_err(to_gql)
+        let dropped = engine.drop_index(&tessellation, &name).map_err(to_gql)?;
+        if dropped {
+            engine.audit(&principal(ctx)?.login, "index.drop", &tessellation, serde_json::json!({ "index": name })).await;
+        }
+        Ok(dropped)
     }
 
     /// Delete a user tessellation and all of its documents. Returns false if it didn't exist.
@@ -885,7 +917,11 @@ impl MutationRoot {
         if engine.tessellation_exists(&name) && engine.is_system_tessellation(&name) {
             return Err(gql_error("FORBIDDEN", format!("'{}' is a system tessellation and can't be deleted.", name)));
         }
-        engine.delete_tessellation(&name).await.map_err(to_gql)
+        let deleted = engine.delete_tessellation(&name).await.map_err(to_gql)?;
+        if deleted {
+            engine.audit(&principal(ctx)?.login, "tessellation.delete", &name, serde_json::json!({})).await;
+        }
+        Ok(deleted)
     }
 }
 

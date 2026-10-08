@@ -1,0 +1,21 @@
+# Sends HexDB's metrics to an OpenTelemetry (OTLP/HTTP) endpoint: an
+# OpenTelemetry Collector, Grafana Alloy, Datadog Agent, Dynatrace, Honeycomb,
+# New Relic... Built into HexDB; no command needed.
+#
+# Metrics: hexdb.documents (per tessellation), hexdb.memory.usage,
+# hexdb.disk.usage, hexdb.unflushed, and the counters hexdb.reads,
+# hexdb.writes and hexdb.queries, every 15 seconds.
+#
+# For logs, copy this folder, set type = "logs" and give it its own id.
+id = "@sinks/otlp"
+name = "OpenTelemetry metrics"
+type = "metrics"
+version = "1.0.0"
+description = "Exports metrics to an OTLP/HTTP endpoint."
+builtin = "otlp"
+
+[otlp]
+endpoint = "http://localhost:4318"
+service_name = "hexdb"
+# headers = { "DD-API-KEY" = "..." }            # Datadog
+# headers = { "Authorization" = "Api-Token ..." } # Dynatrace

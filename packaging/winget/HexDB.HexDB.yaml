@@ -1,0 +1,23 @@
+# winget manifest (singleton format). Submit to microsoft/winget-pkgs with
+# `wingetcreate update HexDB.HexDB --version <v> --urls <zip url>` after each
+# release, or update the URL and InstallerSha256 (from SHA256SUMS) by hand.
+PackageIdentifier: HexDB.HexDB
+PackageVersion: 0.1.0
+PackageName: HexDB
+Publisher: HexDB
+License: See the repository (not yet chosen)
+ShortDescription: Hexagonal document database with an admin UI, replication and change streams.
+PackageUrl: https://github.com/dreaminhex/hexdb
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: hexdb-v0.1.0-x86_64-pc-windows-msvc\hexdb.exe
+        PortableCommandAlias: hexdb
+      - RelativeFilePath: hexdb-v0.1.0-x86_64-pc-windows-msvc\hexdb_api.exe
+        PortableCommandAlias: hexdb_api
+    InstallerUrl: https://github.com/dreaminhex/hexdb/releases/download/v0.1.0/hexdb-v0.1.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: REPLACE_WITH_SHA256_FROM_SHA256SUMS
+ManifestType: singleton
+ManifestVersion: 1.6.0

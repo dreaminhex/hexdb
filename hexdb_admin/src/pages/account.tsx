@@ -2,6 +2,7 @@ import { useState } from "react"
 import { IconCopy, IconKey, IconLoader2, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
+import { MfaCard } from "@/components/mfa-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -12,7 +13,7 @@ import { api, errorMessage } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { formatEpochSeconds } from "@/lib/format"
 
-/** The signed-in user's password and API keys. */
+/** The signed-in user's password, API keys and multi-factor authentication. */
 export function AccountPage() {
   const { me } = useAuth()
   if (!me) return null
@@ -25,17 +26,21 @@ export function AccountPage() {
         </CardHeader>
         <CardContent className="flex flex-wrap gap-1.5">
           {me.roles.length === 0 && <span className="text-muted-foreground text-sm">No roles: you can sign in but not read any data.</span>}
-          {me.roles.map((r) => (
-            <Badge key={r.name} variant="secondary" title={r.permissions.join(", ")}>
-              {r.name}
-              {r.name !== "admin" && r.permissions.length > 0 && <span className="text-muted-foreground ml-1 font-normal">{r.permissions.join(", ")}</span>}
-            </Badge>
-          ))}
+          {me.roles.map((r) => {
+            const grant = me.grants?.find((g) => g.role === r.name)
+            return (
+              <Badge key={r.name} variant="secondary" title={grant ? `Permissions: ${grant.permissions.join(", ")}` : "Unknown role: grants nothing"}>
+                {r.name}
+                {r.name !== "admin" && r.tessellations.length > 0 && <span className="text-muted-foreground ml-1 font-normal">{r.tessellations.join(", ")}</span>}
+              </Badge>
+            )
+          })}
         </CardContent>
       </Card>
       <div className="grid gap-4 lg:grid-cols-2">
         <PasswordCard />
         <ApiKeysCard />
+        <MfaCard />
       </div>
     </div>
   )

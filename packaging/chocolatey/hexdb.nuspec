@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Chocolatey package. Build with `choco pack` in this folder after updating
+     the version and the URL/checksum in tools/chocolateyinstall.ps1. -->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>hexdb</id>
+    <version>0.1.0</version>
+    <title>HexDB</title>
+    <authors>HexDB contributors</authors>
+    <projectUrl>https://github.com/dreaminhex/hexdb</projectUrl>
+    <licenseUrl>https://github.com/dreaminhex/hexdb/blob/main/README.md</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>database document nosql hexdb</tags>
+    <summary>Hexagonal document database: server, CLI and admin UI.</summary>
+    <description>HexDB is a document database with encryption at rest, replication across a lattice of hexes, change streams, plugins and an admin UI. This package installs hexdb_api (the server) and hexdb (the CLI).</description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

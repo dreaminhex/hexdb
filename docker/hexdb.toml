@@ -1,0 +1,34 @@
+# HexDB configuration for the container image. Secrets and per-hex values come
+# from environment variables (HEXDB_<SECTION>__<FIELD>):
+#
+#   HEXDB_STORAGE__ENCRYPTION_KEY   required: base64:<32 bytes>
+#   HEXDB_NETWORK__LATTICE_SECRET   shared by every hex of a lattice
+#   HEXDB_NETWORK__LATTICE_NAME     the same on every hex of a lattice
+#   HEXDB_NETWORK__PEERS            other hexes' discovery addresses, comma-separated
+#   HEXDB_NETWORK__ADVERTISE_HOST   how other hexes reach this one (its DNS name)
+#   HEXDB_SECURITY__ADMIN_PASSWORD  the first administrator's password (else one is generated and printed)
+
+[network]
+api_endpoint = "0.0.0.0:7700"
+discovery_endpoint = "0.0.0.0:7702"
+# Containers see each other by name, not on local ports.
+scan_local_ports = false
+
+[storage]
+path = "/var/lib/hexdb"
+disk_mb = 16384
+
+[memory]
+ram_mb = 1024
+ttl_scan_frequency = 600
+vertex_integrity_check_frequency = 300
+
+[ui]
+path = "/usr/share/hexdb/ui"
+
+[security]
+admin_login = "hexdbadmin"
+admin_email = "admin@hexdb.local"
+
+[plugins]
+registry = "/var/lib/hexdb/plugins.json"

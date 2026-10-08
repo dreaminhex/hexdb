@@ -121,7 +121,7 @@ fn index_ordered_sorting_matches_an_in_memory_sort() -> Result<()> {
 fn field_projection_returns_only_requested_fields() -> Result<()> {
     let server = TestServer::start()?;
     let id = server.insert("people", &json!({ "name": "Ada", "address": { "city": "London", "zip": "N1" }, "secret": 1 }))?;
-    let res = server.request(Method::GET, &format!("/people?fields=name,address.city"), None, &[])?;
+    let res = server.request(Method::GET, "/people?fields=name,address.city", None, &[])?;
     assert_eq!(res.body["documents"][0], json!({ "id": id, "name": "Ada", "address": { "city": "London" } }));
     let res = server.request(Method::POST, "/people/_query", Some(&json!({ "fields": ["secret"] })), &[])?;
     assert_eq!(res.body["documents"][0], json!({ "id": id, "secret": 1 }));

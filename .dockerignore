@@ -1,0 +1,16 @@
+target
+**/node_modules
+**/dist
+**/bin
+**/obj
+**/__pycache__
+.git
+**/.hexdb
+**/.hexdb-*
+**/.hexdb-local
+**/hexdb.local.toml
+**/*.wal
+**/*.hxs
+**/*.hxe
+**/*.hxi
+TODO.md

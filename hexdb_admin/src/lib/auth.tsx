@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react"
 
-import { api, ApiError, UNAUTHORIZED_EVENT, type Me } from "@/lib/api"
+import { api, ApiError, UNAUTHORIZED_EVENT, type Action, type Me } from "@/lib/api"
 
 interface AuthState {
   /** The signed-in user; `null` when signed out; `undefined` while checking. */
@@ -56,12 +56,16 @@ export type Permission = "read" | "write" | "manage"
 export function can(me: Me | null | undefined, permission: Permission, tessellation: string): boolean {
   if (!me) return false
   if (me.is_admin) return true
-  return me.roles.some((grant) => {
-    const applies = grant.permissions.includes("*") || grant.permissions.includes(tessellation)
-    const allows =
-      grant.name === "owner" || (grant.name === "writer" && permission !== "manage") || (grant.name === "reader" && permission === "read")
-    return applies && allows
-  })
+  return (me.grants ?? []).some(
+    (grant) => grant.permissions.includes(permission) && (grant.tessellations.includes("*") || grant.tessellations.includes(tessellation)),
+  )
+}
+
+/** Whether the user holds a permission that applies everywhere (status, logs, audit, ...). */
+// eslint-disable-next-line react-refresh/only-export-components
+export function has(me: Me | null | undefined, action: Action): boolean {
+  if (!me) return false
+  return me.is_admin || (me.permissions ?? []).includes(action)
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

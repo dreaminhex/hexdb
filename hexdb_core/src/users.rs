@@ -5,10 +5,15 @@
 // hashes passwords with Argon2, keeps logins unique (ignoring case), protects
 // the last administrator, and never returns password hashes or MFA secrets.
 //
+// A role is a named permission set (see `crate::auth::Action`). The built-in
+// roles can't be changed or deleted; custom roles can. A user holds grants:
+// a role name plus the tessellations it applies to.
+//
 // Earlier builds stored all users in one document holding a `users` array and
 // all roles in one document holding a `roles` array; `bootstrap` migrates those.
 
 use crate::{
+    auth::{Action, RoleDefinitions},
     config::SecurityConfig,
     crypt::create_hash,
     engine::{EngineError, IdempotencyKey, Outcome},
@@ -25,12 +30,33 @@ pub const USERS_TESSELLATION: &str = "users";
 pub const ROLES_TESSELLATION: &str = "roles";
 pub const ADMIN_ROLE: &str = "admin";
 
-const DEFAULT_ROLES: &[(&str, &str)] = &[
-    ("admin", "Full system access."),
-    ("reader", "Read-only access to specified tessellations."),
-    ("writer", "Write access to specified tessellations (assumes read access)."),
-    ("owner", "Full access to specified tessellations."),
+/// A role that always exists.
+pub struct BuiltinRole {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub permissions: &'static [Action],
+}
+
+pub const BUILTIN_ROLES: &[BuiltinRole] = &[
+    BuiltinRole { name: "admin", description: "Full system access.", permissions: &[Action::Admin] },
+    BuiltinRole { name: "reader", description: "Read the granted tessellations.", permissions: &[Action::Read] },
+    BuiltinRole { name: "writer", description: "Read and write the granted tessellations.", permissions: &[Action::Read, Action::Write] },
+    BuiltinRole {
+        name: "owner",
+        description: "Read, write and manage (indexes, schemas, deletion) the granted tessellations.",
+        permissions: &[Action::Read, Action::Write, Action::Manage],
+    },
+    BuiltinRole {
+        name: "operator",
+        description: "Run the server: status, logs, plugins, flush and compaction. No document access.",
+        permissions: &[Action::Status, Action::Logs, Action::Plugins, Action::Maintenance],
+    },
+    BuiltinRole { name: "auditor", description: "Review the audit trail and server status. No document access.", permissions: &[Action::Status, Action::Audit] },
 ];
+
+fn builtin(name: &str) -> Option<&'static BuiltinRole> {
+    BUILTIN_ROLES.iter().find(|r| r.name == name)
+}
 const MIN_PASSWORD_LEN: usize = 12;
 const MAX_PASSWORD_LEN: usize = 1024;
 
@@ -38,8 +64,9 @@ const MAX_PASSWORD_LEN: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoleGrant {
     pub name: String,
-    #[serde(default)]
-    pub permissions: Vec<String>,
+    /// Accepted as `permissions` too, the name used by earlier builds.
+    #[serde(default, alias = "permissions")]
+    pub tessellations: Vec<String>,
 }
 
 /// A user as stored. Never returned by the API; see [`UserView`].
@@ -76,8 +103,15 @@ pub struct StoredUser {
     pub use_mfa: bool,
     #[serde(default)]
     pub mfa_secret: Option<String>,
+    /// Argon2 hashes of the unused backup codes.
     #[serde(default)]
     pub mfa_backup_codes: Vec<String>,
+    /// A secret being enrolled, until a code confirms it.
+    #[serde(default)]
+    pub mfa_pending_secret: Option<String>,
+    /// The last TOTP step used to sign in (codes for it and earlier are refused).
+    #[serde(default)]
+    pub mfa_last_step: i64,
     /// Sessions issued at or before this time (epoch milliseconds) are no longer valid.
     #[serde(default)]
     pub sessions_valid_after: i64,
@@ -168,6 +202,18 @@ pub struct RoleView {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub permissions: Vec<Action>,
+    /// Built-in roles can't be changed or deleted.
+    pub builtin: bool,
+}
+
+/// Input for creating or changing a custom role.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleInput {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub permissions: Option<Vec<String>>,
 }
 
 fn invalid(message: impl Into<String>) -> anyhow::Error {
@@ -277,6 +323,174 @@ pub async fn change_own_password(engine: &HexDBEngine, user_id: &str, current: &
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Multi-factor authentication (see crate::mfa)
+// ---------------------------------------------------------------------------
+
+fn check_password(user: &StoredUser, password: &str) -> Result<()> {
+    if crate::crypt::verify_hash(password, &user.password_hash) {
+        Ok(())
+    } else {
+        Err(EngineError::Forbidden("The current password is wrong.".into()).into())
+    }
+}
+
+/// Start enrolling: a new pending secret. Returns (secret, otpauth URI).
+pub async fn mfa_setup(engine: &HexDBEngine, user_id: &str, password: &str) -> Result<(String, String)> {
+    engine.ensure_writable()?;
+    let _lock = engine.users_lock.lock().await;
+    let (id, mut user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;
+    check_password(&user, password)?;
+    if user.use_mfa {
+        return Err(EngineError::Conflict("MFA is already on. Turn it off first to enrol a new authenticator.".into()).into());
+    }
+    let secret = crate::mfa::new_secret();
+    user.mfa_pending_secret = Some(secret.clone());
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    let issuer = format!("HexDB {}", engine.config.network.lattice_name);
+    Ok((secret.clone(), crate::mfa::otpauth_uri(&issuer, &user.login, &secret)))
+}
+
+/// Finish enrolling with a code from the app. Returns the backup codes (shown once).
+pub async fn mfa_enable(engine: &HexDBEngine, user_id: &str, code: &str) -> Result<Vec<String>> {
+    engine.ensure_writable()?;
+    let _lock = engine.users_lock.lock().await;
+    let (id, mut user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;
+    let secret = user.mfa_pending_secret.clone().ok_or_else(|| invalid("Start with POST /auth/mfa/setup."))?;
+    let step = crate::mfa::verify_totp(&secret, code, Utc::now().timestamp(), 0)
+        .ok_or_else(|| invalid("That code isn't valid. Check the time on your device and try the current code."))?;
+    let (codes, hashes) = crate::mfa::new_backup_codes();
+    user.use_mfa = true;
+    user.mfa_secret = Some(secret);
+    user.mfa_pending_secret = None;
+    user.mfa_backup_codes = hashes;
+    user.mfa_last_step = step;
+    // Other sessions were signed in with the password alone.
+    user.sessions_valid_after = Utc::now().timestamp_millis();
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    info!("🔐 '{}' turned on multi-factor authentication.", user.login);
+    Ok(codes)
+}
+
+/// Turn MFA off (password and a current code or backup code).
+pub async fn mfa_disable(engine: &HexDBEngine, user_id: &str, password: &str, code: &str) -> Result<()> {
+    engine.ensure_writable()?;
+    let _lock = engine.users_lock.lock().await;
+    let (id, mut user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;
+    check_password(&user, password)?;
+    if !user.use_mfa {
+        return Ok(());
+    }
+    if !second_factor_matches(engine, id, &mut user, code)? {
+        return Err(EngineError::Forbidden("That code isn't valid.".into()).into());
+    }
+    user.use_mfa = false;
+    user.mfa_secret = None;
+    user.mfa_backup_codes.clear();
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    info!("🔐 '{}' turned off multi-factor authentication.", user.login);
+    Ok(())
+}
+
+/// New backup codes, replacing the old ones (password and a current code).
+pub async fn mfa_new_backup_codes(engine: &HexDBEngine, user_id: &str, password: &str, code: &str) -> Result<Vec<String>> {
+    engine.ensure_writable()?;
+    let _lock = engine.users_lock.lock().await;
+    let (id, mut user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;
+    check_password(&user, password)?;
+    if !user.use_mfa || !second_factor_matches(engine, id, &mut user, code)? {
+        return Err(EngineError::Forbidden("MFA is off, or that code isn't valid.".into()).into());
+    }
+    let (codes, hashes) = crate::mfa::new_backup_codes();
+    user.mfa_backup_codes = hashes;
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    Ok(codes)
+}
+
+/// Check a TOTP or backup code, updating `user` (last step, used backup
+/// code) without saving it. Backup codes need a writable hex.
+fn second_factor_matches(engine: &HexDBEngine, id: Ulid, user: &mut StoredUser, code: &str) -> Result<bool> {
+    let Some(secret) = user.mfa_secret.clone() else { return Ok(false) };
+    let last = {
+        let steps = engine.mfa_steps.lock().unwrap();
+        steps.get(&id).copied().unwrap_or(0).max(user.mfa_last_step)
+    };
+    if let Some(step) = crate::mfa::verify_totp(&secret, code, Utc::now().timestamp(), last) {
+        engine.mfa_steps.lock().unwrap().insert(id, step);
+        user.mfa_last_step = step;
+        return Ok(true);
+    }
+    if code.trim().len() == 11 {
+        if !engine.is_writable() {
+            return Err(EngineError::ReadOnly(
+                "Backup codes can only be used on the Overseer (they are used up when signing in). Use your authenticator app, or sign in on the Overseer.".into(),
+            )
+            .into());
+        }
+        if let Some(i) = crate::mfa::match_backup_code(&user.mfa_backup_codes, code) {
+            user.mfa_backup_codes.remove(i);
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The second factor at sign-in. `Ok(true)` if the code is valid (and the
+/// user record was updated where possible), `Ok(false)` if it isn't.
+pub(crate) async fn verify_sign_in_code(engine: &HexDBEngine, id: Ulid, code: &str) -> Result<bool> {
+    let _lock = engine.users_lock.lock().await;
+    let Some((_, mut user)) = find_by_id(engine, &id.to_string()).await? else { return Ok(false) };
+    let backup_before = user.mfa_backup_codes.len();
+    if !second_factor_matches(engine, id, &mut user, code)? {
+        return Ok(false);
+    }
+    if engine.is_writable() {
+        engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+        if user.mfa_backup_codes.len() < backup_before {
+            warn!("🔐 '{}' signed in with a backup code; {} left.", user.login, user.mfa_backup_codes.len());
+        }
+    }
+    Ok(true)
+}
+
+/// A user for a service (e.g. a plugin) with exactly these roles: created
+/// with a random password nobody knows, or updated. Returns (ID, user).
+pub async fn ensure_service_user(engine: &HexDBEngine, login: &str, roles: Vec<RoleGrant>) -> Result<(String, StoredUser)> {
+    validate_login(login)?;
+    check_roles_exist(engine, &roles).await?;
+    if let Some((id, mut user)) = find_by_login(engine, login).await? {
+        if user.roles != roles || user.is_locked {
+            let _lock = engine.users_lock.lock().await;
+            user.roles = roles;
+            user.is_locked = false;
+            engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+        }
+        return Ok((id.to_string(), user));
+    }
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let password = URL_SAFE_NO_PAD.encode(crate::crypt::random_bytes(24));
+    let created = create_user(
+        engine,
+        NewUser { login: login.to_string(), password, email_address: format!("{}@service.hexdb.local", login), roles },
+        None,
+    )
+    .await?;
+    let (id, user) = find_by_id(engine, &created.value.id).await?.ok_or_else(|| anyhow!("the new user vanished"))?;
+    Ok((id.to_string(), user))
+}
+
+/// True if `password` is the user's current password (to confirm sensitive actions).
+pub async fn verify_password(engine: &HexDBEngine, user_id: &str, password: &str) -> Result<bool> {
+    let Some((_, user)) = find_by_id(engine, user_id).await? else { return Ok(false) };
+    Ok(crate::crypt::verify_hash(password, &user.password_hash))
+}
+
+/// Unused backup codes, for the Account page.
+pub async fn mfa_status(engine: &HexDBEngine, user_id: &str) -> Result<(bool, usize, bool)> {
+    let (_, user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;
+    Ok((user.use_mfa, user.mfa_backup_codes.len(), user.mfa_pending_secret.is_some()))
+}
+
 /// Find a user by ID, or by login (ignoring case).
 async fn find_user(engine: &HexDBEngine, id_or_login: &str) -> Result<Option<(Ulid, StoredUser)>> {
     if let Ok(id) = Ulid::from_string(id_or_login) {
@@ -366,6 +580,8 @@ pub async fn create_user(engine: &HexDBEngine, input: NewUser, idem: Option<Idem
         use_mfa: false,
         mfa_secret: None,
         mfa_backup_codes: Vec::new(),
+        mfa_pending_secret: None,
+        mfa_last_step: 0,
         sessions_valid_after: 0,
         login_key: String::new(),
     };
@@ -427,7 +643,16 @@ pub async fn update_user(
         user.is_locked = locked;
     }
     if let Some(use_mfa) = changes.use_mfa {
-        user.use_mfa = use_mfa;
+        if use_mfa && !user.use_mfa {
+            return Err(invalid("Users turn MFA on themselves (Account page, or POST /auth/mfa/setup); administrators can only turn it off."));
+        }
+        if !use_mfa && user.use_mfa {
+            // An administrator's reset, for a user who lost their authenticator and backup codes.
+            user.use_mfa = false;
+            user.mfa_secret = None;
+            user.mfa_pending_secret = None;
+            user.mfa_backup_codes.clear();
+        }
     }
     if let Some(expiration) = changes.password_expiration {
         user.password_expiration = expiration;
@@ -477,21 +702,34 @@ async fn ensure_another_admin(engine: &HexDBEngine, except: Ulid) -> Result<()> 
     Ok(())
 }
 
+fn parse_role(doc: &Document) -> Option<RoleView> {
+    let data = doc.data_json();
+    let name = data.get("name")?.as_str()?.to_string();
+    // Built-in roles always have their built-in permissions.
+    let permissions = match builtin(&name) {
+        Some(b) => b.permissions.to_vec(),
+        None => data
+            .get("permissions")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|p| p.as_str().and_then(Action::parse)).collect())
+            .unwrap_or_default(),
+    };
+    Some(RoleView {
+        id: doc.id.to_string(),
+        builtin: builtin(&name).is_some(),
+        name,
+        description: data.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
+        permissions,
+    })
+}
+
 /// All roles.
 pub async fn list_roles(engine: &HexDBEngine) -> Result<Vec<RoleView>> {
+    if !engine.tessellation_exists(ROLES_TESSELLATION) {
+        return Ok(Vec::new());
+    }
     let page = engine.list_documents(ROLES_TESSELLATION, None, usize::MAX).await?;
-    Ok(page
-        .documents
-        .iter()
-        .filter_map(|doc| {
-            let data = doc.data_json();
-            Some(RoleView {
-                id: doc.id.to_string(),
-                name: data.get("name")?.as_str()?.to_string(),
-                description: data.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
-            })
-        })
-        .collect())
+    Ok(page.documents.iter().filter_map(parse_role).collect())
 }
 
 /// One role by name.
@@ -499,9 +737,124 @@ pub async fn get_role(engine: &HexDBEngine, name: &str) -> Result<Option<RoleVie
     Ok(list_roles(engine).await?.into_iter().find(|r| r.name == name))
 }
 
+/// Every role's permissions, for authorization. Cached until the next write
+/// anywhere; the built-in roles are always present.
+pub async fn role_definitions(engine: &HexDBEngine) -> Result<std::sync::Arc<RoleDefinitions>> {
+    let generation = engine.generation();
+    if let Some((cached_generation, definitions)) = engine.role_cache.lock().unwrap().as_ref() {
+        if *cached_generation == generation {
+            return Ok(definitions.clone());
+        }
+    }
+    let mut definitions = RoleDefinitions::builtin();
+    for role in list_roles(engine).await? {
+        definitions.0.entry(role.name).or_insert(role.permissions);
+    }
+    let definitions = std::sync::Arc::new(definitions);
+    *engine.role_cache.lock().unwrap() = Some((generation, definitions.clone()));
+    Ok(definitions)
+}
+
+fn validate_role_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || "_-".contains(c)) {
+        return Err(invalid("Role names are 1-64 letters, digits, '_' or '-'."));
+    }
+    Ok(())
+}
+
+fn parse_permissions(names: &[String]) -> Result<Vec<Action>> {
+    let mut out = Vec::new();
+    for name in names {
+        let action = Action::parse(name.trim()).ok_or_else(|| {
+            invalid(format!(
+                "Unknown permission '{}'. Use: {}.",
+                name,
+                Action::ALL.iter().map(|a| a.name()).collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+        if !out.contains(&action) {
+            out.push(action);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+fn role_json(name: &str, description: &str, permissions: &[Action]) -> Value {
+    serde_json::json!({
+        "name": name,
+        "description": description,
+        "permissions": permissions.iter().map(|a| a.name()).collect::<Vec<_>>(),
+    })
+}
+
+/// Create a custom role.
+pub async fn create_role(engine: &HexDBEngine, input: RoleInput) -> Result<RoleView> {
+    let _lock = engine.users_lock.lock().await;
+    let name = input.name.unwrap_or_default().trim().to_string();
+    validate_role_name(&name)?;
+    let permissions = parse_permissions(&input.permissions.unwrap_or_default())?;
+    if permissions.is_empty() {
+        return Err(invalid("A role needs at least one permission."));
+    }
+    if get_role(engine, &name).await?.is_some() || builtin(&name).is_some() {
+        return Err(EngineError::Conflict(format!("A role named '{}' already exists.", name)).into());
+    }
+    let description = input.description.unwrap_or_default();
+    if description.len() > 500 {
+        return Err(invalid("description must be at most 500 characters."));
+    }
+    let docs = engine.insert_documents(ROLES_TESSELLATION, vec![role_json(&name, &description, &permissions)], None, None).await?;
+    info!("🛡️ Created role '{}' ({}).", name, permissions.iter().map(|a| a.name()).collect::<Vec<_>>().join(", "));
+    Ok(RoleView { id: docs.value[0].id.to_string(), name, description, permissions, builtin: false })
+}
+
+/// Change a custom role's description or permissions (built-in roles can't change).
+pub async fn update_role(engine: &HexDBEngine, name: &str, input: RoleInput) -> Result<RoleView> {
+    let _lock = engine.users_lock.lock().await;
+    if builtin(name).is_some() {
+        return Err(EngineError::Conflict(format!("'{}' is a built-in role and can't be changed. Create a custom role instead.", name)).into());
+    }
+    let role = get_role(engine, name).await?.ok_or_else(|| EngineError::NotFound(format!("Role '{}' not found.", name)))?;
+    if input.name.as_deref().is_some_and(|n| n != name) {
+        return Err(invalid("Roles can't be renamed; create a new role and move the grants."));
+    }
+    let permissions = match input.permissions {
+        Some(p) => parse_permissions(&p)?,
+        None => role.permissions.clone(),
+    };
+    if permissions.is_empty() {
+        return Err(invalid("A role needs at least one permission."));
+    }
+    let description = input.description.unwrap_or(role.description);
+    engine.replace_document(ROLES_TESSELLATION, &role.id, role_json(name, &description, &permissions), None, None).await?;
+    info!("🛡️ Changed role '{}' ({}).", name, permissions.iter().map(|a| a.name()).collect::<Vec<_>>().join(", "));
+    Ok(RoleView { id: role.id, name: name.to_string(), description, permissions, builtin: false })
+}
+
+/// Delete a custom role that no user holds. False if it doesn't exist.
+pub async fn delete_role(engine: &HexDBEngine, name: &str) -> Result<bool> {
+    let _lock = engine.users_lock.lock().await;
+    if builtin(name).is_some() {
+        return Err(EngineError::Conflict(format!("'{}' is a built-in role and can't be deleted.", name)).into());
+    }
+    let Some(role) = get_role(engine, name).await? else { return Ok(false) };
+    let holders: Vec<String> = all_users(engine).await?.into_iter().filter(|(_, u)| u.roles.iter().any(|g| g.name == name)).map(|(_, u)| u.login).collect();
+    if !holders.is_empty() {
+        return Err(EngineError::Conflict(format!("Role '{}' is still granted to: {}. Remove it from them first.", name, holders.join(", "))).into());
+    }
+    engine.delete_document(ROLES_TESSELLATION, &role.id, None).await?;
+    info!("🛡️ Deleted role '{}'.", name);
+    Ok(true)
+}
+
 /// Create default roles and the configured admin user if missing, and
 /// migrate users and roles stored in the old single-document format.
 pub async fn bootstrap(engine: &HexDBEngine, security: &SecurityConfig) -> Result<()> {
+    crate::engine::SKIP_ACKS.scope(true, bootstrap_inner(engine, security)).await
+}
+
+async fn bootstrap_inner(engine: &HexDBEngine, security: &SecurityConfig) -> Result<()> {
     // Replicas receive users and roles from the Overseer.
     if !engine.is_writable() {
         info!("🔐 This hex is a {}; users and roles are replicated from the Overseer.", engine.role());
@@ -516,25 +869,36 @@ pub async fn bootstrap(engine: &HexDBEngine, security: &SecurityConfig) -> Resul
 
     engine.create_tessellation(ROLES_TESSELLATION, "system")?;
     engine.create_tessellation(USERS_TESSELLATION, "system")?;
+    engine.prepare_audit().await?;
     migrate_legacy(engine).await?;
     add_login_keys(engine).await?;
     engine
         .ensure_internal_index(
             USERS_TESSELLATION,
-            crate::index::IndexDef { name: LOGIN_INDEX.into(), kind: crate::index::IndexKind::Field, fields: vec!["login_key".into()], unique: false },
+            crate::index::IndexDef { name: LOGIN_INDEX.into(), kind: crate::index::IndexKind::Field, fields: vec!["login_key".into()], unique: false, analyzer: None },
         )
         .await?;
 
-    let existing: Vec<String> = list_roles(engine).await?.into_iter().map(|r| r.name).collect();
-    let missing: Vec<Value> = DEFAULT_ROLES
-        .iter()
-        .filter(|(name, _)| !existing.iter().any(|e| e == name))
-        .map(|(name, description)| serde_json::json!({ "name": name, "description": description }))
-        .collect();
+    // Built-in roles: add missing ones, and store their current description and permissions.
+    let existing = list_roles(engine).await?;
+    let page = engine.list_documents(ROLES_TESSELLATION, None, usize::MAX).await?;
+    let mut missing = Vec::new();
+    for role in BUILTIN_ROLES {
+        let wanted = role_json(role.name, role.description, role.permissions);
+        match existing.iter().find(|r| r.name == role.name) {
+            None => missing.push(wanted),
+            Some(found) => {
+                let stored = page.documents.iter().find(|d| d.id.to_string() == found.id).map(|d| d.data_json());
+                if stored.as_ref() != Some(&wanted) {
+                    engine.replace_document(ROLES_TESSELLATION, &found.id, wanted, None, None).await?;
+                }
+            }
+        }
+    }
     if !missing.is_empty() {
         let count = missing.len();
         engine.insert_documents(ROLES_TESSELLATION, missing, None, None).await?;
-        info!("✅ Added {} default role(s).", count);
+        info!("✅ Added {} built-in role(s).", count);
     }
 
     if all_users(engine).await?.is_empty() {
@@ -551,7 +915,7 @@ pub async fn bootstrap(engine: &HexDBEngine, security: &SecurityConfig) -> Resul
             login: login.to_string(),
             password: password.clone(),
             email_address: email.to_string(),
-            roles: vec![RoleGrant { name: ADMIN_ROLE.into(), permissions: vec!["*".into()] }],
+            roles: vec![RoleGrant { name: ADMIN_ROLE.into(), tessellations: vec!["*".into()] }],
         };
         create_user(engine, admin, None).await?;
         if generated {

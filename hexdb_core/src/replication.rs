@@ -14,10 +14,17 @@
 // A change for a document whose snapshot version is newer than the change is
 // skipped, so changes made while the snapshot was read apply exactly once.
 //
-// A new Overseer (failover) or an Overseer restart (new hex ID, and its change
-// history starts over) triggers a full sync. Replication is asynchronous: a
-// write the Overseer acknowledged but no replica received yet is lost if the
-// Overseer fails before it comes back.
+// The cursor names the Overseer's history (`Catalog::history_id`, kept in its
+// data directory) and a sequence number in it. After an Overseer restart the
+// history is the same, so a replica resumes from its cursor, reading older
+// changes from the Overseer's on-disk change history if needed. A new
+// Overseer (failover) has a different history, so replicas take a full sync.
+//
+// Each poll for changes after N acknowledges N, which gives the Overseer each
+// replica's exact position (for lag, and for `replication.min_acks`). With
+// `min_acks = 0` replication is asynchronous: a write the Overseer
+// acknowledged but no replica received yet is lost if the Overseer fails
+// before it comes back.
 //
 // Internal endpoints require a fresh, single-use request signature made with
 // the lattice key (see `network::lattice_auth`), so only hexes configured with
@@ -89,17 +96,26 @@ pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_jso
     .ok_or_else(|| anyhow!("no Overseer is reachable"))?;
     let url = format!("{}{}", peer_base_url(&overseer), path);
     let bytes = serde_json::to_vec(body)?;
-    let signature = engine.lattice_keys.sign_request("POST", path, &bytes);
-    let response = lattice_client(&engine.config, Duration::from_secs(10))?
-        .post(&url)
-        .header(LATTICE_SIGNATURE_HEADER, signature)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(bytes)
-        .send()
-        .await
-        .with_context(|| format!("POST {}", url))?;
-    if !response.status().is_success() {
-        bail!("POST {} returned {}", url, response.status());
+    let client = lattice_client(&engine.config, Duration::from_secs(10))?;
+    // An Overseer that hasn't been given a new lattice secret yet accepts a previous one.
+    for index in 0..engine.lattice_keys.len() {
+        let signature = engine.lattice_keys.sign_request_with(index, "POST", path, &bytes);
+        let response = client
+            .post(&url)
+            .header(LATTICE_SIGNATURE_HEADER, signature)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(bytes.clone())
+            .send()
+            .await
+            .with_context(|| format!("POST {}", url))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED && index + 1 < engine.lattice_keys.len() {
+            continue;
+        }
+        if !status.is_success() {
+            bail!("POST {} returned {}", url, status);
+        }
+        return Ok(());
     }
     Ok(())
 }
@@ -137,8 +153,15 @@ impl ReplicationStatus {
 /// `GET /lattice/snapshot`: where a full sync starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMeta {
+    /// The Overseer's history ID.
     pub source_id: String,
     pub source_name: String,
+    /// The Overseer's hex ID.
+    #[serde(default)]
+    pub hex_id: String,
+    /// The oldest position its change history can resume after.
+    #[serde(default)]
+    pub available_after: u64,
     /// Follow changes after this sequence number once the documents are copied.
     pub seq: u64,
     pub tessellations: Vec<(String, TessellationInfo)>,
@@ -168,8 +191,10 @@ impl HexDBEngine {
     pub fn snapshot_meta(&self) -> SnapshotMeta {
         let seq = self.changes.published_seq();
         SnapshotMeta {
-            source_id: self.id.to_string(),
+            source_id: self.history_id(),
             source_name: self.name.clone(),
+            hex_id: self.id.to_string(),
+            available_after: self.history_available_after(),
             seq,
             tessellations: self.tessellation_details().into_iter().filter(|(name, _)| name != REPLICATION_TESSELLATION).collect(),
         }
@@ -201,7 +226,10 @@ pub fn spawn_replication_task(engine: Arc<HexDBEngine>, mut shutdown_rx: watch::
 }
 
 struct Session {
+    /// The Overseer's history ID.
     source_id: String,
+    /// The Overseer's hex ID (a different hex means start over).
+    overseer_id: String,
     base: String,
     cursor: u64,
     /// Documents whose snapshot version is newer than the snapshot sequence.
@@ -214,6 +242,8 @@ struct Follower {
     client: reqwest::Client,
     session: Option<Session>,
     was_leading: Option<bool>,
+    /// The lattice key the Overseer last accepted (0 is the current key).
+    key_index: std::sync::atomic::AtomicUsize,
 }
 
 impl Follower {
@@ -222,7 +252,7 @@ impl Follower {
             warn!("⚠️ Replication client: {:#}. Using system certificates only.", e);
             reqwest::Client::new()
         });
-        Follower { engine, client, session: None, was_leading: None }
+        Follower { engine, client, session: None, was_leading: None, key_index: std::sync::atomic::AtomicUsize::new(0) }
     }
 
     fn set_status(&self, update: impl FnOnce(&mut ReplicationStatus)) {
@@ -240,6 +270,7 @@ impl Follower {
                     if let Err(e) = crate::users::bootstrap(&self.engine, &self.engine.config.security).await {
                         warn!("⚠️ Couldn't initialize security after promotion: {:#}", e);
                     }
+                    self.engine.resume_schema_migrations().await;
                 }
                 self.was_leading = Some(true);
                 self.session = None;
@@ -263,7 +294,7 @@ impl Follower {
         *self.engine.overseer_endpoint.write().unwrap() = Some(overseer.hex.api_endpoint.clone());
 
         let result = match &self.session {
-            Some(session) if session.source_id == overseer.hex.id => self.stream().await,
+            Some(session) if session.overseer_id == overseer.hex.id => self.stream().await,
             _ => self.start(&overseer).await,
         };
         match result {
@@ -287,10 +318,13 @@ impl Follower {
             s.source_name = Some(overseer.hex.name.clone());
         });
         if let Some(cursor) = self.engine.load_replica_cursor().await {
-            if cursor.source_id == overseer.hex.id {
+            // Resume if the Overseer has the same history and still reaches back to the cursor.
+            let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
+            if cursor.source_id == meta.source_id && cursor.applied_seq >= meta.available_after && cursor.applied_seq <= meta.seq {
                 info!("🔁 Resuming replication from '{}' after sequence {}.", overseer.hex.name, cursor.applied_seq);
                 self.session = Some(Session {
                     source_id: cursor.source_id,
+                    overseer_id: overseer.hex.id.clone(),
                     base,
                     cursor: cursor.applied_seq,
                     guard: HashMap::new(),
@@ -298,24 +332,40 @@ impl Follower {
                 });
                 return Ok(Duration::ZERO);
             }
+            if cursor.source_id == meta.source_id {
+                info!("📥 '{}' no longer has changes after {}; a full sync is needed.", overseer.hex.name, cursor.applied_seq);
+            }
         }
         self.full_sync(overseer, base).await?;
         Ok(Duration::ZERO)
     }
 
     async fn get<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<Result<T, reqwest::StatusCode>> {
-        let response = self
-            .client
-            .get(url)
-            .header(LATTICE_SIGNATURE_HEADER, self.engine.lattice_keys.sign_request("GET", &path_and_query(url), b""))
-            .send()
-            .await
-            .with_context(|| format!("GET {}", url))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Ok(Err(status));
+        let keys = &self.engine.lattice_keys;
+        let mut index = self.key_index.load(std::sync::atomic::Ordering::Relaxed).min(keys.len() - 1);
+        let mut tried = 0;
+        loop {
+            let response = self
+                .client
+                .get(url)
+                .header(LATTICE_SIGNATURE_HEADER, keys.sign_request_with(index, "GET", &path_and_query(url), b""))
+                .send()
+                .await
+                .with_context(|| format!("GET {}", url))?;
+            let status = response.status();
+            tried += 1;
+            // During a lattice secret rotation the Overseer may only know a
+            // previous key; remember whichever key it accepts.
+            if status == reqwest::StatusCode::UNAUTHORIZED && tried < keys.len() {
+                index = (index + 1) % keys.len();
+                continue;
+            }
+            if !status.is_success() {
+                return Ok(Err(status));
+            }
+            self.key_index.store(index, std::sync::atomic::Ordering::Relaxed);
+            return Ok(Ok(response.json().await.with_context(|| format!("GET {}: unreadable response", url))?));
         }
-        Ok(Ok(response.json().await.with_context(|| format!("GET {}: unreadable response", url))?))
     }
 
     async fn get_ok<T: for<'de> Deserialize<'de>>(&self, url: &str) -> Result<T> {
@@ -335,8 +385,8 @@ impl Follower {
             s.last_error = None;
         });
         let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/snapshot", base)).await?;
-        if meta.source_id != overseer.hex.id {
-            bail!("expected Overseer {} but {} answered", overseer.hex.id, meta.source_id);
+        if meta.hex_id != overseer.hex.id {
+            bail!("expected Overseer {} but {} answered", overseer.hex.id, meta.hex_id);
         }
         info!("📥 Full sync from Overseer '{}' at sequence {}...", meta.source_name, meta.seq);
 
@@ -389,6 +439,7 @@ impl Follower {
         }
         for (name, info) in &meta.tessellations {
             engine.reconcile_indexes(name, &info.indexes).await?;
+            engine.set_schemas_unchecked(name, &info.schemas)?;
         }
 
         let cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: meta.seq };
@@ -403,6 +454,7 @@ impl Follower {
         });
         self.session = Some(Session {
             source_id: meta.source_id,
+            overseer_id: meta.hex_id,
             base,
             cursor: meta.seq,
             guard,
@@ -420,7 +472,7 @@ impl Follower {
         if catalog_due {
             self.sync_catalog(&base).await?;
         }
-        let url = format!("{}/lattice/changes?after={}&wait={}&limit=1000", base, cursor, POLL_SECONDS);
+        let url = format!("{}/lattice/changes?after={}&wait={}&limit=1000&hex={}", base, cursor, POLL_SECONDS, self.engine.id);
         let batch: ChangeBatch = match self.get(&url).await? {
             Ok(batch) => batch,
             Err(status) if status == reqwest::StatusCode::GONE => {
@@ -488,6 +540,7 @@ impl Follower {
         for (name, info) in &meta.tessellations {
             self.engine.ensure_replicated_tessellation(name)?;
             self.engine.reconcile_indexes(name, &info.indexes).await?;
+            self.engine.set_schemas_unchecked(name, &info.schemas)?;
         }
         if let Some(s) = self.session.as_mut() {
             s.last_catalog = std::time::Instant::now();

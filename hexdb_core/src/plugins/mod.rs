@@ -1,45 +1,59 @@
 // HexDB Core Plugins
 //
-// Plugins consume the change feed: every committed write to a user
-// tessellation, in order, as it happens. They run while this hex is the
-// Overseer (so a lattice delivers each change once).
-//
-// The registry (`plugins.registry` in hexdb.toml, default `plugins.json`)
-// maps plugin IDs to folders holding a `plugin.toml` manifest:
+// Plugins extend HexDB without changing it. Each one is a folder with a
+// `plugin.toml` manifest, listed in the registry (`plugins.registry` in
+// hexdb.toml, default `plugins.json`):
 //
 //   { "@streams/kafka": { "path": "./plugins/streams/kafka", "enabled": true } }
 //
-// A manifest declares one of two runtimes:
+// What a plugin receives depends on its `type`:
 //
-//   # Process: HexDB starts the command in the plugin folder and writes each
-//   # change to its stdin as one JSON line. Its stdout/stderr go to the HexDB
-//   # log. It is restarted if it exits.
-//   id = "@examples/change-logger"
-//   name = "Change logger"
-//   type = "stream"
-//   version = "0.1.0"
-//   command = ["node", "change-logger.mjs"]
+//   stream   every committed change to user tessellations, in order (the
+//            same JSON as `GET /changes`). `tessellations = [...]` narrows it;
+//            `audit = true` adds the audit trail (`_audit`).
+//   logs     server log records (`[logs] level = "info"`, `targets = [...]`).
+//   metrics  a metrics sample every 15 seconds.
+//   source   nothing; the plugin brings data in through the API (ingest).
 //
-//   # Webhook: HexDB POSTs batches of changes (a JSON array) to a URL.
-//   [webhook]
-//   url = "http://localhost:9000/hexdb"
-//   headers = { Authorization = "Bearer ..." }
-//   batch_size = 100
+// And how it runs:
 //
-// Optional: `tessellations = ["orders", "customers"]` limits the changes sent.
+//   command = ["node", "index.mjs"]   a process in the plugin folder that gets
+//                                     each payload as one JSON line on stdin;
+//                                     its output goes to the HexDB log; it is
+//                                     restarted if it exits.
+//   [webhook] url = "https://..."     batches POSTed as a JSON array.
+//   builtin = "otlp"                  the OpenTelemetry exporter, for logs or
+//                                     metrics (`[otlp] endpoint = ...`).
 //
-// A change is {"seq", "timestamp", "op": "put" | "delete" | "drop_tessellation",
-// "tessellation", "id", "document"}, the same as `GET /changes`.
+// `[access] role = "writer", tessellations = ["orders"]` gives a process
+// plugin its own user with that role and an API key (HEXDB_API_KEY, with
+// HEXDB_API as the base URL), so it can read and write through the API.
 //
-// Delivery is at-most-once across restarts: a plugin starts at the current end
-// of the feed, and changes made while it is down or restarting are skipped
-// (logged as a warning). Use `GET /changes` with a stored cursor when every
-// change must be processed.
+// Plugins run on the Overseer only, so a lattice delivers each payload once.
+//
+// Stream delivery is at-least-once: each plugin's position is saved in the
+// `_plugin_cursors` system tessellation (about once a second, and when it
+// stops), and a restarted plugin continues from there, reading older changes
+// from the durable change history. A change may be delivered again after a
+// crash, so consumers should be idempotent (use `seq`). A new plugin starts at
+// the current end of the feed. After a failover the new Overseer has a
+// different change history, so plugins start at its end (logged as a warning).
+// Logs and metrics are delivered from the moment the plugin starts.
+//
+// Isolation: a process plugin runs with a clean environment (only PATH and the
+// basic variables a runtime needs, its manifest's `env`, the server variables
+// named in `pass_env`, and HEXDB_*), in its own folder. On Unix, HexDB refuses a registry or manifest that other users
+// can write. Plugins still run with the server's privileges, so only install
+// plugins you trust, and keep the registry writable by administrators only.
+// Webhooks must be http(s) URLs and redirects aren't followed.
 
-use crate::{
-    changes::{Change, ChangeKind},
-    engine::HexDBEngine,
-};
+mod access;
+mod feeds;
+pub mod otlp;
+
+pub use access::{login_for, AccessConfig};
+
+use crate::engine::HexDBEngine;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -47,11 +61,22 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast::error::RecvError, watch};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 const RESTART_DELAY: Duration = Duration::from_secs(5);
+/// System tessellation of plugin positions in the change feed.
+pub const PLUGIN_CURSORS_TESSELLATION: &str = "_plugin_cursors";
+/// How often a running plugin's position is saved.
+const SAVE_EVERY: Duration = Duration::from_secs(1);
+/// Longest line read from a plugin's output.
+const MAX_LINE: usize = 64 * 1024;
+/// Environment variables passed through to process plugins.
+const PASSED_ENV: &[&str] = &[
+    "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "APPDATA",
+    "LOCALAPPDATA", "LANG", "LC_ALL", "TZ",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegistryEntry {
@@ -107,7 +132,67 @@ pub struct Manifest {
     /// Extra environment variables for a process plugin.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Variables passed through from the server's own environment (for
+    /// secrets such as API keys, so they needn't be written in plugin.toml).
+    #[serde(default)]
+    pub pass_env: Vec<String>,
+    /// Also deliver the audit trail.
+    #[serde(default)]
+    pub audit: bool,
+    /// A runtime built into HexDB instead of a command or webhook ("otlp").
+    #[serde(default)]
+    pub builtin: Option<String>,
+    #[serde(default)]
+    pub otlp: Option<otlp::OtlpConfig>,
+    /// Filters for `logs` plugins.
+    #[serde(default)]
+    pub logs: LogsConfig,
+    /// API access for a process plugin.
+    #[serde(default)]
+    pub access: Option<AccessConfig>,
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LogsConfig {
+    /// Least severe level sent (error, warn, info, debug, trace). Default: everything kept.
+    #[serde(default)]
+    pub level: Option<String>,
+    /// Only records whose target starts with one of these.
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+/// What a plugin receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginKind {
+    Stream,
+    Logs,
+    Metrics,
+    Source,
+}
+
+impl Manifest {
+    pub fn kind(&self) -> PluginKind {
+        match self.kind.as_str() {
+            "logs" => PluginKind::Logs,
+            "metrics" => PluginKind::Metrics,
+            "source" => PluginKind::Source,
+            _ => PluginKind::Stream,
+        }
+    }
+
+    fn runtime(&self) -> &'static str {
+        if self.builtin.is_some() {
+            "builtin"
+        } else if self.webhook.is_some() {
+            "webhook"
+        } else {
+            "process"
+        }
+    }
+}
+
+const KINDS: &[&str] = &["stream", "logs", "metrics", "source"];
 
 fn default_type() -> String {
     "stream".into()
@@ -122,7 +207,7 @@ pub struct PluginStatus {
     pub kind: String,
     pub version: String,
     pub description: String,
-    /// "process" or "webhook" (empty if the manifest couldn't be read).
+    /// "process", "webhook" or "builtin" (empty if the manifest couldn't be read).
     pub runtime: String,
     pub path: String,
     /// running, standby (this hex isn't the Overseer), disabled, invalid, or error.
@@ -166,15 +251,76 @@ pub fn registry_path(engine: &HexDBEngine) -> PathBuf {
     }
 }
 
+/// Refuse files other users could change (they decide what the server runs).
+#[cfg(unix)]
+fn check_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).with_context(|| format!("can't read {}", path.display()))?;
+    if meta.mode() & 0o022 != 0 {
+        bail!("{} is writable by other users; HexDB won't run plugins from it (chmod go-w)", path.display());
+    }
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc_getuid() };
+    if meta.uid() != uid && meta.uid() != 0 {
+        bail!("{} is owned by another user; HexDB won't run plugins from it", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "getuid"]
+    fn libc_getuid() -> u32;
+}
+
+#[cfg(not(unix))]
+fn check_permissions(_path: &Path) -> Result<()> {
+    // Windows ACLs: keep the registry and plugin folders writable by
+    // administrators only (documented); not checked here.
+    Ok(())
+}
+
 fn load_manifest(dir: &Path) -> Result<Manifest> {
     let file = dir.join("plugin.toml");
+    check_permissions(&file)?;
     let text = std::fs::read_to_string(&file).with_context(|| format!("can't read {}", file.display()))?;
     let manifest: Manifest = toml_from_str(&text).with_context(|| format!("{} is invalid", file.display()))?;
-    match (&manifest.command, &manifest.webhook) {
-        (Some(_), Some(_)) => bail!("declare either command or [webhook], not both"),
-        (None, None) => bail!("declares neither a command nor a [webhook]; nothing to run"),
-        _ => Ok(manifest),
+    if let Some(name) = manifest.env.keys().chain(manifest.pass_env.iter()).find(|k| k.to_ascii_uppercase().starts_with("HEXDB_")) {
+        bail!("env and pass_env can't include {}; HEXDB_* variables are set by HexDB", name);
     }
+    if let Some(webhook) = &manifest.webhook {
+        let url = reqwest::Url::parse(&webhook.url).with_context(|| format!("webhook url '{}' is invalid", webhook.url))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            bail!("webhook url must be http or https, not {}", url.scheme());
+        }
+    }
+    if !KINDS.contains(&manifest.kind.as_str()) {
+        bail!("type must be one of {}, not '{}'", KINDS.join(", "), manifest.kind);
+    }
+    let runtimes = [manifest.command.is_some(), manifest.webhook.is_some(), manifest.builtin.is_some()].iter().filter(|r| **r).count();
+    match runtimes {
+        0 => bail!("declares no command, [webhook] or builtin; nothing to run"),
+        1 => {}
+        _ => bail!("declare only one of command, [webhook] and builtin"),
+    }
+    if let Some(builtin) = &manifest.builtin {
+        if builtin != "otlp" {
+            bail!("unknown builtin '{}' (available: otlp)", builtin);
+        }
+        if manifest.otlp.is_none() {
+            bail!("builtin = \"otlp\" needs an [otlp] section with an endpoint");
+        }
+        if !matches!(manifest.kind(), PluginKind::Logs | PluginKind::Metrics) {
+            bail!("the OTLP exporter sends logs or metrics; set type to \"logs\" or \"metrics\"");
+        }
+    }
+    if manifest.kind() == PluginKind::Source && manifest.command.is_none() {
+        bail!("a source plugin needs a command (it brings data in through the API)");
+    }
+    if manifest.access.is_some() && manifest.command.is_none() {
+        bail!("[access] is for process plugins (the API key is passed in HEXDB_API_KEY)");
+    }
+    Ok(manifest)
 }
 
 fn toml_from_str(text: &str) -> Result<Manifest> {
@@ -188,6 +334,12 @@ pub fn spawn_plugins(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>)
         return;
     }
     let path = registry_path(&engine);
+    if path.exists() {
+        if let Err(e) = check_permissions(&path) {
+            error!("❌ Plugins are not loaded: {:#}", e);
+            return;
+        }
+    }
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -238,7 +390,7 @@ pub fn spawn_plugins(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>)
                 status.kind = m.kind.clone();
                 status.version = m.version.clone();
                 status.description = m.description.clone();
-                status.runtime = if m.webhook.is_some() { "webhook".into() } else { "process".into() };
+                status.runtime = m.runtime().into();
                 status.state = if entry.enabled { "standby".into() } else { "disabled".into() };
                 engine.plugins.plugins.lock().unwrap().push(status);
                 if entry.enabled {
@@ -255,16 +407,6 @@ pub fn spawn_plugins(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>)
             }
         }
     }
-}
-
-fn wanted(manifest: &Manifest, engine: &HexDBEngine, change: &Change) -> bool {
-    if !manifest.tessellations.is_empty() && !manifest.tessellations.contains(&change.tessellation) {
-        return false;
-    }
-    if change.kind == ChangeKind::DropTessellation {
-        return !change.tessellation.starts_with('_');
-    }
-    !engine.is_system_tessellation(&change.tessellation)
 }
 
 /// Keep a plugin running while this hex is the Overseer.
@@ -308,122 +450,203 @@ async fn run_plugin(engine: Arc<HexDBEngine>, manifest: Manifest, dir: PathBuf, 
     }
 }
 
-/// Deliver changes until the plugin fails or this hex stops being the Overseer.
-async fn run_once(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path) -> Result<()> {
-    let (_, mut receiver) = engine
-        .changes
-        .follow(engine.changes.published_seq())
-        .map_err(|_| anyhow!("change feed unavailable"))?;
-    let id = manifest.id.clone();
-
-    match (&manifest.command, &manifest.webhook) {
-        (Some(command), _) => {
-            let args: Vec<String> = match command {
-                Command::Args(args) => args.clone(),
-                Command::Line(line) => line.split_whitespace().map(String::from).collect(),
-            };
-            let (program, rest) = args.split_first().ok_or_else(|| anyhow!("command is empty"))?;
-            let mut child = tokio::process::Command::new(program)
-                .args(rest)
-                .current_dir(dir)
-                .envs(&manifest.env)
-                .env("HEXDB_PLUGIN_ID", &id)
-                .env("HEXDB_API", format!("http://{}", engine.config.network.api_endpoint))
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .with_context(|| format!("couldn't start {:?} in {}", args, dir.display()))?;
-            info!(plugin = %id, "🧩 Started plugin '{}' (pid {}).", id, child.id().unwrap_or_default());
-            for (stream, is_err) in [
-                (child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>), false),
-                (child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>), true),
-            ] {
-                if let Some(stream) = stream {
-                    let id = id.clone();
-                    tokio::spawn(async move {
-                        let mut lines = BufReader::new(stream).lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            if is_err {
-                                warn!(target: "hexdb_core::plugins", plugin = %id, "[{}] {}", id, line);
-                            } else {
-                                info!(target: "hexdb_core::plugins", plugin = %id, "[{}] {}", id, line);
-                            }
-                        }
-                    });
+/// Start the plugin's process (if it has a command) with its environment.
+async fn start_process(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path, command: &Command) -> Result<tokio::process::Child> {
+    let id = &manifest.id;
+    let args: Vec<String> = match command {
+        Command::Args(args) => args.clone(),
+        Command::Line(line) => line.split_whitespace().map(String::from).collect(),
+    };
+    let (program, rest) = args.split_first().ok_or_else(|| anyhow!("command is empty"))?;
+    let mut process = tokio::process::Command::new(program);
+    process.args(rest).current_dir(dir).env_clear();
+    for name in PASSED_ENV {
+        if let Some(value) = std::env::var_os(name) {
+            process.env(name, value);
+        }
+    }
+    let scheme = if engine.config.tls.enabled() { "https" } else { "http" };
+    let api_host = engine.config.network.api_endpoint.replace("0.0.0.0", "127.0.0.1");
+    for name in &manifest.pass_env {
+        if let Some(value) = std::env::var_os(name) {
+            process.env(name, value);
+        }
+    }
+    process
+        .envs(&manifest.env)
+        .env("HEXDB_PLUGIN_ID", id)
+        .env("HEXDB_PLUGIN_TYPE", &manifest.kind)
+        .env("HEXDB_API", format!("{}://{}", scheme, api_host));
+    if !engine.config.tls.ca_file.is_empty() {
+        // Also where Node.js and Python's requests look for extra CA certificates.
+        process
+            .env("HEXDB_CA_FILE", &engine.config.tls.ca_file)
+            .env("NODE_EXTRA_CA_CERTS", &engine.config.tls.ca_file)
+            .env("REQUESTS_CA_BUNDLE", &engine.config.tls.ca_file);
+    }
+    if let Some(access) = &manifest.access {
+        let key = access::api_key(engine, manifest, access).await.context("creating the plugin's API key")?;
+        process.env("HEXDB_API_KEY", key);
+    }
+    crate::process::contain(&mut process);
+    let mut child = process
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("couldn't start {:?} in {}", args, dir.display()))?;
+    crate::process::adopt(&child);
+    info!(plugin = %id, "🧩 Started plugin '{}' (pid {}).", id, child.id().unwrap_or_default());
+    for (stream, is_err) in [
+        (child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>), false),
+        (child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>), true),
+    ] {
+        if let Some(stream) = stream {
+            let id = id.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    // Bounded, so a plugin can't exhaust memory with one endless line.
+                    match (&mut reader).take(MAX_LINE as u64).read_until(b'\n', &mut line).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    let text = String::from_utf8_lossy(&line);
+                    let text = text.trim_end();
+                    if is_err {
+                        warn!(target: "hexdb_core::plugins", plugin = %id, "[{}] {}", id, text);
+                    } else {
+                        info!(target: "hexdb_core::plugins", plugin = %id, "[{}] {}", id, text);
+                    }
                 }
-            }
-            let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+            });
+        }
+    }
+    Ok(child)
+}
+
+/// Saves a stream plugin's position at most once per SAVE_EVERY (and on the way out).
+struct Checkpoint {
+    saved: u64,
+    at: std::time::Instant,
+}
+
+impl Checkpoint {
+    async fn save(&mut self, engine: &HexDBEngine, id: &str, position: Option<u64>, force: bool) {
+        let Some(position) = position else { return };
+        if position != self.saved && (force || self.at.elapsed() >= SAVE_EVERY) {
+            feeds::save_cursor(engine, id, position).await;
+            self.saved = position;
+            self.at = std::time::Instant::now();
+        }
+    }
+}
+
+fn note_skipped(engine: &HexDBEngine, id: &str, feed: &mut feeds::Feed) {
+    let skipped = feed.take_skipped();
+    if skipped > 0 {
+        warn!(plugin = %id, "⚠️ Plugin '{}' skipped {} change positions that were no longer in the history.", id, skipped);
+        engine.plugins.update(id, |p| p.skipped += skipped);
+    }
+}
+
+fn note_delivered(engine: &HexDBEngine, id: &str, batch: &feeds::Batch) {
+    let count = batch.payloads.len() as u64;
+    if count == 0 {
+        return;
+    }
+    let seq = batch.position;
+    engine.plugins.update(id, |p| {
+        p.delivered += count;
+        if let Some(seq) = seq {
+            p.last_seq = seq;
+        }
+    });
+}
+
+/// Deliver until the plugin fails or this hex stops being the Overseer.
+async fn run_once(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path) -> Result<()> {
+    let id = manifest.id.clone();
+    let mut feed = feeds::Feed::open(engine, manifest).await;
+    let mut checkpoint = Checkpoint { saved: feed.position().unwrap_or_default(), at: std::time::Instant::now() };
+
+    if let Some(command) = &manifest.command {
+        let mut child = start_process(engine, manifest, dir, command).await?;
+        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+        if manifest.kind() == PluginKind::Source {
+            // Sources receive nothing; closing stdin tells them so.
+            drop(stdin);
             loop {
                 tokio::select! {
-                    status = child.wait() => {
-                        let status = status?;
-                        bail!("the process exited ({})", status);
-                    }
-                    next = receiver.recv() => {
+                    status = child.wait() => bail!("the process exited ({})", status?),
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
                         if !engine.is_writable() {
                             let _ = child.kill().await;
                             info!(plugin = %id, "🧩 Plugin '{}' paused: this hex is no longer the Overseer.", id);
                             return Ok(());
                         }
-                        match next {
-                            Ok(change) => {
-                                if !wanted(manifest, engine, &change) {
-                                    continue;
-                                }
-                                let mut line = change.to_api_json().to_string();
-                                line.push('\n');
-                                stdin.write_all(line.as_bytes()).await.context("writing to the plugin's stdin")?;
-                                stdin.flush().await?;
-                                let seq = change.seq;
-                                engine.plugins.update(&id, |p| { p.delivered += 1; p.last_seq = seq; });
-                            }
-                            Err(RecvError::Lagged(n)) => {
-                                warn!(plugin = %id, "⚠️ Plugin '{}' fell behind and skipped {} changes.", id, n);
-                                engine.plugins.update(&id, |p| p.skipped += n);
-                            }
-                            Err(RecvError::Closed) => return Ok(()),
-                        }
                     }
                 }
             }
         }
-        (None, Some(webhook)) => {
-            let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
-            let batch_size = webhook.batch_size.clamp(1, 10_000);
-            loop {
-                // Wait for one change, then collect whatever else is ready, up to the batch size.
-                let mut batch = Vec::new();
-                let first = receiver.recv().await;
-                let mut next = Some(first);
-                while let Some(result) = next.take() {
-                    match result {
-                        Ok(change) => {
-                            if wanted(manifest, engine, &change) {
-                                batch.push(change);
-                            }
-                        }
-                        Err(RecvError::Lagged(n)) => {
-                            warn!(plugin = %id, "⚠️ Plugin '{}' fell behind and skipped {} changes.", id, n);
-                            engine.plugins.update(&id, |p| p.skipped += n);
-                        }
-                        Err(RecvError::Closed) => return Ok(()),
-                    }
-                    if batch.len() < batch_size {
-                        if let Ok(more) = receiver.try_recv() {
-                            next = Some(Ok(more));
-                        }
+        let result: Result<()> = loop {
+            tokio::select! {
+                status = child.wait() => {
+                    let status = status?;
+                    break Err(anyhow!("the process exited ({})", status));
+                }
+                _ = tokio::time::sleep(SAVE_EVERY) => {
+                    checkpoint.save(engine, &id, feed.position(), false).await;
+                    if !engine.is_writable() {
+                        let _ = child.kill().await;
+                        info!(plugin = %id, "🧩 Plugin '{}' paused: this hex is no longer the Overseer.", id);
+                        break Ok(());
                     }
                 }
-                if !engine.is_writable() {
-                    return Ok(());
+                batch = feed.next_batch(engine, manifest, 1000) => {
+                    let Some(batch) = batch else { break Ok(()) };
+                    if !engine.is_writable() {
+                        let _ = child.kill().await;
+                        info!(plugin = %id, "🧩 Plugin '{}' paused: this hex is no longer the Overseer.", id);
+                        break Ok(());
+                    }
+                    let mut text = String::new();
+                    for payload in &batch.payloads {
+                        text.push_str(&payload.to_string());
+                        text.push('\n');
+                    }
+                    if !text.is_empty() {
+                        if let Err(e) = stdin.write_all(text.as_bytes()).await {
+                            break Err(anyhow::Error::new(e).context("writing to the plugin's stdin"));
+                        }
+                        if let Err(e) = stdin.flush().await {
+                            break Err(e.into());
+                        }
+                    }
+                    note_delivered(engine, &id, &batch);
+                    note_skipped(engine, &id, &mut feed);
+                    checkpoint.save(engine, &id, batch.position, false).await;
                 }
-                if batch.is_empty() {
-                    continue;
-                }
-                let body: Vec<serde_json::Value> = batch.iter().map(|c| c.to_api_json()).collect();
-                let mut request = client.post(&webhook.url).json(&body).header("x-hexdb-plugin", &id);
+            }
+        };
+        checkpoint.save(engine, &id, feed.position(), true).await;
+        return result;
+    }
+
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
+    let batch_size = manifest.webhook.as_ref().map(|w| w.batch_size).unwrap_or(500).clamp(1, 10_000);
+    loop {
+        let Some(batch) = feed.next_batch(engine, manifest, batch_size).await else { return Ok(()) };
+        if !engine.is_writable() {
+            return Ok(());
+        }
+        note_skipped(engine, &id, &mut feed);
+        if !batch.payloads.is_empty() {
+            if let Some(webhook) = &manifest.webhook {
+                let mut request = client.post(&webhook.url).json(&batch.payloads).header("x-hexdb-plugin", &id).header("x-hexdb-plugin-type", &manifest.kind);
                 for (k, v) in &webhook.headers {
                     request = request.header(k, v);
                 }
@@ -431,15 +654,18 @@ async fn run_once(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path) ->
                 if !response.status().is_success() {
                     bail!("POST {} returned {}", webhook.url, response.status());
                 }
-                let (count, seq) = (batch.len() as u64, batch.last().map(|c| c.seq).unwrap_or_default());
-                debug!(plugin = %id, "🧩 Delivered {} change(s) to {}.", count, webhook.url);
-                engine.plugins.update(&id, |p| {
-                    p.delivered += count;
-                    p.last_seq = seq;
-                });
+            } else if let Some(config) = &manifest.otlp {
+                match manifest.kind() {
+                    PluginKind::Metrics => otlp::send(&client, config, "metrics", &otlp::metrics_body(engine, config, &batch.samples)).await?,
+                    PluginKind::Logs => otlp::send(&client, config, "logs", &otlp::logs_body(engine, config, &batch.logs)).await?,
+                    _ => {}
+                }
             }
+            debug!(plugin = %id, "🧩 Delivered {} payload(s).", batch.payloads.len());
+            note_delivered(engine, &id, &batch);
         }
-        (None, None) => bail!("nothing to run"),
+        // Delivered (or nothing to deliver): the position can move on.
+        checkpoint.save(engine, &id, batch.position, batch.payloads.len() == batch_size).await;
     }
 }
 
@@ -475,5 +701,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.webhook.unwrap().batch_size, 5);
+    }
+
+    #[test]
+    fn example_plugins_are_valid() {
+        let registry = Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins.json");
+        let entries: BTreeMap<String, RegistryEntry> = serde_json::from_str(&std::fs::read_to_string(&registry).unwrap()).unwrap();
+        assert!(entries.len() >= 10);
+        for (id, entry) in entries {
+            let dir = registry.parent().unwrap().join(&entry.path);
+            let manifest = load_manifest(&dir).unwrap_or_else(|e| panic!("{}: {:#}", id, e));
+            assert_eq!(manifest.id, id);
+            assert_eq!(entry.kind.as_deref(), Some(manifest.kind.as_str()), "{}: the registry type matches", id);
+        }
     }
 }

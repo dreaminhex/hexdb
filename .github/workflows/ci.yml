@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Cargo.lock isn't tracked yet; resolve the same way a fresh checkout would.
+      - name: Lockfile
+        shell: bash
+        run: test -f Cargo.lock || cargo generate-lockfile
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace --no-fail-fast
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Lockfile
+        run: test -f Cargo.lock || cargo generate-lockfile
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit --deny warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hexdb_admin/package-lock.json
+      - name: npm audit
+        working-directory: hexdb_admin
+        run: npm audit --audit-level=moderate
+
+  drivers:
+    name: Drivers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build the server
+        run: |
+          test -f Cargo.lock || cargo generate-lockfile
+          cargo build -p hexdb_api
+      - name: Node.js
+        working-directory: drivers/node
+        run: npm install && npm test
+      - name: Python
+        run: node drivers/testing/server.mjs python -m unittest discover -s drivers/python/tests -t drivers/python -v
+      - name: .NET
+        run: node drivers/testing/server.mjs dotnet test drivers/dotnet
+
+  admin-ui:
+    name: Admin UI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hexdb_admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hexdb_admin/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - name: Build
+        run: npm run build
+        timeout-minutes: 5

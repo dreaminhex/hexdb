@@ -226,3 +226,44 @@ fn indexes_over_graphql() -> Result<()> {
     assert_eq!(res.body["data"]["dropIndex"], true, "{}", res.body);
     Ok(())
 }
+
+#[test]
+fn index_snapshots_load_at_startup_and_catch_up_after_a_crash() -> Result<()> {
+    let mut server = TestServer::start()?;
+    seed(&server, 300)?;
+    assert_eq!(create_index(&server, "posts", json!({ "fields": ["status"] }))?.status, 201);
+    assert_eq!(create_index(&server, "posts", json!({ "kind": "text", "fields": ["title"] }))?.status, 201);
+    let before_status = query(&server, "posts", json!({ "status": "live" }))?;
+    let before_text = query(&server, "posts", json!({ "$text": "hexagons" }))?;
+
+    // A clean restart loads the snapshots instead of rebuilding.
+    server.restart()?;
+    assert!(server.log_tail(80).contains("Loaded index 'status' on 'posts'"), "{}", server.log_tail(80));
+    assert_eq!(query(&server, "posts", json!({ "status": "live" }))?, before_status);
+    assert_eq!(query(&server, "posts", json!({ "$text": "hexagons" }))?, before_text);
+
+    // Writes after the snapshot, then a crash: the snapshot is brought up to date.
+    let added = server.insert("posts", &json!({ "status": "live", "title": "fresh hexagons" }))?;
+    let (live_ids, _, _) = query(&server, "posts", json!({ "status": "live" }))?;
+    let gone = live_ids.iter().find(|id| **id != added).unwrap().clone();
+    server.delete("posts", &gone)?;
+    let changed = live_ids[0].clone();
+    if changed != gone && changed != added {
+        server.patch("posts", &json!({ "id": changed, "status": "archived" }))?;
+    }
+    let expected_status = query(&server, "posts", json!({ "status": "live" }))?;
+    let expected_text = query(&server, "posts", json!({ "$text": "hexagons" }))?;
+    server.crash_and_restart()?;
+    assert!(server.log_tail(80).contains("updated since its snapshot"), "{}", server.log_tail(80));
+    assert_eq!(query(&server, "posts", json!({ "status": "live" }))?, expected_status);
+    assert_eq!(query(&server, "posts", json!({ "$text": "hexagons" }))?, expected_text);
+    assert!(expected_status.0.contains(&added) && !expected_status.0.contains(&gone));
+
+    // A damaged snapshot is rebuilt from the documents.
+    server.stop()?;
+    std::fs::write(server.data_dir().join("indexes").join("posts").join("status.hxi"), b"garbage")?;
+    server.launch()?;
+    assert!(server.log_tail(80).contains("Rebuilt index 'status' on 'posts'"), "{}", server.log_tail(80));
+    assert_eq!(query(&server, "posts", json!({ "status": "live" }))?, expected_status);
+    Ok(())
+}

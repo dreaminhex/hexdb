@@ -24,6 +24,7 @@ const LEGACY_CATALOG_FILE: &str = "catalog.json";
 const RESERVED_NAMES: &[&str] = &[
     "health", "status", "flush", "shutdown", "tessellation", "tessellations", "ui", "wal", "graphql",
     "logs", "changes", "indexes", "auth", "transactions", "plugins", "lattice", "replication", "compact",
+    "audit", "settings", "join", "streams", "functions", "schedules", "analyzers", "schemas", "openapi",
 ];
 const MAX_NAME_LEN: usize = 64;
 
@@ -36,6 +37,9 @@ pub struct TessellationInfo {
     /// Secondary index definitions (contents are rebuilt in memory at startup).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<crate::index::IndexDef>,
+    /// Schema versions, oldest first (none: schemaless).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schemas: Vec<crate::schema::SchemaVersion>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -45,6 +49,14 @@ pub struct Catalog {
     /// Dropped tessellation name -> sequence number of the drop.
     #[serde(default)]
     pub dropped: BTreeMap<String, u64>,
+    /// Names this data directory's sequence of changes. It survives restarts,
+    /// so replicas can resume from their cursor; a different hex (or a wiped
+    /// data directory) has a different history and replicas resynchronize.
+    #[serde(default)]
+    pub history_id: String,
+    /// The lattice this data belongs to, when the config doesn't name one.
+    #[serde(default)]
+    pub lattice_name: String,
 }
 
 impl Catalog {
@@ -148,7 +160,7 @@ mod tests {
         assert!(Catalog::load(&dir, &keys).unwrap().is_none());
 
         let mut catalog = Catalog::default();
-        catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1, indexes: Vec::new() });
+        catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1, indexes: Vec::new(), schemas: Vec::new() });
         catalog.dropped.insert("old".into(), 42);
         catalog.save(&dir, &keys).unwrap();
         assert!(!fs::read(Catalog::path(&dir)).unwrap().windows(8).any(|w| w == b"Articles"), "encrypted");

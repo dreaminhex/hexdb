@@ -20,5 +20,29 @@ chrono = "0.4.41"
 tower-http = { version = "0.6.4", features = ["fs"] }
 ulid = "1.2.1"
 futures = "0.3"
-axum-server = { version = "0.7", features = ["tls-rustls"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "service", "tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+
+# `cargo deb -p hexdb_api` (after `cargo build --release -p hexdb_cli` and
+# building the admin UI) makes a Debian/Ubuntu package with a systemd service.
+[package.metadata.deb]
+name = "hexdb"
+maintainer = "HexDB maintainers"
+copyright = "HexDB contributors"
+extended-description = "HexDB, a hexagonal document database: the server, the hexdb CLI and the admin UI."
+section = "database"
+priority = "optional"
+depends = "$auto, adduser"
+maintainer-scripts = "../packaging/debian"
+conf-files = ["/etc/hexdb/hexdb.toml"]
+assets = [
+    ["target/release/hexdb_api", "usr/bin/", "755"],
+    ["target/release/hexdb", "usr/bin/", "755"],
+    ["../packaging/debian/hexdb.toml", "etc/hexdb/hexdb.toml", "644"],
+    ["../hexdb_admin/dist/**/*", "usr/share/hexdb/ui/", "644"],
+    ["../packaging/systemd/hexdb.service", "lib/systemd/system/hexdb.service", "644"],
+    ["../README.md", "usr/share/doc/hexdb/README.md", "644"],
+]

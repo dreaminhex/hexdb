@@ -639,3 +639,28 @@ fn keyed_bulk_writes_store_ids_not_documents_twice() -> Result<()> {
     assert_eq!(first.body, replay.body);
     Ok(())
 }
+
+#[test]
+fn upserts_match_on_key_fields() -> Result<()> {
+    let server = TestServer::start()?;
+    let upsert = |docs: Value| server.request(Method::POST, "/products/_upsert", Some(&json!({ "key": ["sku"], "documents": docs })), &[]);
+
+    let first = upsert(json!([{ "sku": "A-1", "price": 10 }, { "sku": "B-2", "price": 20 }]))?;
+    assert_eq!(first.status, 200, "{}", first.body);
+    assert_eq!((first.body["inserted"].as_u64(), first.body["replaced"].as_u64()), (Some(2), Some(0)));
+    let id_a = first.body["ids"][0].as_str().unwrap().to_string();
+
+    // Same key: replaced in place, keeping the ID; a new key is inserted.
+    let second = upsert(json!([{ "sku": "A-1", "price": 11 }, { "sku": "C-3", "price": 30 }]))?;
+    assert_eq!((second.body["inserted"].as_u64(), second.body["replaced"].as_u64()), (Some(1), Some(1)), "{}", second.body);
+    assert_eq!(second.body["ids"][0], id_a.as_str());
+    assert_eq!(server.get_doc("products", &id_a)?.unwrap()["price"], 11);
+    assert_eq!(server.count("products")?, 3);
+
+    // Errors: a key twice in one request, a missing key field, an ambiguous key.
+    assert_eq!(upsert(json!([{ "sku": "D" }, { "sku": "D" }]))?.status, 400);
+    assert_eq!(upsert(json!([{ "price": 1 }]))?.status, 400);
+    server.insert("products", &json!({ "sku": "A-1", "price": 99 }))?;
+    assert_eq!(upsert(json!([{ "sku": "A-1", "price": 12 }]))?.status, 409);
+    Ok(())
+}

@@ -205,6 +205,6 @@ async fn legacy_users_and_roles_are_migrated() -> Result<()> {
     assert_eq!(engine.count_documents("users").await?, 1, "the legacy array document is removed");
 
     let roles: Vec<String> = users::list_roles(&engine).await?.into_iter().map(|r| r.name).collect();
-    assert_eq!(roles.len(), 4, "{:?}", roles);
+    assert_eq!(roles.len(), 6, "the built-in roles: {:?}", roles);
     engine.shutdown().await
 }

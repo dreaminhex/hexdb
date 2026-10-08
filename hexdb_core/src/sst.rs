@@ -48,7 +48,7 @@ use crate::{crypt::KeyRing, document::Document, wal::sync_dir};
 use anyhow::{anyhow, bail, Context, Result};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -116,6 +116,9 @@ enum IndexKind {
     Chunked(ChunkedIndex),
 }
 
+/// One decrypted chunk of an index: its records in ID order.
+type ChunkRecords = Arc<Vec<(Ulid, IndexEntry)>>;
+
 #[derive(Debug)]
 struct ChunkedIndex {
     /// First ID, file offset, and length of each encrypted chunk.
@@ -125,7 +128,7 @@ struct ChunkedIndex {
     keys: Arc<KeyRing>,
     key_id: u64,
     path: PathBuf,
-    cache: std::sync::Mutex<Vec<(usize, Arc<Vec<(Ulid, IndexEntry)>>)>>,
+    cache: std::sync::Mutex<Vec<(usize, ChunkRecords)>>,
 }
 
 type Records = Arc<Vec<(Ulid, IndexEntry)>>;
@@ -698,6 +701,16 @@ impl SstStore {
         } else {
             DiskLookup::Live { file: file.clone(), entry }
         })
+    }
+
+    /// Documents of a tessellation with an on-disk version newer than `seq`.
+    pub async fn ids_changed_after(&self, tess: &str, seq: u64) -> HashSet<Ulid> {
+        let tables = self.tables.read().await;
+        let mut ids = HashSet::new();
+        for file in tables.get(tess).into_iter().flatten().filter(|f| f.max_seq > seq) {
+            ids.extend(file.index.iter().filter(|(_, e)| e.seq > seq).map(|(id, _)| id));
+        }
+        ids
     }
 
     /// Newest on-disk index entry for every document in a tessellation.

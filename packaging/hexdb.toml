@@ -1,0 +1,28 @@
+# HexDB configuration. Put secrets in hexdb.local.toml next to this file (keep
+# it private), or in HEXDB_* environment variables. See MANUAL.md.
+
+[network]
+api_endpoint = "127.0.0.1:7700"
+discovery_endpoint = "127.0.0.1:7702"
+# lattice_name: left out, the first start generates one. Other hexes that
+# should join need the same name (the admin UI's "Add a hex" shows it).
+# peers = ["other-host:7702"]
+
+[identity]
+role = "auto" # auto | overseer | harvester | replicant
+
+[security]
+admin_login = "hexdbadmin"
+admin_email = "admin@localhost"
+# admin_password: left out, the first start generates one and prints it once.
+
+[memory]
+ram_mb = 1024
+
+[storage]
+path = "./data"
+disk_mb = 16384
+# encryption_key = "base64:..."   # required; put it in hexdb.local.toml. Generate: hexdb secret
+
+[ui]
+path = "./ui"

@@ -179,13 +179,13 @@ pub async fn start_discovery_listener(engine: Arc<HexDBEngine>) {
                     if !matches!(read, Ok(Ok(_))) {
                         return;
                     }
-                    let Some(nonce) = engine.lattice_keys.check_hello(&line, &engine.lattice_nonces) else {
+                    let Some((nonce, key_index)) = engine.lattice_keys.check_hello(&line, &engine.lattice_nonces) else {
                         debug!("📡 Ignored an unauthenticated discovery hello.");
                         return;
                     };
                     let identity = local_identity(&engine).await;
                     if let Ok(json) = serde_json::to_string(&identity) {
-                        let reply = engine.lattice_keys.identity_reply(&nonce, &json);
+                        let reply = engine.lattice_keys.identity_reply(key_index, &nonce, &json);
                         let _ = socket.write_all(format!("{}\n", reply).as_bytes()).await;
                     }
                 });
@@ -214,39 +214,69 @@ fn probe_targets(config: &HexConfig) -> Vec<String> {
     targets
 }
 
-/// Send an authenticated hello to one address and verify the reply.
+/// Send an authenticated hello to one address and verify the reply. A hex
+/// that doesn't answer the current key is tried with previous keys (a
+/// lattice part-way through a secret rotation).
 async fn probe_peer(addr: String, keys: LatticeKeys) -> Option<PeerHex> {
-    let mut stream = TcpStream::connect(&addr).await.ok()?;
-    let (hello, nonce) = keys.hello();
-    stream.write_all(format!("{}\n", hello).as_bytes()).await.ok()?;
+    let attempt = PROBE_TIMEOUT;
+    for index in 0..keys.len() {
+        match tokio::time::timeout(attempt, probe_with_key(&addr, &keys, index)).await {
+            Ok(Probe::Found(peer)) => return Some(*peer),
+            Ok(Probe::Unreachable) => return None,
+            Ok(Probe::Refused) | Err(_) => continue,
+        }
+    }
+    None
+}
 
+enum Probe {
+    Found(Box<PeerHex>),
+    /// Nothing listens there.
+    Unreachable,
+    /// Something answered, but not with a valid identity for this key.
+    Refused,
+}
+
+async fn probe_with_key(addr: &str, keys: &LatticeKeys, index: usize) -> Probe {
+    let Ok(mut stream) = TcpStream::connect(addr).await else { return Probe::Unreachable };
+    let (hello, nonce) = keys.hello_with(index);
+    if stream.write_all(format!("{}\n", hello).as_bytes()).await.is_err() {
+        return Probe::Refused;
+    }
     let mut reader = BufReader::new(&mut stream);
     let mut line = String::new();
-    (&mut reader).take(64 * 1024).read_line(&mut line).await.ok()?;
-    let Some(payload) = keys.check_identity(&nonce, &line) else {
+    if (&mut reader).take(64 * 1024).read_line(&mut line).await.is_err() {
+        return Probe::Refused;
+    }
+    let Some(payload) = keys.check_identity(index, &nonce, &line) else {
         if !line.is_empty() {
             warn!(%addr, "🚫 {} answered discovery without proving it holds the lattice key; ignoring it.", addr);
         }
-        return None;
+        return Probe::Refused;
     };
-    let mut peer: PeerHex = serde_json::from_str(payload).ok()?;
+    let Ok(mut peer) = serde_json::from_str::<PeerHex>(payload) else { return Probe::Refused };
+    Probe::Found(Box::new(fix_endpoint(addr, &mut peer)))
+}
 
-    // A peer that advertises a loopback or wildcard address is reachable at the
-    // host we just connected to.
-    let probed_host = host_of(&addr).to_string();
+/// A peer that advertises a loopback or wildcard address is reachable at the
+/// host we just connected to.
+fn fix_endpoint(addr: &str, peer: &mut PeerHex) -> PeerHex {
+    let mut peer = peer.clone();
+
+    let probed_host = host_of(addr).to_string();
     if !is_local_or_wildcard(&probed_host) {
         if is_local_or_wildcard(host_of(&peer.api_endpoint)) {
             peer.api_endpoint = with_host(&peer.api_endpoint, &probed_host);
         }
-        peer.ip = addr;
+        peer.ip = addr.to_string();
     }
-    Some(peer)
+    peer
 }
 
 /// Probe every target once and return the hexes in our lattice (excluding ourselves).
 pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str) -> Vec<PeerHex> {
-    let keys = match config.lattice_key() {
-        Ok(key) => LatticeKeys::new(&key),
+    let keys = match config.lattice_keys() {
+        Ok(keys) => LatticeKeys::with_previous(&keys),
         Err(e) => {
             warn!("❗ Discovery is disabled: {:#}", e);
             return Vec::new();
@@ -254,7 +284,8 @@ pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str
     };
     let probes = probe_targets(config).into_iter().map(|addr| {
         let keys = keys.clone();
-        async move { tokio::time::timeout(PROBE_TIMEOUT, probe_peer(addr, keys)).await.ok().flatten() }
+        let budget = PROBE_TIMEOUT * keys.len() as u32;
+        async move { tokio::time::timeout(budget, probe_peer(addr, keys)).await.ok().flatten() }
     });
 
     let mut peers: Vec<PeerHex> = Vec::new();
@@ -268,6 +299,38 @@ pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str
         peers.push(peer);
     }
     peers
+}
+
+const NAME_ADJECTIVES: &[&str] = &[
+    "Amber", "Azure", "Bright", "Cobalt", "Crimson", "Distant", "Drifting", "Ember", "Frozen", "Gilded", "Hidden", "Indigo", "Iron", "Jade",
+    "Lunar", "Molten", "Northern", "Obsidian", "Pale", "Quiet", "Radiant", "Scarlet", "Silent", "Silver", "Solar", "Stellar", "Swift",
+    "Twin", "Umbral", "Velvet", "Violet", "Wandering", "Winter", "Zenith",
+];
+const NAME_NOUNS: &[&str] = &[
+    "Aurora", "Comet", "Corona", "Cosmos", "Eclipse", "Equinox", "Galaxy", "Halo", "Horizon", "Meridian", "Meteor", "Nebula", "Nova", "Orbit",
+    "Parallax", "Pulsar", "Quasar", "Singularity", "Solstice", "Spiral", "Starfield", "Tide", "Vortex", "Zephyr",
+];
+
+/// A new lattice name, e.g. "Silent Quasar".
+pub fn generate_lattice_name() -> String {
+    use rand::seq::IndexedRandom;
+    let mut rng = rand::rng();
+    format!("{} {}", NAME_ADJECTIVES.choose(&mut rng).unwrap_or(&"Nameless"), NAME_NOUNS.choose(&mut rng).unwrap_or(&"Lattice"))
+}
+
+/// The lattice name to use: the configured one, else the one saved in the
+/// data directory, else a new one. Returns (name, whether it was generated).
+pub fn resolve_lattice_name(config: &HexConfig, keys: &crate::crypt::KeyRing) -> anyhow::Result<(String, bool)> {
+    let configured = config.network.lattice_name.trim();
+    if !configured.is_empty() {
+        return Ok((configured.to_string(), false));
+    }
+    if let Some(catalog) = crate::catalog::Catalog::load(&config.storage_dir(), keys)? {
+        if !catalog.lattice_name.is_empty() {
+            return Ok((catalog.lattice_name, false));
+        }
+    }
+    Ok((generate_lattice_name(), true))
 }
 
 /// Better candidates sort first: more RAM, then more disk, then lower ID.

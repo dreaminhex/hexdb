@@ -19,6 +19,15 @@ pub mod vertex;
 pub mod tasks;
 pub mod runtime;
 pub mod users;
+pub mod audit;
+pub mod mfa;
+pub mod settings;
+pub mod process;
+pub mod analysis;
+pub mod advisor;
+pub mod schema;
+pub mod streams;
+pub mod functions;
 pub mod network {
     pub mod discovery;
     pub mod lattice_auth;
@@ -29,7 +38,7 @@ pub use runtime::{RuntimeInfo, local_base_url, SHUTDOWN_TOKEN_HEADER};
 pub use logging::{init_logging, log_buffer, parse_level, LogQuery, LogRecord, LOG_CAPACITY};
 pub use engine::{
     DocumentQuery, EngineError, EngineStats, FlushStats, HexDBEngine, HexIdentity, IdempotencyKey, ListPage, Outcome,
-    QueryPage, TessellationStats,
+    QueryPage, TessellationStats, UpsertSummary,
     UpdateSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
     parse_transaction, TransactionResult, TxOpKind, TxOperation, TxResult, MAX_TRANSACTION_OPS,
 };
@@ -45,7 +54,8 @@ pub use filter::{tokenize, Filter, SortKey};
 pub use index::{IndexDef, IndexInfo, IndexKind};
 pub use engine::REPLICATION_TESSELLATION;
 pub use plugins::{spawn_plugins, PluginStatus};
-pub use auth::{Permission, Principal, SESSION_COOKIE};
+pub use audit::{AuditEvent, AuditQuery, AUDIT_TESSELLATION};
+pub use auth::{Action, Permission, Principal, RoleDefinitions, SESSION_COOKIE};
 pub use replication::{spawn_replication_task, ReplicationStatus, LATTICE_SIGNATURE_HEADER};
 pub use changes::{Change, ChangeFeed, ChangeKind, HistoryExpired, CHANGE_HISTORY};
 pub use aggregate::{parse_aggregates, AggregateOp, AggregateResult, AggregateSpec, Aggregation};

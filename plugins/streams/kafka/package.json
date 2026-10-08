@@ -1,0 +1,10 @@
+{
+  "name": "hexdb-plugin-kafka",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "HexDB change data capture to Kafka.",
+  "dependencies": {
+    "kafkajs": "^2.2.4"
+  }
+}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { IconLoader2, IconLock, IconPencil, IconPlus, IconShieldCheck, IconTrash } from "@tabler/icons-react"
+import { IconLoader2, IconLock, IconPencil, IconPlus, IconShieldCheck, IconShieldLock, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -26,13 +26,13 @@ import { formatEpochSeconds } from "@/lib/format"
 // Role grants editor
 // ---------------------------------------------------------------------------
 
-type GrantDraft = Record<string, { checked: boolean; permissions: string }>
+type GrantDraft = Record<string, { checked: boolean; tessellations: string }>
 
 function draftFrom(roles: Role[], grants: RoleGrant[]): GrantDraft {
   return Object.fromEntries(
     roles.map((role) => {
       const grant = grants.find((g) => g.name === role.name)
-      return [role.name, { checked: !!grant, permissions: grant?.permissions.join(", ") ?? "" }]
+      return [role.name, { checked: !!grant, tessellations: grant?.tessellations.join(", ") ?? "" }]
     }),
   )
 }
@@ -42,9 +42,12 @@ function grantsFrom(draft: GrantDraft): RoleGrant[] {
     .filter(([, g]) => g.checked)
     .map(([name, g]) => ({
       name,
-      permissions: g.permissions.split(",").map((p) => p.trim()).filter(Boolean),
+      tessellations: g.tessellations.split(",").map((p) => p.trim()).filter(Boolean),
     }))
 }
+
+/** True if a role has permissions that apply per tessellation (so a grant needs a tessellation list). */
+const scoped = (role: Role) => role.permissions.some((p) => p === "read" || p === "write" || p === "manage")
 
 function RoleGrantsEditor({ roles, draft, onChange }: { roles: Role[]; draft: GrantDraft; onChange: (draft: GrantDraft) => void }) {
   return (
@@ -52,7 +55,7 @@ function RoleGrantsEditor({ roles, draft, onChange }: { roles: Role[]; draft: Gr
       <Label>Roles</Label>
       <div className="divide-y rounded-md border">
         {roles.map((role) => {
-          const entry = draft[role.name] ?? { checked: false, permissions: "" }
+          const entry = draft[role.name] ?? { checked: false, tessellations: "" }
           const id = `role-${role.name}`
           return (
             <div key={role.name} className="grid gap-2 p-3">
@@ -64,17 +67,20 @@ function RoleGrantsEditor({ roles, draft, onChange }: { roles: Role[]; draft: Gr
                   className="mt-0.5"
                 />
                 <label htmlFor={id} className="grid gap-0.5 text-sm leading-tight">
-                  <span className="font-medium">{role.name}</span>
+                  <span className="font-medium">
+                    {role.name}
+                    <span className="text-muted-foreground ml-2 font-mono text-xs font-normal">{role.permissions.join(", ")}</span>
+                  </span>
                   <span className="text-muted-foreground text-xs">{role.description}</span>
                 </label>
               </div>
-              {entry.checked && (
+              {entry.checked && scoped(role) && (
                 <Input
-                  value={entry.permissions}
-                  onChange={(e) => onChange({ ...draft, [role.name]: { ...entry, permissions: e.target.value } })}
+                  value={entry.tessellations}
+                  onChange={(e) => onChange({ ...draft, [role.name]: { ...entry, tessellations: e.target.value } })}
                   placeholder="Tessellations, comma-separated, or * for all"
                   className="h-8 font-mono text-xs"
-                  aria-label={`${role.name} permissions`}
+                  aria-label={`${role.name} tessellations`}
                 />
               )}
             </div>
@@ -108,6 +114,7 @@ function UserDialog({
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [locked, setLocked] = useState(false)
+  const [resetMfa, setResetMfa] = useState(false)
   const [draft, setDraft] = useState<GrantDraft>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -118,6 +125,7 @@ function UserDialog({
     setEmail(user?.email_address ?? "")
     setPassword("")
     setLocked(user?.is_locked ?? false)
+    setResetMfa(false)
     setDraft(draftFrom(roles, user?.roles ?? []))
     setError(null)
   }, [open, user, roles])
@@ -133,6 +141,7 @@ function UserDialog({
         if (email !== user.email_address) changes.email_address = email
         if (password) changes.password = password
         if (locked !== user.is_locked) changes.is_locked = locked
+        if (resetMfa) changes.use_mfa = false
         const grants = grantsFrom(draft)
         if (JSON.stringify(grants) !== JSON.stringify(user.roles)) changes.roles = grants
         if (Object.keys(changes).length > 0) {
@@ -185,6 +194,15 @@ function UserDialog({
             <div className="flex items-center gap-2">
               <Checkbox id="user-locked" checked={locked} onCheckedChange={(checked) => setLocked(checked === true)} />
               <Label htmlFor="user-locked">Locked (can't sign in)</Label>
+            </div>
+          )}
+          {user?.use_mfa && (
+            <div className="flex items-start gap-2">
+              <Checkbox id="user-mfa" checked={resetMfa} onCheckedChange={(checked) => setResetMfa(checked === true)} className="mt-0.5" />
+              <Label htmlFor="user-mfa" className="grid gap-0.5 font-normal">
+                <span className="font-medium">Reset multi-factor authentication</span>
+                <span className="text-muted-foreground text-xs">For a user who lost their authenticator and backup codes. They can set it up again from their Account page.</span>
+              </Label>
             </div>
           )}
           <RoleGrantsEditor roles={roles} draft={draft} onChange={setDraft} />
@@ -248,24 +266,31 @@ export function UsersPage() {
                   <div className="flex flex-wrap gap-1">
                     {user.roles.length === 0 && <span className="text-muted-foreground text-sm">None</span>}
                     {user.roles.map((grant) => (
-                      <Badge key={grant.name} variant="outline" title={grant.permissions.join(", ") || "No tessellations"}>
+                      <Badge key={grant.name} variant="outline" title={grant.tessellations.join(", ") || "No tessellations"}>
                         {grant.name === "admin" && <IconShieldCheck className="size-3" />}
                         {grant.name}
-                        {grant.permissions.length > 0 && (
-                          <span className="text-muted-foreground font-mono font-normal">: {grant.permissions.join(", ")}</span>
+                        {grant.name !== "admin" && grant.tessellations.length > 0 && (
+                          <span className="text-muted-foreground font-mono font-normal">: {grant.tessellations.join(", ")}</span>
                         )}
                       </Badge>
                     ))}
                   </div>
                 </TableCell>
                 <TableCell>
-                  {user.is_locked ? (
-                    <Badge variant="secondary" className="gap-1">
-                      <IconLock className="size-3" /> Locked
-                    </Badge>
-                  ) : (
-                    <Badge variant="outline">Active</Badge>
-                  )}
+                  <div className="flex flex-wrap gap-1">
+                    {user.is_locked ? (
+                      <Badge variant="secondary" className="gap-1">
+                        <IconLock className="size-3" /> Locked
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline">Active</Badge>
+                    )}
+                    {user.use_mfa && (
+                      <Badge variant="outline" className="gap-1" title="Multi-factor authentication is on">
+                        <IconShieldLock className="size-3" /> MFA
+                      </Badge>
+                    )}
+                  </div>
                 </TableCell>
                 <TableCell className="text-muted-foreground text-sm">{formatEpochSeconds(user.created)}</TableCell>
                 <TableCell className="text-muted-foreground text-sm">{formatEpochSeconds(user.last_login)}</TableCell>

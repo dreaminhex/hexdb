@@ -1,0 +1,17 @@
+# Writes HexDB's log to daily files (JSON lines), like a Serilog file sink.
+# Files go to ./logs/hexdb-YYYY-MM-DD.ndjson in this folder unless LOG_DIR is
+# set; files older than LOG_RETAIN_DAYS are deleted.
+id = "@sinks/log-file"
+name = "Log files"
+type = "logs"
+version = "1.0.0"
+description = "Daily JSON-lines log files with retention."
+command = ["node", "index.mjs"]
+
+[logs]
+level = "info"        # error, warn, info, debug or trace
+# targets = ["hexdb_api::requests"]   # only some components
+
+[env]
+LOG_DIR = "./logs"
+LOG_RETAIN_DAYS = "14"

@@ -22,8 +22,9 @@ export function PluginsPage() {
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
       <p className="text-muted-foreground max-w-3xl text-sm">
-        Plugins receive every committed change, in order, while this hex is the Overseer. A process plugin reads changes as JSON lines on
-        stdin; a webhook plugin receives them as batched POSTs.
+        Plugins run while this hex is the Overseer. Stream plugins receive every committed change, in order (a process reads JSON lines on
+        stdin; a webhook receives batched POSTs); log and metrics plugins receive this hex's logs and metrics; source plugins write into
+        HexDB with their own API key.
         {plugins.data && (
           <>
             {" "}
@@ -38,7 +39,7 @@ export function PluginsPage() {
           <TableHeader className="bg-muted/60">
             <TableRow>
               <TableHead className="pl-6">Plugin</TableHead>
-              <TableHead>Runtime</TableHead>
+              <TableHead>Runtime / type</TableHead>
               <TableHead>State</TableHead>
               <TableHead className="text-right">Delivered</TableHead>
               <TableHead className="text-right">Last seq</TableHead>
@@ -75,7 +76,10 @@ function PluginRow({ plugin: p }: { plugin: PluginStatus }) {
         {p.description && <div className="text-muted-foreground mt-1 max-w-xl text-xs whitespace-normal">{p.description}</div>}
         {p.last_error && <div className="text-destructive mt-1 max-w-xl text-xs whitespace-normal">{p.last_error}</div>}
       </TableCell>
-      <TableCell>{p.runtime ? <Badge variant="outline">{p.runtime}</Badge> : <span className="text-muted-foreground">—</span>}</TableCell>
+      <TableCell>
+        {p.runtime ? <Badge variant="outline">{p.runtime}</Badge> : <span className="text-muted-foreground">—</span>}
+        {p.type && <div className="text-muted-foreground mt-1 text-xs">{p.type}</div>}
+      </TableCell>
       <TableCell>
         <span className="flex items-center gap-2" title={state.hint}>
           <span className={cn("size-2 rounded-full", state.dot)} />

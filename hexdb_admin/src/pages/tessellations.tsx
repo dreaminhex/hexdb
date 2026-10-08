@@ -1,5 +1,5 @@
-import { useState } from "react"
-import { IconKey, IconLoader2, IconPlus, IconTrash } from "@tabler/icons-react"
+import { lazy, Suspense, useState } from "react"
+import { IconFileDescription, IconKey, IconLoader2, IconPlus, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -7,26 +7,30 @@ import { IndexesDialog } from "@/components/indexes-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
 import { api, errorMessage } from "@/lib/api"
-import { can, useAuth } from "@/lib/auth"
+import { can, has, useAuth } from "@/lib/auth"
 import { formatBytes, formatNumber, formatTimestamp } from "@/lib/format"
 import { href, linkHandler, navigate } from "@/lib/router"
 
+// The schema editor uses CodeMirror, which loads on first use.
+const SchemasDialog = lazy(() => import("@/components/schemas-dialog").then((m) => ({ default: m.SchemasDialog })))
+
 const NAME_PATTERN = /^[A-Za-z0-9-][A-Za-z0-9_-]{0,63}$/
 
-function CreateTessellationDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (name: string) => void }) {
+function CreateTessellationDialog({
+  open,
+  onOpenChange,
+  onCreated,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCreated: (name: string) => void
+}) {
   const [name, setName] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -84,22 +88,24 @@ function CreateTessellationDialog({ open, onOpenChange, onCreated }: { open: boo
 export function TessellationsPage() {
   const { me } = useAuth()
   const tessellations = usePoll(api.tessellations, 10_000)
-  // Sizes come from /status (admins); other users get document counts per tessellation.
-  const status = usePoll(() => (me?.is_admin ? api.status() : Promise.resolve(undefined)), 10_000, [me?.is_admin])
+  // Sizes come from /status (users with the status permission); other users get document counts per tessellation.
+  const mayStatus = has(me, "status")
+  const status = usePoll(() => (mayStatus ? api.status() : Promise.resolve(undefined)), 10_000, [mayStatus])
   const counts = usePoll(
     async () =>
-      me?.is_admin
+      mayStatus
         ? {}
         : Object.fromEntries(
             await Promise.all((tessellations.data ?? []).map(async (t) => [t.name, (await api.tessellation(t.name)).document_count ?? 0] as const)),
           ),
     10_000,
-    [me?.is_admin, tessellations.data?.length],
+    [mayStatus, tessellations.data?.length],
   )
-  const mayCreate = me?.is_admin || me?.roles.some((r) => (r.name === "writer" || r.name === "owner") && r.permissions.length > 0)
+  const mayCreate = me?.is_admin || (me?.grants ?? []).some((g) => g.permissions.includes("write") && g.tessellations.length > 0)
   const [creating, setCreating] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [indexing, setIndexing] = useState<string | null>(null)
+  const [schemaFor, setSchemaFor] = useState<string | null>(null)
 
   const metrics = new Map((status.data?.metrics.tessellations ?? []).map((t) => [t.name, t]))
   const rows = [...(tessellations.data ?? [])].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "user" ? -1 : 1))
@@ -130,7 +136,7 @@ export function TessellationsPage() {
               <TableHead className="text-right">Total size</TableHead>
               <TableHead>Indexes</TableHead>
               <TableHead>Created</TableHead>
-              <TableHead className="w-12 pr-6" />
+              <TableHead className="w-24 pr-6" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -138,14 +144,17 @@ export function TessellationsPage() {
               const m = metrics.get(t.name)
               const user = t.kind === "user"
               return (
-                <TableRow
-                  key={t.name}
-                  className={user ? "cursor-pointer" : undefined}
-                  onClick={user ? () => navigate(documentsRoute(t.name)) : undefined}
-                >
+                <TableRow key={t.name} className={user ? "cursor-pointer" : undefined} onClick={user ? () => navigate(documentsRoute(t.name)) : undefined}>
                   <TableCell className="pl-6 font-medium">
                     {user ? (
-                      <a href={href(documentsRoute(t.name))} onClick={(e) => { e.stopPropagation(); linkHandler(documentsRoute(t.name))(e) }} className="hover:underline">
+                      <a
+                        href={href(documentsRoute(t.name))}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          linkHandler(documentsRoute(t.name))(e)
+                        }}
+                        className="hover:underline"
+                      >
                         {t.name}
                       </a>
                     ) : (
@@ -183,18 +192,33 @@ export function TessellationsPage() {
                   <TableCell className="text-muted-foreground text-sm">{formatTimestamp(t.created)}</TableCell>
                   <TableCell className="pr-6">
                     {user && can(me, "manage", t.name) && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="text-muted-foreground hover:text-destructive size-8"
-                        aria-label={`Delete ${t.name}`}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setDeleting(t.name)
-                        }}
-                      >
-                        <IconTrash />
-                      </Button>
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-muted-foreground size-8"
+                          aria-label={`Schema for ${t.name}`}
+                          title="Schema"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setSchemaFor(t.name)
+                          }}
+                        >
+                          <IconFileDescription />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-muted-foreground hover:text-destructive size-8"
+                          aria-label={`Delete ${t.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setDeleting(t.name)
+                          }}
+                        >
+                          <IconTrash />
+                        </Button>
+                      </div>
                     )}
                   </TableCell>
                 </TableRow>
@@ -219,6 +243,11 @@ export function TessellationsPage() {
           void status.refresh()
         }}
       />
+      {schemaFor !== null && (
+        <Suspense>
+          <SchemasDialog tessellation={schemaFor} onOpenChange={(open) => !open && setSchemaFor(null)} />
+        </Suspense>
+      )}
       <IndexesDialog tessellation={indexing} onOpenChange={(open) => !open && setIndexing(null)} onChanged={() => void tessellations.refresh()} />
       <ConfirmDialog
         open={deleting !== null}

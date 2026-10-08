@@ -86,11 +86,12 @@ pub fn spawn_metrics_task(engine: Arc<HexDBEngine>, interval: Duration, mut shut
     tokio::spawn(async move {
         let mut taken: u64 = 0;
         loop {
+            engine.refresh_disk_usage().await;
             let sample = crate::metrics::sample(&engine).await;
             engine.history.push(sample);
             taken += 1;
             // Save about once a minute (and at shutdown; see HexDBEngine::shutdown).
-            if taken % 4 == 0 {
+            if taken.is_multiple_of(4) {
                 if let Err(e) = engine.save_metrics_history() {
                     tracing::warn!("Couldn't save the metrics history: {:#}", e);
                 }

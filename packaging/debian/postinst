@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+    if ! getent passwd hexdb >/dev/null; then
+        adduser --system --group --home /var/lib/hexdb --no-create-home hexdb
+    fi
+    mkdir -p /var/lib/hexdb
+    chown hexdb:hexdb /var/lib/hexdb
+    chmod 750 /var/lib/hexdb
+    if [ ! -f /etc/hexdb/hexdb.local.toml ]; then
+        key="base64:$(head -c 32 /dev/urandom | base64)"
+        printf '[storage]\nencryption_key = "%s"\n' "$key" > /etc/hexdb/hexdb.local.toml
+        chown hexdb:hexdb /etc/hexdb/hexdb.local.toml
+        chmod 600 /etc/hexdb/hexdb.local.toml
+        echo "HexDB: created /etc/hexdb/hexdb.local.toml with a new storage key. Back it up: without it the data can't be read."
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    echo "HexDB: start it with 'sudo systemctl enable --now hexdb'; the first administrator's password is printed in 'journalctl -u hexdb'."
+fi
+exit 0

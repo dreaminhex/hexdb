@@ -1,0 +1,167 @@
+name: Release
+
+# Push a tag like v0.2.0 to build and publish:
+#   - archives for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows
+#     (x86_64) with hexdb_api, the hexdb CLI, the admin UI and a sample config,
+#     plus SHA-256 checksums, on the GitHub release;
+#   - a .deb package for Debian/Ubuntu (systemd service included);
+#   - a multi-arch container image on GitHub Container Registry;
+#   - the drivers to npm, PyPI and NuGet when their tokens are configured.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run build
+        working-directory: hexdb_admin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui
+          path: hexdb_admin/dist
+
+  binaries:
+    needs: ui
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, archive: tar.gz }
+          - { os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz }
+          - { os: macos-13, target: x86_64-apple-darwin, archive: tar.gz }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui
+          path: ui
+      - name: Build
+        shell: bash
+        run: |
+          test -f Cargo.lock || cargo generate-lockfile
+          cargo build --release --target ${{ matrix.target }} -p hexdb_api -p hexdb_cli
+      - name: Package
+        shell: bash
+        run: |
+          name="hexdb-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$name"
+          exe=""; [[ "${{ matrix.target }}" == *windows* ]] && exe=".exe"
+          cp "target/${{ matrix.target }}/release/hexdb_api$exe" "target/${{ matrix.target }}/release/hexdb$exe" "$name/"
+          cp -r ui "$name/ui"
+          cp packaging/hexdb.toml "$name/hexdb.toml"
+          cp README.md MANUAL.md "$name/"
+          if [ "${{ matrix.archive }}" = zip ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: hexdb-*.${{ matrix.archive }}
+
+  deb:
+    needs: ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui
+          path: hexdb_admin/dist
+      - run: cargo install cargo-deb --locked
+      - run: |
+          test -f Cargo.lock || cargo generate-lockfile
+          cargo build --release -p hexdb_cli
+          cargo deb -p hexdb_api
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: target/debian/*.deb
+
+  publish:
+    needs: [binaries, deb]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum hexdb-* *.deb > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/hexdb:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/hexdb:latest
+
+  drivers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: npm
+        if: env.NODE_AUTH_TOKEN != ''
+        working-directory: drivers/node
+        run: npm install && npm run build && npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: PyPI
+        if: env.TWINE_PASSWORD != ''
+        working-directory: drivers/python
+        run: pip install build twine && python -m build && twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: NuGet
+        if: env.NUGET_KEY != ''
+        run: |
+          dotnet pack drivers/dotnet/HexDB.Client -c Release -o nupkg
+          dotnet nuget push "nupkg/*.nupkg" --api-key "$NUGET_KEY" --source https://api.nuget.org/v3/index.json
+        env:
+          NUGET_KEY: ${{ secrets.NUGET_KEY }}

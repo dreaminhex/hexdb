@@ -16,6 +16,12 @@
 //
 // MACs are keyed BLAKE3 with keys derived from the lattice key, compared in
 // constant time.
+//
+// Rotation: a hex can hold previous lattice keys (`previous_lattice_secrets`).
+// It signs with the current key and accepts any of them, answering a hello
+// with the key the hello used. A hex whose signed request or hello isn't
+// accepted retries with its previous keys, so hexes can be moved to a new
+// secret one at a time.
 
 use crate::crypt::random_bytes;
 use std::collections::HashMap;
@@ -70,33 +76,66 @@ impl NonceCache {
     }
 }
 
-/// Keys derived from the lattice key.
+/// Keys derived from one lattice key.
 #[derive(Clone)]
-pub struct LatticeKeys {
+struct KeySet {
     discovery: [u8; 32],
     requests: [u8; 32],
 }
 
-impl LatticeKeys {
-    pub fn new(lattice_key: &[u8; 32]) -> Self {
-        LatticeKeys {
+impl KeySet {
+    fn new(lattice_key: &[u8; 32]) -> Self {
+        KeySet {
             discovery: blake3::derive_key("HexDB 2026 discovery handshake v1", lattice_key),
             requests: blake3::derive_key("HexDB 2026 replication request v1", lattice_key),
         }
     }
+}
+
+/// Keys derived from the lattice key and any previous lattice keys (current first).
+#[derive(Clone)]
+pub struct LatticeKeys {
+    sets: std::sync::Arc<Vec<KeySet>>,
+}
+
+impl LatticeKeys {
+    pub fn new(lattice_key: &[u8; 32]) -> Self {
+        Self::with_previous(std::slice::from_ref(lattice_key))
+    }
+
+    /// The current key first, then previous ones. Panics if `keys` is empty.
+    pub fn with_previous(keys: &[[u8; 32]]) -> Self {
+        assert!(!keys.is_empty(), "at least the current lattice key");
+        LatticeKeys { sets: std::sync::Arc::new(keys.iter().map(KeySet::new).collect()) }
+    }
+
+    /// How many keys are held (1 + previous keys).
+    pub fn len(&self) -> usize {
+        self.sets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
 
     // --- discovery -----------------------------------------------------------
 
-    /// A hello line (without the newline) and the nonce to expect in the reply.
+    /// A hello line (without the newline) with the current key, and the nonce to expect in the reply.
     pub fn hello(&self) -> (String, String) {
+        self.hello_with(0)
+    }
+
+    /// A hello signed with key `index` (0 is the current key).
+    pub fn hello_with(&self, index: usize) -> (String, String) {
         let ts = chrono::Utc::now().timestamp();
         let nonce = new_nonce();
-        let tag = mac(&self.discovery, &[b"hello", ts.to_string().as_bytes(), nonce.as_bytes()]);
+        let tag = mac(&self.sets[index].discovery, &[b"hello", ts.to_string().as_bytes(), nonce.as_bytes()]);
         (format!("HEXDB_HELLO2 {} {} {}", ts, nonce, tag.to_hex()), nonce)
     }
 
-    /// Check a hello line; returns its nonce if valid, fresh, and unused.
-    pub fn check_hello(&self, line: &str, seen: &NonceCache) -> Option<String> {
+    /// Check a hello line; returns its nonce and the index of the key it used,
+    /// if valid, fresh, and unused.
+    pub fn check_hello(&self, line: &str, seen: &NonceCache) -> Option<(String, usize)> {
         let mut parts = line.trim().split(' ');
         if parts.next()? != "HEXDB_HELLO2" {
             return None;
@@ -108,41 +147,48 @@ impl LatticeKeys {
             return None;
         }
         let ts: i64 = ts_text.parse().ok()?;
-        if !fresh(ts) || mac(&self.discovery, &[b"hello", ts_text.as_bytes(), nonce.as_bytes()]) != tag {
+        if !fresh(ts) {
             return None;
         }
-        seen.first_use(nonce).then(|| nonce.to_string())
+        let index = self.sets.iter().position(|s| mac(&s.discovery, &[b"hello", ts_text.as_bytes(), nonce.as_bytes()]) == tag)?;
+        seen.first_use(nonce).then(|| (nonce.to_string(), index))
     }
 
-    /// The identity reply line for a hello's nonce.
-    pub fn identity_reply(&self, nonce: &str, json: &str) -> String {
-        let tag = mac(&self.discovery, &[b"identity", nonce.as_bytes(), json.as_bytes()]);
+    /// The identity reply line for a hello's nonce, with the key the hello used.
+    pub fn identity_reply(&self, index: usize, nonce: &str, json: &str) -> String {
+        let tag = mac(&self.sets[index].discovery, &[b"identity", nonce.as_bytes(), json.as_bytes()]);
         format!("HEXDB_IDENTITY {} {}", json, tag.to_hex())
     }
 
-    /// Check an identity reply against our nonce; returns the JSON if genuine.
-    pub fn check_identity<'a>(&self, nonce: &str, line: &'a str) -> Option<&'a str> {
+    /// Check an identity reply to a hello sent with key `index`; returns the JSON if genuine.
+    pub fn check_identity<'a>(&self, index: usize, nonce: &str, line: &'a str) -> Option<&'a str> {
         let rest = line.trim_end().strip_prefix("HEXDB_IDENTITY ")?;
         let (json, tag) = rest.rsplit_once(' ')?;
         let tag = parse_mac(tag)?;
-        (mac(&self.discovery, &[b"identity", nonce.as_bytes(), json.as_bytes()]) == tag).then_some(json)
+        (mac(&self.sets[index].discovery, &[b"identity", nonce.as_bytes(), json.as_bytes()]) == tag).then_some(json)
     }
 
     // --- replication requests -------------------------------------------------
 
-    /// The signature header value for a request.
+    /// The signature header value for a request, with the current key.
     pub fn sign_request(&self, method: &str, path_and_query: &str, body: &[u8]) -> String {
+        self.sign_request_with(0, method, path_and_query, body)
+    }
+
+    /// The signature header value for a request, with key `index`.
+    pub fn sign_request_with(&self, index: usize, method: &str, path_and_query: &str, body: &[u8]) -> String {
         let ts = chrono::Utc::now().timestamp();
         let nonce = new_nonce();
         let body_hash = blake3::hash(body);
         let tag = mac(
-            &self.requests,
+            &self.sets[index].requests,
             &[b"request", ts.to_string().as_bytes(), nonce.as_bytes(), method.as_bytes(), path_and_query.as_bytes(), body_hash.as_bytes()],
         );
         format!("{}.{}.{}", ts, nonce, tag.to_hex())
     }
 
-    /// Verify a request signature (fresh, single use, and matching this request).
+    /// Verify a request signature made with any held key (fresh, single use,
+    /// and matching this request).
     pub fn verify_request(&self, header: &str, method: &str, path_and_query: &str, body: &[u8], seen: &NonceCache) -> bool {
         let mut parts = header.trim().split('.');
         let (Some(ts_text), Some(nonce), Some(tag), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
@@ -153,11 +199,13 @@ impl LatticeKeys {
             return false;
         }
         let body_hash = blake3::hash(body);
-        let expected = mac(
-            &self.requests,
-            &[b"request", ts_text.as_bytes(), nonce.as_bytes(), method.as_bytes(), path_and_query.as_bytes(), body_hash.as_bytes()],
-        );
-        expected == tag && seen.first_use(nonce)
+        let matched = self.sets.iter().any(|s| {
+            mac(
+                &s.requests,
+                &[b"request", ts_text.as_bytes(), nonce.as_bytes(), method.as_bytes(), path_and_query.as_bytes(), body_hash.as_bytes()],
+            ) == tag
+        });
+        matched && seen.first_use(nonce)
     }
 }
 
@@ -173,16 +221,41 @@ mod tests {
 
         let (hello, nonce) = keys.hello();
         assert!(stranger.check_hello(&hello, &NonceCache::default()).is_none(), "wrong key");
-        assert_eq!(keys.check_hello(&hello, &seen).as_deref(), Some(nonce.as_str()));
+        assert_eq!(keys.check_hello(&hello, &seen), Some((nonce.clone(), 0)));
         assert!(keys.check_hello(&hello, &seen).is_none(), "replayed hello");
         assert!(keys.check_hello("HEXDB_HELLO", &seen).is_none(), "old unauthenticated hello");
 
-        let reply = keys.identity_reply(&nonce, r#"{"id":"a"}"#);
-        assert_eq!(keys.check_identity(&nonce, &reply), Some(r#"{"id":"a"}"#));
-        assert!(keys.check_identity("another-nonce-0000000000000000000", &reply).is_none(), "bound to the nonce");
-        assert!(stranger.check_identity(&nonce, &reply).is_none());
+        let reply = keys.identity_reply(0, &nonce, r#"{"id":"a"}"#);
+        assert_eq!(keys.check_identity(0, &nonce, &reply), Some(r#"{"id":"a"}"#));
+        assert!(keys.check_identity(0, "another-nonce-0000000000000000000", &reply).is_none(), "bound to the nonce");
+        assert!(stranger.check_identity(0, &nonce, &reply).is_none());
         let forged = reply.replace(r#""a""#, r#""b""#);
-        assert!(keys.check_identity(&nonce, &forged).is_none(), "tampered JSON");
+        assert!(keys.check_identity(0, &nonce, &forged).is_none(), "tampered JSON");
+    }
+
+    #[test]
+    fn previous_keys_are_accepted_during_a_rotation() {
+        let (old, new) = ([1u8; 32], [2u8; 32]);
+        let rotated = LatticeKeys::with_previous(&[new, old]);
+        let legacy = LatticeKeys::new(&old);
+        let seen = NonceCache::default();
+
+        // A hex still on the old key is answered with the old key.
+        let (hello, nonce) = legacy.hello();
+        let (_, index) = rotated.check_hello(&hello, &seen).unwrap();
+        assert_eq!(index, 1);
+        let reply = rotated.identity_reply(index, &nonce, "{}");
+        assert_eq!(legacy.check_identity(0, &nonce, &reply), Some("{}"));
+
+        // The rotated hex probes an old hex with its previous key.
+        let (hello, nonce) = rotated.hello_with(1);
+        let (_, index) = legacy.check_hello(&hello, &seen).unwrap();
+        assert_eq!(rotated.check_identity(1, &nonce, &legacy.identity_reply(index, &nonce, "{}")), Some("{}"));
+
+        // Requests: either key verifies on the rotated hex; the old hex needs the old key.
+        assert!(rotated.verify_request(&legacy.sign_request("GET", "/x", b""), "GET", "/x", b"", &seen));
+        assert!(!legacy.verify_request(&rotated.sign_request("GET", "/x", b""), "GET", "/x", b"", &seen));
+        assert!(legacy.verify_request(&rotated.sign_request_with(1, "GET", "/x", b""), "GET", "/x", b"", &seen));
     }
 
     #[test]

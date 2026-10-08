@@ -121,6 +121,12 @@ pub struct TestOptions {
     pub discovery_interval_seconds: Option<u64>,
     /// Extra TOML appended to the config (whole sections only).
     pub extra_toml: String,
+    /// Extra `key = value` lines for the `[network]` section.
+    pub network_toml: String,
+    /// Extra `key = value` lines for the `[storage]` section.
+    pub storage_toml: String,
+    /// `storage.disk_mb` (default 1024).
+    pub disk_mb: Option<u64>,
     /// Don't configure an admin password (HexDB generates one) and don't sign in.
     pub no_admin_password: bool,
     /// Serve HTTPS with this certificate: (PEM chain, PEM key). The
@@ -253,6 +259,7 @@ lattice_name = "{lattice}"
 peers = [{peers}]
 scan_local_ports = false
 discovery_interval_seconds = {interval}
+{network_extra}
 
 [identity]
 role = "{role}"
@@ -264,11 +271,12 @@ vertex_integrity_check_frequency = 3600
 
 [storage]
 path = "./data"
-disk_mb = 1024
+disk_mb = {disk_mb}
 encryption_key = "{key}"
 previous_encryption_keys = [{previous}]
 compaction_frequency = 3600
 wal_flush_check_frequency = 3600
+{storage_extra}
 
 [ui]
 path = "./no-ui"
@@ -281,6 +289,9 @@ admin_email = "admin@example.com"
             key = self.options.encryption_key.as_deref().unwrap_or(TEST_ENCRYPTION_KEY),
             previous = self.options.previous_encryption_keys.iter().map(|k| format!("\"{}\"", k)).collect::<Vec<_>>().join(", "),
             admin = TEST_ADMIN_LOGIN,
+            network_extra = self.options.network_toml,
+            storage_extra = self.options.storage_toml,
+            disk_mb = self.options.disk_mb.unwrap_or(1024),
             password = if self.options.no_admin_password { "" } else { TEST_ADMIN_PASSWORD },
         ) + &self.options.extra_toml;
         let config = match &self.options.tls {

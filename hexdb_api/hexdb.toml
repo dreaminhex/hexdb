@@ -1,7 +1,9 @@
 [network]
 api_endpoint = "127.0.0.1:7700"
 discovery_endpoint = "127.0.0.1:7702"
-lattice_name = "Nebula Prime"
+# lattice_name: hexes with the same name form one lattice. Left out, the first
+# start generates a name (saved in the data directory); the admin UI's
+# "Add a hex" dialog shows the settings another hex needs to join.
 
 [identity]
 role = "auto" # auto | overseer | harvester | replicant

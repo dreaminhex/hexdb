@@ -1,0 +1,18 @@
+# Change data capture to Amazon Kinesis Data Streams. Partition key = document
+# ID, so changes to one document stay in order within a shard.
+#
+# Setup: `npm install` in this folder. Credentials come from the usual AWS
+# sources (environment, ~/.aws, instance role); with a clean plugin
+# environment, set them in [env] or use an instance/task role.
+id = "@streams/kinesis"
+name = "Amazon Kinesis"
+type = "stream"
+version = "1.0.0"
+description = "Puts every change on a Kinesis data stream."
+command = ["node", "index.mjs"]
+
+[env]
+AWS_REGION = "us-east-1"
+KINESIS_STREAM = "hexdb-changes"
+# AWS_ACCESS_KEY_ID = ""
+# AWS_SECRET_ACCESS_KEY = ""

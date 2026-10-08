@@ -8,8 +8,14 @@
 //
 // The WAL is split into segment files named after the first sequence number
 // they may contain (`wal/00000000000000000042.wal`). A flush rotates to a new
-// segment, writes SSTables, and only then deletes the older segments, so a
+// segment, writes SSTables, and only then retires the older segments, so a
 // crash at any point leaves every acknowledged write in a segment or an SSTable.
+//
+// Retired segments are moved to `wal/archive/` rather than deleted (unless
+// `storage.change_history_hours` is 0). They are never replayed; they are the
+// durable change history, read when a consumer of the change feed (a replica,
+// a plugin, `GET /changes`) asks for changes older than the in-memory feed
+// holds. The archive is pruned by age and size.
 //
 // Record framing: [u32 big-endian length][12-byte nonce][ciphertext].
 
@@ -42,6 +48,9 @@ const SEGMENT_EXTENSION: &str = "wal";
 pub struct WalRecord {
     pub seq: u64,
     pub op: WalOp,
+    /// When it was committed (epoch milliseconds; 0 in records from earlier builds).
+    #[serde(default)]
+    pub time: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -339,6 +348,136 @@ pub fn list_segments(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
     Ok(segments)
 }
 
+/// Folder of retired segments (the change history).
+pub const ARCHIVE_DIR: &str = "archive";
+
+/// Move WAL segments older than `seq` (now in SSTables) to the archive.
+pub fn archive_segments_before(dir: &Path, seq: u64) -> Result<usize> {
+    let archive = dir.join(ARCHIVE_DIR);
+    let mut moved = 0;
+    for (segment_seq, path) in list_segments(dir)? {
+        if segment_seq < seq {
+            fs::create_dir_all(&archive)?;
+            let target = archive.join(path.file_name().unwrap_or_default());
+            fs::rename(&path, &target).with_context(|| format!("Failed to archive {}", path.display()))?;
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        sync_dir(dir);
+        sync_dir(&archive);
+    }
+    Ok(moved)
+}
+
+/// Delete archived segments beyond the limits, oldest first, and any the key
+/// ring can no longer read (written with a key that has been removed).
+/// Returns how many were deleted.
+pub fn prune_archive(dir: &Path, keys: &crate::crypt::KeyRing, max_age: std::time::Duration, max_bytes: u64) -> Result<usize> {
+    let archive = dir.join(ARCHIVE_DIR);
+    let segments = list_segments(&archive)?;
+    let mut sizes: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    for (_, path) in &segments {
+        let meta = fs::metadata(path)?;
+        sizes.push((path.clone(), meta.len(), meta.modified().unwrap_or(std::time::SystemTime::now())));
+    }
+    let mut total: u64 = sizes.iter().map(|s| s.1).sum();
+    let now = std::time::SystemTime::now();
+    let mut deleted = 0;
+    // The newest segments are kept; history must stay contiguous, so only a prefix is removed.
+    let mut remove_prefix = 0;
+    for (i, (path, size, modified)) in sizes.iter().enumerate() {
+        let too_old = now.duration_since(*modified).unwrap_or_default() > max_age;
+        let too_big = total > max_bytes;
+        let unreadable = !first_record_readable(path, keys);
+        if too_old || too_big || unreadable {
+            remove_prefix = i + 1;
+            total = total.saturating_sub(*size);
+        } else {
+            break;
+        }
+    }
+    for (path, _, _) in sizes.iter().take(remove_prefix) {
+        fs::remove_file(path).with_context(|| format!("Failed to delete {}", path.display()))?;
+        deleted += 1;
+    }
+    if deleted > 0 {
+        sync_dir(&archive);
+    }
+    Ok(deleted)
+}
+
+fn first_record_readable(path: &Path, keys: &crate::crypt::KeyRing) -> bool {
+    let mut found = None;
+    let _ = read_segment(path, keys, false, &mut ReplayStats::default(), &mut |record| {
+        if found.is_none() {
+            found = Some(record.seq);
+        }
+        false
+    });
+    // An empty segment is readable (nothing to lose).
+    found.is_some() || fs::metadata(path).map(|m| m.len() == 0).unwrap_or(false)
+}
+
+/// Archived and live segments, oldest first.
+fn history_segments(dir: &Path) -> Result<Vec<(u64, PathBuf)>> {
+    let mut segments = list_segments(&dir.join(ARCHIVE_DIR))?;
+    segments.extend(list_segments(dir)?);
+    segments.sort_by_key(|(seq, _)| *seq);
+    Ok(segments)
+}
+
+/// Changes after this sequence number are on disk (archive or live WAL).
+pub fn history_floor(dir: &Path) -> Result<Option<u64>> {
+    Ok(history_segments(dir)?.first().map(|(seq, _)| seq.saturating_sub(1)))
+}
+
+/// One operation read back from the history.
+#[derive(Debug, Clone)]
+pub struct HistoryOp {
+    pub seq: u64,
+    pub time: i64,
+    pub op: WalOp,
+}
+
+/// Up to `limit` operations with `after < seq <= up_to`, oldest first, from
+/// the archive and the live WAL. `Ok(None)` if the history no longer reaches
+/// back to `after`.
+pub fn read_history(dir: &Path, keys: &crate::crypt::KeyRing, after: u64, up_to: u64, limit: usize) -> Result<Option<Vec<HistoryOp>>> {
+    let segments = history_segments(dir)?;
+    let Some((first, _)) = segments.first() else { return Ok(None) };
+    if after + 1 < *first {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for (i, (_, path)) in segments.iter().enumerate() {
+        // Skip segments that end before the cursor.
+        if let Some((next_start, _)) = segments.get(i + 1) {
+            if *next_start <= after + 1 {
+                continue;
+            }
+        }
+        let mut done = false;
+        read_segment(path, keys, false, &mut ReplayStats::default(), &mut |record| {
+            let time = record.time;
+            for (seq, op) in record.into_ops() {
+                if seq > up_to || out.len() >= limit {
+                    done = true;
+                    return false;
+                }
+                if seq > after {
+                    out.push(HistoryOp { seq, time, op });
+                }
+            }
+            true
+        })?;
+        if done {
+            break;
+        }
+    }
+    Ok(Some(out))
+}
+
 /// Delete WAL segments older than `seq` (whose contents are now in SSTables).
 pub fn delete_segments_before(dir: &Path, seq: u64) -> Result<usize> {
     let mut deleted = 0;
@@ -374,52 +513,62 @@ pub fn replay(dir: &Path, keys: &crate::crypt::KeyRing, mut apply: impl FnMut(Wa
 
     for (index, (_, path)) in segments.iter().enumerate() {
         stats.segments += 1;
-        let mut reader = io::BufReader::new(
-            File::open(path).with_context(|| format!("Failed to open {}", path.display()))?,
-        );
-
-        loop {
-            let mut len_buf = [0u8; 4];
-            match read_full(&mut reader, &mut len_buf)? {
-                ReadOutcome::Eof => break,
-                ReadOutcome::Partial => {
-                    note_torn_tail(path, index == last, &mut stats);
-                    break;
-                }
-                ReadOutcome::Full => {}
-            }
-
-            let len = u32::from_be_bytes(len_buf) as usize;
-            if !(NONCE_LEN + 16..=MAX_RECORD_LEN).contains(&len) {
-                // The framing is lost; nothing after this point can be trusted.
-                note_torn_tail(path, index == last, &mut stats);
-                break;
-            }
-
-            let mut payload = vec![0u8; len];
-            match read_full(&mut reader, &mut payload)? {
-                ReadOutcome::Full => {}
-                _ => {
-                    note_torn_tail(path, index == last, &mut stats);
-                    break;
-                }
-            }
-
-            match decode_record(keys, &payload) {
-                Ok(record) => {
-                    stats.records += 1;
-                    stats.max_seq = stats.max_seq.max(record.last_seq());
-                    apply(record);
-                }
-                Err(e) => {
-                    stats.corrupt_records += 1;
-                    error!("❌ Skipping unreadable WAL record in {}: {}", path.display(), e);
-                }
-            }
-        }
+        read_segment(path, keys, index == last, &mut stats, &mut |record| {
+            apply(record);
+            true
+        })?;
     }
 
     Ok(stats)
+}
+
+/// Read one segment's records in order, passing each to `apply` until it
+/// returns false. `is_last` only affects how a torn tail is reported (a crash
+/// mid-write is expected in the newest segment).
+fn read_segment(path: &Path, keys: &crate::crypt::KeyRing, is_last: bool, stats: &mut ReplayStats, apply: &mut dyn FnMut(WalRecord) -> bool) -> Result<()> {
+    let mut reader = io::BufReader::new(File::open(path).with_context(|| format!("Failed to open {}", path.display()))?);
+    loop {
+        let mut len_buf = [0u8; 4];
+        match read_full(&mut reader, &mut len_buf)? {
+            ReadOutcome::Eof => break,
+            ReadOutcome::Partial => {
+                note_torn_tail(path, is_last, stats);
+                break;
+            }
+            ReadOutcome::Full => {}
+        }
+
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if !(NONCE_LEN + 16..=MAX_RECORD_LEN).contains(&len) {
+            // The framing is lost; nothing after this point can be trusted.
+            note_torn_tail(path, is_last, stats);
+            break;
+        }
+
+        let mut payload = vec![0u8; len];
+        match read_full(&mut reader, &mut payload)? {
+            ReadOutcome::Full => {}
+            _ => {
+                note_torn_tail(path, is_last, stats);
+                break;
+            }
+        }
+
+        match decode_record(keys, &payload) {
+            Ok(record) => {
+                stats.records += 1;
+                stats.max_seq = stats.max_seq.max(record.last_seq());
+                if !apply(record) {
+                    break;
+                }
+            }
+            Err(e) => {
+                stats.corrupt_records += 1;
+                error!("❌ Skipping unreadable WAL record in {}: {}", path.display(), e);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn note_torn_tail(path: &Path, is_last_segment: bool, stats: &mut ReplayStats) {
@@ -495,6 +644,7 @@ mod tests {
     fn put(seq: u64) -> WalRecord {
         WalRecord {
             seq,
+            time: 1000 + seq as i64,
             op: WalOp::Put(Document {
                 id: Ulid::new(),
                 tessellation: "t".into(),
@@ -532,6 +682,47 @@ mod tests {
         let mut seqs = Vec::new();
         replay(&dir, &key(), |r| seqs.push(r.seq)).unwrap();
         assert_eq!(seqs, vec![4]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn archived_segments_serve_history_and_are_pruned() {
+        let dir = temp_dir();
+        let wal = WalWriter::start(&dir, &key(), 0, true, 1).unwrap();
+        for seq in 1..=3 {
+            wal.append(put(seq)).await.unwrap().wait().await.unwrap();
+        }
+        wal.rotate(4).await.unwrap().await.unwrap().unwrap();
+        for seq in 4..=5 {
+            wal.append(put(seq)).await.unwrap().wait().await.unwrap();
+        }
+        wal.rotate(6).await.unwrap().await.unwrap().unwrap();
+        wal.append(put(6)).await.unwrap().wait().await.unwrap();
+
+        // Retire the first two segments: they leave the replayed set but stay readable as history.
+        assert_eq!(archive_segments_before(&dir, 6).unwrap(), 2);
+        let mut replayed = Vec::new();
+        replay(&dir, &key(), |r| replayed.push(r.seq)).unwrap();
+        assert_eq!(replayed, vec![6]);
+        let seqs = |after, up_to, limit| -> Option<Vec<u64>> {
+            read_history(&dir, &key(), after, up_to, limit).unwrap().map(|ops| ops.iter().map(|o| o.seq).collect())
+        };
+        assert_eq!(seqs(0, 99, 100), Some(vec![1, 2, 3, 4, 5, 6]));
+        assert_eq!(seqs(2, 99, 2), Some(vec![3, 4]), "limit, across segments");
+        assert_eq!(seqs(3, 5, 100), Some(vec![4, 5]), "up_to");
+        assert_eq!(read_history(&dir, &key(), 0, 99, 1).unwrap().unwrap()[0].time, 1001);
+        assert_eq!(history_floor(&dir).unwrap(), Some(0));
+
+        // Size limit: the oldest archived segment goes first, keeping history contiguous.
+        let first_size = fs::metadata(dir.join(ARCHIVE_DIR).join("00000000000000000001.wal")).unwrap().len();
+        let total: u64 = list_segments(&dir.join(ARCHIVE_DIR)).unwrap().iter().map(|(_, p)| fs::metadata(p).unwrap().len()).sum();
+        assert_eq!(prune_archive(&dir, &key(), std::time::Duration::from_secs(3600), total - first_size).unwrap(), 1);
+        assert_eq!(seqs(0, 99, 100), None, "no longer reaches back");
+        assert_eq!(seqs(3, 99, 100), Some(vec![4, 5, 6]));
+        // A key that can't read the archive anymore prunes it.
+        let other = crate::crypt::KeyRing::new(&[9u8; 32], &[]);
+        assert_eq!(prune_archive(&dir, &other, std::time::Duration::from_secs(3600), u64::MAX).unwrap(), 1);
+        wal.shutdown().await.unwrap();
         fs::remove_dir_all(&dir).ok();
     }
 

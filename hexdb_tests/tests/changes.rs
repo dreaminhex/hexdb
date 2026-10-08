@@ -144,8 +144,17 @@ fn server_sent_events_stream_backlog_and_live_changes() -> Result<()> {
 }
 
 #[test]
-fn history_older_than_startup_is_gone() -> Result<()> {
+fn history_survives_restarts_unless_disabled() -> Result<()> {
+    // With the change history (the default), older changes are read from disk.
     let mut server = TestServer::start()?;
+    server.insert("notes", &json!({ "n": 1 }))?;
+    server.restart()?;
+    let res = server.request(Method::GET, "/changes?after=0", None, &[])?;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    assert_eq!(res.body["changes"][0]["document"]["n"], 1);
+
+    // Without it, history starts at startup.
+    let mut server = TestServer::start_with(hexdb_tests::TestOptions { storage_toml: "change_history_hours = 0".into(), ..Default::default() })?;
     server.insert("notes", &json!({ "n": 1 }))?;
     server.restart()?;
     let res = server.request(Method::GET, "/changes?after=0", None, &[])?;

@@ -12,9 +12,13 @@
 // Every document is reachable by its ID (the primary key, a ULID that HexDB
 // generates and that sorts by creation time), so no index is needed for that.
 //
-// Index definitions are stored in the catalog; index contents live in memory
-// and are rebuilt when HexDB starts. Writes update indexes inside the commit,
-// so queries always see their own writes.
+// Index definitions are stored in the catalog; index contents live in memory.
+// After each flush and at shutdown, every index is saved as an encrypted
+// snapshot (`indexes/<tessellation>/<index>.hxi`) together with the sequence
+// number it reflects. At startup a snapshot is loaded and brought up to date
+// from the SSTables written after it; an index without a usable snapshot is
+// rebuilt from every document. Writes update indexes inside the commit, so
+// queries always see their own writes.
 //
 // Indexes only narrow down candidates: the query planner returns a superset of
 // the matching document IDs, and the full filter is still checked on each
@@ -23,7 +27,7 @@
 use crate::{
     document::Document,
     engine::EngineError,
-    filter::{resolve, strings, tokenize, Filter, Node, Op},
+    filter::{resolve, strings, Filter, Node, Op},
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -60,6 +64,10 @@ pub struct IndexDef {
     /// missing every indexed field are not checked.
     #[serde(default)]
     pub unique: bool,
+    /// Text indexes only: how text is split into words (see `crate::analysis`;
+    /// default "standard").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyzer: Option<String>,
 }
 
 fn invalid(message: impl Into<String>) -> anyhow::Error {
@@ -90,6 +98,12 @@ impl IndexDef {
         if self.kind == IndexKind::Text && self.unique {
             return Err(invalid("Text indexes can't be unique."));
         }
+        if self.kind == IndexKind::Field && self.analyzer.is_some() {
+            return Err(invalid("Only text indexes have an analyzer."));
+        }
+        if self.analyzer.as_deref() == Some("") || self.analyzer.as_deref() == Some("standard") {
+            self.analyzer = None;
+        }
         if self.name.is_empty() {
             let suffix = if self.kind == IndexKind::Text { "_text" } else { "" };
             self.name = format!("{}{}", self.fields.join("_").replace('.', "_"), suffix);
@@ -106,7 +120,7 @@ impl IndexDef {
 // ---------------------------------------------------------------------------
 
 /// One indexed value, ordered like query sorting: null < bool < number < string.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum KeyPart {
     Null,
     Bool(bool),
@@ -196,6 +210,7 @@ pub(crate) struct FieldIndex {
 
 pub(crate) struct TextIndex {
     paths: Vec<Vec<String>>,
+    analyzer: crate::analysis::Analyzer,
     words: HashMap<String, BTreeSet<Ulid>>,
     by_doc: HashMap<Ulid, Vec<String>>,
 }
@@ -210,6 +225,33 @@ pub(crate) struct Index {
     pub(crate) data: IndexData,
     /// False while the index is being built; the planner doesn't use it yet.
     pub(crate) ready: bool,
+}
+
+/// Bump when what an index stores for a document changes (keys or text
+/// tokens), so snapshots from older builds are rebuilt instead of trusted.
+pub(crate) const SNAPSHOT_VERSION: u32 = 1;
+
+/// An index's contents at a sequence number, saved so startup doesn't have
+/// to rebuild it from every document (see `engine::indexing`).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct IndexSnapshot {
+    pub version: u32,
+    pub tessellation: String,
+    pub def: IndexDef,
+    /// Every write up to and including this sequence number is reflected.
+    pub seq: u64,
+    /// A text index's analyzer pipeline when the snapshot was taken.
+    #[serde(default)]
+    pub analysis: String,
+    data: SnapshotData,
+}
+
+#[derive(Serialize, Deserialize)]
+enum SnapshotData {
+    /// (document, keys, irregular)
+    Field(Vec<(Ulid, Vec<Key>, bool)>),
+    /// (document, words)
+    Text(Vec<(Ulid, Vec<String>)>),
 }
 
 /// Index statistics for the API.
@@ -229,7 +271,13 @@ fn split(path: &str) -> Vec<String> {
 }
 
 impl Index {
+    #[cfg(test)]
     pub(crate) fn new(def: IndexDef) -> Index {
+        Self::with_analyzer(def, crate::analysis::Analyzer::standard())
+    }
+
+    /// An index; text indexes split words with `analyzer`.
+    pub(crate) fn with_analyzer(def: IndexDef, analyzer: crate::analysis::Analyzer) -> Index {
         let paths = def.fields.iter().map(|f| split(f)).collect();
         let data = match def.kind {
             IndexKind::Field => IndexData::Field(FieldIndex {
@@ -239,9 +287,51 @@ impl Index {
                 by_doc: HashMap::new(),
                 irregular: HashSet::new(),
             }),
-            IndexKind::Text => IndexData::Text(TextIndex { paths, words: HashMap::new(), by_doc: HashMap::new() }),
+            IndexKind::Text => IndexData::Text(TextIndex { paths, analyzer, words: HashMap::new(), by_doc: HashMap::new() }),
         };
         Index { def, data, ready: false }
+    }
+
+    /// The index's contents, for a snapshot.
+    pub(crate) fn snapshot(&self, tessellation: &str, seq: u64) -> IndexSnapshot {
+        let data = match &self.data {
+            IndexData::Field(f) => SnapshotData::Field(f.by_doc.iter().map(|(id, keys)| (*id, keys.clone(), f.irregular.contains(id))).collect()),
+            IndexData::Text(t) => SnapshotData::Text(t.by_doc.iter().map(|(id, words)| (*id, words.clone())).collect()),
+        };
+        let analysis = match &self.data {
+            IndexData::Text(t) => t.analyzer.pipeline(),
+            IndexData::Field(_) => String::new(),
+        };
+        IndexSnapshot { version: SNAPSHOT_VERSION, tessellation: tessellation.to_string(), def: self.def.clone(), seq, analysis, data }
+    }
+
+    /// An index restored from a snapshot (not ready until it is caught up).
+    pub(crate) fn from_snapshot(snapshot: IndexSnapshot, analyzer: crate::analysis::Analyzer) -> Index {
+        let mut index = Index::with_analyzer(snapshot.def, analyzer);
+        match (&mut index.data, snapshot.data) {
+            (IndexData::Field(f), SnapshotData::Field(docs)) => {
+                for (id, keys, irregular) in docs {
+                    for key in &keys {
+                        f.entries.entry(key.clone()).or_default().insert(id);
+                    }
+                    if irregular {
+                        f.irregular.insert(id);
+                    }
+                    f.by_doc.insert(id, keys);
+                }
+            }
+            (IndexData::Text(t), SnapshotData::Text(docs)) => {
+                for (id, words) in docs {
+                    for w in &words {
+                        t.words.entry(w.clone()).or_default().insert(id);
+                    }
+                    t.by_doc.insert(id, words);
+                }
+            }
+            // The kind didn't match the definition: leave it empty (it will be rebuilt).
+            _ => {}
+        }
+        index
     }
 
     pub(crate) fn info(&self) -> IndexInfo {
@@ -352,7 +442,7 @@ impl Index {
                         strings(v, &mut texts);
                     }
                 }
-                let words: BTreeSet<String> = texts.iter().flat_map(|s| tokenize(s)).collect();
+                let words: BTreeSet<String> = texts.iter().flat_map(|s| t.analyzer.index_tokens(s)).collect();
                 for w in &words {
                     t.words.entry(w.clone()).or_default().insert(doc.id);
                 }
@@ -590,13 +680,12 @@ impl Indexes {
         }
     }
 
-    /// The text index fields of a tessellation, if it has a text index.
-    pub(crate) fn text_fields(&self, tess: &str) -> Option<Vec<String>> {
-        self.by_tessellation
-            .get(tess)?
-            .iter()
-            .find(|i| i.def.kind == IndexKind::Text)
-            .map(|i| i.def.fields.clone())
+    /// The fields and analyzer of a tessellation's text index, if it has one.
+    pub(crate) fn text_index(&self, tess: &str) -> Option<(Vec<String>, crate::analysis::Analyzer)> {
+        self.by_tessellation.get(tess)?.iter().find_map(|i| match &i.data {
+            IndexData::Text(t) => Some((i.def.fields.clone(), t.analyzer.clone())),
+            IndexData::Field(_) => None,
+        })
     }
 }
 
@@ -620,7 +709,7 @@ mod tests {
     }
 
     fn field(fields: &[&str]) -> IndexDef {
-        IndexDef { name: String::new(), kind: IndexKind::Field, fields: fields.iter().map(|s| s.to_string()).collect(), unique: false }
+        IndexDef { name: String::new(), kind: IndexKind::Field, fields: fields.iter().map(|s| s.to_string()).collect(), unique: false, analyzer: None }
     }
 
     /// The planner's candidates always include every true match.
@@ -678,7 +767,7 @@ mod tests {
             doc(json!({ "country": "NZ", "city": "Wellington", "bio": "rust" })),
             doc(json!({ "country": "AU", "city": "Auckland", "bio": "Python" })),
         ];
-        let text = IndexDef { name: String::new(), kind: IndexKind::Text, fields: vec!["bio".into()], unique: false };
+        let text = IndexDef { name: String::new(), kind: IndexKind::Text, fields: vec!["bio".into()], unique: false, analyzer: None };
         let indexes = vec![ready(field(&["country", "city"]), &docs), ready(text, &docs)];
         assert_eq!(indexes[0].def.name, "country_city");
         assert_eq!(indexes[1].def.name, "bio_text");

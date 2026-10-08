@@ -1,9 +1,22 @@
-# plugins/streams/kafka/plugin.toml
-name = "Kafka Stream Output"
+# Change data capture to Apache Kafka (or Redpanda, Confluent Cloud, Amazon
+# MSK): every committed change becomes a Kafka message, keyed by document ID
+# so changes to one document stay in order within a partition.
+#
+# Setup: run `npm install` in this folder, set the [env] values, and enable
+# the plugin in plugins.json.
 id = "@streams/kafka"
+name = "Kafka"
 type = "stream"
-entry = "main.rs"
-description = "Kafka Stream Output Plugin"
-version = "0.1.0"# Not implemented yet: add `command = [...]` (a process that reads change
-# lines on stdin and produces them to Kafka) or a [webhook] section, then
-# enable it in plugins.json. See hexdb_core/src/plugins.rs for the protocol.
+version = "1.0.0"
+description = "Produces every change to a Kafka topic."
+command = ["node", "index.mjs"]
+# tessellations = ["orders", "customers"]
+
+[env]
+KAFKA_BROKERS = "localhost:9092"          # comma-separated
+KAFKA_TOPIC = "hexdb.changes"             # use {tessellation} for one topic per tessellation
+KAFKA_CLIENT_ID = "hexdb"
+# KAFKA_SASL_MECHANISM = "plain"          # plain, scram-sha-256 or scram-sha-512
+# KAFKA_USERNAME = ""
+# KAFKA_PASSWORD = ""
+# KAFKA_SSL = "true"

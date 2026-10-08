@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod lattice;
+
 #[derive(Parser)]
 #[command(name = "hexdb", about = " ⌬  HexDB CLI", version)]
 struct Cli {
@@ -65,6 +67,37 @@ enum Commands {
         #[command(subcommand)]
         sub: PluginCommand,
     },
+    /// Run more hexes on this machine that join this lattice
+    Lattice {
+        #[command(subcommand)]
+        sub: LatticeCommand,
+    },
+    /// Print a new random key for storage.encryption_key or network.lattice_secret
+    Secret,
+}
+
+#[derive(Subcommand)]
+enum LatticeCommand {
+    /// Start hexes that join the lattice of the hex this config describes
+    Spawn {
+        /// How many hexes to start
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Their role: harvester (read replica that can be elected), replicant (never elected), or auto
+        #[arg(long, default_value = "harvester", value_parser = lattice::role)]
+        role: String,
+        /// Path to the hexdb_api server binary. Defaults to the one next to this CLI, then PATH.
+        #[arg(long, env = "HEXDB_SERVER_BIN")]
+        server_bin: Option<PathBuf>,
+    },
+    /// List the hexes started with `spawn`
+    List,
+    /// Stop the hexes started with `spawn`
+    Stop {
+        /// Also delete their folders and data
+        #[arg(long)]
+        remove: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -117,6 +150,18 @@ async fn main() -> Result<()> {
             PluginCommand::Remove { id } => remove_plugin(&id),
             PluginCommand::List => list_plugins(),
         },
+        Commands::Lattice { sub } => {
+            let config = load(config_path)?;
+            match sub {
+                LatticeCommand::Spawn { count, role, server_bin } => lattice::spawn(&config, count.max(1), &role, &resolve_server_bin(server_bin)).await,
+                LatticeCommand::List => lattice::list(&config),
+                LatticeCommand::Stop { remove } => lattice::stop(&config, remove).await,
+            }
+        }
+        Commands::Secret => {
+            println!("{}", lattice::new_secret());
+            Ok(())
+        }
     }
 }
 
@@ -428,9 +473,9 @@ mod platform {
         Ok(())
     }
 
-    /// The executable path and (on Linux) start time in epoch ms of a process.
+    /// The executable path and start time in epoch ms of a process.
+    #[cfg(target_os = "linux")]
     pub fn process_identity(pid: u32) -> Option<(String, Option<i64>)> {
-        #[cfg(target_os = "linux")]
         {
             let exe = std::fs::read_link(format!("/proc/{}/exe", pid)).ok()?.display().to_string();
             // Field 22 of /proc/<pid>/stat is the start time in clock ticks after boot.
@@ -445,9 +490,13 @@ mod platform {
                 .parse()
                 .ok()?;
             // Linux reports USER_HZ, which is 100 on every mainstream build.
-            return Some((exe, Some(boot * 1000 + ticks * 10)));
+            Some((exe, Some(boot * 1000 + ticks * 10)))
         }
-        #[cfg(not(target_os = "linux"))]
+    }
+
+    /// The executable path of a process (no start time outside Linux).
+    #[cfg(not(target_os = "linux"))]
+    pub fn process_identity(pid: u32) -> Option<(String, Option<i64>)> {
         {
             let output = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output().ok()?;
             let exe = String::from_utf8_lossy(&output.stdout).trim().to_string();

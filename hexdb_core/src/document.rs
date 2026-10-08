@@ -175,7 +175,7 @@ impl FieldValue {
 }
 
 /// Field names that are metadata in API responses and are ignored in request bodies.
-pub const RESERVED_FIELDS: &[&str] = &["id", "_expires_at"];
+pub const RESERVED_FIELDS: &[&str] = &["id", "_expires_at", "_schema"];
 
 /// True for fields that are ignored when writing documents.
 pub fn is_reserved_field(name: &str) -> bool {
