@@ -716,6 +716,21 @@ impl HexDBEngine {
             .iter()
             .map(|doc| BatchItem { key: DocKey::new(tess, doc.id), op: WalOp::Put(doc.clone()), expected_seq: None })
             .collect();
+        self.stored_forms(items)
+    }
+
+    /// Apply the tessellation's schema now (validation, defaults, the
+    /// `_schema` stamp) so the response shows exactly what is stored. The
+    /// commit applies it again, which changes nothing.
+    fn stored_forms(&self, mut items: Vec<BatchItem>) -> Result<(Vec<BatchItem>, Vec<Document>)> {
+        self.apply_schemas(&mut items)?;
+        let docs = items
+            .iter()
+            .filter_map(|item| match &item.op {
+                WalOp::Put(doc) => Some(doc.clone()),
+                _ => None,
+            })
+            .collect();
         Ok((items, docs))
     }
 
@@ -726,7 +741,6 @@ impl HexDBEngine {
         ttl: Option<i64>,
     ) -> Result<(Vec<BatchItem>, Vec<Document>)> {
         let mut items = Vec::with_capacity(targets.len());
-        let mut docs = Vec::with_capacity(targets.len());
         let mut missing = Vec::new();
 
         for (id, id_str, modification) in targets {
@@ -745,14 +759,13 @@ impl HexDBEngine {
             if ttl.is_some() {
                 doc.ttl = ttl;
             }
-            items.push(BatchItem { key, op: WalOp::Put(doc.clone()), expected_seq: Some(seq) });
-            docs.push(doc);
+            items.push(BatchItem { key, op: WalOp::Put(doc), expected_seq: Some(seq) });
         }
 
         if !missing.is_empty() {
             return Err(not_found_ids(tess, &missing));
         }
-        Ok((items, docs))
+        self.stored_forms(items)
     }
 
     async fn plan_delete(&self, tess: &str, id: Ulid) -> Result<(Vec<BatchItem>, bool)> {

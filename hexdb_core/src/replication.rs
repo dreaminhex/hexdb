@@ -183,9 +183,22 @@ pub struct ChangeBatch {
     pub last_seq: u64,
     /// The Overseer's latest published sequence number.
     pub published_seq: u64,
+    /// A fingerprint of the Overseer's catalog (tessellations, index
+    /// definitions, schemas). When it changes, the replica re-reads the
+    /// catalog at once instead of waiting for its periodic check.
+    #[serde(default)]
+    pub catalog: String,
 }
 
 impl HexDBEngine {
+    /// Fingerprint of what replicas copy from the catalog (see `ChangeBatch::catalog`).
+    pub fn catalog_fingerprint(&self) -> String {
+        let details: Vec<(String, crate::catalog::TessellationInfo)> =
+            self.tessellation_details().into_iter().filter(|(name, _)| name != REPLICATION_TESSELLATION).collect();
+        let bytes = serde_json::to_vec(&details).unwrap_or_default();
+        blake3::hash(&bytes).to_hex()[..16].to_string()
+    }
+
     /// Snapshot metadata. The sequence number is taken first, so every change
     /// after it is either in the documents read afterwards or in the feed.
     pub fn snapshot_meta(&self) -> SnapshotMeta {
@@ -235,6 +248,8 @@ struct Session {
     /// Documents whose snapshot version is newer than the snapshot sequence.
     guard: HashMap<DocKey, u64>,
     last_catalog: std::time::Instant,
+    /// The Overseer's catalog fingerprint as of the last catalog sync.
+    catalog_seen: String,
 }
 
 struct Follower {
@@ -329,6 +344,7 @@ impl Follower {
                     cursor: cursor.applied_seq,
                     guard: HashMap::new(),
                     last_catalog: std::time::Instant::now() - CATALOG_EVERY,
+                    catalog_seen: String::new(),
                 });
                 return Ok(Duration::ZERO);
             }
@@ -459,6 +475,7 @@ impl Follower {
             cursor: meta.seq,
             guard,
             last_catalog: std::time::Instant::now(),
+            catalog_seen: String::new(),
         });
         Ok(())
     }
@@ -488,6 +505,15 @@ impl Follower {
             self.session = None;
             return Ok(Duration::ZERO);
         }
+        // A new tessellation, index or schema version on the Overseer: copy it now.
+        if !batch.catalog.is_empty() && batch.catalog != session.catalog_seen {
+            let seen = batch.catalog.clone();
+            self.sync_catalog(&base).await?;
+            if let Some(s) = self.session.as_mut() {
+                s.catalog_seen = seen;
+            }
+        }
+        let session = self.session.as_mut().unwrap();
 
         let engine = self.engine.clone();
         let mut writes = Vec::new();

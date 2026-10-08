@@ -140,3 +140,39 @@ fn an_overseer_without_quorum_refuses_writes() -> Result<()> {
     wait_until(Duration::from_secs(30), "quorum loss", || Ok(overseer.request(Method::POST, "/notes", Some(&json!({ "n": 3 })), &[])?.status == 503))?;
     Ok(())
 }
+
+#[test]
+fn schemas_and_indexes_reach_every_hex_promptly() -> Result<()> {
+    let ports = [TestServer::free_port()?, TestServer::free_port()?];
+    let overseer = TestServer::start_with(pair(ports, 0, 4096, ""))?;
+    let replica = TestServer::start_with(pair(ports, 1, 1024, ""))?;
+    let first = overseer.insert("customers", &json!({ "email": "ada@example.com", "name": "Ada" }))?;
+    wait_until(Duration::from_secs(30), "the first sync", || Ok(replica.get_doc("customers", &first)?.is_some()))?;
+
+    // A schema and an index registered on the Overseer...
+    let schema = json!({ "fields": { "email": { "type": "string", "required": true }, "name": { "type": "string" } }, "additional_fields": true });
+    assert_eq!(overseer.request(Method::POST, "/tessellations/customers/schemas", Some(&schema), &[])?.status.as_u16(), 201);
+    assert_eq!(overseer.request(Method::POST, "/tessellations/customers/indexes", Some(&json!({ "fields": ["email"], "unique": true })), &[])?.status.as_u16(), 201);
+
+    // ...reach the replica well within the periodic catalog check (15 s).
+    let started = Instant::now();
+    wait_until(Duration::from_secs(10), "the schema and index on the replica", || {
+        let schemas = replica.request(Method::GET, "/tessellations/customers/schemas", None, &[])?.body;
+        let indexes = replica.request(Method::GET, "/tessellations/customers/indexes", None, &[])?.body;
+        let has_index = indexes.as_array().or_else(|| indexes["indexes"].as_array()).is_some_and(|l| l.iter().any(|i| i["name"] == "email"));
+        Ok(schemas["current"] == 1 && has_index)
+    })?;
+    assert!(started.elapsed() < Duration::from_secs(10));
+
+    // The replica's queries use the index; writes through it obey the schema
+    // (forwarded to the Overseer, which validates them).
+    let q = replica.request(Method::POST, "/customers/_query", Some(&json!({ "filter": { "email": "ada@example.com" } })), &[])?;
+    assert_eq!(q.body["plan"]["indexes"], json!(["email"]), "{}", q.body);
+    let bad = replica.request(Method::POST, "/customers", Some(&json!({ "name": "no email" })), &[])?;
+    assert_eq!(bad.status.as_u16(), 422, "{}", bad.body);
+    assert_eq!(bad.body["error"]["code"], "schema_violation");
+    let good = replica.request(Method::POST, "/customers", Some(&json!({ "email": "grace@example.com" })), &[])?;
+    assert_eq!(good.status.as_u16(), 201, "{}", good.body);
+    assert_eq!(good.body["_schema"], 1, "stamped with the lattice's schema version: {}", good.body);
+    Ok(())
+}

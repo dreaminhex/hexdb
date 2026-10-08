@@ -185,7 +185,9 @@ fn decrypt_with(cipher: &Aes256Gcm, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> 
 /// Decodes the configured storage encryption key.
 /// The value must look like `base64:<base64 data>` and decode to exactly 32 bytes (AES-256).
 pub fn decode_encryption_key(value: &str) -> Result<[u8; ENCRYPTION_KEY_LEN]> {
-    const HINT: &str = "Generate one with `openssl rand -base64 32` and set storage.encryption_key = \"base64:<value>\".";
+    const HINT: &str = "Generate one with `hexdb secret` (or `openssl rand -base64 32`, adding the base64: prefix) and put it in hexdb.local.toml next to hexdb.toml:
+  [storage]
+  encryption_key = \"base64:<value>\"";
 
     let value = value.trim();
     if value.is_empty() {

@@ -1109,6 +1109,8 @@ Every hex keeps a full copy. A replica:
 - After an Overseer restart the history is the same, so replicas resume from their cursor, reading older changes from the Overseer's change history if needed.
 - After a failover the new Overseer has a different history, so replicas take a full sync from it.
 
+**Schemas, indexes and tessellations.** Replicas copy these definitions from the Overseer's catalog. Each change-feed response carries a fingerprint of the catalog, and a replica re-reads the catalog as soon as the fingerprint changes. A new schema version or index is therefore on every hex within one poll (a few seconds), and a replica that takes over as Overseer enforces the same schemas. A periodic check every 15 seconds backs this up.
+
 **Progress.** Each poll for changes after N acknowledges N, which gives the Overseer each replica's exact position. `/status` shows the lag per replica, and the dashboard's lattice card shows it too.
 
 **Reads and writes.** Replicas serve reads. A write sent to a replica is forwarded to the Overseer (`replication.forward_writes`, default true), signed with the lattice key, and the response carries `X-HexDB-Forwarded-To`. With forwarding off, the write fails with 421 `read_only_replica`, naming the Overseer.
@@ -1138,13 +1140,16 @@ On the Dashboard, "Add a hex" (administrators, password required) shows:
 
 The lattice name is `network.lattice_name`. When it's left empty on the first hex, HexDB generates a name (an adjective and a noun) and saves it in the catalog. Every other hex must use the same name.
 
-To try a lattice on one machine:
+To try a lattice on one machine, either start a separate demo lattice or add hexes to your own server:
 
 ```bash
+node scripts/lattice-demo.mjs          # three new hexes on 7800/7810/7820 with sample data; type stop N / start N / list / quit
 hexdb lattice spawn --count 2          # two Harvesters joining the lattice of the hex in ./hexdb.toml
 hexdb lattice list
 hexdb lattice stop --remove            # stop them and delete their folders
 ```
+
+In the demo, `stop 1` stops the Overseer. Within a few seconds another hex is elected, and the remaining replica takes a full sync from it, because the new Overseer has its own change history. The stopped hex shows as "lost" until `start 1` brings it back as a replica.
 
 Spawned hexes live in `.hexdb-local/hex-N/` next to the config, on free ports, with the same lattice name and secret (or storage key), and the main hex as a seed.
 

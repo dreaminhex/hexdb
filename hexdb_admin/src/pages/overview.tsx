@@ -439,9 +439,16 @@ function LatticeCard({ status }: { status: Status }) {
                 {!hex.is_self && hex.last_seen && <> · seen {formatAgo(hex.last_seen)}</>}
               </div>
             </div>
-            <Badge variant={hex.role === "Overseer" ? "default" : "secondary"} title={`preference: ${hex.preference}`}>
-              {hex.role}
-            </Badge>
+            {hex.status === "active" ? (
+              <Badge variant={hex.role === "Overseer" ? "default" : "secondary"} title={`preference: ${hex.preference}`}>
+                {hex.role}
+              </Badge>
+            ) : (
+              // A lost hex's role is only what it was when last seen; another hex may hold it now.
+              <Badge variant="outline" className="text-muted-foreground" title={`Last seen as ${hex.role}`}>
+                {hex.status}
+              </Badge>
+            )}
           </div>
         ))}
         {lattice.hexes.length === 1 ? (

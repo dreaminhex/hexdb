@@ -122,7 +122,14 @@ pub async fn changes(
         let taken = engine.changes_after(params.after, limit).await.map_err(gone)?;
         let last_seq = taken.last().map_or(params.after, |c| c.seq);
         let changes = taken.iter().filter(|c| c.tessellation != REPLICATION_TESSELLATION).map(|c| (**c).clone()).collect();
-        return Ok(Json(ChangeBatch { source_id: engine.history_id(), changes, last_seq, published_seq: engine.changes.published_seq() }).into_response());
+        return Ok(Json(ChangeBatch {
+            source_id: engine.history_id(),
+            changes,
+            last_seq,
+            published_seq: engine.changes.published_seq(),
+            catalog: engine.catalog_fingerprint(),
+        })
+        .into_response());
     }
     loop {
         let (backlog, mut receiver) = engine.changes.follow(params.after).map_err(gone)?;
@@ -139,6 +146,7 @@ pub async fn changes(
                 changes,
                 last_seq,
                 published_seq: engine.changes.published_seq(),
+                catalog: engine.catalog_fingerprint(),
             })
             .into_response());
         }

@@ -25,45 +25,132 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 
 ## Quick start
 
-### With Docker
+From a fresh clone to a running server and the admin UI takes five steps. Every command is run from the repository root unless a step says otherwise. On Windows, use PowerShell: Git Bash ships its own `link.exe`, which hides the Visual C++ linker and breaks Rust builds.
 
-```bash
-docker build -t hexdb .
-docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
-  -e HEXDB_STORAGE__ENCRYPTION_KEY="base64:$(openssl rand -base64 32)" hexdb
+### 1. Install the prerequisites
+
+You need Git, Rust (stable), Node.js 22 or later, and a C toolchain.
+
+**Windows** (PowerShell; open a new terminal after installing):
+
+```powershell
+winget install --id Git.Git -e
+winget install --id Rustlang.Rustup -e
+winget install --id OpenJS.NodeJS.LTS -e
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 ```
 
-The first start creates an administrator and prints a generated password in the container log (`docker logs <container> | grep password`). Open http://localhost:7700/ui/ and sign in. Keep the encryption key: the data can't be read without it.
-
-`docker compose up -d` starts a three-hex lattice instead; see the comments at the top of [docker-compose.yml](docker-compose.yml).
-
-### From source
-
-You need Rust (stable) and Node.js 22 or later. On Windows, also install the Visual Studio Build Tools ("Desktop development with C++").
+**Linux** (Debian and Ubuntu; on Fedora use `sudo dnf install gcc git pkg-config openssl-devel`):
 
 ```bash
+sudo apt update && sudo apt install -y build-essential git pkg-config libssl-dev curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+```
+
+Then install Node.js 22 or later, from [nodejs.org](https://nodejs.org/) or with a version manager such as `nvm install 22`.
+
+**macOS**:
+
+```bash
+xcode-select --install                     # the C toolchain, if it isn't installed yet
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+brew install node                          # or download Node.js 22+ from nodejs.org
+```
+
+Check with `cargo --version` and `node --version` (v22 or later).
+
+### 2. Get the code and build it
+
+The same on every OS:
+
+```bash
+git clone https://github.com/dreaminhex/hexdb.git
+cd hexdb
+cd hexdb_admin
+npm ci
+npm run build
+cd ..
 cargo build --release -p hexdb_api -p hexdb_cli
-(cd hexdb_admin && npm ci && npm run build)
-
-# A key for encryption at rest, kept out of version control:
-./target/release/hexdb secret                  # prints base64:...
-# then put it in hexdb_api/hexdb.local.toml:
-#   [storage]
-#   encryption_key = "base64:..."
-
-./target/release/hexdb --config hexdb_api/hexdb.toml start
 ```
 
-During development, `cargo run -p hexdb_api` from the repository root uses [hexdb_api/hexdb.toml](hexdb_api/hexdb.toml).
+The first Rust build takes a few minutes. It produces two programs in `target/release`: `hexdb_api` (the server) and `hexdb` (the CLI that starts, stops and inspects it). On Windows they end in `.exe`.
 
-On first start with no users, HexDB creates the administrator named by `security.admin_login`. It prints a generated password once and saves it to `initial-admin-password.txt` in the data directory, readable by your user only. Sign in at http://localhost:7700/ui/, change the password on the Account page, and delete that file.
+### 3. Put `hexdb` on your PATH
+
+Pick one of the two options.
+
+**Option A: install into Cargo's bin folder (recommended).** Rustup already added `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows) to your PATH, so this works the same on every OS:
+
+```bash
+cargo install --path hexdb_cli
+cargo install --path hexdb_api
+```
+
+`hexdb start` runs the `hexdb_api` installed next to it. Run both commands again after pulling changes. Because the running server is the installed copy, `cargo build` in the repository still works while it runs.
+
+**Option B: add `target/release` to your PATH.** Nothing is copied, but on Windows you must stop the server before rebuilding: Windows locks a running `.exe`, and `cargo build` fails with "failed to remove file".
+
+Windows (PowerShell; open a new terminal afterwards):
+
+```powershell
+$bin = (Resolve-Path .\target\release).Path
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$bin", "User")
+```
+
+Linux (bash):
+
+```bash
+echo "export PATH=\"$(pwd)/target/release:\$PATH\"" >> ~/.bashrc && . ~/.bashrc
+```
+
+macOS (zsh, the default shell):
+
+```bash
+echo "export PATH=\"$(pwd)/target/release:\$PATH\"" >> ~/.zshrc && . ~/.zshrc
+```
+
+Check with `hexdb --help`.
+
+### 4. Create your encryption key
+
+HexDB encrypts everything it stores, and every developer creates their own key. It goes in `hexdb_api/hexdb.local.toml`, which git ignores. Keep the key: data written with it can't be read without it.
+
+Windows (PowerShell):
+
+```powershell
+$key = hexdb secret
+Set-Content -Path hexdb_api\hexdb.local.toml -Encoding ascii -Value "[storage]`nencryption_key = `"$key`""
+```
+
+Linux and macOS:
+
+```bash
+printf '[storage]\nencryption_key = "%s"\n' "$(hexdb secret)" > hexdb_api/hexdb.local.toml
+```
+
+### 5. Start the server and sign in
+
+```bash
+cd hexdb_api
+hexdb start
+```
+
+`hexdb` reads `hexdb.toml` from the current folder, which is why this step starts in `hexdb_api`. From anywhere else, run `hexdb --config <path to hexdb.toml> start`.
+
+The server runs in this terminal; Ctrl+C stops it gracefully. On the first start it creates the administrator `hexdbadmin` and prints a generated password. The password is also saved to `hexdb_api/.hexdb/initial-admin-password.txt`, readable only by you.
+
+Open http://localhost:7700/ui/ and sign in. Then change the password on the Account page and delete that file.
+
+To run the server in the background instead, use `hexdb start -s` (output goes to `hexdb_api/.hexdb/hexdb.log`), and stop it with `hexdb stop` from the same folder. Data lives in `hexdb_api/.hexdb`. Delete that folder to start over; the key in `hexdb.local.toml` can stay.
 
 ### First requests
 
 Create an API key on the Account page, then:
 
 ```bash
-export HEXDB_TOKEN=hxk_...
+export HEXDB_TOKEN=hxk_...                 # PowerShell: $env:HEXDB_TOKEN = "hxk_..."
 curl -X POST http://localhost:7700/orders -H "Authorization: Bearer $HEXDB_TOKEN" \
   -H "Content-Type: application/json" -d '{ "customer": "ada", "total": 42, "status": "paid" }'
 
@@ -71,7 +158,30 @@ curl -G http://localhost:7700/orders -H "Authorization: Bearer $HEXDB_TOKEN" \
   --data-urlencode 'filter={"status":"paid","total":{"$gte":10}}' --data-urlencode 'sort=-total'
 ```
 
-To load sample data (articles, products, customers, orders and short-lived sessions), run `HEXDB_TOKEN=hxk_... node scripts/seed.mjs`.
+In PowerShell, call `curl.exe` (plain `curl` is an alias for `Invoke-WebRequest`). On Windows PowerShell 5.1, write the JSON with escaped quotes, for example `-d '{\"customer\": \"ada\"}'`.
+
+To load sample data (articles, products, customers, orders and short-lived sessions), run `node scripts/seed.mjs` with `HEXDB_TOKEN` set.
+
+### While developing
+
+- `cargo run -p hexdb_api` from the repository root runs the server straight from source, using `hexdb_api/hexdb.toml` (set by [.cargo/config.toml](.cargo/config.toml)). Stop any `hexdb start` server first: both use port 7700.
+- `cd hexdb_admin && npm run dev` serves the admin UI with live reload at http://localhost:5173/ui/, sending API calls to the server on port 7700.
+- `node scripts/lattice-demo.mjs` starts a three-hex lattice on ports 7800, 7810 and 7820 (separate from your server on 7700) and loads sample data. Open any hex's Dashboard to see the lattice. Type `stop 1` to stop the Overseer and watch another hex take over, then `start 1` to bring it back. It needs the release build and the built UI from step 2.
+- `hexdb lattice spawn --count 2` (from `hexdb_api`) adds two hexes to your own server's lattice instead.
+
+### With Docker
+
+No Rust or Node.js needed:
+
+```bash
+docker build -t hexdb .
+docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
+  -e HEXDB_STORAGE__ENCRYPTION_KEY="base64:$(openssl rand -base64 32)" hexdb
+```
+
+The first start prints a generated administrator password in the container log (`docker logs <container> | grep password`). Open http://localhost:7700/ui/ and sign in. Keep the encryption key: the data can't be read without it.
+
+`docker compose up -d` starts a three-hex lattice instead; see the comments at the top of [docker-compose.yml](docker-compose.yml).
 
 ## Command-line interface
 
