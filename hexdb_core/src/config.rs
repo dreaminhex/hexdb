@@ -304,6 +304,10 @@ pub struct CompressionConfig {
 pub struct UiConfig {
     /// Built admin UI (Vite `dist`) directory. Relative paths are resolved against the config file's directory.
     pub path: String,
+    /// A short notice the admin UI shows above every page and on the sign-in
+    /// screen, for example that a shared demo resets every hour. Empty: none.
+    #[serde(default)]
+    pub notice: String,
 }
 
 fn default_discovery_interval() -> u64 {
@@ -380,6 +384,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             path: "../hexdb_admin/dist".into(),
+            notice: String::new(),
         }
     }
 }

@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react"
 
 import { AppSidebar } from "@/components/app-sidebar"
 import { SiteHeader } from "@/components/site-header"
+import { NoticeBar } from "@/components/notice-bar"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import type { Action } from "@/lib/api"
@@ -68,6 +69,7 @@ function Shell() {
     <SidebarProvider>
       <AppSidebar variant="inset" activeRoute={active} />
       <SidebarInset>
+        <NoticeBar />
         <SiteHeader title={page.title} />
         <div className="flex min-h-0 flex-1 flex-col">
           <Suspense fallback={<div className="text-muted-foreground p-6 text-sm">Loading…</div>}>

@@ -1562,6 +1562,7 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 | `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Query advisor AI |
 | `analyzers.<name>` | none | Custom text analyzers |
 | `ui.path` | `../hexdb_admin/dist` | Built admin UI |
+| `ui.notice` | empty | A short notice the admin UI shows above every page and on the sign-in screen (also returned by `GET /health`, to everyone) |
 
 ## 22. Operations
 

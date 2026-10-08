@@ -444,17 +444,27 @@ pub struct ShutdownHandle {
 /// Without credentials it only says the server is up; signed-in users also
 /// see the hex's identity and version.
 pub async fn health(State(engine): Engine, MaybeAuth(principal): MaybeAuth) -> Json<Value> {
+    // `ui.notice` is public by design: the sign-in screen shows it before anyone is signed in.
+    let notice = engine.config.ui.notice.trim();
     if principal.is_none() {
-        return Json(json!({ "status": "ok" }));
+        let mut body = json!({ "status": "ok" });
+        if !notice.is_empty() {
+            body["notice"] = Value::String(notice.to_string());
+        }
+        return Json(body);
     }
-    Json(json!({
+    let mut body = json!({
         "status": "ok",
         "id": engine.id.to_string(),
         "name": engine.name,
         "hex_type": engine.role(),
         "version": engine.version,
         "uptime_seconds": (Utc::now() - engine.start_datetime).num_seconds().max(0),
-    }))
+    });
+    if !notice.is_empty() {
+        body["notice"] = Value::String(notice.to_string());
+    }
+    Json(body)
 }
 
 /// Begin a graceful shutdown. Requires the token from the runtime file in the `x-hexdb-shutdown-token` header.

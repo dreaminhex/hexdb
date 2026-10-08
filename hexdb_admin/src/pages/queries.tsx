@@ -31,7 +31,8 @@ import { DocumentTable } from "@/components/document-table"
 import { toTable } from "@/lib/doc-table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { executeGraphQL, fetchSchema, GRAPHQL_ENDPOINT, type GraphQLResult } from "@/lib/graphql"
-import { QUERY_EXAMPLES } from "@/lib/query-examples"
+import { QUERY_EXAMPLES, queryExamples } from "@/lib/query-examples"
+import { api } from "@/lib/api"
 
 const DRAFT_KEY = "hexdb.query.draft"
 const HISTORY_KEY = "hexdb.query.history"
@@ -91,11 +92,18 @@ export function QueriesPage() {
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<GraphQLResult | null>(null)
   const [inputError, setInputError] = useState<string | null>(null)
+  // The examples are written against the tessellations this hex has.
+  const [tessellations, setTessellations] = useState<string[]>([])
+  const examples = useMemo(() => queryExamples(tessellations), [tessellations])
 
   useEffect(() => {
     fetchSchema()
       .then(setSchema)
       .catch((e: Error) => setSchemaError(e.message))
+    api
+      .tessellations()
+      .then((list) => setTessellations(list.filter((t) => t.kind !== "system").map((t) => t.name)))
+      .catch(() => undefined)
   }, [])
 
   useEffect(() => save(DRAFT_KEY, { query, variables }), [query, variables])
@@ -140,7 +148,7 @@ export function QueriesPage() {
   }
 
   const loadExample = (index: number) => {
-    const example = QUERY_EXAMPLES[index]
+    const example = examples[index]
     setQuery(example.query)
     setVariables(example.variables ? JSON.stringify(example.variables, null, 2) : "{}")
     setInputTab("query")
@@ -173,7 +181,7 @@ export function QueriesPage() {
           <DropdownMenuContent align="start" className="w-72">
             <DropdownMenuLabel>Start from an example</DropdownMenuLabel>
             <DropdownMenuSeparator />
-            {QUERY_EXAMPLES.map((example, i) => (
+            {examples.map((example, i) => (
               <DropdownMenuItem key={example.name} onSelect={() => loadExample(i)} className="flex-col items-start gap-0">
                 <span>{example.name}</span>
                 <span className="text-muted-foreground text-xs">{example.description}</span>

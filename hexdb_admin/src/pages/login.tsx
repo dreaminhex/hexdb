@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { api, ApiError, errorMessage } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { useNotice } from "@/components/notice-bar"
 
 /**
  * Sign-in screen, shown whenever there's no valid session. Accounts with
@@ -14,6 +15,7 @@ import { useAuth } from "@/lib/auth"
  */
 export function LoginPage() {
   const { refresh } = useAuth()
+  const notice = useNotice()
   const [login, setLogin] = useState("")
   const [password, setPassword] = useState("")
   const [code, setCode] = useState("")
@@ -55,6 +57,11 @@ export function LoginPage() {
     <div className="bg-muted/40 flex min-h-svh items-center justify-center p-4">
       <div className="w-full max-w-sm space-y-6">
         <img src="hexdb_lg.png" alt="HexDB" className="mx-auto h-12 w-auto" />
+        {notice && (
+          <p role="note" className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-center text-xs text-amber-900 dark:text-amber-200">
+            {notice}
+          </p>
+        )}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
