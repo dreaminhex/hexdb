@@ -76,6 +76,10 @@ pub fn app_router(
             get(crate::functions::get_schedule).put(crate::functions::update_schedule).delete(crate::functions::delete_schedule),
         )
         .route("/schedules/{name}/run", post(crate::functions::run_schedule))
+
+        // Triggers
+        .route("/triggers", get(crate::triggers::list).post(crate::triggers::create))
+        .route("/triggers/{name}", get(crate::triggers::get).put(crate::triggers::update).delete(crate::triggers::delete))
         .route("/plugins", get(plugins))
         .route("/changes", get(crate::changes::changes))
         .route("/changes/stream", get(crate::changes::change_stream))
@@ -106,6 +110,7 @@ pub fn app_router(
         .route("/tessellations/{name}/advice", get(advice))
         .route("/tessellations/{name}/schemas", get(get_schemas).post(add_schema).delete(drop_schemas))
         .route("/tessellations/{name}/schemas/check", post(check_schema))
+        .route("/tessellations/{name}/schemas/rollback", post(rollback_schema))
         .route("/analyzers", get(list_analyzers))
         .route("/analyzers/_analyze", post(analyze))
 

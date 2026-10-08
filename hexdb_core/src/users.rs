@@ -13,6 +13,7 @@
 // all roles in one document holding a `roles` array; `bootstrap` migrates those.
 
 use crate::{
+    access::Restriction,
     auth::{Action, RoleDefinitions},
     config::SecurityConfig,
     crypt::create_hash,
@@ -23,6 +24,7 @@ use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use tracing::{info, warn};
 use ulid::Ulid;
 
@@ -118,6 +120,9 @@ pub struct StoredUser {
     /// The login in lowercase, indexed for case-insensitive lookups.
     #[serde(default)]
     pub login_key: String,
+    /// Values role filters can refer to: `{"$user": "attributes.region"}`.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub attributes: serde_json::Map<String, Value>,
 }
 
 /// Name of the internal index on `users.login_key`.
@@ -150,6 +155,9 @@ pub struct UserView {
     pub use_mfa: bool,
     pub last_password_change: i64,
     pub password_expiration: i64,
+    /// Values role filters can refer to.
+    #[serde(default)]
+    pub attributes: serde_json::Map<String, Value>,
 }
 
 impl UserView {
@@ -165,6 +173,7 @@ impl UserView {
             use_mfa: user.use_mfa,
             last_password_change: user.last_password_change,
             password_expiration: user.password_expiration,
+            attributes: user.attributes.clone(),
         }
     }
 }
@@ -179,6 +188,9 @@ pub struct NewUser {
     pub email_address: String,
     #[serde(default)]
     pub roles: Vec<RoleGrant>,
+    /// Values role filters can refer to.
+    #[serde(default)]
+    pub attributes: serde_json::Map<String, Value>,
 }
 
 /// Input for changing a user. For a full replace (PUT), `email_address` and
@@ -194,6 +206,8 @@ pub struct UserChanges {
     pub is_locked: Option<bool>,
     pub use_mfa: Option<bool>,
     pub password_expiration: Option<i64>,
+    /// Replaces the user's attributes.
+    pub attributes: Option<serde_json::Map<String, Value>>,
 }
 
 /// A role as returned by the API.
@@ -203,6 +217,9 @@ pub struct RoleView {
     pub name: String,
     pub description: String,
     pub permissions: Vec<Action>,
+    /// Row filters and field masks by tessellation ("*" for every one); see `crate::access`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub restrictions: BTreeMap<String, Restriction>,
     /// Built-in roles can't be changed or deleted.
     pub builtin: bool,
 }
@@ -214,6 +231,8 @@ pub struct RoleInput {
     pub name: Option<String>,
     pub description: Option<String>,
     pub permissions: Option<Vec<String>>,
+    /// Replaces the role's restrictions (`{}` removes them).
+    pub restrictions: Option<BTreeMap<String, Restriction>>,
 }
 
 fn invalid(message: impl Into<String>) -> anyhow::Error {
@@ -471,7 +490,7 @@ pub async fn ensure_service_user(engine: &HexDBEngine, login: &str, roles: Vec<R
     let password = URL_SAFE_NO_PAD.encode(crate::crypt::random_bytes(24));
     let created = create_user(
         engine,
-        NewUser { login: login.to_string(), password, email_address: format!("{}@service.hexdb.local", login), roles },
+        NewUser { login: login.to_string(), password, email_address: format!("{}@service.hexdb.local", login), roles, attributes: Default::default() },
         None,
     )
     .await?;
@@ -584,6 +603,7 @@ pub async fn create_user(engine: &HexDBEngine, input: NewUser, idem: Option<Idem
         mfa_last_step: 0,
         sessions_valid_after: 0,
         login_key: String::new(),
+        attributes: validate_attributes(input.attributes)?,
     };
 
     let outcome = engine.insert_documents(USERS_TESSELLATION, vec![to_json(&user)?], None, idem).await?;
@@ -657,6 +677,9 @@ pub async fn update_user(
     if let Some(expiration) = changes.password_expiration {
         user.password_expiration = expiration;
     }
+    if let Some(attributes) = changes.attributes {
+        user.attributes = validate_attributes(attributes)?;
+    }
 
     if before.is_active_admin() && !user.is_active_admin() {
         ensure_another_admin(engine, id).await?;
@@ -720,6 +743,7 @@ fn parse_role(doc: &Document) -> Option<RoleView> {
         name,
         description: data.get("description").and_then(Value::as_str).unwrap_or_default().to_string(),
         permissions,
+        restrictions: data.get("restrictions").and_then(|r| serde_json::from_value(r.clone()).ok()).unwrap_or_default(),
     })
 }
 
@@ -748,7 +772,7 @@ pub async fn role_definitions(engine: &HexDBEngine) -> Result<std::sync::Arc<Rol
     }
     let mut definitions = RoleDefinitions::builtin();
     for role in list_roles(engine).await? {
-        definitions.0.entry(role.name).or_insert(role.permissions);
+        definitions.0.entry(role.name).or_insert(crate::auth::RoleRules { permissions: role.permissions, restrictions: role.restrictions });
     }
     let definitions = std::sync::Arc::new(definitions);
     *engine.role_cache.lock().unwrap() = Some((generation, definitions.clone()));
@@ -780,12 +804,36 @@ fn parse_permissions(names: &[String]) -> Result<Vec<Action>> {
     Ok(out)
 }
 
-fn role_json(name: &str, description: &str, permissions: &[Action]) -> Value {
+fn role_json(name: &str, description: &str, permissions: &[Action], restrictions: &BTreeMap<String, Restriction>) -> Value {
     serde_json::json!({
         "name": name,
         "description": description,
         "permissions": permissions.iter().map(|a| a.name()).collect::<Vec<_>>(),
+        "restrictions": restrictions,
     })
+}
+
+/// Check a role's restrictions: keys are tessellation names or "*", and
+/// restricted roles can't manage (managing needs unrestricted access).
+fn validate_restrictions(restrictions: &BTreeMap<String, Restriction>) -> Result<()> {
+    if restrictions.len() > 100 {
+        return Err(invalid("A role may restrict at most 100 tessellations."));
+    }
+    for (key, restriction) in restrictions {
+        if key != "*" && crate::catalog::validate_tessellation_name(key).is_err() {
+            return Err(invalid(format!("restrictions: '{}' isn't a tessellation name (or \"*\").", key)));
+        }
+        restriction.validate(key)?;
+    }
+    Ok(())
+}
+
+/// User attributes: a JSON object of at most 50 entries and 16 KB.
+fn validate_attributes(attributes: serde_json::Map<String, Value>) -> Result<serde_json::Map<String, Value>> {
+    if attributes.len() > 50 || serde_json::to_vec(&attributes).map(|b| b.len()).unwrap_or(0) > 16 * 1024 {
+        return Err(invalid("attributes: at most 50 entries and 16 KB."));
+    }
+    Ok(attributes)
 }
 
 /// Create a custom role.
@@ -804,9 +852,11 @@ pub async fn create_role(engine: &HexDBEngine, input: RoleInput) -> Result<RoleV
     if description.len() > 500 {
         return Err(invalid("description must be at most 500 characters."));
     }
-    let docs = engine.insert_documents(ROLES_TESSELLATION, vec![role_json(&name, &description, &permissions)], None, None).await?;
+    let restrictions = input.restrictions.unwrap_or_default();
+    validate_restrictions(&restrictions)?;
+    let docs = engine.insert_documents(ROLES_TESSELLATION, vec![role_json(&name, &description, &permissions, &restrictions)], None, None).await?;
     info!("🛡️ Created role '{}' ({}).", name, permissions.iter().map(|a| a.name()).collect::<Vec<_>>().join(", "));
-    Ok(RoleView { id: docs.value[0].id.to_string(), name, description, permissions, builtin: false })
+    Ok(RoleView { id: docs.value[0].id.to_string(), name, description, permissions, restrictions, builtin: false })
 }
 
 /// Change a custom role's description or permissions (built-in roles can't change).
@@ -827,9 +877,11 @@ pub async fn update_role(engine: &HexDBEngine, name: &str, input: RoleInput) -> 
         return Err(invalid("A role needs at least one permission."));
     }
     let description = input.description.unwrap_or(role.description);
-    engine.replace_document(ROLES_TESSELLATION, &role.id, role_json(name, &description, &permissions), None, None).await?;
+    let restrictions = input.restrictions.unwrap_or(role.restrictions);
+    validate_restrictions(&restrictions)?;
+    engine.replace_document(ROLES_TESSELLATION, &role.id, role_json(name, &description, &permissions, &restrictions), None, None).await?;
     info!("🛡️ Changed role '{}' ({}).", name, permissions.iter().map(|a| a.name()).collect::<Vec<_>>().join(", "));
-    Ok(RoleView { id: role.id, name: name.to_string(), description, permissions, builtin: false })
+    Ok(RoleView { id: role.id, name: name.to_string(), description, permissions, restrictions, builtin: false })
 }
 
 /// Delete a custom role that no user holds. False if it doesn't exist.
@@ -884,7 +936,7 @@ async fn bootstrap_inner(engine: &HexDBEngine, security: &SecurityConfig) -> Res
     let page = engine.list_documents(ROLES_TESSELLATION, None, usize::MAX).await?;
     let mut missing = Vec::new();
     for role in BUILTIN_ROLES {
-        let wanted = role_json(role.name, role.description, role.permissions);
+        let wanted = role_json(role.name, role.description, role.permissions, &BTreeMap::new());
         match existing.iter().find(|r| r.name == role.name) {
             None => missing.push(wanted),
             Some(found) => {
@@ -916,6 +968,7 @@ async fn bootstrap_inner(engine: &HexDBEngine, security: &SecurityConfig) -> Res
             password: password.clone(),
             email_address: email.to_string(),
             roles: vec![RoleGrant { name: ADMIN_ROLE.into(), tessellations: vec!["*".into()] }],
+            attributes: Default::default(),
         };
         create_user(engine, admin, None).await?;
         if generated {

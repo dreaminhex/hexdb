@@ -33,6 +33,7 @@
 // Pass it as `if_version` later for optimistic concurrency.
 
 use super::{writes::BatchItem, EngineError, HexDBEngine, MAX_WRITE_RETRIES};
+use crate::auth::Action;
 use crate::{
     catalog::validate_tessellation_name,
     document::{is_reserved_field, CompactFields, Document, FieldValue},
@@ -213,6 +214,8 @@ struct Slot {
     base_seq: u64,
     current: Option<Document>,
     written: bool,
+    /// The document exists but the caller's role can't see it.
+    hidden: bool,
 }
 
 /// A planned transaction: the batch to commit plus the results (versions are
@@ -299,18 +302,40 @@ impl HexDBEngine {
         let mut order: Vec<DocKey> = Vec::new();
         let mut results = Vec::with_capacity(ops.len());
         let mut result_keys = Vec::with_capacity(ops.len());
+        // The caller's row filters and field masks, per tessellation (read, write).
+        let mut scopes: HashMap<String, (crate::access::Scope, crate::access::Scope)> = HashMap::new();
 
         for (i, op) in ops.iter().enumerate() {
             let at = |m: String| format!("operations[{}]: {}", i, m);
             let id = op.id.unwrap_or_else(Ulid::new);
             let key = DocKey::new(&op.tessellation, id);
 
+            let (read, write) = scopes
+                .entry(op.tessellation.clone())
+                .or_insert_with(|| (self.caller_scope(&op.tessellation, Action::Read), self.caller_scope(&op.tessellation, Action::Write)))
+                .clone();
+            if let Some(filter) = &op.if_match {
+                self.check_scope_fields(&op.tessellation, &read, filter, &[])?;
+            }
             if !slots.contains_key(&key) {
                 let (current, base_seq) = if op.id.is_some() { self.read_latest(&key).await? } else { (None, 0) };
-                slots.insert(key.clone(), Slot { base_seq, current, written: false });
+                let hidden = current.as_ref().is_some_and(|d| !read.allows(d));
+                let current = if hidden { None } else { current };
+                slots.insert(key.clone(), Slot { base_seq, current, written: false, hidden });
                 order.push(key.clone());
             }
             let slot = slots.get_mut(&key).unwrap();
+            if slot.hidden && op.kind == TxOpKind::Insert {
+                return Err(conflict(at(format!("document {} already exists in '{}'.", id, op.tessellation))));
+            }
+            if matches!(op.kind, TxOpKind::Replace | TxOpKind::Patch | TxOpKind::Delete) && slot.current.as_ref().is_some_and(|d| !write.allows(d)) {
+                return Err(EngineError::Forbidden(at(format!("document {} is outside what your role may change in '{}'.", id, op.tessellation))).into());
+            }
+            if let Some(Value::Object(data)) = &op.data {
+                if matches!(op.kind, TxOpKind::Insert | TxOpKind::Replace | TxOpKind::Patch) {
+                    write.check_writable(data.keys().map(String::as_str))?;
+                }
+            }
 
             if let Some(expected) = op.if_version {
                 if slot.written {
@@ -360,7 +385,9 @@ impl HexDBEngine {
                 }
                 TxOpKind::Replace => {
                     let doc = slot.current.as_mut().ok_or_else(missing)?;
+                    let old = doc.clone();
                     doc.data = fields(op.data.as_ref().unwrap());
+                    write.restore_hidden(doc, &old);
                     if op.ttl.is_some() {
                         doc.ttl = op.ttl;
                     }
@@ -385,8 +412,25 @@ impl HexDBEngine {
                     None
                 }
             };
+            let document = document.map(|mut json| {
+                read.mask_json(&mut json);
+                json
+            });
             results.push(TxResult { op: op.kind, tessellation: op.tessellation.clone(), id: id.to_string(), version: None, document });
             result_keys.push(key);
+        }
+
+        // Every document written must stay within what the caller may write.
+        for (key, slot) in &slots {
+            if let (true, Some(doc)) = (slot.written, &slot.current) {
+                if !scopes.get(&key.tessellation).is_none_or(|(_, write)| write.allows(doc)) {
+                    return Err(EngineError::Forbidden(format!(
+                        "document {} would be outside what your role may write in '{}'.",
+                        key.id, key.tessellation
+                    ))
+                    .into());
+                }
+            }
         }
 
         // One write per document with its final state; documents only read are checked.
@@ -420,6 +464,8 @@ impl HexDBEngine {
                 (!slot.written && slot.current.is_some()).then_some(slot.base_seq)
             })
             .collect();
+        // Before triggers may change or refuse the writes (results show the planned documents).
+        self.run_before_triggers(&mut items).await?;
         Ok(Plan { items, checks, results, write_index, read_version })
     }
 }

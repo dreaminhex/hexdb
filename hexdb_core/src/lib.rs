@@ -1,3 +1,4 @@
+pub mod access;
 pub mod config;
 pub mod logging;
 pub mod engine;
@@ -28,6 +29,7 @@ pub mod advisor;
 pub mod schema;
 pub mod streams;
 pub mod functions;
+pub mod triggers;
 pub mod network {
     pub mod discovery;
     pub mod lattice_auth;

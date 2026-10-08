@@ -75,6 +75,45 @@ impl Filter {
         Filter(Node::And(Vec::new()))
     }
 
+    /// A filter that matches no document.
+    pub fn none() -> Filter {
+        Filter(Node::Or(Vec::new()))
+    }
+
+    /// Both filters must match.
+    pub fn and(a: Filter, b: Filter) -> Filter {
+        match (a.is_empty(), b.is_empty()) {
+            (true, _) => b,
+            (_, true) => a,
+            _ => Filter(Node::And(vec![a.0, b.0])),
+        }
+    }
+
+    /// Any of the filters matches (none given: nothing matches).
+    pub fn any(filters: Vec<Filter>) -> Filter {
+        match filters.len() {
+            1 => filters.into_iter().next().unwrap(),
+            _ => Filter(Node::Or(filters.into_iter().map(|f| f.0).collect())),
+        }
+    }
+
+    /// Every field path the filter tests, and whether it searches text in
+    /// every string field (a `$text` without a text index's fields).
+    pub fn referenced_paths(&self) -> (Vec<String>, bool) {
+        fn walk(node: &Node, out: &mut Vec<String>, all_text: &mut bool) {
+            match node {
+                Node::And(nodes) | Node::Or(nodes) => nodes.iter().for_each(|n| walk(n, out, all_text)),
+                Node::Not(inner) => walk(inner, out, all_text),
+                Node::Field { path, .. } => out.push(path.join(".")),
+                Node::Text { fields: Some(fields), .. } => out.extend(fields.iter().map(|p| p.join("."))),
+                Node::Text { fields: None, .. } => *all_text = true,
+            }
+        }
+        let (mut out, mut all_text) = (Vec::new(), false);
+        walk(&self.0, &mut out, &mut all_text);
+        (out, all_text)
+    }
+
     /// Parse a filter. `null` and `{}` match every document.
     pub fn parse(value: &Value) -> Result<Filter> {
         match value {

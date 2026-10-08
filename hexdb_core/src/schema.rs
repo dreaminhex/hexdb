@@ -116,6 +116,14 @@ pub enum Step {
     Remove(String),
     SetDefault { field: String, value: Value },
     Convert { field: String, to: FieldType },
+    /// Run a function over the documents (in batches): it gets them as
+    /// `documents` and returns them migrated. `undo` names the function that
+    /// reverses it, for rollbacks.
+    Function {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        undo: Option<String>,
+    },
 }
 
 /// A schema version.
@@ -130,6 +138,14 @@ pub struct SchemaVersion {
     /// Turns a document of the previous version into this one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migration: Vec<Step>,
+    /// Who registered it (migration functions run as this user).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_by: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_by_login: String,
+    /// Set on a rollback: the version whose fields this one restores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restores: Option<u32>,
 }
 
 fn yes() -> bool {
@@ -248,6 +264,8 @@ impl Step {
                     }
                 }
             }
+            // Function steps run in the engine, over batches (see engine::schemas).
+            Step::Function { .. } => {}
         }
     }
 
@@ -255,6 +273,12 @@ impl Step {
         let fields: Vec<&String> = match self {
             Step::Rename { from, to } | Step::Copy { from, to } => vec![from, to],
             Step::Remove(f) | Step::SetDefault { field: f, .. } | Step::Convert { field: f, .. } => vec![f],
+            Step::Function { name, undo } => {
+                if name.is_empty() || undo.as_deref() == Some("") {
+                    bail!("migration: a function step names its function (and optionally an undo function)");
+                }
+                vec![]
+            }
         };
         for f in fields {
             if f.is_empty() || f == "id" || f.starts_with('_') || f.split('.').any(str::is_empty) {
@@ -337,7 +361,14 @@ impl SchemaVersion {
         }
     }
 
-    /// Run this version's migration on a document of the previous version.
+    /// True if this version's migration calls a function (it can then only
+    /// run in the engine, which runs functions).
+    pub fn has_function_steps(&self) -> bool {
+        self.migration.iter().any(|s| matches!(s, Step::Function { .. }))
+    }
+
+    /// Run this version's migration on a document of the previous version
+    /// (function steps are skipped here; see engine::schemas).
     pub fn migrate(&self, doc: &mut Map<String, Value>) {
         for step in &self.migration {
             step.apply(doc);
@@ -368,7 +399,11 @@ pub fn new_version(current: &[SchemaVersion], input: SchemaInput) -> Result<Sche
     if previous.is_none() && !input.migration.is_empty() {
         bail!("The first schema version has no previous version to migrate from; leave out \"migration\".");
     }
-    if let Some(previous) = previous {
+    // A function step can change anything, so compatibility can't be proven
+    // up front; the background migration validates every document instead
+    // (and `/schemas/check` runs the function on existing documents first).
+    let functions = input.migration.iter().any(|s| matches!(s, Step::Function { .. }));
+    if let (Some(previous), false) = (previous, functions) {
         check_compatible(previous, &input)?;
     }
     Ok(SchemaVersion {
@@ -377,7 +412,55 @@ pub fn new_version(current: &[SchemaVersion], input: SchemaInput) -> Result<Sche
         fields: input.fields,
         additional_fields: input.additional_fields,
         migration: input.migration,
+        created_by: String::new(),
+        created_by_login: String::new(),
+        restores: None,
     })
+}
+
+/// The input for a rollback to version `to`: that version's fields, and a
+/// migration that undoes every version after it (newest first), followed by
+/// `extra` steps. Renames are reversed, copies removed, conversions converted
+/// back and function steps run their `undo` function; removed fields and
+/// defaults can't be undone (the compatibility check says if that matters,
+/// and `extra` steps such as set_default can fill the gap).
+pub fn rollback_input(versions: &[SchemaVersion], to: u32, extra: Vec<Step>) -> Result<SchemaInput> {
+    let target = versions.iter().find(|v| v.version == to).ok_or_else(|| anyhow::anyhow!("There's no schema version {}.", to))?;
+    let current = versions.last().map(|v| v.version).unwrap_or(0);
+    if to >= current {
+        bail!("Version {} is the current version; roll back to an earlier one.", to);
+    }
+    let mut steps = Vec::new();
+    for version in versions.iter().rev().filter(|v| v.version > to) {
+        // The version a step migrated from, for the type a conversion undoes to.
+        let before = versions.iter().rev().find(|v| v.version < version.version);
+        for step in version.migration.iter().rev() {
+            match step {
+                Step::Rename { from, to } => steps.push(Step::Rename { from: to.clone(), to: from.clone() }),
+                Step::Copy { from: _, to: copied } => {
+                    if !target.fields.contains_key(copied) {
+                        steps.push(Step::Remove(copied.clone()));
+                    }
+                }
+                Step::Convert { field, .. } => {
+                    if let Some(kind) = before.and_then(|b| b.fields.get(field)).map(|r| r.kind).filter(|k| *k != FieldType::Any) {
+                        steps.push(Step::Convert { field: field.clone(), to: kind });
+                    }
+                }
+                Step::Function { name, undo } => match undo {
+                    Some(undo) => steps.push(Step::Function { name: undo.clone(), undo: Some(name.clone()) }),
+                    None => bail!(
+                        "Version {}'s migration runs '{}', which has no undo function, so it can't be rolled back automatically. Register a new version with the steps you need instead.",
+                        version.version,
+                        name
+                    ),
+                },
+                Step::Remove(_) | Step::SetDefault { .. } => {}
+            }
+        }
+    }
+    steps.extend(extra);
+    Ok(SchemaInput { fields: target.fields.clone(), additional_fields: target.additional_fields, migration: steps })
 }
 
 /// Backward compatibility: a document valid under `previous`, migrated, must
@@ -405,6 +488,8 @@ fn check_compatible(previous: &SchemaVersion, next: &SchemaInput) -> Result<()> 
             Step::Convert { field, to } => {
                 converted.insert(field.clone(), *to);
             }
+            // Versions with function steps aren't checked here (see new_version).
+            Step::Function { .. } => {}
         }
     }
     let mut problems = Vec::new();

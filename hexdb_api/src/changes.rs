@@ -84,6 +84,26 @@ fn visible(engine: &HexDBEngine, principal: &Principal, change: &Change, tessell
     !engine.is_system_tessellation(&change.tessellation)
 }
 
+/// The change as this principal may see it: `None` if it's not visible at
+/// all, or the document is outside their role's row filter; hidden fields
+/// removed. Deletes carry no document, so they're shown by ID.
+fn render(engine: &HexDBEngine, principal: &Principal, change: &Change, tessellation: Option<&str>) -> Option<Value> {
+    if !visible(engine, principal, change, tessellation) {
+        return None;
+    }
+    let mut json = change.to_api_json();
+    if let Some(doc) = &change.document {
+        let scope = principal.scope(&change.tessellation, hexdb_core::Action::Read);
+        if !scope.allows(doc) {
+            return None;
+        }
+        if let Some(document) = json.get_mut("document") {
+            scope.mask_json(document);
+        }
+    }
+    Some(json)
+}
+
 /// Changes after a sequence number (see the module docs).
 pub async fn changes(
     params: Result<Query<ChangeParams>, QueryRejection>,
@@ -121,8 +141,8 @@ pub async fn changes(
                     break;
                 }
                 cursor = change.seq;
-                if visible(&engine, &principal, change, tessellation) {
-                    out.push(change.to_api_json());
+                if let Some(json) = render(&engine, &principal, change, tessellation) {
+                    out.push(json);
                 }
             }
             if !out.is_empty() || cursor >= engine.changes.available_after() {
@@ -140,8 +160,8 @@ pub async fn changes(
                 break;
             }
             cursor = change.seq;
-            if visible(&engine, &principal, change, tessellation) {
-                out.push(change.to_api_json());
+            if let Some(json) = render(&engine, &principal, change, tessellation) {
+                out.push(json);
             }
         }
         if !out.is_empty() || wait.is_zero() {
@@ -187,12 +207,7 @@ pub async fn change_stream(
     let backlog: Vec<Arc<Change>> = disk_backlog.into_iter().chain(memory_backlog).collect();
     let tessellation = params.tessellation.filter(|t| !t.is_empty());
 
-    let event = |change: &Change| {
-        Event::default()
-            .event("change")
-            .id(change.seq.to_string())
-            .data(change.to_api_json().to_string())
-    };
+    let event = |change: &Change, json: Value| Event::default().event("change").id(change.seq.to_string()).data(json.to_string());
 
     let filter_engine = engine.clone();
     let filter_tess = tessellation.clone();
@@ -200,8 +215,7 @@ pub async fn change_stream(
     let backlog = stream::iter(
         backlog
             .into_iter()
-            .filter(move |c| visible(&filter_engine, &filter_principal, c, filter_tess.as_deref()))
-            .map(move |c| Ok(event(&c)))
+            .filter_map(move |c| render(&filter_engine, &filter_principal, &c, filter_tess.as_deref()).map(|json| Ok(event(&c, json))))
             .collect::<Vec<_>>(),
     );
 
@@ -242,8 +256,8 @@ pub async fn change_stream(
             };
             match next {
                 Ok(change) => {
-                    if visible(&s.engine, &s.principal, &change, s.tessellation.as_deref()) {
-                        return Some((Ok(event(&change)), s));
+                    if let Some(json) = render(&s.engine, &s.principal, &change, s.tessellation.as_deref()) {
+                        return Some((Ok(event(&change, json)), s));
                     }
                 }
                 Err(RecvError::Lagged(_)) => {

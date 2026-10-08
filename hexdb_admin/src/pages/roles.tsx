@@ -9,10 +9,11 @@ import { Card } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
-import { api, errorMessage, type Action, type PermissionInfo, type Role } from "@/lib/api"
+import { api, errorMessage, type Action, type PermissionInfo, type Role, type RoleInput } from "@/lib/api"
 import { href, linkHandler } from "@/lib/router"
 
 function RoleDialog({
@@ -32,6 +33,7 @@ function RoleDialog({
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [permissions, setPermissions] = useState<Action[]>([])
+  const [restrictions, setRestrictions] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
 
@@ -40,6 +42,7 @@ function RoleDialog({
     setName(role?.name ?? "")
     setDescription(role?.description ?? "")
     setPermissions(role?.permissions ?? [])
+    setRestrictions(role?.restrictions && Object.keys(role.restrictions).length ? JSON.stringify(role.restrictions, null, 2) : "")
     setError(undefined)
   }, [open, role])
 
@@ -50,11 +53,19 @@ function RoleDialog({
     setBusy(true)
     setError(undefined)
     try {
+      let parsed: RoleInput["restrictions"] = {}
+      if (restrictions.trim()) {
+        try {
+          parsed = JSON.parse(restrictions)
+        } catch (e) {
+          throw new Error(`Restrictions aren't valid JSON: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
       if (role) {
-        await api.updateRole(role.name, { description, permissions })
+        await api.updateRole(role.name, { description, permissions, restrictions: parsed })
         toast.success(`Updated ${role.name}.`)
       } else {
-        await api.createRole({ name: name.trim(), description, permissions })
+        await api.createRole({ name: name.trim(), description, permissions, restrictions: parsed })
         toast.success(`Created ${name.trim()}.`)
       }
       onSaved()
@@ -105,7 +116,23 @@ function RoleDialog({
               </div>
             </div>
           ))}
-          {error && <p className="text-destructive text-sm">{error}</p>}
+          <div className="grid gap-2">
+            <Label htmlFor="role-restrictions">Restrictions (optional)</Label>
+            <Textarea
+              id="role-restrictions"
+              value={restrictions}
+              onChange={(e) => setRestrictions(e.target.value)}
+              className="min-h-28 font-mono text-xs"
+              spellCheck={false}
+              placeholder={'{\n  "orders": {\n    "filter": { "region": { "$user": "attributes.region" } },\n    "hide": ["cost"]\n  }\n}'}
+            />
+            <p className="text-muted-foreground text-xs">
+              Per tessellation (or <code>*</code>): <code>filter</code> limits the documents this role can see and write, <code>hide</code> lists fields it
+              can't see or change. <code>{'{"$user": "login"}'}</code> or <code>{'{"$user": "attributes.region"}'}</code> stand for the user's values
+              (set attributes on the Users page). Restricted grants can't manage tessellations.
+            </p>
+          </div>
+          {error && <p className="text-destructive text-sm whitespace-pre-wrap">{error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
               Cancel

@@ -30,6 +30,7 @@ use chrono::Utc;
 use futures::future::BoxFuture;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
+use crate::auth::Action;
 use std::collections::{HashMap, HashSet};
 use ulid::Ulid;
 
@@ -276,6 +277,10 @@ fn not_found_ids(tess: &str, missing: &[String]) -> anyhow::Error {
     .into()
 }
 
+fn outside_scope(tess: &str) -> anyhow::Error {
+    EngineError::Forbidden(format!("The document would be outside what your role may write in '{}'.", tess)).into()
+}
+
 fn validate_tess(tess: &str) -> Result<()> {
     validate_tessellation_name(tess).map_err(|e| invalid(e.to_string()))
 }
@@ -309,7 +314,20 @@ impl HexDBEngine {
     /// `after` for the following page; with `sort`, page with `offset`.
     pub async fn query_documents(&self, tess: &str, query: &DocumentQuery) -> Result<QueryPage> {
         let started = std::time::Instant::now();
-        let page = self.query_documents_inner(tess, query).await?;
+        // The caller's role may see only some documents and fields.
+        let scope = self.caller_scope(tess, Action::Read);
+        let page = if scope.is_full() {
+            self.query_documents_inner(tess, query).await?
+        } else {
+            let sort: Vec<&str> = query.sort.iter().map(|k| k.field.as_str()).collect();
+            self.check_scope_fields(tess, &scope, &query.filter, &sort)?;
+            let narrowed = DocumentQuery { filter: scope.narrow(&query.filter), ..query.clone() };
+            let mut page = self.query_documents_inner(tess, &narrowed).await?;
+            page.documents = page.documents.into_iter().map(|d| scope.mask(d)).collect();
+            // How many documents were read would reveal how many the caller can't see.
+            page.scanned = page.total.unwrap_or(page.documents.len());
+            page
+        };
         if !tess.starts_with('_') && !self.is_system_tessellation(tess) {
             let shape = crate::advisor::Shape::of(&query.filter, &query.sort);
             let matched = page.total.unwrap_or(page.documents.len());
@@ -462,6 +480,16 @@ impl HexDBEngine {
     pub async fn aggregate(&self, tess: &str, aggregation: &crate::aggregate::Aggregation) -> Result<crate::aggregate::AggregateResult> {
         self.queries_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();
+        let scope = self.caller_scope(tess, Action::Read);
+        let narrowed;
+        let mut aggregation = aggregation;
+        if !scope.is_full() {
+            let mut fields: Vec<&str> = aggregation.group_by.iter().map(String::as_str).collect();
+            fields.extend(aggregation.aggregates.iter().filter_map(|a| a.field.as_deref()));
+            self.check_scope_fields(tess, &scope, &aggregation.filter, &fields)?;
+            narrowed = crate::aggregate::Aggregation { filter: scope.narrow(&aggregation.filter), ..aggregation.clone() };
+            aggregation = &narrowed;
+        }
         let (filter, plan) = self.prepare_filter(tess, &aggregation.filter);
         let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
         let ids = self.candidate_ids(tess, plan, None).await;
@@ -481,7 +509,7 @@ impl HexDBEngine {
 
     /// Number of documents matching a filter.
     pub async fn count_matching(&self, tess: &str, filter: &Filter) -> Result<usize> {
-        if filter.is_empty() {
+        if filter.is_empty() && self.caller_scope(tess, Action::Read).filter.is_none() {
             return self.count_documents(tess).await;
         }
         let query = DocumentQuery { filter: filter.clone(), limit: 0, ..DocumentQuery::default() };
@@ -569,7 +597,9 @@ impl HexDBEngine {
     async fn plan_upsert(&self, tess: &str, prepared: &[(Filter, CompactFields, String)], ttl: Option<i64>) -> Result<(Vec<BatchItem>, UpsertSummary)> {
         let mut summary = UpsertSummary::default();
         let mut items = Vec::with_capacity(prepared.len());
+        let write = self.caller_scope(tess, Action::Write);
         for (filter, fields, described) in prepared {
+            write.check_writable(fields.keys().map(String::as_str))?;
             let matches = self.matching_documents(tess, filter).await?;
             if matches.len() > 1 {
                 return Err(EngineError::Conflict(format!(
@@ -582,19 +612,31 @@ impl HexDBEngine {
             }
             let doc = match matches.into_iter().next() {
                 Some(existing) => {
+                    if !write.allows(&existing) {
+                        return Err(EngineError::Conflict(format!("A document with the key {} exists in '{}' outside what your role may change.", described, tess)).into());
+                    }
                     let key = DocKey::new(tess, existing.id);
                     let (_, seq) = self.read_latest(&key).await?;
                     summary.replaced += 1;
-                    Document { id: existing.id, tessellation: tess.to_string(), data: fields.clone(), ttl: ttl.or(existing.ttl) }
-                        .with_expected(seq, &mut items)
+                    let mut doc = Document { id: existing.id, tessellation: tess.to_string(), data: fields.clone(), ttl: ttl.or(existing.ttl) };
+                    write.restore_hidden(&mut doc, &existing);
+                    if !write.allows(&doc) {
+                        return Err(outside_scope(tess));
+                    }
+                    doc.with_expected(seq, &mut items)
                 }
                 None => {
                     summary.inserted += 1;
-                    Document { id: Ulid::new(), tessellation: tess.to_string(), data: fields.clone(), ttl }.with_expected(0, &mut items)
+                    let doc = Document { id: Ulid::new(), tessellation: tess.to_string(), data: fields.clone(), ttl };
+                    if !write.allows(&doc) {
+                        return Err(outside_scope(tess));
+                    }
+                    doc.with_expected(0, &mut items)
                 }
             };
             summary.ids.push(doc.to_string());
         }
+        self.run_before_triggers(&mut items).await?;
         Ok((items, summary))
     }
 
@@ -708,22 +750,38 @@ impl HexDBEngine {
     }
 
     async fn plan_insert(&self, tess: &str, fields: &[CompactFields], ttl: Option<i64>) -> Result<(Vec<BatchItem>, Vec<Document>)> {
-        let docs: Vec<Document> = fields
+        let write = self.caller_scope(tess, Action::Write);
+        for data in fields {
+            write.check_writable(data.keys().map(String::as_str))?;
+        }
+        let mut items = self.plan_insert_unchecked(tess, fields, ttl);
+        self.run_before_triggers(&mut items).await?;
+        self.run_before_triggers(&mut items).await?;
+        let (items, docs) = self.stored_forms(items).await?;
+        for doc in &docs {
+            if !write.allows(doc) {
+                return Err(outside_scope(tess));
+            }
+        }
+        let read = self.caller_scope(tess, Action::Read);
+        Ok((items, docs.into_iter().map(|d| read.mask(d)).collect()))
+    }
+
+    fn plan_insert_unchecked(&self, tess: &str, fields: &[CompactFields], ttl: Option<i64>) -> Vec<BatchItem> {
+        fields
             .iter()
-            .map(|data| Document { id: Ulid::new(), tessellation: tess.to_string(), data: data.clone(), ttl })
-            .collect();
-        let items = docs
-            .iter()
-            .map(|doc| BatchItem { key: DocKey::new(tess, doc.id), op: WalOp::Put(doc.clone()), expected_seq: None })
-            .collect();
-        self.stored_forms(items)
+            .map(|data| {
+                let doc = Document { id: Ulid::new(), tessellation: tess.to_string(), data: data.clone(), ttl };
+                BatchItem { key: DocKey::new(tess, doc.id), op: WalOp::Put(doc), expected_seq: None }
+            })
+            .collect()
     }
 
     /// Apply the tessellation's schema now (validation, defaults, the
     /// `_schema` stamp) so the response shows exactly what is stored. The
     /// commit applies it again, which changes nothing.
-    fn stored_forms(&self, mut items: Vec<BatchItem>) -> Result<(Vec<BatchItem>, Vec<Document>)> {
-        self.apply_schemas(&mut items)?;
+    async fn stored_forms(&self, mut items: Vec<BatchItem>) -> Result<(Vec<BatchItem>, Vec<Document>)> {
+        self.apply_schemas(&mut items).await?;
         let docs = items
             .iter()
             .filter_map(|item| match &item.op {
@@ -742,17 +800,28 @@ impl HexDBEngine {
     ) -> Result<(Vec<BatchItem>, Vec<Document>)> {
         let mut items = Vec::with_capacity(targets.len());
         let mut missing = Vec::new();
+        let (read, write) = (self.caller_scope(tess, Action::Read), self.caller_scope(tess, Action::Write));
 
         for (id, id_str, modification) in targets {
             let key = DocKey::new(tess, *id);
             let (current, seq) = if id.is_nil() { (None, 0) } else { self.read_latest(&key).await? };
-            let Some(mut doc) = current else {
+            // Documents the caller can't see don't exist for them.
+            let Some(mut doc) = current.filter(|d| read.allows(d)) else {
                 missing.push(id_str.clone());
                 continue;
             };
+            if !write.allows(&doc) {
+                return Err(outside_scope(tess));
+            }
             match modification {
-                Modification::Replace(fields) => doc.data = fields.clone(),
+                Modification::Replace(fields) => {
+                    write.check_writable(fields.keys().map(String::as_str))?;
+                    let old = doc.clone();
+                    doc.data = fields.clone();
+                    write.restore_hidden(&mut doc, &old);
+                }
                 Modification::Patch(changes) => {
+                    write.check_writable(changes.iter().map(|(k, _)| k.as_str()))?;
                     apply_changes(&mut doc.data, changes);
                 }
             }
@@ -765,17 +834,27 @@ impl HexDBEngine {
         if !missing.is_empty() {
             return Err(not_found_ids(tess, &missing));
         }
-        self.stored_forms(items)
+        self.run_before_triggers(&mut items).await?;
+        let (items, docs) = self.stored_forms(items).await?;
+        if docs.iter().any(|d| !write.allows(d)) {
+            return Err(outside_scope(tess));
+        }
+        Ok((items, docs.into_iter().map(|d| read.mask(d)).collect()))
     }
 
     async fn plan_delete(&self, tess: &str, id: Ulid) -> Result<(Vec<BatchItem>, bool)> {
         let key = DocKey::new(tess, id);
         let (current, seq) = self.read_latest(&key).await?;
-        if current.is_none() {
+        let Some(doc) = current.filter(|d| self.caller_scope(tess, Action::Read).allows(d)) else {
             return Ok((Vec::new(), false));
+        };
+        if !self.caller_scope(tess, Action::Write).allows(&doc) {
+            return Err(outside_scope(tess));
         }
         let op = WalOp::Delete { tessellation: tess.to_string(), id };
-        Ok((vec![BatchItem { key, op, expected_seq: Some(seq) }], true))
+        let mut items = vec![BatchItem { key, op, expected_seq: Some(seq) }];
+        self.run_before_triggers(&mut items).await?;
+        Ok((items, true))
     }
 
     async fn plan_update_where(
@@ -785,6 +864,14 @@ impl HexDBEngine {
         changes: &Changes,
         ttl: Option<i64>,
     ) -> Result<(Vec<BatchItem>, UpdateSummary)> {
+        let write = self.caller_scope(tess, Action::Write);
+        let read = self.caller_scope(tess, Action::Read);
+        if !write.is_full() || !read.is_full() {
+            self.check_scope_fields(tess, &read, filter, &[])?;
+            write.check_writable(changes.iter().map(|(k, _)| k.as_str()))?;
+        }
+        // Only documents the caller can see and change.
+        let filter = &read.narrow(&write.narrow(filter));
         let (filter, plan) = self.prepare_filter(tess, filter);
         let filter = &filter;
         let ids = self.candidate_ids(tess, plan, None).await;
@@ -813,9 +900,13 @@ impl HexDBEngine {
                         MAX_UPDATE_MATCHES
                     )));
                 }
+                if !write.allows(&doc) {
+                    return Err(outside_scope(tess));
+                }
                 items.push(BatchItem { key, op: WalOp::Put(doc), expected_seq: Some(seq) });
             }
         }
+        self.run_before_triggers(&mut items).await?;
         Ok((items, summary))
     }
 
@@ -1010,7 +1101,7 @@ impl HexDBEngine {
 
         let mut items = items;
         if !replicated {
-            self.apply_schemas(&mut items)?;
+            self.apply_schemas(&mut items).await?;
         }
         let user_writes = items.iter().filter(|i| i.key.tessellation != IDEMPOTENCY_TESSELLATION).count() as u64;
         let touched: Vec<String> = if replicated {
@@ -1062,7 +1153,8 @@ impl HexDBEngine {
             if !replicated {
                 self.check_unique(&items)?;
             }
-            let deltas = self.count_deltas(&state, &prepared).await;
+            let (deltas, created) = self.count_deltas(&state, &prepared).await;
+            let origin = crate::access::current_trigger();
             let count = items.len() as u64;
             let now = Utc::now();
             let changes: Vec<Change> = items
@@ -1081,6 +1173,8 @@ impl HexDBEngine {
                         tessellation: item.key.tessellation.clone(),
                         id: Some(item.key.id),
                         document,
+                        created: created.contains(&i),
+                        origin: origin.clone(),
                     })
                 })
                 .collect();
@@ -1088,7 +1182,8 @@ impl HexDBEngine {
             let op = if ops.len() == 1 { ops.pop().unwrap() } else { WalOp::Batch(ops) };
 
             // Queue to the WAL first so nothing is applied if the WAL is unavailable.
-            let ack = self.wal.append(WalRecord { seq: first, op, time: Utc::now().timestamp_millis() }).await?;
+            let created_seqs = created.iter().map(|i| first + *i as u64).collect();
+            let ack = self.wal.append(WalRecord { seq: first, op, time: Utc::now().timestamp_millis(), created: created_seqs, origin }).await?;
             state.next_seq += count;
             let changes = (changes, count);
             for (i, (key, bytes, ttl)) in prepared.iter().enumerate() {
@@ -1202,20 +1297,56 @@ impl HexDBEngine {
     }
 
     /// Sequence number of a document's newest version (0 if it never existed).
+    /// The caller's row filter and field mask on a user tessellation (full
+    /// for internal work and system tessellations); see `crate::access`.
+    pub(crate) fn caller_scope(&self, tess: &str, action: Action) -> crate::access::Scope {
+        if tess.starts_with('_') || self.is_system_tessellation(tess) {
+            return crate::access::Scope::full();
+        }
+        match crate::access::caller() {
+            Some(principal) => principal.scope(tess, action),
+            None => crate::access::Scope::full(),
+        }
+    }
+
+    /// Refuse a query that tests, sorts, groups or aggregates on a field the
+    /// caller can't see, or searches text that includes such fields.
+    pub(crate) fn check_scope_fields(&self, tess: &str, scope: &crate::access::Scope, filter: &Filter, others: &[&str]) -> Result<()> {
+        if scope.hidden.is_empty() {
+            return Ok(());
+        }
+        let (mut paths, all_text) = filter.referenced_paths();
+        if all_text {
+            match self.indexes.read().unwrap().text_index(tess) {
+                Some((fields, _)) => paths.extend(fields),
+                None => {
+                    return Err(EngineError::Forbidden(format!(
+                        "Full-text search in '{}' without a text index searches every field, including fields hidden from your role.",
+                        tess
+                    ))
+                    .into())
+                }
+            }
+        }
+        scope.check_fields(paths.iter().map(String::as_str).chain(others.iter().copied()))
+    }
+
     /// How a batch changes the cached counts: for each write to a counted
     /// tessellation, whether the document was visible before and after.
     /// Called under the state lock, before the batch is applied.
-    async fn count_deltas(&self, state: &super::EngineState, prepared: &[Prepared]) -> HashMap<String, super::reads::CountDelta> {
+    /// Also returns the positions of puts that create a document in a user
+    /// tessellation (inserts, as opposed to updates; for the change feed).
+    async fn count_deltas(&self, state: &super::EngineState, prepared: &[Prepared]) -> (HashMap<String, super::reads::CountDelta>, Vec<usize>) {
         let counted = self.counted_tessellations();
         let mut deltas: HashMap<String, super::reads::CountDelta> = HashMap::new();
-        if counted.is_empty() {
-            return deltas;
-        }
+        let mut created = Vec::new();
         let now = Utc::now().timestamp_millis();
         // A batch may hold several versions of one document (replication).
         let mut within: HashMap<&DocKey, bool> = HashMap::new();
-        for (key, bytes, ttl) in prepared {
-            if !counted.contains(&key.tessellation) {
+        for (i, (key, bytes, ttl)) in prepared.iter().enumerate() {
+            let user = !key.tessellation.starts_with('_') && !self.is_system_tessellation(&key.tessellation);
+            let is_counted = counted.contains(&key.tessellation);
+            if !is_counted && !user {
                 continue;
             }
             let before = match within.get(key) {
@@ -1224,6 +1355,12 @@ impl HexDBEngine {
             };
             let after = bytes.is_some() && ttl.is_none_or(|t| t > now);
             within.insert(key, after);
+            if user && bytes.is_some() && !before {
+                created.push(i);
+            }
+            if !is_counted {
+                continue;
+            }
             let d = deltas.entry(key.tessellation.clone()).or_default();
             d.delta += after as i64 - before as i64;
             if after {
@@ -1232,7 +1369,7 @@ impl HexDBEngine {
                 }
             }
         }
-        deltas
+        (deltas, created)
     }
 
     /// Whether a document's newest version is visible (not deleted or expired).

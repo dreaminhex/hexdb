@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { IconCheck, IconLoader2, IconTrash } from "@tabler/icons-react"
+import { IconArrowBackUp, IconCheck, IconLoader2, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { JsonEditor, parseJson } from "@/components/json-editor"
@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { usePoll } from "@/hooks/use-poll"
 import { api, errorMessage, type SchemaCheck, type SchemaVersion } from "@/lib/api"
 import { formatNumber } from "@/lib/format"
@@ -52,7 +53,9 @@ function SchemaManager({ tessellation }: { tessellation: string }) {
   const schemas = usePoll(() => api.schemas(tessellation), 3000, [tessellation])
   const [draft, setDraft] = useState<string>()
   const [check, setCheck] = useState<SchemaCheck>()
-  const [busy, setBusy] = useState<"check" | "save" | "drop">()
+  const [busy, setBusy] = useState<"check" | "save" | "drop" | "rollback">()
+  const [rollbackTo, setRollbackTo] = useState<string>("")
+  const [rollbackSteps, setRollbackSteps] = useState("")
   const [error, setError] = useState<string>()
 
   const versions = schemas.data?.versions ?? []
@@ -61,11 +64,18 @@ function SchemaManager({ tessellation }: { tessellation: string }) {
     if (schemas.data && draft === undefined) setDraft(draftFrom(current))
   }, [schemas.data, current, draft])
 
-  const run = async (what: "check" | "save" | "drop") => {
+  const run = async (what: "check" | "save" | "drop" | "rollback") => {
     setBusy(what)
     setError(undefined)
     try {
-      if (what === "drop") {
+      if (what === "rollback") {
+        const steps = rollbackSteps.trim() ? parseJson<unknown[]>(rollbackSteps, "The extra steps") : []
+        const version = await api.rollbackSchema(tessellation, Number(rollbackTo), steps)
+        toast.success(`Version ${version.version} restores version ${rollbackTo}. Existing documents are being migrated.`)
+        setRollbackTo("")
+        setRollbackSteps("")
+        setDraft(draftFrom(version))
+      } else if (what === "drop") {
         await api.dropSchemas(tessellation)
         toast.success(`'${tessellation}' is schemaless again.`)
         setDraft(EXAMPLE)
@@ -108,6 +118,51 @@ function SchemaManager({ tessellation }: { tessellation: string }) {
           schemas.data && <span className="text-muted-foreground">No schema: any JSON object is accepted.</span>
         )}
       </div>
+      {versions.length > 0 && (
+        <div className="divide-y rounded-md border text-sm">
+          {[...versions].reverse().map((v) => (
+            <div key={v.version} className="flex flex-wrap items-center gap-2 px-3 py-1.5">
+              <span className="font-medium">Version {v.version}</span>
+              {v.restores && <Badge variant="outline">restores {v.restores}</Badge>}
+              <span className="text-muted-foreground text-xs">
+                {Object.keys(v.fields).length} fields · {new Date(v.created).toLocaleString()}
+                {v.created_by_login ? ` · ${v.created_by_login}` : ""}
+                {v.migration?.length ? ` · ${v.migration.length} migration step${v.migration.length === 1 ? "" : "s"}` : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {versions.length > 1 && (
+        <div className="grid gap-2 rounded-md border p-3">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="grid gap-1.5">
+              <Label>Roll back to</Label>
+              <Select value={rollbackTo} onValueChange={setRollbackTo}>
+                <SelectTrigger className="w-40">
+                  <SelectValue placeholder="a version" />
+                </SelectTrigger>
+                <SelectContent>
+                  {versions.slice(0, -1).map((v) => (
+                    <SelectItem key={v.version} value={String(v.version)}>
+                      Version {v.version}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button variant="outline" disabled={!!busy || !rollbackTo} onClick={() => void run("rollback")}>
+              {busy === "rollback" ? <IconLoader2 className="animate-spin" /> : <IconArrowBackUp />} Roll back
+            </Button>
+          </div>
+          <p className="text-muted-foreground text-xs">
+            Registers a new version with that version's fields and the inverse of every migration since: renames reversed, copies removed, conversions
+            converted back, function steps run their undo function. Removed fields can't come back by themselves; add steps for them here, e.g.{" "}
+            <code>{'[{"set_default": {"field": "name", "value": "unknown"}}]'}</code>.
+          </p>
+          {rollbackTo && <JsonEditor value={rollbackSteps} onChange={setRollbackSteps} label="Extra rollback steps" className="h-16" />}
+        </div>
+      )}
       {migration && (
         <div className="bg-muted/40 rounded-md border px-3 py-2 text-sm">
           <div className="flex flex-wrap items-center gap-2">
@@ -138,7 +193,9 @@ function SchemaManager({ tessellation }: { tessellation: string }) {
         <p className="text-muted-foreground text-xs">
           Field rules: type (string, number, integer, boolean, object, array, any), required, nullable, default, enum, min, max, min_length,
           max_length, description. Migration steps: rename and copy ({"{from, to}"}), remove ("field"), set_default ({"{field, value}"}), convert (
-          {"{field, to}"}). A new version must stay compatible: no type change without a convert step, no new required field without a default.
+          {"{field, to}"}), and function ({"{name, undo}"}: a function that gets batches of documents and returns them migrated). A new version must stay
+          compatible: no type change without a convert step, no new required field without a default. With a function step, use Check to run it on
+          the existing documents first.
         </p>
       </div>
       {check && (

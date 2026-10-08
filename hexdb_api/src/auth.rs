@@ -157,8 +157,16 @@ pub async fn authenticate(State(engine): State<Arc<HexDBEngine>>, mut request: R
                     .into_response();
                 }
                 let login = principal.login.clone();
+                let caller = std::sync::Arc::new(principal.clone());
+                let trigger = principal.trigger.clone();
                 request.extensions_mut().insert(principal);
-                let mut response = next.run(request).await;
+                // The engine applies this caller's row filters and field masks
+                // (and a trigger script's writes don't fire triggers).
+                let run = hexdb_core::access::as_caller(caller, next.run(request));
+                let mut response = match trigger {
+                    Some(name) => hexdb_core::access::as_trigger(name, run).await,
+                    None => run.await,
+                };
                 response.extensions_mut().insert(crate::routes::AuditUser(login));
                 return response;
             }

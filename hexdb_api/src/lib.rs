@@ -9,3 +9,4 @@ pub mod client;
 pub mod forward;
 pub mod streams;
 pub mod functions;
+pub mod triggers;

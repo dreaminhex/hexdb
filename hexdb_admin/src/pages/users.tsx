@@ -16,6 +16,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
@@ -115,6 +116,7 @@ function UserDialog({
   const [password, setPassword] = useState("")
   const [locked, setLocked] = useState(false)
   const [resetMfa, setResetMfa] = useState(false)
+  const [attributes, setAttributes] = useState("")
   const [draft, setDraft] = useState<GrantDraft>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -126,6 +128,7 @@ function UserDialog({
     setPassword("")
     setLocked(user?.is_locked ?? false)
     setResetMfa(false)
+    setAttributes(user?.attributes && Object.keys(user.attributes).length ? JSON.stringify(user.attributes, null, 2) : "")
     setDraft(draftFrom(roles, user?.roles ?? []))
     setError(null)
   }, [open, user, roles])
@@ -135,8 +138,17 @@ function UserDialog({
     setBusy(true)
     setError(null)
     try {
+      let attrs: Record<string, unknown> = {}
+      if (attributes.trim()) {
+        try {
+          attrs = JSON.parse(attributes)
+        } catch (e) {
+          throw new Error(`Attributes aren't valid JSON: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
       if (user) {
         const changes: UserChanges = {}
+        if (JSON.stringify(attrs) !== JSON.stringify(user.attributes ?? {})) changes.attributes = attrs
         if (login !== user.login) changes.login = login
         if (email !== user.email_address) changes.email_address = email
         if (password) changes.password = password
@@ -149,7 +161,7 @@ function UserDialog({
           toast.success(`Updated ${login}.`)
         }
       } else {
-        await api.createUser({ login, email_address: email, password, roles: grantsFrom(draft) })
+        await api.createUser({ login, email_address: email, password, roles: grantsFrom(draft), attributes: attrs })
         toast.success(`Created ${login}.`)
       }
       onSaved()
@@ -206,6 +218,20 @@ function UserDialog({
             </div>
           )}
           <RoleGrantsEditor roles={roles} draft={draft} onChange={setDraft} />
+          <div className="grid gap-2">
+            <Label htmlFor="user-attributes">Attributes (optional)</Label>
+            <Textarea
+              id="user-attributes"
+              value={attributes}
+              onChange={(e) => setAttributes(e.target.value)}
+              className="min-h-16 font-mono text-xs"
+              spellCheck={false}
+              placeholder={'{ "region": "EU" }'}
+            />
+            <p className="text-muted-foreground text-xs">
+              Values role filters can refer to, e.g. <code>{'{"$user": "attributes.region"}'}</code>. A filter whose attribute is missing matches nothing.
+            </p>
+          </div>
           {error && <p className="text-destructive text-sm">{error}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>

@@ -8,6 +8,12 @@
 // Each write is checked against the current version inside the commit. A
 // document from the client is taken to be in the current shape; a stored
 // document being patched is upgraded first if it is still on an older version.
+//
+// Migration steps run in order over a batch of documents: the built-in steps
+// on each document, a function step as one call for the whole batch (the
+// function gets `documents` and returns them migrated; it runs as whoever
+// registered the version). A rollback registers a new version that restores
+// an earlier one's fields with the inverse steps (see `schema::rollback_input`).
 
 use super::{writes::BatchItem, EngineError, HexDBEngine};
 use crate::{
@@ -57,12 +63,6 @@ fn from_map(map: &Map<String, Value>, version: u32) -> CompactFields {
     data
 }
 
-/// Upgrade a document's fields from version `from` to the latest of `versions`.
-fn upgrade(map: &mut Map<String, Value>, from: u32, versions: &[SchemaVersion]) {
-    for v in versions.iter().filter(|v| v.version > from) {
-        v.migrate(map);
-    }
-}
 
 impl HexDBEngine {
     /// A tessellation's schema versions, oldest first.
@@ -75,16 +75,40 @@ impl HexDBEngine {
         self.schema_jobs.lock().unwrap().get(tess).cloned()
     }
 
-    /// Register a new schema version (see `crate::schema` for the rules).
-    /// The caller starts the migration with [`HexDBEngine::migrate_schema`].
-    pub fn add_schema(&self, tess: &str, input: SchemaInput) -> Result<SchemaVersion> {
+    /// Register a new schema version (see `crate::schema` for the rules), by
+    /// `by` (whom its migration functions run as). The caller starts the
+    /// migration with [`HexDBEngine::migrate_schema`].
+    pub async fn add_schema(&self, tess: &str, input: SchemaInput, by: &crate::auth::Principal) -> Result<SchemaVersion> {
+        self.register_schema(tess, input, by, None).await
+    }
+
+    /// Roll back to version `to`: register a new version with its fields and
+    /// the inverse migration (plus `extra` steps); see `schema::rollback_input`.
+    pub async fn rollback_schema(&self, tess: &str, to: u32, extra: Vec<schema::Step>, by: &crate::auth::Principal) -> Result<SchemaVersion> {
+        let input = schema::rollback_input(&self.schemas(tess), to, extra).map_err(|e| EngineError::Conflict(format!("{:#}", e)))?;
+        self.register_schema(tess, input, by, Some(to)).await
+    }
+
+    async fn register_schema(&self, tess: &str, input: SchemaInput, by: &crate::auth::Principal, restores: Option<u32>) -> Result<SchemaVersion> {
         self.ensure_writable()?;
+        for step in &input.migration {
+            if let schema::Step::Function { name, undo } = step {
+                for f in std::iter::once(name).chain(undo.iter()) {
+                    if self.get_function(f).await?.is_none() {
+                        return Err(EngineError::Invalid(format!("migration: function '{}' doesn't exist.", f)).into());
+                    }
+                }
+            }
+        }
         let mut catalog = self.catalog.lock().unwrap();
         let info = catalog.tessellations.get_mut(tess).ok_or_else(|| EngineError::NotFound(format!("Tessellation '{}' not found.", tess)))?;
         if info.kind != "user" {
             return Err(EngineError::Invalid(format!("'{}' is a system tessellation; it can't have a schema.", tess)).into());
         }
-        let version = schema::new_version(&info.schemas, input).map_err(|e| EngineError::Conflict(format!("{:#}", e)))?;
+        let mut version = schema::new_version(&info.schemas, input).map_err(|e| EngineError::Conflict(format!("{:#}", e)))?;
+        version.created_by = by.user_id.clone();
+        version.created_by_login = by.login.clone();
+        version.restores = restores;
         info.schemas.push(version.clone());
         catalog.save(&self.storage_dir, &self.keys)?;
         info!("📐 Schema version {} registered for '{}'.", version.version, tess);
@@ -118,9 +142,97 @@ impl HexDBEngine {
         Ok(())
     }
 
+    /// Migrate documents (each with the version it's on) to the latest of
+    /// `versions`, in order. Fails if a migration function fails.
+    /// (A boxed future: a migration function may write, and writes migrate.)
+    pub fn migrate_maps<'a>(&'a self, tess: &'a str, versions: &'a [SchemaVersion], mut docs: Vec<(u32, Map<String, Value>)>) -> futures::future::BoxFuture<'a, Result<Vec<Map<String, Value>>>> {
+        Box::pin(async move {
+        for version in versions {
+            let due: Vec<usize> = (0..docs.len()).filter(|&i| docs[i].0 < version.version).collect();
+            if due.is_empty() {
+                continue;
+            }
+            for step in &version.migration {
+                match step {
+                    schema::Step::Function { name, .. } => {
+                        let batch: Vec<Map<String, Value>> = due.iter().map(|&i| docs[i].1.clone()).collect();
+                        let migrated = self.run_migration_function(tess, version, name, batch).await?;
+                        for (&i, map) in due.iter().zip(migrated) {
+                            docs[i].1 = map;
+                        }
+                    }
+                    other => {
+                        for &i in &due {
+                            other.apply(&mut docs[i].1);
+                        }
+                    }
+                }
+            }
+            for &i in &due {
+                version.apply_defaults(&mut docs[i].1);
+            }
+        }
+        Ok(docs.into_iter().map(|(_, map)| map).collect())
+        })
+    }
+
+    /// Run a migration function over a batch of documents, as the user who
+    /// registered the version. It returns `{"documents": [...]}` (or the array),
+    /// one per document given, in order.
+    async fn run_migration_function(&self, tess: &str, version: &SchemaVersion, name: &str, docs: Vec<Map<String, Value>>) -> Result<Vec<Map<String, Value>>> {
+        let def = self.get_function(name).await?.ok_or_else(|| EngineError::SchemaViolation(format!("migration function '{}' no longer exists", name)))?;
+        let (_, user) = crate::users::find_by_id(self, &version.created_by)
+            .await?
+            .ok_or_else(|| EngineError::SchemaViolation(format!("migration function '{}': the user who registered version {} no longer exists", name, version.version)))?;
+        let definitions = crate::users::role_definitions(self).await?;
+        let principal = Arc::new(
+            crate::auth::Principal::new(version.created_by.clone(), user.login, user.email_address, user.roles, crate::auth::Credential::ApiKey { key_id: format!("migration:{}", name) }, &definitions)
+                .with_attributes(user.attributes),
+        );
+        let count = docs.len();
+        let documents = Value::Array(docs.into_iter().map(Value::Object).collect());
+        let context = serde_json::json!({ "tessellation": tess, "from_version": version.version - 1, "to_version": version.version, "documents": documents });
+        let mut args = Map::new();
+        if def.params.iter().any(|p| p.name == "documents") {
+            args.insert("documents".into(), documents);
+        }
+        let run = self.run_function_with(&def, &principal, &args, Some(("migration", context)));
+        let output = crate::access::as_caller(principal.clone(), run).await.map_err(|e| EngineError::SchemaViolation(format!("migration function '{}' failed: {:#}", name, e)))?;
+        let list = match output {
+            Value::Array(list) => list,
+            Value::Object(mut map) => match map.remove("documents") {
+                Some(Value::Array(list)) => list,
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        if list.len() != count || !list.iter().all(Value::is_object) {
+            return Err(EngineError::SchemaViolation(format!(
+                "migration function '{}' must return {} documents (as {{\"documents\": [...]}}), in order; it returned {}",
+                name,
+                count,
+                list.len()
+            ))
+            .into());
+        }
+        Ok(list
+            .into_iter()
+            .map(|v| {
+                let mut map = match v {
+                    Value::Object(map) => map,
+                    _ => Map::new(),
+                };
+                for reserved in crate::document::RESERVED_FIELDS {
+                    map.remove(*reserved);
+                }
+                map
+            })
+            .collect())
+    }
+
     /// Validate (and upgrade, and fill in defaults for) documents being
     /// written to tessellations with a schema. Called inside the commit.
-    pub(crate) fn apply_schemas(&self, items: &mut [BatchItem]) -> Result<()> {
+    pub(crate) async fn apply_schemas(&self, items: &mut [BatchItem]) -> Result<()> {
         let mut cache: std::collections::HashMap<String, Vec<SchemaVersion>> = std::collections::HashMap::new();
         for item in items.iter_mut() {
             let WalOp::Put(doc) = &mut item.op else { continue };
@@ -129,8 +241,10 @@ impl HexDBEngine {
             let mut map = to_map(&doc.data);
             // A document without a stamp came from the client, in the current
             // shape; a stamped older one is a stored document being patched.
-            if doc.data.contains_key(SCHEMA_FIELD) {
-                upgrade(&mut map, version_of(&doc.data), versions);
+            let from = version_of(&doc.data);
+            if doc.data.contains_key(SCHEMA_FIELD) && from < current.version {
+                let tess = doc.tessellation.clone();
+                map = self.migrate_maps(&tess, versions, vec![(from, map)]).await?.remove(0);
             }
             current.apply_defaults(&mut map);
             let problems = current.validate(&map);
@@ -185,15 +299,19 @@ impl HexDBEngine {
             };
             let mut items = Vec::new();
             let (mut unchanged, mut failed, mut errors) = (0u64, 0u64, Vec::new());
-            for doc in &page.documents {
-                let from = version_of(&doc.data);
-                if from >= current.version {
-                    unchanged += 1;
-                    continue;
+            let due: Vec<&crate::document::Document> = page.documents.iter().filter(|d| version_of(&d.data) < current.version).collect();
+            unchanged += (page.documents.len() - due.len()) as u64;
+            let migrated_maps = match self.migrate_maps(tess, &versions, due.iter().map(|d| (version_of(&d.data), to_map(&d.data))).collect()).await {
+                Ok(maps) => maps,
+                Err(e) => {
+                    // A migration function failed for this batch: report it and go on.
+                    failed += due.len() as u64;
+                    errors.push(serde_json::json!({ "id": due.first().map(|d| d.id.to_string()), "problems": [{ "field": "", "message": format!("{:#}", e) }] }));
+                    Vec::new()
                 }
-                let mut map = to_map(&doc.data);
-                upgrade(&mut map, from, &versions);
-                current.apply_defaults(&mut map);
+            };
+            for (doc, map) in due.iter().zip(migrated_maps) {
+                let from = version_of(&doc.data);
                 let problems = current.validate(&map);
                 if !problems.is_empty() {
                     failed += 1;
@@ -207,7 +325,7 @@ impl HexDBEngine {
                     Ok((_, seq)) => seq,
                     Err(_) => continue,
                 };
-                let mut migrated = doc.clone();
+                let mut migrated = (*doc).clone();
                 migrated.data = from_map(&map, current.version);
                 items.push(BatchItem { key, op: WalOp::Put(migrated), expected_seq: Some(seq) });
             }

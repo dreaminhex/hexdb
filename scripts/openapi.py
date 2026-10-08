@@ -80,6 +80,7 @@ ROUTES = [
     ("post", "/tessellations/{name}/schemas", "Schemas", "Register a schema version (manage)", {"parameters": [NAME], "requestBody": body(description="{\"fields\": {...}, \"additional_fields\": true, \"migration\": [...]}"), "responses": ok("Created", status="201")}),
     ("delete", "/tessellations/{name}/schemas", "Schemas", "Remove every schema version (manage)", {"parameters": [NAME], "responses": no_content()}),
     ("post", "/tessellations/{name}/schemas/check", "Schemas", "Check a schema without registering it", {"parameters": [NAME], "requestBody": body(), "responses": ok()}),
+    ("post", "/tessellations/{name}/schemas/rollback", "Schemas", "Roll back to an earlier version (a new version with its fields and the inverse migration)", {"parameters": [NAME], "requestBody": body({"type": "object", "required": ["to"], "properties": {"to": {"type": "integer"}, "migration": {"type": "array", "items": OBJ}}}), "responses": ok("Created", status="201")}),
     # Documents
     ("get", "/{tessellation}", "Documents", "List documents (?filter=&sort=&limit=&offset=&after=&fields=&total=)", {"parameters": [TESS] + [param(n, "query") for n in ("filter", "sort", "limit", "offset", "after", "fields", "total")], "responses": ok()}),
     ("post", "/{tessellation}", "Documents", "Insert a document", {"parameters": [TESS, TTL, IDEM], "requestBody": body(), "responses": ok("Created", status="201")}),
@@ -123,6 +124,11 @@ ROUTES = [
     ("put", "/schedules/{name}", "Functions", "Replace a schedule", {"parameters": [NAME], "requestBody": body(), "responses": ok()}),
     ("delete", "/schedules/{name}", "Functions", "Delete a schedule", {"parameters": [NAME], "responses": no_content()}),
     ("post", "/schedules/{name}/run", "Functions", "Run a schedule now", {"parameters": [NAME], "responses": ok()}),
+    ("get", "/triggers", "Triggers", "Every trigger with its run status (admins)", {"responses": ok()}),
+    ("post", "/triggers", "Triggers", "Create a trigger; it runs as you (admins)", {"requestBody": body({"type": "object", "required": ["name", "tessellation", "function"], "properties": {"name": {"type": "string"}, "description": {"type": "string"}, "tessellation": {"type": "string"}, "events": {"type": "array", "items": {"enum": ["insert", "update", "delete"]}}, "timing": {"enum": ["before", "after"]}, "function": {"type": "string"}, "filter": OBJ, "enabled": {"type": "boolean"}}}), "responses": ok("Created", status="201")}),
+    ("get", "/triggers/{name}", "Triggers", "A trigger with its run status", {"parameters": [NAME], "responses": ok()}),
+    ("put", "/triggers/{name}", "Triggers", "Replace a trigger", {"parameters": [NAME], "requestBody": body(), "responses": ok()}),
+    ("delete", "/triggers/{name}", "Triggers", "Delete a trigger", {"parameters": [NAME], "responses": {"204": {"description": "Deleted"}}}),
     # Users and roles
     ("get", "/users", "Users and roles", "Users (admins)", {"responses": ok()}),
     ("post", "/users", "Users and roles", "Create a user (admins)", {"parameters": [IDEM], "requestBody": body({"type": "object", "properties": {"login": {"type": "string"}, "password": {"type": "string"}, "email_address": {"type": "string"}, "roles": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "tessellations": {"type": "array", "items": {"type": "string"}}}}}}}), "responses": ok("Created", status="201")}),

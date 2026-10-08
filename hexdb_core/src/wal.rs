@@ -51,6 +51,13 @@ pub struct WalRecord {
     /// When it was committed (epoch milliseconds; 0 in records from earlier builds).
     #[serde(default)]
     pub time: i64,
+    /// Sequence numbers in this record that created a document (the others
+    /// replaced one), so the change feed can tell inserts from updates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<u64>,
+    /// The trigger whose run made these writes, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -438,6 +445,8 @@ pub struct HistoryOp {
     pub seq: u64,
     pub time: i64,
     pub op: WalOp,
+    pub created: bool,
+    pub origin: Option<String>,
 }
 
 /// Up to `limit` operations with `after < seq <= up_to`, oldest first, from
@@ -458,15 +467,17 @@ pub fn read_history(dir: &Path, keys: &crate::crypt::KeyRing, after: u64, up_to:
             }
         }
         let mut done = false;
-        read_segment(path, keys, false, &mut ReplayStats::default(), &mut |record| {
+        read_segment(path, keys, false, &mut ReplayStats::default(), &mut |mut record| {
             let time = record.time;
+            let created = std::mem::take(&mut record.created);
+            let origin = record.origin.take();
             for (seq, op) in record.into_ops() {
                 if seq > up_to || out.len() >= limit {
                     done = true;
                     return false;
                 }
                 if seq > after {
-                    out.push(HistoryOp { seq, time, op });
+                    out.push(HistoryOp { seq, time, op, created: created.contains(&seq), origin: origin.clone() });
                 }
             }
             true
@@ -645,6 +656,8 @@ mod tests {
         WalRecord {
             seq,
             time: 1000 + seq as i64,
+            created: Vec::new(),
+            origin: None,
             op: WalOp::Put(Document {
                 id: Ulid::new(),
                 tessellation: "t".into(),

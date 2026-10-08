@@ -110,6 +110,7 @@ impl From<anyhow::Error> for ApiError {
             Some(EngineError::NoQuorum(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no_quorum", m.clone()),
             Some(EngineError::TooLarge(m)) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "document_too_large", m.clone()),
             Some(EngineError::SchemaViolation(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "schema_violation", m.clone()),
+            Some(EngineError::TriggerRejected(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "trigger_rejected", m.clone()),
             Some(EngineError::DiskFull(m)) => ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "disk_full", m.clone()),
             Some(EngineError::Forbidden(m)) => ApiError::forbidden(m.clone()),
             Some(EngineError::RateLimited(m, retry)) => {
@@ -585,7 +586,7 @@ pub async fn add_schema(
     principal.require(Permission::Manage, &name)?;
     let Json(input) = body?;
     existing_tessellation(&engine, &name)?;
-    let version = engine.add_schema(&name, input)?;
+    let version = engine.add_schema(&name, input, &principal).await?;
     engine.audit(&principal.login, "schema.create", &name, json!({ "version": version.version })).await;
     let migrating = engine.clone();
     let tess = name.clone();
@@ -605,24 +606,35 @@ pub async fn check_schema(
     let Json(input) = body?;
     existing_tessellation(&engine, &name)?;
     let versions = engine.schemas(&name);
-    let candidate = match hexdb_core::schema::new_version(&versions, input) {
+    let mut candidate = match hexdb_core::schema::new_version(&versions, input) {
         Ok(v) => v,
         Err(e) => return Ok(Json(json!({ "compatible": false, "error": format!("{:#}", e) })).into_response()),
     };
+    // Migration functions in the candidate run as the caller.
+    candidate.created_by = principal.user_id.clone();
     let mut all = versions.clone();
     all.push(candidate.clone());
     let (mut checked, mut failing, mut errors) = (0u64, 0u64, Vec::new());
     let mut after = None;
-    // Up to 100,000 documents are checked.
+    // Up to 100,000 documents are checked, migrated exactly as they would be
+    // (migration functions included).
     while checked < 100_000 {
         let page = engine.list_documents(&name, after, 1000).await?;
-        for doc in &page.documents {
+        let batch: Vec<(u32, serde_json::Map<String, Value>)> = page
+            .documents
+            .iter()
+            .map(|doc| {
+                let mut map: serde_json::Map<String, Value> = doc.data_json().as_object().cloned().unwrap_or_default();
+                let from = map.remove(hexdb_core::schema::SCHEMA_FIELD).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                (from, map)
+            })
+            .collect();
+        let migrated = match engine.migrate_maps(&name, &all, batch).await {
+            Ok(maps) => maps,
+            Err(e) => return Ok(Json(json!({ "compatible": false, "error": format!("{:#}", e) })).into_response()),
+        };
+        for (doc, map) in page.documents.iter().zip(migrated) {
             checked += 1;
-            let mut map: serde_json::Map<String, Value> = doc.data_json().as_object().cloned().unwrap_or_default();
-            let from = map.remove(hexdb_core::schema::SCHEMA_FIELD).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            for v in all.iter().filter(|v| v.version > from) {
-                v.migrate(&mut map);
-            }
             let problems = candidate.validate(&map);
             if !problems.is_empty() {
                 failing += 1;
@@ -637,6 +649,36 @@ pub async fn check_schema(
         }
     }
     Ok(Json(json!({ "compatible": true, "version": candidate.version, "checked": checked, "would_not_fit": failing, "errors": errors })).into_response())
+}
+
+/// Options for `POST /tessellations/{name}/schemas/rollback`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaRollback {
+    /// The version whose fields to restore.
+    pub to: u32,
+    /// Steps to run after the automatic inverse ones (e.g. set_default for removed fields).
+    #[serde(default)]
+    pub migration: Vec<hexdb_core::schema::Step>,
+}
+
+/// Roll back to an earlier version: a new version with its fields and the
+/// inverse migration; existing documents are migrated in the background.
+pub async fn rollback_schema(
+    Path(name): Path<String>,
+    State(engine): Engine,
+    Auth(principal): Auth,
+    body: Result<Json<SchemaRollback>, JsonRejection>,
+) -> ApiResult {
+    principal.require(Permission::Manage, &name)?;
+    let Json(input) = body?;
+    existing_tessellation(&engine, &name)?;
+    let version = engine.rollback_schema(&name, input.to, input.migration, &principal).await?;
+    engine.audit(&principal.login, "schema.rollback", &name, json!({ "to": input.to, "version": version.version })).await;
+    let migrating = engine.clone();
+    let tess = name.clone();
+    tokio::spawn(async move { migrating.migrate_schema(&tess).await });
+    Ok((StatusCode::CREATED, Json(json!(version))).into_response())
 }
 
 /// Remove every schema version (the tessellation becomes schemaless).
@@ -821,7 +863,8 @@ pub async fn get_tessellation(Path(name): Path<String>, State(engine): Engine, A
         .tessellation_info(&name)
         .ok_or_else(|| ApiError::not_found(format!("Tessellation '{}' not found.", name)))?;
     let mut body = tessellation_json(&name, &info);
-    body["document_count"] = json!(engine.count_documents(&name).await?);
+    // Counted as the caller sees it (a role's row filter narrows it).
+    body["document_count"] = json!(engine.count_matching(&name, &hexdb_core::filter::Filter::all()).await?);
     Ok(Json(body).into_response())
 }
 

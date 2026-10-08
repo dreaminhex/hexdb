@@ -325,6 +325,9 @@ export interface SchemaVersion {
   fields: Record<string, Record<string, unknown>>
   additional_fields: boolean
   migration?: Record<string, unknown>[]
+  created_by_login?: string
+  /** Set on a rollback: the version whose fields this one restores. */
+  restores?: number
 }
 
 export interface SchemaMigration {
@@ -503,6 +506,14 @@ export interface User {
   use_mfa: boolean
   last_password_change: number
   password_expiration: number
+  /** Values role filters can refer to: {"$user": "attributes.region"}. */
+  attributes?: Record<string, unknown>
+}
+
+/** A role's row filter and hidden fields on one tessellation ("*" for all). */
+export interface Restriction {
+  filter?: Record<string, unknown>
+  hide?: string[]
 }
 
 export interface Role {
@@ -510,6 +521,7 @@ export interface Role {
   name: string
   description: string
   permissions: Action[]
+  restrictions?: Record<string, Restriction>
   /** Built-in roles can't be changed or deleted. */
   builtin: boolean
 }
@@ -525,6 +537,7 @@ export interface RoleInput {
   name?: string
   description?: string
   permissions?: Action[]
+  restrictions?: Record<string, Restriction>
 }
 
 export interface NewUser {
@@ -532,6 +545,7 @@ export interface NewUser {
   password: string
   email_address: string
   roles: RoleGrant[]
+  attributes?: Record<string, unknown>
 }
 
 export type UserChanges = Partial<{
@@ -541,7 +555,22 @@ export type UserChanges = Partial<{
   roles: RoleGrant[]
   is_locked: boolean
   use_mfa: boolean
+  attributes: Record<string, unknown>
 }>
+
+export interface Trigger {
+  name: string
+  description: string
+  tessellation: string
+  events: ("insert" | "update" | "delete")[]
+  timing: "before" | "after"
+  function: string
+  filter?: Record<string, unknown>
+  enabled: boolean
+  run_as_login?: string
+  updated?: number
+  status?: { runs: number; failures: number; rejected: number; last_run: number | null; last_error: string | null; last_ms: number }
+}
 
 // ---------------------------------------------------------------------------
 // Endpoints
@@ -620,6 +649,13 @@ export const api = {
   addSchema: (tess: string, schema: unknown) => request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas`, schema),
   checkSchema: (tess: string, schema: unknown) => request<SchemaCheck>("POST", `/tessellations/${enc(tess)}/schemas/check`, schema),
   dropSchemas: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas`),
+  rollbackSchema: (tess: string, to: number, migration: unknown[] = []) =>
+    request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas/rollback`, { to, migration }),
+
+  triggers: () => request<{ triggers: Trigger[] }>("GET", "/triggers").then((r) => r.triggers),
+  createTrigger: (trigger: Trigger) => request<Trigger>("POST", "/triggers", trigger),
+  updateTrigger: (name: string, trigger: Trigger) => request<Trigger>("PUT", `/triggers/${enc(name)}`, trigger),
+  deleteTrigger: (name: string) => request<void>("DELETE", `/triggers/${enc(name)}`),
 
   streams: () => request<{ streams: StreamConfig[] }>("GET", "/streams").then((r) => r.streams),
   stream: (name: string) => request<StreamDetail>("GET", `/streams/${enc(name)}`),

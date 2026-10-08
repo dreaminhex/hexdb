@@ -66,7 +66,7 @@ impl HexDBEngine {
                     WalOp::Delete { tessellation, id } => (ChangeKind::Delete, tessellation, Some(id), None),
                     WalOp::Batch(_) => return None,
                 };
-                Some(Change { seq: h.seq, timestamp, kind, tessellation, id, document })
+                Some(Change { seq: h.seq, timestamp, kind, tessellation, id, document, created: h.created, origin: h.origin })
             })
             .collect();
         // Tessellation drops aren't WAL records; the catalog remembers when they happened.
@@ -76,7 +76,7 @@ impl HexDBEngine {
             catalog.dropped.iter().filter(|(_, seq)| **seq > after && **seq <= last).map(|(n, s)| (n.clone(), *s)).collect()
         };
         for (tessellation, seq) in drops {
-            changes.push(Change { seq, timestamp: Utc::now(), kind: ChangeKind::DropTessellation, tessellation, id: None, document: None });
+            changes.push(Change { seq, timestamp: Utc::now(), kind: ChangeKind::DropTessellation, tessellation, id: None, document: None, created: false, origin: None });
         }
         changes.sort_by_key(|c| c.seq);
         changes.truncate(limit);

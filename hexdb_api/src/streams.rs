@@ -50,10 +50,27 @@ pub async fn list(axum::extract::State(engine): Engine, Auth(principal): Auth) -
     Ok(Json(json!({ "streams": list })).into_response())
 }
 
+/// A stream's sources copy every change of their tessellations, so whoever
+/// configures them needs unrestricted read access there (no row filter or
+/// field mask), or a stream could reveal what their role hides.
+fn require_sources(principal: &hexdb_core::Principal, config: &StreamConfig) -> Result<(), ApiError> {
+    for source in &config.sources {
+        principal.require(Permission::Read, &source.tessellation)?;
+        if !principal.unrestricted(&source.tessellation, hexdb_core::Action::Read) {
+            return Err(ApiError::from(anyhow::Error::from(hexdb_core::EngineError::Forbidden(format!(
+                "Your role's access to '{}' is restricted, so it can't be a stream source.",
+                source.tessellation
+            )))));
+        }
+    }
+    Ok(())
+}
+
 /// Create a stream.
 pub async fn create(axum::extract::State(engine): Engine, Auth(principal): Auth, body: Result<Json<StreamConfig>, JsonRejection>) -> ApiResult {
     let Json(config) = body?;
     require(&principal, Permission::Manage, &config.name)?;
+    require_sources(&principal, &config)?;
     let saved = engine.save_stream(config, &principal.login, true).await?;
     engine.audit(&principal.login, "stream.create", &saved.name, json!({ "sources": saved.sources.len(), "destinations": saved.destinations.len() })).await;
     Ok((StatusCode::CREATED, Json(json!(saved))).into_response())
@@ -79,6 +96,7 @@ pub async fn update(Path(name): Path<String>, axum::extract::State(engine): Engi
     require(&principal, Permission::Manage, &name)?;
     let Json(mut config) = body?;
     config.name = name.clone();
+    require_sources(&principal, &config)?;
     let saved = engine.save_stream(config, &principal.login, false).await?;
     engine.audit(&principal.login, "stream.update", &name, json!({})).await;
     Ok(Json(json!(saved)).into_response())

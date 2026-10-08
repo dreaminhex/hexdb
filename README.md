@@ -9,15 +9,15 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 - **Documents and queries.** Insert, replace, patch, delete, bulk writes, upserts, update-by-filter, TTLs and idempotency keys. A JSON filter language with sorting and paging, shared by REST and GraphQL.
 - **Indexes and search.** Field, composite and unique indexes. Full-text indexes with configurable analyzers (stemming, n-grams, autocomplete). A query advisor that suggests indexes from observed queries, with an optional second opinion from Claude.
 - **Aggregations and transactions.** Group-by with count, distinct count, sum, average, min and max. Multi-document ACID transactions across tessellations, with version and filter preconditions.
-- **Schemas.** Optional, versioned per tessellation, with compatibility checks and background migrations (rename, copy, remove, default, convert).
+- **Schemas.** Optional, versioned per tessellation, with compatibility checks, background migrations (rename, copy, remove, default, convert, or a function you write), and rollback to an earlier version.
 - **Change data.** An ordered change feed (polling, long polling, Server-Sent Events) backed by an on-disk history, so consumers can resume after a restart.
 - **Streams.** Named publish/subscribe logs with consumer groups and retention. They can be fed from tessellation changes and delivered to webhooks.
-- **Functions.** Saved queries, aggregations, transactions and scripts (Python, TypeScript, JavaScript), run by name with typed parameters. Schedules run them on an interval or a cron expression.
+- **Functions and triggers.** Saved queries, aggregations, transactions and scripts (Python, TypeScript, JavaScript), run by name with typed parameters. Schedules run them on an interval or a cron expression. Triggers run them when documents change: before a write, to check, change or refuse it, or after it commits.
 - **Plugins.** Change data capture (Kafka, Kinesis), ingest sources (PostgreSQL, SQL Server, S3), log and metrics sinks (OpenTelemetry, files, HTTP) and enrichers. A plugin can be a process, a webhook or built in.
 - **Replication.** Automatic discovery and Overseer election, snapshot plus change-stream replication, and failover. Optional synchronous acknowledgements, a write quorum, and write forwarding from replicas.
 - **Security.**
   - Authentication: sessions, API keys and TOTP multi-factor authentication.
-  - Access control: built-in and custom roles granted per tessellation.
+  - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region) and hidden fields per role.
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon sharding that repairs corrupted memory.
@@ -166,8 +166,28 @@ To load sample data (articles, products, customers, orders and short-lived sessi
 
 - `cargo run -p hexdb_api` from the repository root runs the server straight from source, using `hexdb_api/hexdb.toml` (set by [.cargo/config.toml](.cargo/config.toml)). Stop any `hexdb start` server first: both use port 7700.
 - `cd hexdb_admin && npm run dev` serves the admin UI with live reload at http://localhost:5173/ui/, sending API calls to the server on port 7700.
-- `node scripts/lattice-demo.mjs` starts a three-hex lattice on ports 7800, 7810 and 7820 (separate from your server on 7700) and loads sample data. Open any hex's Dashboard to see the lattice. Type `stop 1` to stop the Overseer and watch another hex take over, then `start 1` to bring it back. It needs the release build and the built UI from step 2.
+- `node scripts/lattice-demo.mjs` starts a lattice; see [See a lattice](#see-a-lattice) below.
 - `hexdb lattice spawn --count 2` (from `hexdb_api`) adds two hexes to your own server's lattice instead.
+
+### See a lattice
+
+To see replication and failover in the UI, run the demo script from the repository root after step 2 (it needs the release build and the built UI):
+
+```bash
+node scripts/lattice-demo.mjs
+```
+
+It starts three hexes on ports 7800, 7810 and 7820, separate from your own server on 7700, and loads sample data into the first. Then it prints a UI link for each hex and an admin password. Sign in on any of them:
+- The Dashboard's Lattice card lists all three hexes, with one Overseer and two Harvesters, and their replication lag.
+- Each hex's vertex hexagon shows its six memory vertices.
+- The Documents page on any hex shows the replicated data.
+
+The script takes commands while it runs:
+- `stop 1` stops the Overseer; within seconds another hex takes over, and the lost one is marked as such.
+- `start 1` brings it back as a replica.
+- `list` shows the roles; `quit` (or Ctrl+C) stops every hex.
+
+`--hexes 5` starts up to seven hexes and `--port 9000` moves them. The data lives in `.hexdb-demo/`, which git ignores; `--keep` reuses it on the next run.
 
 ### With Docker
 
@@ -207,11 +227,11 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | --- | --- |
 | Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, and "Add a hex" for joining new servers; flush and back up |
 | Queries | A GraphQL console with schema-aware completion, examples and history |
-| Tessellations | Create and delete tessellations; manage indexes (with analyzer choice and index suggestions) and schemas |
+| Tessellations | Create and delete tessellations; manage indexes (with analyzer choice and index suggestions) and schemas (with version history and rollback) |
 | Documents | Browse with filters and sorting; create, edit and delete documents |
 | Streams | Create streams, publish, read messages, and watch consumer groups and deliveries |
-| Functions | Create and run functions; manage schedules |
-| Users, Roles | Accounts, role grants, custom roles, MFA resets |
+| Functions | Create and run functions; manage schedules and triggers |
+| Users, Roles | Accounts, role grants, user attributes, custom roles with row filters and hidden fields, MFA resets |
 | Audit Trail | Security events, filterable by user, action and time |
 | Plugins | Loaded plugins, their state and deliveries |
 | Logs | The server log, tailed live |

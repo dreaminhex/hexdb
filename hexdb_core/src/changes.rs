@@ -46,17 +46,37 @@ pub struct Change {
     pub id: Option<Ulid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document: Option<Document>,
+    /// A put that created the document (an insert) rather than replacing it.
+    #[serde(default)]
+    pub created: bool,
+    /// The trigger whose run made this change, if any (triggers don't fire on these).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 impl Change {
+    /// "insert", "update", "delete" or "drop_tessellation".
+    pub fn event(&self) -> &'static str {
+        match self.kind {
+            ChangeKind::Put if self.created => "insert",
+            ChangeKind::Put => "update",
+            ChangeKind::Delete => "delete",
+            ChangeKind::DropTessellation => "drop_tessellation",
+        }
+    }
+
     /// The change as the public API shows it (documents as plain JSON).
     pub fn to_api_json(&self) -> Value {
         let mut value = json!({
             "seq": self.seq,
             "timestamp": self.timestamp,
             "op": self.kind,
+            "event": self.event(),
             "tessellation": self.tessellation,
         });
+        if let Some(origin) = &self.origin {
+            value["trigger"] = Value::String(origin.clone());
+        }
         if let Some(id) = self.id {
             value["id"] = Value::String(id.to_string());
         }
@@ -180,7 +200,7 @@ mod tests {
     use super::*;
 
     fn change(seq: u64) -> Change {
-        Change { seq, timestamp: Utc::now(), kind: ChangeKind::Delete, tessellation: "t".into(), id: Some(Ulid::new()), document: None }
+        Change { seq, timestamp: Utc::now(), kind: ChangeKind::Delete, tessellation: "t".into(), id: Some(Ulid::new()), document: None, created: false, origin: None }
     }
 
     fn seqs(changes: &[Arc<Change>]) -> Vec<u64> {

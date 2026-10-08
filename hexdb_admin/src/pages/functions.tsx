@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { usePoll } from "@/hooks/use-poll"
-import { api, errorMessage, type FunctionDef, type Schedule } from "@/lib/api"
+import { api, errorMessage, type FunctionDef, type Schedule, type Trigger } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 
 const TEMPLATES: Record<FunctionDef["kind"], { body?: string; code?: string; params: string }> = {
@@ -388,6 +388,153 @@ function ScheduleDialog({ schedule, functions, open, onOpenChange, onSaved }: { 
   )
 }
 
+const EVENTS: Trigger["events"] = ["insert", "update", "delete"]
+
+function TriggerDialog({ trigger, functions, open, onOpenChange, onSaved }: { trigger: Trigger | null; functions: FunctionDef[]; open: boolean; onOpenChange: (open: boolean) => void; onSaved: () => void }) {
+  const [name, setName] = useState("")
+  const [description, setDescription] = useState("")
+  const [tessellation, setTessellation] = useState("")
+  const [timing, setTiming] = useState<Trigger["timing"]>("after")
+  const [events, setEvents] = useState<Trigger["events"]>(EVENTS)
+  const [fn, setFn] = useState("")
+  const [filter, setFilter] = useState("")
+  const [enabled, setEnabled] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string>()
+
+  useEffect(() => {
+    if (!open) return
+    setName(trigger?.name ?? "")
+    setDescription(trigger?.description ?? "")
+    setTessellation(trigger?.tessellation ?? "")
+    setTiming(trigger?.timing ?? "after")
+    setEvents(trigger?.events ?? EVENTS)
+    setFn(trigger?.function ?? "")
+    setFilter(trigger?.filter ? JSON.stringify(trigger.filter, null, 2) : "")
+    setEnabled(trigger?.enabled ?? true)
+    setError(undefined)
+  }, [open, trigger])
+
+  // Before triggers decide whether and how a write goes ahead, so they run scripts.
+  const choices = functions.filter((f) => timing === "after" || f.kind === "script")
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setBusy(true)
+    setError(undefined)
+    try {
+      const t: Trigger = {
+        name: name.trim(),
+        description,
+        tessellation: tessellation.trim(),
+        timing,
+        events,
+        function: fn,
+        enabled,
+        ...(filter.trim() ? { filter: parseJson<Record<string, unknown>>(filter, "The filter") } : {}),
+      }
+      if (trigger) await api.updateTrigger(trigger.name, t)
+      else await api.createTrigger(t)
+      toast.success(trigger ? `Updated ${t.name}.` : `Created ${t.name}.`)
+      onSaved()
+      onOpenChange(false)
+    } catch (e) {
+      setError(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
+      <DialogContent className="max-h-[94svh] overflow-y-auto sm:max-w-xl">
+        <form onSubmit={submit} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>{trigger ? `Edit ${trigger.name}` : "New trigger"}</DialogTitle>
+            <DialogDescription>
+              Runs a function when documents change. A before trigger runs a script inside the write: it can let it through, change the document, or
+              refuse it. An after trigger runs any function once the write is committed. Triggers run as you; writes they make don't fire triggers.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="trg-name">Name</Label>
+              <Input id="trg-name" value={name} onChange={(e) => setName(e.target.value)} disabled={!!trigger} required placeholder="check-orders" />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="trg-tess">Tessellation</Label>
+              <Input id="trg-tess" value={tessellation} onChange={(e) => setTessellation(e.target.value)} required placeholder="orders" />
+            </div>
+            <div className="grid gap-1.5">
+              <Label>When</Label>
+              <Select value={timing} onValueChange={(v) => setTiming(v as Trigger["timing"])}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="before">Before the write (script)</SelectItem>
+                  <SelectItem value="after">After the write</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label>Function</Label>
+              <Select value={fn} onValueChange={setFn}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder={choices.length ? "Choose a function" : "No suitable functions"} />
+                </SelectTrigger>
+                <SelectContent>
+                  {choices.map((f) => (
+                    <SelectItem key={f.name} value={f.name}>
+                      {f.name} <span className="text-muted-foreground">({f.kind === "script" ? f.runtime : f.kind})</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-4 text-sm">
+            <span className="font-medium">Events</span>
+            {EVENTS.map((e) => (
+              <label key={e} className="flex items-center gap-2">
+                <Checkbox checked={events.includes(e)} onCheckedChange={(on) => setEvents((cur) => (on ? [...cur, e] : cur.filter((x) => x !== e)))} />
+                {e}
+              </label>
+            ))}
+          </div>
+          <div className="grid gap-1.5">
+            <Label>Filter (optional)</Label>
+            <JsonEditor value={filter} onChange={setFilter} label="Trigger filter" className="h-20" />
+            <p className="text-muted-foreground text-xs">Only documents matching this filter (the new version; the stored one for deletes).</p>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="trg-description">Description</Label>
+            <Input id="trg-description" value={description} onChange={(e) => setDescription(e.target.value)} />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox checked={enabled} onCheckedChange={(v) => setEnabled(v === true)} /> Enabled
+          </label>
+          <p className="text-muted-foreground text-xs">
+            Scripts read <code>trigger</code> on stdin: <code>event</code>, <code>tessellation</code>, <code>id</code>, <code>document</code>, <code>previous</code>,{" "}
+            <code>user</code>. A before trigger prints <code>null</code>, <code>{'{"document": {...}}'}</code> or <code>{'{"reject": "why"}'}</code>. Other
+            functions receive the values their parameters name.
+          </p>
+          {error && <p className="text-destructive text-sm whitespace-pre-wrap">{error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy || !name.trim() || !tessellation.trim() || !fn || events.length === 0}>
+              {busy && <IconLoader2 className="animate-spin" />}
+              {trigger ? "Save" : "Create trigger"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 const when = (ms?: number) => (ms ? new Date(ms).toLocaleString() : "—")
 
 /** Saved functions (queries, aggregations, transactions, scripts) and their schedules. */
@@ -398,8 +545,10 @@ export function FunctionsPage() {
   const schedules = usePoll(() => (admin ? api.schedules() : Promise.resolve([])), 5000, [admin])
   const [editing, setEditing] = useState<FunctionDef | null | undefined>(undefined)
   const [running, setRunning] = useState<FunctionDef | null>(null)
-  const [deleting, setDeleting] = useState<{ kind: "function" | "schedule"; name: string } | null>(null)
+  const [deleting, setDeleting] = useState<{ kind: "function" | "schedule" | "trigger"; name: string } | null>(null)
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null | undefined>(undefined)
+  const triggers = usePoll(() => (admin ? api.triggers() : Promise.resolve([])), 5000, [admin])
+  const [editingTrigger, setEditingTrigger] = useState<Trigger | null | undefined>(undefined)
 
   const runSchedule = async (name: string) => {
     try {
@@ -419,6 +568,7 @@ export function FunctionsPage() {
           <TabsList>
             <TabsTrigger value="functions">Functions</TabsTrigger>
             {admin && <TabsTrigger value="schedules">Schedules</TabsTrigger>}
+            {admin && <TabsTrigger value="triggers">Triggers</TabsTrigger>}
           </TabsList>
         </div>
         <TabsContent value="functions" className="grid gap-4 pt-2">
@@ -555,7 +705,83 @@ export function FunctionsPage() {
             </Card>
           </TabsContent>
         )}
+        {admin && (
+          <TabsContent value="triggers" className="grid gap-4 pt-2">
+            <div className="flex items-start gap-4">
+              <p className="text-muted-foreground max-w-3xl text-sm">
+                Triggers run a function when documents are inserted, updated or deleted: before the write (to check or change it) or after it commits.
+              </p>
+              <Button size="sm" className="ml-auto shrink-0" onClick={() => setEditingTrigger(null)} disabled={!functions.data?.length}>
+                <IconPlus /> New trigger
+              </Button>
+            </div>
+            <Card className="gap-0 overflow-hidden py-0">
+              <Table>
+                <TableHeader className="bg-muted/60">
+                  <TableRow>
+                    <TableHead className="pl-6">Trigger</TableHead>
+                    <TableHead>On</TableHead>
+                    <TableHead>Runs</TableHead>
+                    <TableHead>Last run</TableHead>
+                    <TableHead className="w-24 pr-6" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {(triggers.data ?? []).map((t) => (
+                    <TableRow key={t.name}>
+                      <TableCell className="pl-6">
+                        <div className="font-medium">
+                          {t.name} {!t.enabled && <Badge variant="secondary">off</Badge>}
+                        </div>
+                        <div className="text-muted-foreground text-xs">
+                          {t.timing} · runs {t.function} as {t.run_as_login}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {t.tessellation} <span className="text-muted-foreground text-xs">({t.events.join(", ")})</span>
+                      </TableCell>
+                      <TableCell className="text-sm tabular-nums">
+                        {t.status?.runs ?? 0}
+                        {t.status?.failures ? <span className="text-destructive ml-1.5 text-xs">{t.status.failures} failed</span> : null}
+                        {t.status?.rejected ? <span className="text-muted-foreground ml-1.5 text-xs">{t.status.rejected} refused</span> : null}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        <span title={t.status?.last_error ?? undefined} className={t.status?.last_error ? "text-destructive" : ""}>
+                          {when(t.status?.last_run ?? undefined)}
+                        </span>
+                      </TableCell>
+                      <TableCell className="pr-6">
+                        <div className="flex justify-end gap-1">
+                          <Button variant="ghost" size="icon" className="text-muted-foreground size-8" aria-label={`Edit ${t.name}`} onClick={() => setEditingTrigger(t)}>
+                            <IconPencil />
+                          </Button>
+                          <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-destructive size-8" aria-label={`Delete ${t.name}`} onClick={() => setDeleting({ kind: "trigger", name: t.name })}>
+                            <IconTrash />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {triggers.data?.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-muted-foreground py-10 text-center">
+                        No triggers.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </Card>
+          </TabsContent>
+        )}
       </Tabs>
+      <TriggerDialog
+        trigger={editingTrigger ?? null}
+        functions={functions.data ?? []}
+        open={editingTrigger !== undefined}
+        onOpenChange={(open) => !open && setEditingTrigger(undefined)}
+        onSaved={() => void triggers.refresh()}
+      />
       <FunctionDialog fn={editing ?? null} open={editing !== undefined} onOpenChange={(open) => !open && setEditing(undefined)} onSaved={() => void functions.refresh()} />
       <RunDialog fn={running} onOpenChange={(open) => !open && setRunning(null)} />
       <ScheduleDialog
@@ -573,10 +799,12 @@ export function FunctionsPage() {
         confirmLabel={`Delete ${deleting?.kind}`}
         onConfirm={async () => {
           if (deleting!.kind === "function") await api.deleteFunction(deleting!.name)
-          else await api.deleteSchedule(deleting!.name)
+          else if (deleting!.kind === "schedule") await api.deleteSchedule(deleting!.name)
+          else await api.deleteTrigger(deleting!.name)
           toast.success(`Deleted ${deleting!.name}.`)
           void functions.refresh()
           void schedules.refresh()
+          void triggers.refresh()
         }}
       />
     </div>

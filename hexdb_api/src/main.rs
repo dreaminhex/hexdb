@@ -238,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
     // Stream sources and destinations run on the Overseer too, as do schedules.
     hexdb_core::streams::spawn_streams(engine.clone(), shutdown_rx.clone());
     hexdb_core::functions::spawn_scheduler(engine.clone(), shutdown_rx.clone());
+    hexdb_core::triggers::spawn_trigger_runner(engine.clone(), shutdown_rx.clone());
 
     // Follow the Overseer whenever this hex isn't one.
     hexdb_core::spawn_replication_task(engine.clone(), shutdown_rx.clone());

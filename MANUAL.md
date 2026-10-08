@@ -20,7 +20,7 @@ Examples use `curl` against `http://localhost:7700` and leave out credentials. A
 12. [Schemas](#12-schemas)
 13. [Change data](#13-change-data)
 14. [Streams](#14-streams)
-15. [Functions and schedules](#15-functions-and-schedules)
+15. [Functions, schedules and triggers](#15-functions-schedules-and-triggers)
 16. [Plugins](#16-plugins)
 17. [Security](#17-security)
 18. [Lattices and replication](#18-lattices-and-replication)
@@ -45,9 +45,9 @@ What it provides:
 | Consistency | Every write is atomic and durable before it's acknowledged; multi-document transactions are serializable for the documents they touch |
 | Performance | Field, composite, unique and text indexes; an index advisor; an LRU memory cache; SSTables with Bloom filters; Zstandard compression |
 | Change data | An ordered change feed with an on-disk history; streams (publish/subscribe) with consumer groups; plugins for Kafka, Kinesis, OpenTelemetry and more |
-| Logic | Functions (saved queries, aggregations, transactions, scripts in Python, TypeScript or JavaScript) and schedules |
+| Logic | Functions (saved queries, aggregations, transactions, scripts in Python, TypeScript or JavaScript), schedules, and triggers that run code before or after writes |
 | Distribution | Several servers form a lattice with automatic discovery, election, replication and failover. Synchronous acknowledgements, a quorum, and write forwarding are optional |
-| Security | Sessions, API keys, TOTP MFA, built-in and custom roles, an audit trail, AES-256-GCM encryption at rest, TLS, authenticated hex-to-hex traffic |
+| Security | Sessions, API keys, TOTP MFA, built-in and custom roles with row filters and field masks, an audit trail, AES-256-GCM encryption at rest, TLS, authenticated hex-to-hex traffic |
 
 What it doesn't do (yet):
 
@@ -149,7 +149,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 **Tessellations**
 - Create and delete tessellations and see their sizes.
 - The key button opens the indexes dialog. It lists indexes, creates field or text indexes (choosing an analyzer for text), and has a Suggestions section. "From recent queries" runs the rule-based advisor; "Ask Claude" adds the AI's suggestions. Each suggestion has a button to apply it.
-- The document button opens the schema dialog. It shows the current version and any migration in progress, and edits the next version. Check reports compatibility and how many existing documents wouldn't fit; Save registers the version.
+- The document button opens the schema dialog. It shows the version history and any migration in progress, and edits the next version. Check reports compatibility and how many existing documents wouldn't fit (running migration functions on them); Save registers the version. "Roll back to" restores an earlier version's fields.
 
 **Documents.** Pick a tessellation, filter with JSON, sort and page. A side panel creates, edits (with an optional TTL) and deletes documents. The footer shows which index answered the query.
 
@@ -160,10 +160,11 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 **Functions**
 - Functions: create and edit with a template for each kind, run with parameters, see the result and timing.
 - Schedules (administrators): interval or cron, last and next run, last status, run now.
+- Triggers (administrators): the tessellation, events and timing of each trigger, its runs, failures and refusals, and create, edit, disable and delete.
 
-**Users.** Create, edit, lock, reset passwords, reset MFA, and grant roles with the tessellations (or `stream:<name>`) they apply to.
+**Users.** Create, edit, lock, reset passwords, reset MFA, grant roles with the tessellations (or `stream:<name>`) they apply to, and set attributes that role filters refer to.
 
-**Roles.** The built-in roles and who holds them. Create, edit and delete custom roles by picking permissions.
+**Roles.** The built-in roles and who holds them. Create, edit and delete custom roles by picking permissions and, optionally, restrictions (row filters and hidden fields) as JSON.
 
 **Audit Trail** (needs `audit`). Security events, newest first, filtered by user, action area, target, outcome and time.
 
@@ -207,6 +208,7 @@ Errors have one shape:
 | 421 | `read_only_replica` | A write sent to a replica with forwarding off |
 | 422 | `idempotency_key_reused` | An `Idempotency-Key` reused with a different request |
 | 422 | `schema_violation` | A document that doesn't fit the tessellation's schema |
+| 422 | `trigger_rejected` | A before trigger refused the write, or failed |
 | 429 | `rate_limited` | Too many failed sign-ins; see `Retry-After` |
 | 502 | `overseer_unreachable` | A replica couldn't forward a write to the Overseer |
 | 503 | `replication_timeout` | Committed, but fewer than `replication.min_acks` replicas confirmed in time |
@@ -575,14 +577,45 @@ Field names are top-level names or dotted paths. With `"additional_fields": fals
     { "copy": { "from": "customer", "to": "billing_name" } },
     { "remove": "legacy_flag" },
     { "set_default": { "field": "currency", "value": "USD" } },
-    { "convert": { "field": "zip", "to": "string" } }
+    { "convert": { "field": "zip", "to": "string" } },
+    { "function": { "name": "split_name", "undo": "join_name" } }
   ]
 }
 ```
 
+**Function steps** run a function over the documents, for changes the built-in steps can't express:
+- It runs once per batch (up to 200 documents in the background migration, one when a document is upgraded on write).
+- It gets `documents` (the documents as they are at that step) and returns them migrated, in order: `{"documents": [...]}` or the array itself.
+- A script reads them as `migration.documents` on stdin, along with `tessellation`, `from_version` and `to_version`. Other kinds receive them through a `documents` parameter.
+- It runs as the user who registered the version.
+- `undo` names the function that reverses it, which a rollback needs.
+
+```python
+# split_name: {"name": "Ada Lovelace"} -> {"first": "Ada", "last": "Lovelace"}
+import json, sys
+docs = json.load(sys.stdin)["migration"]["documents"]
+for d in docs:
+    d["first"], _, d["last"] = d.pop("name").partition(" ")
+print(json.dumps({"documents": docs}))
+```
+
+A function can change anything, so HexDB can't prove a version with a function step compatible up front. Run `POST .../schemas/check` first: it runs the migration, function included, on the existing documents and reports any that wouldn't fit. The background migration validates every document too, and reports those that don't fit.
+
 **Compatibility.** Like a schema registry, HexDB requires each version to be compatible with the previous one: every document valid under the old version, once migrated, must be valid under the new one. Changing a field's type needs a `convert` step. Adding a required field needs a `default` or a `set_default` step. An incompatible version is refused with an explanation. `POST .../schemas/check` checks a candidate without registering it. It reports compatibility and how many existing documents wouldn't fit after migrating (checking up to 100,000), with examples.
 
 **Migration.** After a version is registered, HexDB rewrites existing documents in the background, in batches. `GET /tessellations/{name}/schemas` shows all versions and the migration's progress (migrated, unchanged, failed, with examples of failures). A migration interrupted by a restart resumes. Until it finishes, a document not yet migrated is upgraded when it's written, and reads can return documents of either version (check `_schema`). Documents written without `_schema` count as the current version.
+
+**Rollback.** `POST /tessellations/{name}/schemas/rollback` with `{"to": 2}` registers a new version that restores version 2's fields. Its migration is the inverse of every version after 2, newest first:
+
+| Step | Undone by |
+| --- | --- |
+| `rename {from, to}` | `rename {to, from}` |
+| `copy {from, to}` | `remove to` (unless version 2 has that field) |
+| `convert {field, to}` | `convert` back to the field's type before that version |
+| `function {name, undo}` | `function {undo, name}`; a function step without `undo` can't be rolled back automatically |
+| `remove`, `set_default` | nothing: removed data is gone |
+
+History stays linear: the rollback is a new version (`"restores": 2`), checked for compatibility like any other, and existing documents migrate to it in the background. When a removed field is required again, the rollback is refused with an explanation. Add steps that fill the gap: `{"to": 2, "migration": [{"set_default": {"field": "name", "value": "unknown"}}]}`. The extra steps run after the inverse ones.
 
 `DELETE /tessellations/{name}/schemas` removes the schema, and the tessellation becomes schemaless. Schema changes need `manage` on the tessellation.
 
@@ -596,7 +629,7 @@ Every committed write to a user tessellation is published, in order, once it's d
 { "seq": 831, "timestamp": 1760000000000, "op": "put", "tessellation": "orders", "id": "01J...", "document": { "...": "..." } }
 ```
 
-`op` is `put`, `delete` or `drop_tessellation`. `seq` is the write's sequence number, which increases across the whole hex.
+`op` is `put`, `delete` or `drop_tessellation`. `event` says more: `insert` (the put created the document), `update`, `delete` or `drop_tessellation`. `seq` is the write's sequence number, which increases across the whole hex. A change made by a trigger has `trigger` (its name).
 
 ```bash
 curl "http://localhost:7700/changes"                                 # current position: {"changes": [], "last_seq": 830, ...}
@@ -671,7 +704,7 @@ Creating a stream needs `manage` on its name. A grant on `*` covers every tessel
 
 **Storage.** Messages are documents in the system tessellation `_stream_<name>`, so they're encrypted, replicated, and expire by TTL. Configurations live in `_streams` and offsets in `_stream_offsets`. Sources and destinations run on the Overseer.
 
-## 15. Functions and schedules
+## 15. Functions, schedules and triggers
 
 A function is saved on the server and run by name with parameters.
 
@@ -753,6 +786,64 @@ curl -X POST http://localhost:7700/schedules/nightly-report/run      # run now
 - Schedules run on the Overseer only, so a lattice runs each one once.
 
 **Status.** Each schedule records its next run, last run, last status and error, last duration, and run count. Functions and schedules are stored in `_functions` and `_schedules`.
+
+### Triggers
+
+A trigger runs a function when documents in a tessellation are inserted, updated or deleted. Administrators manage them at `/triggers` (and on the Functions page).
+
+```bash
+curl -X POST http://localhost:7700/triggers -H "Content-Type: application/json" -d '{
+  "name": "check-orders", "tessellation": "orders", "events": ["insert", "update"],
+  "timing": "before", "function": "check_order", "filter": { "status": { "$ne": "draft" } } }'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `tessellation` | The tessellation it watches |
+| `events` | Any of `insert`, `update`, `delete` (default: all) |
+| `timing` | `before` or `after` (default) |
+| `function` | The function to run |
+| `filter` | Only documents matching it: the new version, or for a before trigger on a delete, the stored one. After triggers see deletes without a document, so a filtered after trigger doesn't fire on deletes |
+| `enabled` | `false` pauses it |
+
+**Before triggers** run inside the write, before it commits, and must be script functions. The script prints one of:
+- `null` or `{}` to let the write through;
+- `{"document": {...}}` to store this document instead (the schema is checked after the trigger);
+- `{"reject": "why"}` to refuse the write with 422 `trigger_rejected`.
+
+A script that fails, or times out, refuses the write too. Before triggers apply to every write path: single documents, bulk writes, update-by-filter, upserts and transactions. The response shows the document as stored. A write that conflicts with another is planned again, so a before trigger may run more than once for one write; it must not have side effects. It adds the script's run time to every matching write, so keep it fast.
+
+```python
+# check_order: refuse negative totals, stamp the rest
+import json, sys
+t = json.load(sys.stdin)["trigger"]
+doc = t["document"]
+if doc.get("total", 0) < 0:
+    print(json.dumps({"reject": "totals can't be negative"}))
+else:
+    doc["checked_by"] = t["user"]
+    print(json.dumps({"document": doc}))
+```
+
+**After triggers** run once the write is committed, on the Overseer, from the change feed. They can use any kind of function: a transaction that writes a log entry, a script that calls a webhook. The runner's position in the feed is saved (`_trigger_cursors`), so after a restart it carries on where it stopped. A change may run twice after a crash, so make after triggers idempotent. A failure is recorded in the trigger's status, and the runner moves on to the next change.
+
+**What the function gets.** A script reads `trigger` on stdin:
+
+| Field | Meaning |
+| --- | --- |
+| `event` | `insert`, `update` or `delete` |
+| `tessellation`, `id` | The document written |
+| `document` | The new version (none for deletes) |
+| `previous` | The stored version, for updates and deletes (before triggers) |
+| `user` | Who wrote (before triggers) |
+
+Other kinds of function receive the values their declared parameters name; for example, a transaction function with `id` and `event` parameters.
+
+**Rules:**
+- Triggers run as the administrator who created or last changed them.
+- Writes made while a trigger runs, directly or through its script's API session, don't fire triggers, so triggers can't cascade or loop.
+- Internal writes (schema migrations, replication) don't fire triggers either.
+- `GET /triggers` shows each trigger with its status on this hex: runs, failures, refused writes, last run and last error.
 
 ## 16. Plugins
 
@@ -992,7 +1083,47 @@ curl -X POST http://localhost:7700/roles -H "Content-Type: application/json" \
 - Each handler checks the specific permission before looking anything up, so a 403 never reveals whether something exists.
 - Lists (tessellations, changes, streams, GraphQL) include only what the caller can read.
 - Transactions check each operation. GraphQL checks every resolver, including nested fields.
+- Row filters and field masks apply at the engine's caller-facing reads and writes, for the request's caller (and for a schedule's or trigger's owner).
 - A refused request (403) is recorded in the audit trail.
+
+### Row filters and field masks
+
+A role can be restricted per tessellation (or `*`, every tessellation it's granted on):
+
+```bash
+curl -X POST http://localhost:7700/roles -H "Content-Type: application/json" -d '{
+  "name": "regional", "permissions": ["read", "write"],
+  "restrictions": { "orders": { "filter": { "region": { "$user": "attributes.region" } }, "hide": ["cost", "margin"] } } }'
+
+curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json" -d '{ "attributes": { "region": "EU" } }'
+```
+
+**The two parts:**
+- `filter` (the filter language) limits the documents the role can see and write. `{"$user": "login"}`, `{"$user": "id"}`, `{"$user": "email"}` and `{"$user": "attributes.<name>"}` stand for the caller's values. Users' attributes are set by administrators: a JSON object of up to 50 entries. A missing attribute makes the filter match nothing, never everything.
+- `hide` lists fields (dotted paths) the role can't see or change.
+
+**Combining grants.** When several of a user's grants allow an action on a tessellation:
+- an unrestricted grant makes access unrestricted;
+- otherwise the user sees the documents any of their filters allows;
+- a field is hidden only if every grant hides it.
+
+**Reads:**
+- Queries, counts, aggregations, `GET /tessellations/{name}`, GraphQL, the change feed and functions only see matching documents. Other documents read as not found.
+- Hidden fields are removed from every document returned.
+- Filtering, sorting, grouping or aggregating on a hidden field is refused with 403, so values can't be probed. So is `$text` unless the text index covers no hidden field.
+- The query plan's `scanned` count reports only visible documents.
+- Delete events in the change feed carry no document, so they're shown by ID.
+
+**Writes:**
+- A document must match the filter before (replace, patch, delete) and after (every write) the change. Writes that would move a document out of reach are refused with 403.
+- Writes can't set or remove hidden fields, and a full replace keeps their stored values.
+- Update-by-filter only touches matching documents.
+- An upsert whose key matches a document outside the filter fails with 409.
+
+**Limits:**
+- Managing a tessellation (indexes, schemas, deletion) needs an unrestricted grant.
+- A stream can only be sourced from a tessellation the creator can read without restriction (a stream copies every change).
+- Administrators are never restricted, and restrictions apply to user tessellations only.
 
 ### The audit trail
 
@@ -1001,8 +1132,8 @@ HexDB records security-relevant events as documents in the `_audit` system tesse
 | Area | Actions |
 | --- | --- |
 | Accounts | `auth.*` (sign-in, failures, sign-out, password, MFA, API keys), `user.*`, `role.*` |
-| Data structure | `tessellation.*`, `index.*`, `schema.*` |
-| Features | `stream.*`, `function.*`, `schedule.*` |
+| Data structure | `tessellation.*`, `index.*`, `schema.*` (including `schema.rollback`) |
+| Features | `stream.*`, `function.*`, `schedule.*`, `trigger.*` |
 | Operations | `maintenance.*` (flush, compact, backup), `settings.update`, `server.shutdown`, `lattice.join_info` |
 | Refusals | `access.denied` |
 
@@ -1401,7 +1532,7 @@ There's no ODBC or JDBC driver: both need a SQL dialect, which HexDB doesn't hav
 
 **Why did my write return 503 but the data is there?** With `replication.min_acks` set, the write committed on the Overseer, but not enough replicas confirmed within `ack_timeout_ms`. Retry with the same idempotency key to be safe.
 
-**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
+**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
 
 **A replica is far behind or keeps re-syncing.**
 1. Check the Logs page on the replica, filtered by `hexdb_core::replication`.

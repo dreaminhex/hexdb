@@ -134,6 +134,10 @@ impl HexDBEngine {
     }
 
     /// A tessellation's write generation.
+    pub(crate) fn tessellation_generation(&self, tess: &str) -> u64 {
+        self.tess_generation(tess)
+    }
+
     fn tess_generation(&self, tess: &str) -> u64 {
         self.counts.lock().unwrap().generations.get(tess).copied().unwrap_or(0)
     }

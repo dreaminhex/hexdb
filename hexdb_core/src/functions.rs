@@ -502,6 +502,12 @@ impl HexDBEngine {
 
     /// Run a function as `principal` with these arguments.
     pub async fn run_function(&self, def: &FunctionDef, principal: &Principal, args: &Map<String, Value>) -> Result<Value> {
+        self.run_function_with(def, principal, args, None).await
+    }
+
+    /// Run a function; a script also gets `context` (a name and value, e.g.
+    /// the trigger event) on stdin beside its parameters.
+    pub async fn run_function_with(&self, def: &FunctionDef, principal: &Principal, args: &Map<String, Value>, context: Option<(&str, Value)>) -> Result<Value> {
         let params = def.bind(args)?;
         let body = substitute(def.body.as_ref().unwrap_or(&json!({})), &params)?;
         match def.kind.as_str() {
@@ -534,12 +540,12 @@ impl HexDBEngine {
                 }
                 Ok(serde_json::to_value(self.transaction(&ops, None).await?.value)?)
             }
-            "script" => self.run_script(def, principal, &params).await,
+            "script" => self.run_script(def, principal, &params, context).await,
             _ => Err(invalid("unknown function kind")),
         }
     }
 
-    async fn run_script(&self, def: &FunctionDef, principal: &Principal, params: &Map<String, Value>) -> Result<Value> {
+    async fn run_script(&self, def: &FunctionDef, principal: &Principal, params: &Map<String, Value>, context: Option<(&str, Value)>) -> Result<Value> {
         if !self.config.functions.scripts {
             bail!(invalid("Script functions are turned off (functions.scripts = false)."));
         }
@@ -554,7 +560,8 @@ impl HexDBEngine {
         };
         std::fs::write(dir.join(file), code)?;
         // A session for the caller, only for this run.
-        let (token, claims) = crate::auth::issue_session(&self.config.session_key()?, &principal.user_id, 1);
+        // Inside a trigger, the session is marked so the script's writes don't fire triggers.
+        let (token, claims) = crate::auth::issue_session_for(&self.config.session_key()?, &principal.user_id, 1, crate::access::current_trigger());
         let scheme = if self.config.tls.enabled() { "https" } else { "http" };
         let mut command = tokio::process::Command::new(&program);
         command.args(&args).arg(file).current_dir(&dir).env_clear();
@@ -580,7 +587,10 @@ impl HexDBEngine {
         let result = async {
             let mut child = command.spawn().with_context(|| format!("couldn't start {} (set functions.{} in hexdb.toml)", program, if runtime == "python" { "python" } else { "node" }))?;
             crate::process::adopt(&child);
-            let input = json!({ "params": params, "function": def.name, "caller": principal.login });
+            let mut input = json!({ "params": params, "function": def.name, "caller": principal.login });
+            if let Some((name, value)) = &context {
+                input[*name] = value.clone();
+            }
             if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(input.to_string().as_bytes()).await?;
             }
@@ -696,8 +706,11 @@ impl HexDBEngine {
                 bail!("its owner '{}' is locked", user.login);
             }
             let definitions = crate::users::role_definitions(self).await?;
-            let principal = Principal::new(schedule.run_as.clone(), user.login, user.email_address, user.roles, Credential::ApiKey { key_id: format!("schedule:{}", schedule.name) }, &definitions);
-            self.run_function(&def, &principal, &schedule.params).await
+            let principal = Principal::new(schedule.run_as.clone(), user.login, user.email_address, user.roles, Credential::ApiKey { key_id: format!("schedule:{}", schedule.name) }, &definitions)
+                .with_attributes(user.attributes);
+            // The schedule's owner is the caller: their role restrictions apply.
+            let principal = std::sync::Arc::new(principal);
+            crate::access::as_caller(principal.clone(), self.run_function(&def, &principal, &schedule.params)).await
         }
         .await;
         schedule.last_run = Utc::now().timestamp_millis();

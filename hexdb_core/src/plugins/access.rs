@@ -43,7 +43,8 @@ pub async fn api_key(engine: &HexDBEngine, manifest: &Manifest, access: &AccessC
     let (user_id, user) = users::ensure_service_user(engine, &login, vec![grant]).await?;
     // Revoke the keys of earlier runs.
     let definitions = users::role_definitions(engine).await?;
-    let principal = Principal::new(user_id.clone(), user.login.clone(), user.email_address.clone(), user.roles.clone(), Credential::ApiKey { key_id: String::new() }, &definitions);
+    let principal = Principal::new(user_id.clone(), user.login.clone(), user.email_address.clone(), user.roles.clone(), Credential::ApiKey { key_id: String::new() }, &definitions)
+        .with_attributes(user.attributes.clone());
     for key in auth::list_api_keys(engine, Some(&user_id)).await? {
         auth::revoke_api_key(engine, &principal, &key.id).await?;
     }

@@ -183,12 +183,25 @@ impl Action {
 
 /// Role names mapped to their permissions.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct RoleDefinitions(pub HashMap<String, Vec<Action>>);
+pub struct RoleDefinitions(pub HashMap<String, RoleRules>);
+
+/// What a role allows: its permissions, and row filters and field masks per
+/// tessellation (see `crate::access`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoleRules {
+    pub permissions: Vec<Action>,
+    pub restrictions: std::collections::BTreeMap<String, crate::access::Restriction>,
+}
 
 impl RoleDefinitions {
     /// The built-in roles alone.
     pub fn builtin() -> Self {
-        RoleDefinitions(users::BUILTIN_ROLES.iter().map(|r| (r.name.to_string(), r.permissions.to_vec())).collect())
+        RoleDefinitions(
+            users::BUILTIN_ROLES
+                .iter()
+                .map(|r| (r.name.to_string(), RoleRules { permissions: r.permissions.to_vec(), restrictions: Default::default() }))
+                .collect(),
+        )
     }
 
     /// Resolve a user's grants. Unknown roles grant nothing.
@@ -196,8 +209,13 @@ impl RoleDefinitions {
         roles
             .iter()
             .filter_map(|grant| {
-                let permissions = self.0.get(&grant.name)?.clone();
-                Some(ResolvedGrant { role: grant.name.clone(), tessellations: grant.tessellations.clone(), permissions })
+                let rules = self.0.get(&grant.name)?;
+                Some(ResolvedGrant {
+                    role: grant.name.clone(),
+                    tessellations: grant.tessellations.clone(),
+                    permissions: rules.permissions.clone(),
+                    restrictions: rules.restrictions.clone(),
+                })
             })
             .collect()
     }
@@ -209,6 +227,9 @@ pub struct ResolvedGrant {
     pub role: String,
     pub tessellations: Vec<String>,
     pub permissions: Vec<Action>,
+    /// Row filters and field masks, by tessellation ("*" for all).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub restrictions: std::collections::BTreeMap<String, crate::access::Restriction>,
 }
 
 /// How a request authenticated.
@@ -229,12 +250,30 @@ pub struct Principal {
     /// The roles' permissions, resolved when the request was authenticated.
     pub grants: Vec<ResolvedGrant>,
     pub credential: Credential,
+    /// The user's attributes, for `{"$user": "attributes.<name>"}` in role filters.
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    pub attributes: serde_json::Map<String, serde_json::Value>,
+    /// Set for a trigger script's session: the trigger it runs for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
 }
 
 impl Principal {
     pub fn new(user_id: String, login: String, email_address: String, roles: Vec<RoleGrant>, credential: Credential, definitions: &RoleDefinitions) -> Self {
         let grants = definitions.resolve(&roles);
-        Principal { user_id, login, email_address, roles, grants, credential }
+        Principal { user_id, login, email_address, roles, grants, credential, attributes: Default::default(), trigger: None }
+    }
+
+    /// The same principal, acting for a trigger (from a trigger script's session).
+    pub fn with_trigger(mut self, trigger: Option<String>) -> Self {
+        self.trigger = trigger;
+        self
+    }
+
+    /// The same principal with the user's attributes (for role filters).
+    pub fn with_attributes(mut self, attributes: serde_json::Map<String, serde_json::Value>) -> Self {
+        self.attributes = attributes;
+        self
     }
 
     pub fn is_admin(&self) -> bool {
@@ -260,12 +299,16 @@ impl Principal {
         Action::ALL.into_iter().filter(|a| !a.is_scoped() && self.has(*a)).collect()
     }
 
-    /// True if the principal has `permission` on `tessellation`.
+    /// True if the principal has `permission` on `tessellation`. Managing a
+    /// tessellation needs a grant without a row filter or field mask.
     pub fn can(&self, permission: Permission, tessellation: &str) -> bool {
         if self.is_admin() {
             return true;
         }
         let action = permission.action();
+        if action == Action::Manage {
+            return self.unrestricted(tessellation, action);
+        }
         self.grants.iter().any(|grant| {
             grant.permissions.contains(&action) && grant.tessellations.iter().any(|t| t == "*" || t == tessellation)
         })
@@ -305,6 +348,9 @@ pub struct SessionClaims {
     pub iat: i64,
     /// Expires at (epoch seconds).
     pub exp: i64,
+    /// Issued to a trigger's script: its writes don't fire triggers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trg: Option<String>,
 }
 
 fn mac(key: &[u8; 32], message: &[u8]) -> blake3::Hash {
@@ -313,12 +359,18 @@ fn mac(key: &[u8; 32], message: &[u8]) -> blake3::Hash {
 
 /// Create a signed session token for a user.
 pub fn issue_session(key: &[u8; 32], user_id: &str, hours: u64) -> (String, SessionClaims) {
+    issue_session_for(key, user_id, hours, None)
+}
+
+/// A session token, marked when it's issued to a trigger's script.
+pub fn issue_session_for(key: &[u8; 32], user_id: &str, hours: u64, trigger: Option<String>) -> (String, SessionClaims) {
     let now = Utc::now();
     let claims = SessionClaims {
         sub: user_id.to_string(),
         sid: Ulid::new().to_string(),
         iat: now.timestamp_millis(),
         exp: now.timestamp() + (hours.clamp(1, 24 * 30) as i64) * 3600,
+        trg: trigger,
     };
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap_or_default());
     let signed = format!("{}{}", SESSION_PREFIX, payload);
@@ -489,7 +541,9 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
             user.roles,
             Credential::Session { session_id: claims.sid, expires_at: claims.exp },
             &definitions,
-        )));
+        )
+        .with_attributes(user.attributes)
+        .with_trigger(claims.trg)));
     }
     if let Some((id, secret)) = split_api_key(token) {
         let Some(doc) = engine.get_system_document(API_KEYS_TESSELLATION, id).await? else { return Ok(None) };
@@ -526,7 +580,8 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
             user.roles,
             Credential::ApiKey { key_id: id.to_string() },
             &definitions,
-        )));
+        )
+        .with_attributes(user.attributes)));
     }
     Ok(None)
 }
@@ -626,7 +681,8 @@ pub async fn login(engine: &HexDBEngine, login: &str, password: &str, code: Opti
             user.roles,
             Credential::Session { session_id: claims.sid.clone(), expires_at: claims.exp },
             &definitions,
-        ),
+        )
+        .with_attributes(user.attributes),
         claims,
     })
 }
@@ -820,8 +876,8 @@ mod tests {
     fn custom_roles_grant_their_permission_sets() {
         use Permission::*;
         let mut defs = RoleDefinitions::builtin();
-        defs.0.insert("appender".into(), vec![Action::Write]);
-        defs.0.insert("watcher".into(), vec![Action::Status, Action::Logs, Action::Read]);
+        defs.0.insert("appender".into(), RoleRules { permissions: vec![Action::Write], restrictions: Default::default() });
+        defs.0.insert("watcher".into(), RoleRules { permissions: vec![Action::Status, Action::Logs, Action::Read], restrictions: Default::default() });
         let p = principal_with(&[("appender", &["events"]), ("watcher", &["metrics"])], &defs);
         assert!(p.can(Write, "events") && !p.can(Read, "events"), "exactly the set: write without read");
         assert!(p.can(Read, "metrics") && !p.can(Write, "metrics"));

@@ -63,6 +63,7 @@ fn to_gql(e: anyhow::Error) -> async_graphql::Error {
         Some(EngineError::NoQuorum(m)) => gql_error("NO_QUORUM", m.clone()),
         Some(EngineError::TooLarge(m)) => gql_error("DOCUMENT_TOO_LARGE", m.clone()),
         Some(EngineError::SchemaViolation(m)) => gql_error("SCHEMA_VIOLATION", m.clone()),
+        Some(EngineError::TriggerRejected(m)) => gql_error("TRIGGER_REJECTED", m.clone()),
         Some(EngineError::DiskFull(m)) => gql_error("DISK_FULL", m.clone()),
         Some(EngineError::Forbidden(m)) => gql_error("FORBIDDEN", m.clone()),
         Some(EngineError::RateLimited(m, _)) => gql_error("RATE_LIMITED", m.clone()),
