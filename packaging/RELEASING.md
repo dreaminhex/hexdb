@@ -17,7 +17,7 @@ Pushing a tag such as `v1.0.1` runs [.github/workflows/release.yml](../.github/w
 | Chocolatey | `choco install hexdb` | community.chocolatey.org | an account and API key; versions are moderated | `CHOCOLATEY_API_KEY` |
 | npm | `npm install hexdb` | npmjs.com | an account and token | `NPM_TOKEN` |
 | PyPI | `pip install hexdb` | pypi.org | an account and token | `PYPI_TOKEN` |
-| NuGet | `dotnet add package HexDB.Client` / `HexDB.EntityFrameworkCore` | nuget.org | an account and API key | `NUGET_API_KEY` |
+| NuGet | `dotnet add package HexDB.Client` / `HexDB.EntityFrameworkCore` | nuget.org | an account and a trusted publishing policy | `NUGET_USER` (or `NUGET_API_KEY`) |
 
 Every package name above was free on 2026-10-09: `hexdb` on npm, PyPI, Chocolatey and crates.io, `HexDB.Client` and `HexDB.EntityFrameworkCore` on NuGet, `DreamInHex.HexDB` on winget. Claim them with the first release.
 
@@ -100,7 +100,10 @@ The `chocolatey` job packs [packaging/chocolatey](chocolatey) (which runs the MS
 ### NuGet
 
 1. Sign in at https://www.nuget.org with a Microsoft account.
-2. **API Keys > Create**: key name `hexdb-release`, scopes **Push new packages and package versions**, glob pattern `HexDB.*`. Add it as `NUGET_API_KEY`.
+2. Use trusted publishing, so no long-lived key is stored: under your account menu, **Trusted Publishing > Create**. Repository owner `dreaminhex`, repository `hexdb`, workflow file `release.yml`, environment blank.
+3. Add a secret `NUGET_USER` with your nuget.org user name (the profile name, not the email). The `nuget` job then exchanges GitHub's identity token for a one-hour key on each release.
+
+   Alternatively, skip steps 2 and 3 and create an API key: **API Keys > Create**, scope **Push new packages and package versions**, glob `HexDB.*`, saved as `NUGET_API_KEY`.
 3. Optional but worth it: ask NuGet to reserve the `HexDB.` prefix for your account (email account@nuget.org, see https://learn.microsoft.com/nuget/nuget-org/id-prefix-reservation). Reserved packages get a verified checkmark and nobody else can publish `HexDB.Something`.
 
 New packages take a few minutes to validate and index before `dotnet add package` finds them.
