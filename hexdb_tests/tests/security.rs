@@ -268,7 +268,11 @@ fn api_keys_are_shown_once_and_revocable() -> Result<()> {
     assert_eq!(server.request_as(Some(&key), Method::GET, "/auth/me", None, &[])?.body["login"], TEST_ADMIN_LOGIN);
 
     let list = server.request(Method::GET, "/auth/keys", None, &[])?;
-    assert!(!list.body.to_string().contains(key.rsplit('_').next().unwrap()), "secrets are never listed");
+    // Keys are hxk_<id>_<secret>. The id has no underscore but the secret can,
+    // so the whole secret is everything after the second underscore.
+    let secret = key.splitn(3, '_').nth(2).unwrap();
+    assert!(secret.len() >= 20, "{}", key);
+    assert!(!list.body.to_string().contains(secret), "secrets are never listed");
     let id = list.body["keys"][0]["id"].as_str().unwrap().to_string();
 
     // Another user can't revoke it; a tampered key doesn't work.

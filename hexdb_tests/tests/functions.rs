@@ -161,9 +161,19 @@ fn schedules_run_functions_on_time() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    let schedule = server.request(Method::GET, "/schedules/ticker", None, &[])?;
+    // The run's write lands before the scheduler records the run, so wait for
+    // the record too rather than reading it straight away.
+    let schedule = loop {
+        let schedule = server.request(Method::GET, "/schedules/ticker", None, &[])?;
+        if schedule.body["runs"].as_u64().unwrap_or(0) >= 2 {
+            break schedule;
+        }
+        if Instant::now() > deadline {
+            bail!("the scheduled run wasn't recorded: {}", schedule.body);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
     assert_eq!(schedule.body["last_status"], "ok", "{}", schedule.body);
-    assert!(schedule.body["runs"].as_u64().unwrap() >= 2);
 
     // A function used by a schedule can't be deleted until the schedule is.
     assert_eq!(server.request(Method::DELETE, "/functions/tick", None, &[])?.status, 409);
