@@ -38,7 +38,7 @@ pub mod network {
     pub mod lattice_auth;
 }
 
-pub use config::{load_config, load_config_from, HexConfig};
+pub use config::{load_config, load_config_from, user_config_dir, HexConfig, CONFIG_FILE_NAME, LOCAL_CONFIG_FILE_NAME};
 pub use runtime::{RuntimeInfo, local_base_url, SHUTDOWN_TOKEN_HEADER};
 pub use logging::{init_logging, log_buffer, parse_level, LogQuery, LogRecord, LOG_CAPACITY};
 pub use engine::{

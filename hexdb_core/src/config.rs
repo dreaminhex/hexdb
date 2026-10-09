@@ -550,6 +550,8 @@ pub fn load_config() -> Result<HexConfig, config::ConfigError> {
 /// 2. the `HEXDB_CONFIG` environment variable
 /// 3. `./hexdb.toml` in the working directory
 /// 4. `hexdb.toml` next to the running executable
+/// 5. `hexdb.toml` in the user's HexDB folder (see [`user_config_dir`]), which
+///    `hexdb init` creates and installed copies of HexDB use
 ///
 /// If none is found, built-in defaults are used. An explicitly named file that
 /// does not exist is an error. Environment variables override file values.
@@ -641,7 +643,36 @@ fn find_config_file(explicit: Option<&Path>) -> Result<Option<PathBuf>, config::
         }
     }
 
+    if let Some(candidate) = user_config_dir().map(|dir| dir.join(CONFIG_FILE_NAME)) {
+        if candidate.is_file() {
+            return Ok(Some(candidate));
+        }
+    }
+
     Ok(None)
+}
+
+/// The user's own HexDB folder, where `hexdb init` writes `hexdb.toml`, the
+/// secrets file and (by default) the data. Only the user can read it:
+/// - Windows: `%LOCALAPPDATA%\HexDB`
+/// - macOS: `~/Library/Application Support/HexDB`
+/// - Linux and others: `$XDG_CONFIG_HOME/hexdb`, else `~/.config/hexdb`
+///
+/// `HEXDB_HOME` overrides it everywhere. `None` when no home folder is known.
+pub fn user_config_dir() -> Option<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(dir) = var("HEXDB_HOME") {
+        return Some(dir);
+    }
+    if cfg!(windows) {
+        var("LOCALAPPDATA").map(|d| d.join("HexDB"))
+    } else if cfg!(target_os = "macos") {
+        var("HOME").map(|h| h.join("Library").join("Application Support").join("HexDB"))
+    } else {
+        var("XDG_CONFIG_HOME")
+            .map(|d| d.join("hexdb"))
+            .or_else(|| var("HOME").map(|h| h.join(".config").join("hexdb")))
+    }
 }
 
 fn absolute(path: &Path) -> PathBuf {

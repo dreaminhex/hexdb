@@ -308,8 +308,12 @@ impl Follower {
         };
         *self.engine.overseer_endpoint.write().unwrap() = Some(overseer.hex.api_endpoint.clone());
 
+        // Keep streaming only from the same hex at the same address. A hex keeps
+        // its ID across restarts but can come back on another address; then the
+        // session starts again, resuming from the saved cursor (no full sync).
+        let base = peer_base_url(&overseer.hex);
         let result = match &self.session {
-            Some(session) if session.overseer_id == overseer.hex.id => self.stream().await,
+            Some(session) if session.overseer_id == overseer.hex.id && session.base == base => self.stream().await,
             _ => self.start(&overseer).await,
         };
         match result {

@@ -14,6 +14,11 @@ if [ "$1" = "configure" ]; then
         chmod 600 /etc/hexdb/hexdb.local.toml
         echo "HexDB: created /etc/hexdb/hexdb.local.toml with a new storage key. Back it up: without it the data can't be read."
     fi
+    # Register the ODBC driver when unixODBC is installed (apt install unixodbc,
+    # then reinstall or run these lines, to add it later).
+    if command -v odbcinst >/dev/null 2>&1; then
+        printf '[HexDB]\nDescription=HexDB ODBC driver\nDriver=/usr/lib/hexdb/libhexdb_odbc.so\n' | odbcinst -i -d -r >/dev/null 2>&1 || true
+    fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     echo "HexDB: start it with 'sudo systemctl enable --now hexdb'; the first administrator's password is printed in 'journalctl -u hexdb'."
 fi

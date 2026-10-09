@@ -1,12 +1,14 @@
 $ErrorActionPreference = 'Stop'
-$version = '1.0.0'
+# The release workflow sets the version in this URL and the checksum (from the
+# release's SHA256SUMS) before packing.
 $packageArgs = @{
-  packageName    = 'hexdb'
-  unzipLocation  = (Split-Path -Parent $MyInvocation.MyCommand.Definition)
-  url64bit       = "https://github.com/dreaminhex/hexdb/releases/download/v$version/hexdb-v$version-x86_64-pc-windows-msvc.zip"
-  checksum64     = 'REPLACE_WITH_SHA256_FROM_SHA256SUMS'
+  packageName    = $env:ChocolateyPackageName
+  fileType       = 'msi'
+  url64bit       = 'https://github.com/dreaminhex/hexdb/releases/download/v1.0.0/hexdb-windows-x64.msi'
+  checksum64     = 'REPLACE_WITH_SHA256_OF_THE_MSI'
   checksumType64 = 'sha256'
+  silentArgs     = "/qn /norestart /l*v `"$($env:TEMP)\$($env:ChocolateyPackageName).$($env:ChocolateyPackageVersion).MsiInstall.log`""
+  validExitCodes = @(0, 3010, 1641)
 }
-Install-ChocolateyZipPackage @packageArgs
-# Chocolatey shims the .exe files it finds, so hexdb and hexdb_api are on PATH.
-Write-Host "HexDB installed. Create a config with a storage key (hexdb secret), then run: hexdb_api --config <path>\hexdb.toml"
+Install-ChocolateyPackage @packageArgs
+Write-Host "HexDB is installed. Open a new terminal and run: hexdb start"

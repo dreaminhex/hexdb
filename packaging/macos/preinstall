@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs as root before HexDB.pkg installs. Removes the previous admin UI so files
+# from an older version don't linger (its asset names change every build).
+rm -rf /usr/local/hexdb/ui
+exit 0

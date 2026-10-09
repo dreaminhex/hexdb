@@ -7,10 +7,22 @@
     <PackageId>HexDB.Client</PackageId>
     <Version>1.0.0</Version>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <Authors>Dream In Hex</Authors>
+    <Company>Dream In Hex</Company>
+    <PackageProjectUrl>https://hexdb-website.vercel.app</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/dreaminhex/hexdb</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
     <Description>Client for HexDB, the hexagonal document database.</Description>
     <PackageTags>hexdb;database;document;nosql</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
 </Project>

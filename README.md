@@ -226,6 +226,7 @@ The first start prints a generated administrator password in the container log (
 ## Command-line interface
 
 ```text
+hexdb init [--dir D]             create a configuration with a new encryption key
 hexdb start [-s]                 start the server (-s: in the background, logging to hexdb.log)
 hexdb stop [--force]             stop it gracefully
 hexdb health                     is it up?
@@ -238,7 +239,7 @@ hexdb lattice spawn --count 2    start more hexes on this machine that join its 
 hexdb lattice list|stop          list or stop them (stop --remove deletes their data)
 ```
 
-Every command takes `--config <path>`. The config is otherwise found through `HEXDB_CONFIG`, `./hexdb.toml`, or `hexdb.toml` next to the executable.
+Every command takes `--config <path>`. The config is otherwise found through `HEXDB_CONFIG`, `./hexdb.toml`, `hexdb.toml` next to the executable, or the user's HexDB folder that `hexdb init` creates.
 
 ## Admin UI
 
@@ -273,7 +274,21 @@ See [drivers/README.md](drivers/README.md). The REST API is described by `GET /o
 
 ## Installing
 
-Release builds come from [.github/workflows/release.yml](.github/workflows/release.yml), which produces archives for Linux, macOS and Windows plus a Debian package. The [packaging](packaging) folder has an install script, a systemd unit, and Homebrew, Chocolatey and winget manifests. Each manifest's version and checksums are filled in at release time.
+Prebuilt releases are on the [releases page](https://github.com/dreaminhex/hexdb/releases/latest), or install with a package manager:
+
+| Platform | Command |
+| --- | --- |
+| Windows | [hexdb-windows-x64.msi](https://github.com/dreaminhex/hexdb/releases/latest/download/hexdb-windows-x64.msi), `winget install DreamInHex.HexDB` or `choco install hexdb` |
+| macOS | [hexdb-macos-universal.dmg](https://github.com/dreaminhex/hexdb/releases/latest/download/hexdb-macos-universal.dmg) or `brew install dreaminhex/hexdb/hexdb` |
+| Debian, Ubuntu | `sudo apt install hexdb` from the APT repository (see [packaging/RELEASING.md](packaging/RELEASING.md#what-users-run)) |
+| Linux, macOS | `curl -fsSL https://raw.githubusercontent.com/dreaminhex/hexdb/main/packaging/install.sh \| sh` |
+| Docker | `docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb -e HEXDB_STORAGE__ENCRYPTION_KEY=... ghcr.io/dreaminhex/hexdb` |
+
+Then run `hexdb start`. The first start creates your configuration and encryption key (`hexdb init` does only that step) and prints where the generated administrator password is; open http://127.0.0.1:7700/ui/ to sign in. Each installer includes the ODBC driver, and the Windows installer and the Debian package register it.
+
+Linux builds need glibc 2.28 or later (Ubuntu 20.04, Debian 10, RHEL 8 and newer). Windows builds need nothing else installed.
+
+[packaging/RELEASING.md](packaging/RELEASING.md) explains how releases are built and published to each channel.
 
 ## Repository layout
 

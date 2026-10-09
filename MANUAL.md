@@ -83,7 +83,7 @@ What it doesn't do (yet):
 
 A hex reads its configuration from:
 
-1. `hexdb.toml`, found through `--config <path>`, then the `HEXDB_CONFIG` variable, then `./hexdb.toml`, then `hexdb.toml` next to the executable. Without one, built-in defaults apply.
+1. `hexdb.toml`, found through `--config <path>`, then the `HEXDB_CONFIG` variable, then `./hexdb.toml`, then `hexdb.toml` next to the executable, then `hexdb.toml` in the user's HexDB folder (`%LOCALAPPDATA%\HexDB` on Windows, `~/Library/Application Support/HexDB` on macOS, `$XDG_CONFIG_HOME/hexdb` or `~/.config/hexdb` elsewhere; `HEXDB_HOME` overrides it). Without one, built-in defaults apply.
 2. `hexdb.local.toml` next to it, if present. Values here override `hexdb.toml`. This is where secrets go; the repository ignores the file.
 3. Environment variables named `HEXDB_<SECTION>__<FIELD>` (two underscores), for example `HEXDB_NETWORK__API_ENDPOINT=0.0.0.0:7700`. List settings (`peers`, `trusted_proxies`, `previous_lattice_secrets`, `previous_encryption_keys`) take comma-separated values.
 4. Runtime settings saved from the admin UI (`settings.hxe` in the data directory). These apply on top of everything else; see [Runtime settings](#runtime-settings).
@@ -91,6 +91,8 @@ A hex reads its configuration from:
 Relative paths in the file (`storage.path`, `ui.path`, `plugins.registry`) resolve against the config file's folder.
 
 The one required setting is `storage.encryption_key`: 32 random bytes, base64-encoded, with a `base64:` prefix. Generate one with `hexdb secret` or `echo "base64:$(openssl rand -base64 32)"`. Without the key, the data can't be read. Back it up separately from the data.
+
+`hexdb init` writes a starting configuration: `hexdb.toml` (data in `./data` beside it, and the admin UI that shipped with this copy of HexDB) and `hexdb.local.toml` with a new key, readable by the user only. It writes to the user's HexDB folder, or to `--dir <folder>`, and never replaces a file that exists. `hexdb start` runs it by itself when it finds no configuration and no key in the environment, which is what happens on the first start after installing HexDB.
 
 ```toml
 # hexdb.local.toml
@@ -104,6 +106,7 @@ lattice_secret = "base64:..."   # optional; see section 19
 ### Starting and stopping
 
 ```bash
+hexdb init             # create a configuration with a new key (hexdb start does this when there's none)
 hexdb start            # in the foreground
 hexdb start -s         # in the background; output goes to hexdb.log in the data directory
 hexdb stop             # graceful: drains the WAL and flushes to SSTables
@@ -133,7 +136,7 @@ docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
 
 ### As a service
 
-[packaging/systemd/hexdb.service](packaging/systemd/hexdb.service) runs HexDB under systemd. The Debian package (built by `cargo deb -p hexdb_api` in the release workflow) installs it and creates a `hexdb` user. [packaging/install.sh](packaging/install.sh) installs a release into `~/.local`. Homebrew, Chocolatey and winget manifests are in [packaging](packaging).
+[packaging/systemd/hexdb.service](packaging/systemd/hexdb.service) runs HexDB under systemd. The Debian package (from the APT repository, or built by `cargo deb -p hexdb_api`) installs it, creates a `hexdb` user and a key in `/etc/hexdb/hexdb.local.toml`; start it with `sudo systemctl enable --now hexdb`. Homebrew runs it with `brew services start hexdb`. On Windows there's no service mode yet: run `hexdb start -s`, or have Task Scheduler run it at sign-in. Every way to install HexDB is listed in the README's Installing section, and [packaging/RELEASING.md](packaging/RELEASING.md) explains how each is built.
 
 ## 4. The admin UI
 
@@ -146,7 +149,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - The lattice card: each hex's role, address, replication state and lag. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
 - A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#22-operations)).
 
-**Queries.** A GraphQL console with schema-aware completion and validation, variables, examples, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
+**Queries.** A console for GraphQL and SQL, switched at the top left. GraphQL has schema-aware completion and validation, and variables; SQL has table and column completion, `?` or `$1` parameters (a JSON array), and runs read-only `SELECT`s (see [SQL](#10-sql)). Both have examples written against the tessellations the hex has, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
 
 **Tessellations**
 - Create and delete tessellations and see their sizes.

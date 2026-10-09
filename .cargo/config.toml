@@ -3,3 +3,8 @@
 # A HEXDB_CONFIG already set in your environment takes precedence.
 [env]
 HEXDB_CONFIG = { value = "hexdb_api/hexdb.toml", relative = true }
+
+# Link the C runtime into the Windows binaries, so they run without the Visual
+# C++ Redistributable (missing on clean installs, Windows Sandbox and many servers).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

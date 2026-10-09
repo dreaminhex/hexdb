@@ -1,6 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use hexdb_core::{load_config_from, runtime::local_base_url_with, HexConfig, RuntimeInfo, SHUTDOWN_TOKEN_HEADER};
+use hexdb_core::{
+    load_config_from, runtime::local_base_url_with, user_config_dir, HexConfig, RuntimeInfo, CONFIG_FILE_NAME, LOCAL_CONFIG_FILE_NAME,
+    SHUTDOWN_TOKEN_HEADER,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -30,6 +33,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Create a private configuration with a new encryption key (hexdb start does this on first use)
+    Init {
+        /// Folder for hexdb.toml, hexdb.local.toml and the data. Defaults to the
+        /// user's HexDB folder (%LOCALAPPDATA%\HexDB, ~/Library/Application
+        /// Support/HexDB or ~/.config/hexdb), or the folder of --config.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
     /// Start the HexDB server
     Start {
         /// Run in the background. Output goes to hexdb.log in the data directory.
@@ -156,6 +167,12 @@ async fn main() -> Result<()> {
     let token = cli.token.as_deref();
 
     match cli.command {
+        Commands::Init { dir } => {
+            let target = init_target(config_path, dir)?;
+            let created = init(&target)?;
+            print_init(&target, &created);
+            Ok(())
+        }
         Commands::Start { silent, server_bin } => start(config_path, silent, server_bin).await,
         Commands::Stop { timeout, force } => stop(config_path, Duration::from_secs(timeout), force).await,
         Commands::Health { url } => {
@@ -247,7 +264,18 @@ async fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<PathBuf>) -> Result<()> {
-    let config = load(config_path)?;
+    let mut config = load(config_path)?;
+    // First run of an installed HexDB: no config anywhere and no key in the
+    // environment. Create the user's own configuration rather than fail.
+    if config.source.is_none() && config.storage.encryption_key.is_empty() {
+        if let Some(dir) = user_config_dir() {
+            let target = dir.join(CONFIG_FILE_NAME);
+            let created = init(&target)?;
+            print_init(&target, &created);
+            println!();
+            config = load(Some(&target))?;
+        }
+    }
     let storage_dir = config.storage_dir();
     let base = local_base_url_with(&config.network.api_endpoint, config.tls.enabled());
 
@@ -305,7 +333,16 @@ async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<Path
         }
         if is_healthy(&config, &base).await {
             println!("⌬  HexDB started in the background (PID {}) at {}.", pid, base);
+            println!("   Admin UI: {}/ui/", base);
             println!("   Logs: {}", log_path.display());
+            let first_password = storage_dir.join("initial-admin-password.txt");
+            if first_password.is_file() {
+                println!(
+                    "   First sign-in: {} with the password in {} (change it, then delete the file).",
+                    config.security.admin_login,
+                    first_password.display()
+                );
+            }
             return Ok(());
         }
         if Instant::now() > deadline {
@@ -441,6 +478,117 @@ fn resolve_server_bin(explicit: Option<PathBuf>) -> PathBuf {
         }
     }
     PathBuf::from(file)
+}
+
+// ---------------------------------------------------------------------------
+// hexdb init
+// ---------------------------------------------------------------------------
+
+/// The config file `init` writes: `--dir`, else the `--config` path, else the user's HexDB folder.
+fn init_target(config_path: Option<&Path>, dir: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(dir) = dir {
+        return Ok(dir.join(CONFIG_FILE_NAME));
+    }
+    if let Some(path) = config_path {
+        return Ok(path.to_path_buf());
+    }
+    user_config_dir()
+        .map(|d| d.join(CONFIG_FILE_NAME))
+        .ok_or_else(|| anyhow!("No home folder is known. Pass --dir <folder> or set HEXDB_HOME."))
+}
+
+/// Writes `config_file` and `hexdb.local.toml` beside it, each only if it is
+/// missing, so running it twice never replaces a key. Returns what it created.
+fn init(config_file: &Path) -> Result<Vec<PathBuf>> {
+    let dir = config_file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    if !dir.exists() {
+        fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+        platform::restrict_dir(dir);
+    }
+    let mut created = Vec::new();
+    if !config_file.exists() {
+        fs::write(config_file, config_template(installed_ui_dir().as_deref()))
+            .with_context(|| format!("Failed to write {}", config_file.display()))?;
+        created.push(config_file.to_path_buf());
+    }
+    let local = dir.join(LOCAL_CONFIG_FILE_NAME);
+    if !local.exists() {
+        let text = format!(
+            "# Secrets for hexdb.toml. Keep this file private and back it up: without the\n# encryption key the data can't be read.\n\n[storage]\nencryption_key = \"{}\"\n",
+            lattice::new_secret()
+        );
+        write_private(&local, &text).with_context(|| format!("Failed to write {}", local.display()))?;
+        created.push(local);
+    }
+    Ok(created)
+}
+
+fn print_init(config_file: &Path, created: &[PathBuf]) {
+    let dir = config_file.parent().unwrap_or(Path::new("."));
+    if created.is_empty() {
+        println!("⌬  HexDB is already set up in {}. Nothing changed.", dir.display());
+        return;
+    }
+    println!("⌬  Created your HexDB configuration in {}", dir.display());
+    for path in created {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name == LOCAL_CONFIG_FILE_NAME {
+            println!("   {}   your encryption key. Back it up: without it the data can't be read.", name);
+        } else {
+            println!("   {}         settings; the data goes in the data folder beside it", name);
+        }
+    }
+    println!("   Start the server with `hexdb start`.");
+}
+
+/// The admin UI shipped with this copy of HexDB: next to the executable
+/// (archives, MSI, macOS package) or in ../share/hexdb/ui (Debian, Homebrew,
+/// the install script).
+fn installed_ui_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = fs::canonicalize(&exe).unwrap_or(exe);
+    let dir = exe.parent()?;
+    [dir.join("ui"), dir.join("..").join("share").join("hexdb").join("ui")]
+        .into_iter()
+        .find(|p| p.join("index.html").is_file())
+        .map(|p| fs::canonicalize(&p).unwrap_or(p))
+        .map(|p| PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\")))
+}
+
+fn config_template(ui: Option<&Path>) -> String {
+    let ui_line = match ui {
+        Some(path) => format!("path = {}", toml::Value::String(path.to_string_lossy().into_owned())),
+        None => "# path = \"/path/to/hexdb_admin/dist\"   # the built admin UI; not found next to hexdb".to_string(),
+    };
+    format!(
+        "# HexDB configuration, created by `hexdb init`. Every setting is described in\n\
+         # MANUAL.md. Secrets go in hexdb.local.toml beside this file.\n\
+         \n\
+         [network]\n\
+         api_endpoint = \"127.0.0.1:7700\"\n\
+         discovery_endpoint = \"127.0.0.1:7702\"\n\
+         \n\
+         [storage]\n\
+         path = \"./data\"\n\
+         \n\
+         [ui]\n\
+         {}\n",
+        ui_line
+    )
+}
+
+/// Writes a file only its owner can read (0600 on Unix; on Windows the user's
+/// profile folders are already private).
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(text.as_bytes())
 }
 
 fn spawn_hint(server: &Path) -> String {
@@ -585,6 +733,12 @@ mod platform {
         cmd.process_group(0);
     }
 
+    /// Make a folder `hexdb init` created private to its owner (0700).
+    pub fn restrict_dir(dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+
     pub fn process_alive(pid: u32) -> bool {
         match kill(Pid::from_raw(pid as i32), None) {
             Ok(()) => true,
@@ -640,6 +794,10 @@ mod platform {
         GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
         CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
+
+    /// Nothing to do: the default folder is under %LOCALAPPDATA%, which only
+    /// the user (plus SYSTEM and administrators) can open.
+    pub fn restrict_dir(_dir: &std::path::Path) {}
 
     /// The executable path and start time (epoch ms) of a process.
     pub fn process_identity(pid: u32) -> Option<(String, Option<i64>)> {
@@ -796,4 +954,48 @@ fn list_plugins() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hexdb-cli-{}-{}", tag, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn init_creates_a_loadable_config_and_never_replaces_the_key() {
+        let dir = temp_dir("init");
+        let file = dir.join(CONFIG_FILE_NAME);
+
+        let created = init(&file).unwrap();
+        assert_eq!(created.len(), 2);
+        let key = load_config_from(Some(&file)).unwrap().storage.encryption_key;
+        assert!(key.starts_with("base64:"));
+
+        // A second run leaves both files alone.
+        assert!(init(&file).unwrap().is_empty());
+        let config = load_config_from(Some(&file)).unwrap();
+        assert_eq!(config.storage.encryption_key, key);
+        assert_eq!(PathBuf::from(&config.storage.path), std::path::absolute(dir.join("data")).unwrap());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.join(LOCAL_CONFIG_FILE_NAME)).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn template_escapes_windows_paths() {
+        let text = config_template(Some(Path::new(r"C:\Program Files\HexDB\ui")));
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["ui"]["path"].as_str(), Some(r"C:\Program Files\HexDB\ui"));
+        assert!(toml::from_str::<toml::Value>(&config_template(None)).is_ok());
+    }
 }

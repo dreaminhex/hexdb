@@ -1,0 +1,6 @@
+#!/bin/sh
+# Runs as root after HexDB.pkg installs: puts the commands on the PATH.
+mkdir -p /usr/local/bin
+ln -sf /usr/local/hexdb/hexdb /usr/local/bin/hexdb
+ln -sf /usr/local/hexdb/hexdb_api /usr/local/bin/hexdb_api
+exit 0

@@ -1,0 +1,107 @@
+<!--
+  The HexDB Windows installer (WiX Toolset 5). Build it with build-msi.ps1 in
+  this folder, which the release workflow runs on every tag.
+
+  It installs, for all users, into C:\Program Files\HexDB:
+    hexdb.exe (the CLI), hexdb_api.exe (the server), ui\ (the admin UI),
+    README.md, MANUAL.md and LICENSE;
+  adds that folder to the system PATH; and installs the ODBC driver in
+  C:\Program Files\HexDB\ODBC, registered as "HexDB" (leave it out with
+  msiexec /i hexdb-windows-x64.msi ODBC=0).
+
+  No configuration or data is installed here: Program Files isn't writable.
+  `hexdb start` creates the user's own configuration, with a new encryption key,
+  in %LOCALAPPDATA%\HexDB on first use (or run `hexdb init`).
+
+  UpgradeCode identifies HexDB across versions. Never change it: a new value
+  would make Windows install a second copy instead of upgrading.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+    Name="HexDB"
+    Manufacturer="Dream In Hex"
+    Version="$(Version)"
+    UpgradeCode="7785422D-1F25-4D95-9F53-BC9E07031807"
+    Scope="perMachine"
+    Compressed="yes"
+    Language="1033">
+
+    <SummaryInformation Description="HexDB document database: server, CLI, admin UI and ODBC driver" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of HexDB is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="HexDBIcon" SourceFile="hexdb.ico" />
+    <Property Id="ARPPRODUCTICON" Value="HexDBIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://hexdb-website.vercel.app" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/dreaminhex/hexdb/issues" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/dreaminhex/hexdb/releases" />
+    <Property Id="ARPCOMMENTS" Value="Run `hexdb start` in a new terminal, then open http://127.0.0.1:7700/ui/" />
+    <!-- ODBC=0 on the command line leaves the ODBC driver out. -->
+    <Property Id="ODBC" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="HexDB">
+        <Directory Id="UIFOLDER" Name="ui" />
+        <Directory Id="ODBCFOLDER" Name="ODBC" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Server" Title="HexDB" Description="The server, the hexdb CLI and the admin UI." Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="Programs" />
+      <ComponentGroupRef Id="AdminUi" />
+    </Feature>
+    <Feature Id="Odbc" Title="ODBC driver" Description="The 64-bit HexDB ODBC driver, for reporting tools, spreadsheets, pyodbc and R." Level="1">
+      <Level Value="0" Condition='ODBC = "0"' />
+      <ComponentGroupRef Id="OdbcDriver" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
+      <Component>
+        <File Source="$(StageDir)\hexdb.exe" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(StageDir)\hexdb_api.exe" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(StageDir)\README.md" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(StageDir)\MANUAL.md" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(StageDir)\LICENSE" KeyPath="yes" />
+      </Component>
+      <!-- Puts C:\Program Files\HexDB on the system PATH, and takes it off again on uninstall. -->
+      <Component Id="SystemPath" Guid="7BE1EC4A-FCE5-4BB2-80A6-07AE8A765084">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Dream In Hex\HexDB" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+        <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set" System="yes" Permanent="no" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="AdminUi" Directory="UIFOLDER">
+      <Files Include="$(StageDir)\ui\**" />
+    </ComponentGroup>
+
+    <!-- The same registration drivers/odbc/install-windows.ps1 makes. -->
+    <ComponentGroup Id="OdbcDriver" Directory="ODBCFOLDER">
+      <Component>
+        <File Id="OdbcDll" Source="$(StageDir)\odbc\hexdb_odbc.dll" KeyPath="yes" />
+        <RegistryKey Root="HKLM" Key="SOFTWARE\ODBC\ODBCINST.INI\HexDB">
+          <RegistryValue Name="Driver" Type="string" Value="[#OdbcDll]" />
+          <RegistryValue Name="APILevel" Type="string" Value="1" />
+          <RegistryValue Name="ConnectFunctions" Type="string" Value="YYN" />
+          <RegistryValue Name="DriverODBCVer" Type="string" Value="03.80" />
+          <RegistryValue Name="FileUsage" Type="string" Value="0" />
+          <RegistryValue Name="SQLLevel" Type="string" Value="1" />
+          <RegistryValue Name="UsageCount" Type="integer" Value="1" />
+        </RegistryKey>
+        <RegistryValue Root="HKLM" Key="SOFTWARE\ODBC\ODBCINST.INI\ODBC Drivers" Name="HexDB" Type="string" Value="Installed" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

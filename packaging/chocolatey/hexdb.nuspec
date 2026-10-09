@@ -1,18 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Chocolatey package. Build with `choco pack` in this folder after updating
-     the version and the URL/checksum in tools/chocolateyinstall.ps1. -->
+<!-- Chocolatey package: installs the HexDB MSI from the GitHub release.
+     The release workflow's chocolatey job sets <version> and the MSI's URL and
+     checksum in tools/chocolateyinstall.ps1, then packs and pushes it. -->
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>hexdb</id>
     <version>1.0.0</version>
     <title>HexDB</title>
-    <authors>HexDB contributors</authors>
-    <projectUrl>https://github.com/dreaminhex/hexdb</projectUrl>
+    <authors>Dream In Hex</authors>
+    <owners>dreaminhex</owners>
+    <projectUrl>https://hexdb-website.vercel.app</projectUrl>
+    <projectSourceUrl>https://github.com/dreaminhex/hexdb</projectSourceUrl>
+    <packageSourceUrl>https://github.com/dreaminhex/hexdb/tree/main/packaging/chocolatey</packageSourceUrl>
+    <docsUrl>https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md</docsUrl>
+    <bugTrackerUrl>https://github.com/dreaminhex/hexdb/issues</bugTrackerUrl>
+    <iconUrl>https://raw.githubusercontent.com/dreaminhex/hexdb/main/hexdb_admin/public/favicon-192.png</iconUrl>
     <licenseUrl>https://github.com/dreaminhex/hexdb/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <tags>database document nosql hexdb</tags>
-    <summary>Hexagonal document database: server, CLI and admin UI.</summary>
-    <description>HexDB is a document database with encryption at rest, replication across a lattice of hexes, change streams, plugins and an admin UI. This package installs hexdb_api (the server) and hexdb (the CLI).</description>
+    <releaseNotes>https://github.com/dreaminhex/hexdb/releases</releaseNotes>
+    <tags>hexdb database document-database nosql graphql sql odbc admin foss</tags>
+    <summary>Document database with REST, GraphQL, SQL, replication and an admin UI, in one program.</summary>
+    <description>HexDB is a document database in a single program: JSON documents served over REST, GraphQL and read-only SQL, with an admin UI, AES-256 encryption at rest, replication with automatic failover, streams, functions and plugins.
+
+This package runs the HexDB installer (MSI), which puts the server (`hexdb_api`), the CLI (`hexdb`) and the admin UI in C:\Program Files\HexDB, adds them to the PATH and registers the 64-bit ODBC driver.
+
+After installing, open a new terminal and run `hexdb start`. The first start creates your configuration and encryption key in %LOCALAPPDATA%\HexDB. Then open http://127.0.0.1:7700/ui/ and sign in as hexdbadmin.</description>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

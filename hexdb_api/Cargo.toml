@@ -3,6 +3,8 @@ name = "hexdb_api"
 version = "1.0.0"
 license = "Apache-2.0"
 edition = "2021"
+homepage = "https://hexdb-website.vercel.app"
+repository = "https://github.com/dreaminhex/hexdb"
 description = "HexDB server: a document database with REST, GraphQL, replication and an admin UI"
 
 [dependencies]
@@ -28,16 +30,21 @@ tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
-# `cargo deb -p hexdb_api` (after `cargo build --release -p hexdb_cli` and
-# building the admin UI) makes a Debian/Ubuntu package with a systemd service.
+# `cargo deb -p hexdb_api` (after `cargo build --release -p hexdb_cli -p
+# hexdb_odbc` and building the admin UI) makes a Debian/Ubuntu package with a
+# systemd service and the ODBC driver, registered with unixODBC when present.
 [package.metadata.deb]
 name = "hexdb"
-maintainer = "HexDB maintainers"
-copyright = "HexDB contributors"
-extended-description = "HexDB, a hexagonal document database: the server, the hexdb CLI and the admin UI."
+maintainer = "Dream In Hex <matthew@dreaminhex.com>"
+copyright = "2026, Dream In Hex. Apache License 2.0."
+license-file = ["../LICENSE", "0"]
+extended-description = "HexDB, a document database: the server, the hexdb CLI, the admin UI and the ODBC driver."
 section = "database"
 priority = "optional"
-depends = "$auto, adduser"
+# Not $auto: the binaries are built against glibc 2.28 (cargo zigbuild) and need
+# only libc, libm, libpthread and libdl, but dpkg-shlibdeps on a newer build
+# machine would ask for that machine's glibc.
+depends = "adduser, libc6 (>= 2.28)"
 maintainer-scripts = "../packaging/debian"
 conf-files = ["/etc/hexdb/hexdb.toml"]
 assets = [
@@ -46,5 +53,7 @@ assets = [
     ["../packaging/debian/hexdb.toml", "etc/hexdb/hexdb.toml", "644"],
     ["../hexdb_admin/dist/**/*", "usr/share/hexdb/ui/", "644"],
     ["../packaging/systemd/hexdb.service", "lib/systemd/system/hexdb.service", "644"],
+    ["target/release/libhexdb_odbc.so", "usr/lib/hexdb/libhexdb_odbc.so", "644"],
     ["../README.md", "usr/share/doc/hexdb/README.md", "644"],
+    ["../MANUAL.md", "usr/share/doc/hexdb/MANUAL.md", "644"],
 ]

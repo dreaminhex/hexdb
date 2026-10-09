@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+if [ "$1" = "remove" ]; then
+    systemctl stop hexdb >/dev/null 2>&1 || true
+    systemctl disable hexdb >/dev/null 2>&1 || true
+    # Unregister the ODBC driver. The data in /var/lib/hexdb and the key in
+    # /etc/hexdb/hexdb.local.toml stay, so a reinstall can read the data again.
+    if command -v odbcinst >/dev/null 2>&1; then
+        odbcinst -u -d -n HexDB >/dev/null 2>&1 || true
+    fi
+fi
+exit 0

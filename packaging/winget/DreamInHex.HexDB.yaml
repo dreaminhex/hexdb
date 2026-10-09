@@ -1,0 +1,8 @@
+# winget manifests for HexDB (the version file; see the installer and locale
+# files beside it). The release workflow's winget job fills in the version, the
+# MSI's URL and its checksum, then submits them to microsoft/winget-pkgs.
+PackageIdentifier: DreamInHex.HexDB
+PackageVersion: 1.0.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0
