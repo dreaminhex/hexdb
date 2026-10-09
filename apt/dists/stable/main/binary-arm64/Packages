@@ -1,0 +1,20 @@
+Package: hexdb
+Architecture: arm64
+Version: 1.0.0-1
+Priority: optional
+Section: database
+Maintainer: Dream In Hex <matthew@dreaminhex.com>
+Installed-Size: 41527
+Depends: adduser, libc6 (>= 2.28)
+Filename: pool/main/h/hexdb/hexdb_1.0.0-1_arm64.deb
+Size: 10893236
+MD5sum: 0bf139776ba7301bcecd9cace069a695
+SHA1: caf2836ea2c16012e77bcd1481974c9f750f757e
+SHA256: 77f49ff691845bba67ae50d91549da7a5a9f4d2d11ff6ef99f1c43d9a6cc33cb
+SHA512: a9206c65d3b3b787bd9cb4e95a7e356a602614dfff1488cea261e2bea79631bc424a7f46322da3ae4519013dd3dade9e8abf6ff977bdbbdd80fc6d753f78c903
+Homepage: https://hexdb-website.vercel.app
+Description: HexDB server: a document database with REST, GraphQL, replication and an admin
+ UI
+ HexDB, a document database: the server, the hexdb CLI, the admin UI and the
+ ODBC driver.
+
