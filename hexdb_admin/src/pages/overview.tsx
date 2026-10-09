@@ -6,8 +6,10 @@ import {
   IconCircleCheck,
   IconDatabase,
   IconDeviceFloppy,
+  IconHexagon,
   IconHexagons,
   IconLoader2,
+  IconLock,
   IconPlus,
   IconRefresh,
 } from "@tabler/icons-react"
@@ -554,18 +556,33 @@ function TessellationTable({ status }: { status: Status }) {
         </TableHeader>
         <TableBody>
           {rows.map((t) => (
-            <TableRow key={t.name}>
+            <TableRow key={t.name} className={t.kind === "user" ? undefined : "bg-muted/15 text-muted-foreground hover:bg-muted/25"}>
               <TableCell className="pl-6 font-medium">
-                {t.kind === "user" ? (
-                  <a className="hover:underline" href={href(`/documents?tessellation=${encodeURIComponent(t.name)}`)} onClick={linkHandler(`/documents?tessellation=${encodeURIComponent(t.name)}`)}>
-                    {t.name}
-                  </a>
-                ) : (
-                  <span className="text-muted-foreground">{t.name}</span>
-                )}
+                <span className="flex items-center gap-2.5">
+                  <span
+                    className={cn(
+                      "flex size-6 shrink-0 items-center justify-center rounded-md",
+                      t.kind === "user" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+                    )}
+                    aria-hidden
+                  >
+                    {t.kind === "user" ? <IconHexagon className="size-3.5" /> : <IconLock className="size-3" />}
+                  </span>
+                  {t.kind === "user" ? (
+                    <a className="hover:underline" href={href(`/documents?tessellation=${encodeURIComponent(t.name)}`)} onClick={linkHandler(`/documents?tessellation=${encodeURIComponent(t.name)}`)}>
+                      {t.name}
+                    </a>
+                  ) : (
+                    <span className="font-mono text-sm font-normal" title="Managed by HexDB">
+                      {t.name}
+                    </span>
+                  )}
+                </span>
               </TableCell>
               <TableCell>
-                <Badge variant={t.kind === "user" ? "outline" : "secondary"}>{t.kind}</Badge>
+                <Badge variant={t.kind === "user" ? "outline" : "secondary"} className={t.kind === "user" ? undefined : "text-[10px] tracking-wide uppercase"}>
+                  {t.kind}
+                </Badge>
               </TableCell>
               <TableCell className="text-right tabular-nums">{formatNumber(t.document_count)}</TableCell>
               <TableCell className="text-right tabular-nums">{formatNumber(t.documents_in_ram)}</TableCell>

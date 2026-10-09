@@ -4,11 +4,11 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>hexdb</id>
-    <version>0.1.0</version>
+    <version>1.0.0</version>
     <title>HexDB</title>
     <authors>HexDB contributors</authors>
     <projectUrl>https://github.com/dreaminhex/hexdb</projectUrl>
-    <licenseUrl>https://github.com/dreaminhex/hexdb/blob/main/README.md</licenseUrl>
+    <licenseUrl>https://github.com/dreaminhex/hexdb/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <tags>database document nosql hexdb</tags>
     <summary>Hexagonal document database: server, CLI and admin UI.</summary>

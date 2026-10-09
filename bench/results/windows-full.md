@@ -1,6 +1,6 @@
 # HexDB benchmark results
 
-Machine: 12th Gen Intel(R) Core(TM) i9-12900H (20 threads), windows x86_64. HexDB 0.1.0, release build. Run with `cargo run --release -p hexdb_bench` (98 s).
+Machine: 12th Gen Intel(R) Core(TM) i9-12900H (20 threads), windows x86_64. HexDB 1.0.0, release build. Run with `cargo run --release -p hexdb_bench` (98 s).
 
 ## Binary sizes
 

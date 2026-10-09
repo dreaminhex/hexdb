@@ -5,7 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>HexDB.Client</PackageId>
-    <Version>0.1.0</Version>
+    <Version>1.0.0</Version>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Description>Client for HexDB, the hexagonal document database.</Description>
     <PackageTags>hexdb;database;document;nosql</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>

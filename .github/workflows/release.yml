@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.2.0 to build and publish:
+# Push a tag like v1.0.0 to build and publish:
 #   - archives for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows
 #     (x86_64) with hexdb_api, the hexdb CLI, the admin UI, the ODBC driver and
 #     a sample config,

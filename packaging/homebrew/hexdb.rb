@@ -6,7 +6,7 @@
 class Hexdb < Formula
   desc "Hexagonal document database: server, CLI and admin UI"
   homepage "https://github.com/dreaminhex/hexdb"
-  version "0.1.0"
+  version "1.0.0"
 
   on_macos do
     on_arm do

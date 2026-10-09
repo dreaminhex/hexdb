@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react"
-import { IconFileDescription, IconKey, IconLoader2, IconPlus, IconTrash } from "@tabler/icons-react"
+import { IconEye, IconEyeOff, IconFileDescription, IconHexagon, IconKey, IconLoader2, IconLock, IconPlus, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -16,11 +16,46 @@ import { api, errorMessage } from "@/lib/api"
 import { can, has, useAuth } from "@/lib/auth"
 import { formatBytes, formatNumber, formatTimestamp } from "@/lib/format"
 import { href, linkHandler, navigate } from "@/lib/router"
+import { cn } from "@/lib/utils"
 
 // The schema editor uses CodeMirror, which loads on first use.
 const SchemasDialog = lazy(() => import("@/components/schemas-dialog").then((m) => ({ default: m.SchemasDialog })))
 
 const NAME_PATTERN = /^[A-Za-z0-9-][A-Za-z0-9_-]{0,63}$/
+/** Whether the system group is expanded; remembered per browser. */
+const SHOW_SYSTEM_KEY = "hexdb.tessellations.showSystem"
+
+function loadShowSystem(): boolean {
+  try {
+    return localStorage.getItem(SHOW_SYSTEM_KEY) === "true"
+  } catch {
+    return false
+  }
+}
+
+/** What a system tessellation holds, from its name, for the hint beside it. */
+function systemPurpose(name: string): string {
+  if (name.startsWith("_stream_")) return `messages of the stream ${name.slice("_stream_".length)}`
+  const known: Record<string, string> = {
+    users: "accounts (Users page)",
+    roles: "roles and grants (Roles page)",
+    _revoked_sessions: "signed-out sessions",
+    _api_keys: "API keys",
+    _login_failures: "sign-in throttling",
+    _audit: "the audit trail",
+    _streams: "stream configurations",
+    _stream_offsets: "stream positions and consumer groups",
+    _functions: "saved functions",
+    _schedules: "schedules",
+    _triggers: "triggers",
+    _trigger_cursors: "trigger positions in the change feed",
+    _plugin_cursors: "plugin positions in the change feed",
+    _idempotency: "idempotency keys and their stored responses",
+    _replication: "replication state",
+    _system: "runtime settings and server state",
+  }
+  return known[name] ?? "managed by HexDB"
+}
 
 function CreateTessellationDialog({
   open,
@@ -64,7 +99,7 @@ function CreateTessellationDialog({
           </DialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="tess-name">Name</Label>
-            <Input id="tess-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="articles" autoFocus autoComplete="off" />
+            <Input id="tess-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="orders" autoFocus autoComplete="off" />
             <p className="text-muted-foreground text-xs">
               1–64 letters, digits, <code>_</code> or <code>-</code>; can't start with <code>_</code>. Names are unique ignoring case.
             </p>
@@ -106,22 +141,56 @@ export function TessellationsPage() {
   const [deleting, setDeleting] = useState<string | null>(null)
   const [indexing, setIndexing] = useState<string | null>(null)
   const [schemaFor, setSchemaFor] = useState<string | null>(null)
+  const [showSystem, setShowSystem] = useState(loadShowSystem)
 
   const metrics = new Map((status.data?.metrics.tessellations ?? []).map((t) => [t.name, t]))
-  const rows = [...(tessellations.data ?? [])].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "user" ? -1 : 1))
+  const all = [...(tessellations.data ?? [])].sort((a, b) => a.name.localeCompare(b.name))
+  const userRows = all.filter((t) => t.kind === "user")
+  const systemRows = all.filter((t) => t.kind !== "user")
+  const rows = showSystem ? [...userRows, ...systemRows] : userRows
   const documentsRoute = (name: string) => `/documents?tessellation=${encodeURIComponent(name)}`
+  const toggleSystem = () => {
+    setShowSystem((v) => {
+      try {
+        localStorage.setItem(SHOW_SYSTEM_KEY, String(!v))
+      } catch {
+        // Not critical.
+      }
+      return !v
+    })
+  }
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <p className="text-muted-foreground text-sm">
-          {tessellations.data ? `${rows.filter((t) => t.kind === "user").length} user · ${rows.filter((t) => t.kind !== "user").length} system` : "Loading…"}
+          {tessellations.data ? (
+            <>
+              {userRows.length} user tessellation{userRows.length === 1 ? "" : "s"}
+              {systemRows.length > 0 && (
+                <>
+                  {" · "}
+                  {systemRows.length} system
+                </>
+              )}
+            </>
+          ) : (
+            "Loading…"
+          )}
         </p>
-        {mayCreate && (
-          <Button className="ml-auto" size="sm" onClick={() => setCreating(true)}>
-            <IconPlus /> New tessellation
-          </Button>
-        )}
+        <div className="ml-auto flex items-center gap-2">
+          {systemRows.length > 0 && (
+            <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={toggleSystem} aria-pressed={showSystem}>
+              {showSystem ? <IconEyeOff /> : <IconEye />}
+              {showSystem ? "Hide system" : "Show system"}
+            </Button>
+          )}
+          {mayCreate && (
+            <Button size="sm" onClick={() => setCreating(true)}>
+              <IconPlus /> New tessellation
+            </Button>
+          )}
+        </div>
       </div>
 
       {tessellations.error && <p className="text-destructive text-sm">{tessellations.error.message}</p>}
@@ -131,7 +200,6 @@ export function TessellationsPage() {
           <TableHeader className="bg-muted/60">
             <TableRow>
               <TableHead className="pl-6">Name</TableHead>
-              <TableHead>Kind</TableHead>
               <TableHead className="text-right">Documents</TableHead>
               <TableHead className="text-right">Total size</TableHead>
               <TableHead>Indexes</TableHead>
@@ -140,31 +208,63 @@ export function TessellationsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((t) => {
+            {rows.map((t, i) => {
               const m = metrics.get(t.name)
               const user = t.kind === "user"
-              return (
-                <TableRow key={t.name} className={user ? "cursor-pointer" : undefined} onClick={user ? () => navigate(documentsRoute(t.name)) : undefined}>
-                  <TableCell className="pl-6 font-medium">
-                    {user ? (
-                      <a
-                        href={href(documentsRoute(t.name))}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          linkHandler(documentsRoute(t.name))(e)
-                        }}
-                        className="hover:underline"
-                      >
-                        {t.name}
-                      </a>
-                    ) : (
-                      <span className="text-muted-foreground" title="Managed by HexDB; use the Users and Roles pages.">
-                        {t.name}
+              const firstSystem = !user && (i === 0 || rows[i - 1].kind === "user")
+              return [
+                firstSystem && (
+                  <TableRow key="__system" className="bg-muted/40 hover:bg-muted/40">
+                    <TableCell colSpan={6} className="text-muted-foreground py-2 pl-6 text-xs font-medium tracking-wide uppercase">
+                      <span className="inline-flex items-center gap-1.5">
+                        <IconLock className="size-3.5" />
+                        System tessellations
                       </span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={user ? "outline" : "secondary"}>{t.kind}</Badge>
+                      <span className="ml-2 font-normal normal-case tracking-normal">
+                        Managed by HexDB and encrypted like everything else. Change them through the Users, Roles, Streams and Functions pages, not here.
+                      </span>
+                    </TableCell>
+                  </TableRow>
+                ),
+                <TableRow
+                  key={t.name}
+                  className={cn(user ? "cursor-pointer" : "bg-muted/15 text-muted-foreground hover:bg-muted/25")}
+                  onClick={user ? () => navigate(documentsRoute(t.name)) : undefined}
+                >
+                  <TableCell className="pl-6 font-medium">
+                    <span className="flex items-center gap-2.5">
+                      <span
+                        className={cn(
+                          "flex size-7 shrink-0 items-center justify-center rounded-md",
+                          user ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+                        )}
+                        aria-hidden
+                      >
+                        {user ? <IconHexagon className="size-4" /> : <IconLock className="size-3.5" />}
+                      </span>
+                      {user ? (
+                        <a
+                          href={href(documentsRoute(t.name))}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            linkHandler(documentsRoute(t.name))(e)
+                          }}
+                          className="hover:underline"
+                        >
+                          {t.name}
+                        </a>
+                      ) : (
+                        <span className="flex min-w-0 flex-col">
+                          <span className="font-mono text-sm font-normal">{t.name}</span>
+                          <span className="text-xs font-normal">{systemPurpose(t.name)}</span>
+                        </span>
+                      )}
+                      {!user && (
+                        <Badge variant="secondary" className="ml-1 h-4.5 px-1.5 text-[10px] tracking-wide uppercase">
+                          system
+                        </Badge>
+                      )}
+                    </span>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
                     {m ? formatNumber(m.document_count) : counts.data?.[t.name] !== undefined ? formatNumber(counts.data[t.name]) : "—"}
@@ -221,13 +321,22 @@ export function TessellationsPage() {
                       </div>
                     )}
                   </TableCell>
-                </TableRow>
-              )
+                </TableRow>,
+              ]
             })}
-            {tessellations.data && rows.length === 0 && (
+            {tessellations.data && userRows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="text-muted-foreground py-10 text-center">
+                <TableCell colSpan={6} className="text-muted-foreground py-10 text-center">
                   No tessellations yet. Create one, or insert a document and it will be created for you.
+                  {!showSystem && systemRows.length > 0 && (
+                    <>
+                      {" "}
+                      <button type="button" className="underline underline-offset-4 hover:text-foreground" onClick={toggleSystem}>
+                        Show the {systemRows.length} system tessellation{systemRows.length === 1 ? "" : "s"}
+                      </button>
+                      .
+                    </>
+                  )}
                 </TableCell>
               </TableRow>
             )}

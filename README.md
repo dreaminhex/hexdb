@@ -306,3 +306,7 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 - Every hex holds a full copy of the data. Horizontal partitioning (sharding across hexes) isn't implemented.
 - SQL is read-only and covers single-tessellation `SELECT`s: no joins, subqueries or expressions over fields. The ODBC driver inherits those limits. It's tested with pyodbc (unixODBC and the Windows driver manager), not yet with desktop tools such as Excel or Power BI. There's no JDBC driver.
 - The Entity Framework Core provider maps one entity type to one tessellation. It doesn't support relationships, owned types, inheritance or explicit transactions (see [MANUAL.md](MANUAL.md#entity-framework-core)).
+
+## License
+
+HexDB is licensed under the [Apache License 2.0](LICENSE).

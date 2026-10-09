@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$version = '0.1.0'
+$version = '1.0.0'
 $packageArgs = @{
   packageName    = 'hexdb'
   unzipLocation  = (Split-Path -Parent $MyInvocation.MyCommand.Definition)

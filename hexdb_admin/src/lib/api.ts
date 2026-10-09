@@ -572,6 +572,31 @@ export interface Trigger {
   status?: { runs: number; failures: number; rejected: number; last_run: number | null; last_error: string | null; last_ms: number }
 }
 
+export interface SqlRequest {
+  sql: string
+  /** Values for `?` or `$1` placeholders, in order. */
+  params?: unknown[]
+  page_size?: number
+  cursor?: string
+}
+
+export interface SqlColumn {
+  name: string
+  /** Inferred from the page's values: boolean, integer, number, string, json or null. */
+  type: string
+  nullable?: boolean
+  source?: "id" | "schema" | "sample"
+}
+
+export interface SqlResult {
+  columns: SqlColumn[]
+  rows: unknown[][]
+  /** A cursor for the next page, or null on the last one. */
+  next: string | null
+  /** The filter, sort and aggregation the statement was translated into. */
+  translated: Record<string, unknown>
+}
+
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
@@ -676,6 +701,9 @@ export const api = {
   updateSchedule: (name: string, schedule: Schedule) => request<Schedule>("PUT", `/schedules/${enc(name)}`, schedule),
   deleteSchedule: (name: string) => request<void>("DELETE", `/schedules/${enc(name)}`),
   runSchedule: (name: string) => request<{ result: unknown }>("POST", `/schedules/${enc(name)}/run`),
+  sql: (query: SqlRequest) => request<SqlResult>("POST", "/sql", query),
+  sqlTables: () => request<{ tables: { name: string }[] }>("GET", "/sql/tables").then((r) => r.tables.map((t) => t.name)),
+  sqlColumns: (table: string) => request<{ table: string; columns: SqlColumn[] }>("GET", `/sql/columns?table=${enc(table)}`).then((r) => r.columns),
   createRole: (role: RoleInput) => request<Role>("POST", "/roles", role),
   updateRole: (name: string, role: RoleInput) => request<Role>("PATCH", `/roles/${enc(name)}`, role),
   deleteRole: (name: string) => request<void>("DELETE", `/roles/${enc(name)}`),

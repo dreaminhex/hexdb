@@ -1,6 +1,7 @@
 [package]
 name = "hexdb_bench"
-version = "0.1.0"
+version = "1.0.0"
+license = "Apache-2.0"
 edition = "2021"
 publish = false
 description = "Measures HexDB: binary sizes, compression, encryption, Reed-Solomon repair, crash recovery, failover, and read/write speed."

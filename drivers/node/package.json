@@ -1,8 +1,8 @@
 {
   "name": "hexdb",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Client for HexDB, the hexagonal document database.",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,7 +12,10 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "engines": {
     "node": ">=18"
   },

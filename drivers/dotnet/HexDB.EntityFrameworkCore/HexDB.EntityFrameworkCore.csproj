@@ -5,7 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>HexDB.EntityFrameworkCore</PackageId>
-    <Version>0.1.0</Version>
+    <Version>1.0.0</Version>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Description>Entity Framework Core provider for HexDB: LINQ queries translated to HexDB's filters, sorting and paging; SaveChanges as one atomic HexDB transaction.</Description>
     <PackageTags>hexdb;efcore;entityframeworkcore;database;document;nosql</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>

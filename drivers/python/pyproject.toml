@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hexdb"
-version = "0.1.0"
+version = "1.0.0"
 description = "Client for HexDB, the hexagonal document database."
 readme = "README.md"
 requires-python = ">=3.9"
+license = "Apache-2.0"
 dependencies = []
 
 [tool.setuptools]
