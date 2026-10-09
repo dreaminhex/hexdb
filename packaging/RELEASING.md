@@ -15,11 +15,11 @@ Pushing a tag such as `v1.0.1` runs [.github/workflows/release.yml](../.github/w
 | Homebrew | `brew install dreaminhex/hexdb/hexdb` | the tap repo `dreaminhex/homebrew-hexdb` | create the tap repo, a token | `HOMEBREW_TAP_TOKEN` |
 | winget | `winget install DreamInHex.HexDB` | `microsoft/winget-pkgs` | a token; first version is reviewed | `WINGET_TOKEN` |
 | Chocolatey | `choco install hexdb` | community.chocolatey.org | an account and API key; versions are moderated | `CHOCOLATEY_API_KEY` |
-| npm | `npm install hexdb` | npmjs.com | an account and token | `NPM_TOKEN` |
+| npm | `npm install @dreaminhex/hexdb` | npmjs.com | an account and token | `NPM_TOKEN` |
 | PyPI | `pip install hexdb` | pypi.org | an account and token | `PYPI_TOKEN` |
 | NuGet | `dotnet add package HexDB.Client` / `HexDB.EntityFrameworkCore` | nuget.org | an account and a trusted publishing policy | `NUGET_USER` (or `NUGET_API_KEY`) |
 
-Every package name above was free on 2026-10-09: `hexdb` on npm, PyPI, Chocolatey and crates.io, `HexDB.Client` and `HexDB.EntityFrameworkCore` on NuGet, `DreamInHex.HexDB` on winget. Claim them with the first release.
+Every package name above was free on 2026-10-09: `hexdb` on PyPI, Chocolatey and crates.io, `HexDB.Client` and `HexDB.EntityFrameworkCore` on NuGet, `DreamInHex.HexDB` on winget. Claim them with the first release.
 
 Secrets go in the HexDB repository under **Settings > Secrets and variables > Actions > New repository secret**. A job whose secret is missing is skipped, not failed, so you can turn channels on one at a time.
 
@@ -162,7 +162,7 @@ apt-cache policy hexdb
 brew update && brew info dreaminhex/hexdb/hexdb
 
 # Drivers
-npm view hexdb version
+npm view @dreaminhex/hexdb version
 pip index versions hexdb
 curl -s https://api.nuget.org/v3-flatcontainer/hexdb.client/index.json
 

@@ -1,5 +1,5 @@
 {
-  "name": "hexdb",
+  "name": "@dreaminhex/hexdb",
   "version": "1.0.0",
   "description": "Client for HexDB, the hexagonal document database.",
   "license": "Apache-2.0",

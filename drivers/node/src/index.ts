@@ -1,7 +1,7 @@
 // HexDB client for Node.js (18+), Deno, Bun and browsers. No dependencies:
 // it speaks HexDB's REST API with fetch.
 //
-//   import { HexDB } from "hexdb"
+//   import { HexDB } from "@dreaminhex/hexdb"
 //   const db = new HexDB({ url: "http://127.0.0.1:7700", apiKey: process.env.HEXDB_API_KEY })
 //   const orders = db.tessellation("orders")
 //   const { id } = await orders.insert({ customer: "ada", total: 12 })

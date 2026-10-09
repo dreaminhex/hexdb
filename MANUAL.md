@@ -1604,7 +1604,7 @@ Hard-linked backups share disk blocks with the live data, so they don't protect 
 
 | Language | Folder | Install |
 | --- | --- | --- |
-| JavaScript / TypeScript | [drivers/node](drivers/node) | `npm install hexdb` (Node.js 18+, Deno, Bun, browsers) |
+| JavaScript / TypeScript | [drivers/node](drivers/node) | `npm install @dreaminhex/hexdb` (Node.js 18+, Deno, Bun, browsers) |
 | Python | [drivers/python](drivers/python) | `pip install hexdb` (3.9+, no dependencies) |
 | .NET | [drivers/dotnet](drivers/dotnet) | `dotnet add package HexDB.Client` (.NET 8+) |
 | Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 8+, EF Core 8) |

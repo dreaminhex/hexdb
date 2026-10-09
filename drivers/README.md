@@ -12,7 +12,7 @@ Client libraries for HexDB's REST API, plus an Entity Framework Core provider an
 
 | Language | Folder | Package | Requirements |
 |---|---|---|---|
-| JavaScript / TypeScript | [node](node) | `hexdb` (npm) | Node.js 18+, Deno, Bun or a browser; no dependencies |
+| JavaScript / TypeScript | [node](node) | `@dreaminhex/hexdb` (npm) | Node.js 18+, Deno, Bun or a browser; no dependencies |
 | Python | [python](python) | `hexdb` (PyPI) | Python 3.9+; standard library only |
 | .NET (C#, F#) | [dotnet](dotnet) | `HexDB.Client` (NuGet) | .NET 8+ |
 | Entity Framework Core | [dotnet/HexDB.EntityFrameworkCore](dotnet/HexDB.EntityFrameworkCore) | `HexDB.EntityFrameworkCore` (NuGet) | .NET 8+, EF Core 8 |
@@ -23,7 +23,7 @@ The three drivers authenticate with an API key (create one on the admin UI's Acc
 ## Quick examples
 
 ```ts
-import { HexDB } from "hexdb"
+import { HexDB } from "@dreaminhex/hexdb"
 const db = new HexDB({ url: "http://127.0.0.1:7700", apiKey: process.env.HEXDB_API_KEY })
 const orders = db.tessellation("orders")
 await orders.insert({ customer: "ada", total: 12 })

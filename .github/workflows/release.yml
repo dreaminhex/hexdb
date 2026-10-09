@@ -431,7 +431,7 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - name: Publish hexdb to npm
+      - name: Publish @dreaminhex/hexdb to npm
         if: env.NODE_AUTH_TOKEN != ''
         working-directory: drivers/node
         run: npm ci && npm run build && npm publish --access public
