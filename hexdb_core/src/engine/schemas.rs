@@ -102,7 +102,7 @@ impl HexDBEngine {
         }
         let mut catalog = self.catalog.lock().unwrap();
         let info = catalog.tessellations.get_mut(tess).ok_or_else(|| EngineError::NotFound(format!("Tessellation '{}' not found.", tess)))?;
-        if info.kind != "user" {
+        if !info.is_user_data() {
             return Err(EngineError::Invalid(format!("'{}' is a system tessellation; it can't have a schema.", tess)).into());
         }
         let mut version = schema::new_version(&info.schemas, input).map_err(|e| EngineError::Conflict(format!("{:#}", e)))?;
@@ -370,7 +370,7 @@ impl HexDBEngine {
     /// documents may not all be on the current version yet.
     pub async fn resume_schema_migrations(self: &Arc<Self>) {
         for (name, info) in self.tessellation_details() {
-            if !info.schemas.is_empty() && info.kind == "user" {
+            if !info.schemas.is_empty() && info.is_user_data() {
                 let engine = self.clone();
                 tokio::spawn(async move { engine.migrate_schema(&name).await });
             }

@@ -8,7 +8,8 @@ Client libraries for HexDB's REST API, plus an Entity Framework Core provider an
 - transactions and idempotency keys;
 - the change feed;
 - streams: publish, read, consumer groups;
-- functions and GraphQL.
+- functions and GraphQL;
+- files: upload (resumable from 16 MB), download by path or ID (whole, streamed, or a byte range), list folders, search names and metadata, versions, the trash, thumbnails and re-extraction.
 
 | Language | Folder | Package | Requirements |
 |---|---|---|---|
@@ -44,6 +45,30 @@ using var db = new HexDBClient(new Uri("http://127.0.0.1:7700"), Environment.Get
 var orders = db.Tessellation("orders");
 await orders.InsertAsync(new { customer = "ada", total = 12 });
 var page = await orders.QueryAsync(new Query { Filter = new { status = "paid" }, Sort = "-total" });
+```
+
+Files tessellations (photos, audio, video, documents) have their own object:
+
+```ts
+const media = db.files("media")
+await media.create()                                        // a files tessellation, if it doesn't exist
+const doc = await media.upload("photos/IMG_1.jpg", bytes)   // Uint8Array or Blob; returns the file's document
+const hits = await media.search("glacier")                  // names, tags and extracted metadata
+const copy = await media.download("photos/IMG_1.jpg")       // or by doc.id; { version } for an earlier one
+```
+
+```python
+media = db.files("media")
+media.upload("photos/IMG_1.jpg", "IMG_1.jpg")      # a local path, bytes or a binary file object
+media.download_to("photos/IMG_1.jpg", "copy.jpg")
+hits = media.search("glacier", filter={"meta.camera.make": "FUJIFILM"})
+```
+
+```csharp
+var media = db.Files("media");
+var doc = await media.UploadFileAsync("photos/IMG_1.jpg", @"C:\Pictures\IMG_1.jpg");
+var hits = await media.SearchAsync("glacier");
+var page = await media.Documents.QueryAsync(new Query { Filter = new { path = "/photos/" } });   // any query on the files' documents
 ```
 
 ## Entity Framework Core

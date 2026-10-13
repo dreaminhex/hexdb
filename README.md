@@ -1,12 +1,13 @@
 # HexDB
 
-HexDB is a document database written in Rust. Documents are JSON, grouped into collections called tessellations, and served over REST, GraphQL and read-only SQL from a single binary that also hosts an admin UI. Several HexDB servers (hexes) form a lattice: one Overseer takes writes, and the others replicate its data, serve reads, and take over if it fails.
+HexDB is a document database written in Rust. Documents are JSON, grouped into collections called tessellations, and served over REST, GraphQL and read-only SQL from a single binary that also hosts an admin UI. It also stores files of any kind, with their metadata indexed for search. Several HexDB servers (hexes) form a lattice: one Overseer takes writes, and the others replicate its data, serve reads, and take over if it fails.
 
 The [technical manual](MANUAL.md) covers every feature in depth, including how the storage engine, encryption, replication and indexes work.
 
 ## Features
 
 - **Documents and queries.** Insert, replace, patch, delete, bulk writes, upserts, update-by-filter, TTLs and idempotency keys. A JSON filter language with sorting and paging, shared by REST and GraphQL, and SQL `SELECT` (with `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` and paging) translated onto it.
+- **Files.** Photos, audio, video, Photoshop and Illustrator files, office documents, archives: any file, deduplicated, compressed when that helps, encrypted, and split across the six vertices so any two can be lost. Metadata (EXIF and GPS, IPTC, XMP, ID3, Vorbis comments, MP4 and QuickTime, Matroska, Broadcast WAV and iXML, PDF, Office, EPUB, ...) is extracted into each file's document, so files are found with the same filters, full-text search, SQL and GraphQL as documents. Thumbnails, versions with rollback, a trash, resumable uploads, ranged downloads for media players, `hexdb put`/`get`, and a Files page in the admin UI.
 - **Indexes and search.** Field, composite and unique indexes. Full-text indexes with configurable analyzers (stemming, n-grams, autocomplete). A query advisor that suggests indexes from observed queries, with an optional second opinion from Claude.
 - **Aggregations and transactions.** Group-by with count, distinct count, sum, average, min and max. Multi-document ACID transactions across tessellations, with version and filter preconditions.
 - **Schemas.** Optional, versioned per tessellation, with compatibility checks, background migrations (rename, copy, remove, default, convert, or a function you write), and rollback to an earlier version.

@@ -5,6 +5,8 @@
 //   GET /lattice/snapshot/{tessellation}  documents with versions, paged by ID
 //   GET /lattice/changes?after=&wait=     the change feed with typed documents
 //   POST /lattice/revoke                  record a sign-out made on a replica
+//   GET /lattice/chunks/{id}              a file chunk, sealed with the lattice transfer key
+//                                         (any hex serves it, so hexes repair each other)
 //
 // Every request needs a valid `X-HexDB-Lattice-Signature` (fresh, single use,
 // made with the lattice key; see `hexdb_core::network::lattice_auth`), and
@@ -42,6 +44,28 @@ fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &U
         ));
     }
     Ok(())
+}
+
+/// A file chunk this hex holds, sealed for the asking hex. Any hex answers,
+/// not only the Overseer; 404 when it doesn't have the chunk (or can't rebuild it).
+pub async fn chunk(Path(id): Path<String>, method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
+    let presented = headers.get(LATTICE_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let target = uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path());
+    if !engine.lattice_keys.verify_request(presented, method.as_str(), target, b"", &engine.lattice_nonces) {
+        tracing::warn!("🚫 Rejected a lattice request to {} without a valid signature.", uri.path());
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "A valid lattice signature is required."));
+    }
+    let missing = || ApiError::new(StatusCode::NOT_FOUND, "not_found", "This hex doesn't have that chunk.");
+    let id = hexdb_core::blobs::parse_chunk_id(&id).ok_or_else(missing)?;
+    if !engine.blobs().contains(&id) {
+        return Err(missing());
+    }
+    let data = engine.read_local_chunk(id).await.map_err(|_| missing())?;
+    let compressed = engine.blobs().is_compressed(&id).unwrap_or(false);
+    let sealed = engine.lattice_keys.seal(&data, &id);
+    let mut response = sealed.into_response();
+    response.headers_mut().insert("x-hexdb-compress", axum::http::HeaderValue::from_static(if compressed { "1" } else { "0" }));
+    Ok(response)
 }
 
 /// Where a full sync starts.

@@ -110,4 +110,48 @@ public class ClientTests
         var change = await first;
         Assert.Equal(doc["id"]!.GetValue<string>(), change!["id"]!.GetValue<string>());
     }
+
+    [SkippableFact]
+    public async Task Files()
+    {
+        Skip.If(Url is null || Key is null, "set HEXDB_URL and HEXDB_API_KEY");
+        using var db = Client();
+        var media = db.Files($"{_prefix}-media");
+        Assert.Equal("files", (await media.CreateAsync())!["kind"]!.GetValue<string>());
+        await media.CreateAsync();
+
+        var text = System.Text.Encoding.UTF8.GetBytes("Glacier lagoon field notes");
+        var doc = await media.UploadAsync("notes/hello.txt", text);
+        var id = doc["id"]!.GetValue<string>();
+        Assert.Equal("/notes/", doc["path"]!.GetValue<string>());
+        Assert.Equal(text, await media.DownloadAsync("notes/hello.txt"));
+        Assert.Equal(text, await media.DownloadAsync(id));
+        Assert.Equal("lagoon", System.Text.Encoding.UTF8.GetString(await media.ReadRangeAsync(id, 8, 14)));
+        Assert.Equal(id, (await media.StatAsync("notes/hello.txt"))!["id"]!.GetValue<string>());
+        Assert.Null(await media.StatAsync("notes/missing.txt"));
+        Assert.Equal(new[] { "hello.txt" }, (await media.ListAsync("notes")).Select(f => f["name"]!.GetValue<string>()));
+
+        var v2 = await media.UploadAsync("notes/hello.txt", System.Text.Encoding.UTF8.GetBytes("second draft"));
+        Assert.Equal(2, v2["version"]!.GetValue<int>());
+        Assert.Equal(text, await media.DownloadAsync("notes/hello.txt", version: 1));
+        Assert.Equal(3, (await media.RestoreVersionAsync(id, 1))["version"]!.GetValue<int>());
+
+        var big = new byte[17 * 1024 * 1024];
+        Random.Shared.NextBytes(big);
+        var bigDoc = await media.UploadAsync("raw/big.bin", big);
+        Assert.Equal(big.Length, bigDoc["size"]!.GetValue<int>());
+        using var copy = new MemoryStream();
+        await media.DownloadToAsync(bigDoc["id"]!.GetValue<string>(), copy);
+        Assert.Equal(big, copy.ToArray());
+
+        for (var i = 0; i < 50 && (await media.Documents.GetAsync(id))!["extract"]!["status"]!.GetValue<string>() != "done"; i++) await Task.Delay(200);
+        Assert.Equal(new[] { "hello.txt" }, (await media.SearchAsync("glacier")).Select(f => f["name"]!.GetValue<string>()));
+
+        Assert.True(await media.DeleteAsync(id));
+        Assert.Equal(new[] { id }, (await media.TrashAsync()).Select(f => f["id"]!.GetValue<string>()));
+        Assert.Equal("hello.txt", (await media.RestoreAsync(id))["name"]!.GetValue<string>());
+        await media.DeleteAsync(id);
+        await media.PurgeAsync(id);
+        Assert.Empty(await media.TrashAsync());
+    }
 }

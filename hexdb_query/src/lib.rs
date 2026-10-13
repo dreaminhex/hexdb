@@ -485,7 +485,7 @@ impl QueryRoot {
                 if principal.is_admin() {
                     !name.starts_with('_')
                 } else {
-                    info.kind == "user" && principal.can(Permission::Read, name)
+                    info.is_user_data() && principal.can(Permission::Read, name)
                 }
             })
             .map(|(name, info)| TessellationObject { name, info })

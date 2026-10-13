@@ -197,6 +197,10 @@ pub async fn serve(
 /// cap their own waits, so the request timeout doesn't apply.
 fn is_long_running(path: &str) -> bool {
     matches!(path, "/changes" | "/changes/stream" | "/lattice/changes")
+        // File uploads and downloads take as long as the file needs.
+        || path.contains("/_files/")
+        || path.contains("/_uploads/")
+        || path.ends_with("/content")
         || (path.starts_with("/streams/") && (path.ends_with("/messages") || path.ends_with("/subscribe")))
 }
 

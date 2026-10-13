@@ -42,6 +42,8 @@ use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
 pub(crate) mod backup;
+mod files;
+pub use files::{ExtractQueue, FileContent, FileSync, UploadOptions, UploadResult};
 mod indexing;
 mod reads;
 mod history;
@@ -263,6 +265,12 @@ pub struct HexDBEngine {
     doc_cache: reads::DocCache,
     /// The storage key ring (for encrypted metadata files).
     pub(crate) keys: Arc<crate::crypt::KeyRing>,
+    /// Binary file content (see `crate::blobs`).
+    pub(crate) blobs: Arc<crate::blobs::BlobStore>,
+    /// Files waiting for metadata extraction.
+    pub(crate) extract_queue: files::ExtractQueue,
+    /// Copying file content from other hexes.
+    pub(crate) file_sync: files::FileSync,
     /// The last TOTP step each user signed in with on this hex (replay protection
     /// that also works on replicas, which can't write it to the user record).
     pub(crate) mfa_steps: std::sync::Mutex<HashMap<Ulid, i64>>,
@@ -328,13 +336,32 @@ impl HexDBEngine {
             catalog.hex_id = id_text;
             catalog.hex_name = identity.name.clone();
         }
+        // The key that names chunks in the chunk store.
+        let content_key_created = catalog.content_key.is_empty();
+        if content_key_created {
+            catalog.content_key = hex::encode(crate::crypt::random_bytes(32));
+        }
+        let content_key: [u8; 32] = hex::decode(&catalog.content_key)
+            .ok()
+            .and_then(|k| k.try_into().ok())
+            .ok_or_else(|| anyhow!("The catalog's content key is corrupt."))?;
+        if !config.files.vertex_paths.is_empty() && config.files.vertex_paths.len() != crate::hex::VERTEX_COUNT {
+            bail!("files.vertex_paths must list exactly {} directories (one per vertex), or none.", crate::hex::VERTEX_COUNT);
+        }
+        let blobs = Arc::new(crate::blobs::BlobStore::open(
+            &config.blob_dirs(),
+            keys.clone(),
+            content_key,
+            level,
+            (config.files.cache_mb as usize).saturating_mul(1024 * 1024),
+        )?);
 
         // Clean up tables left behind by a drop that was interrupted.
         for (tess, &dropped_seq) in &catalog.dropped {
             sst.purge_dropped(tess, dropped_seq).await?;
         }
         // Register tessellations found on disk but missing from the catalog.
-        let mut catalog_changed = history_created || lattice_changed || identity_changed;
+        let mut catalog_changed = history_created || lattice_changed || identity_changed || content_key_created;
         for tess in sst.tessellations().await {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
@@ -467,6 +494,9 @@ impl HexDBEngine {
             stats_cache: std::sync::Mutex::new(HashMap::new()),
             doc_cache: reads::DocCache::new(ram_budget / 4),
             keys: keys.clone(),
+            blobs,
+            extract_queue: Default::default(),
+            file_sync: Default::default(),
             role_cache: std::sync::Mutex::new(None),
             history_id,
             indexes_loaded: std::sync::atomic::AtomicBool::new(false),
@@ -709,7 +739,7 @@ impl HexDBEngine {
     /// Create a tessellation. Returns false if it already exists. User
     /// tessellations can only be created on the Overseer.
     pub fn create_tessellation(&self, name: &str, kind: &str) -> Result<bool> {
-        if kind == "user" {
+        if kind == "user" || kind == crate::files::FILES_KIND {
             self.ensure_writable()?;
         }
         self.create_tessellation_unchecked(name, kind)
@@ -748,7 +778,13 @@ impl HexDBEngine {
     /// Delete a tessellation and all of its documents. Returns false if it doesn't exist.
     pub async fn delete_tessellation(&self, name: &str) -> Result<bool> {
         self.ensure_writable()?;
-        self.delete_tessellation_unchecked(name).await
+        let files = self.tessellation_info(name).is_some_and(|i| i.is_files());
+        let deleted = self.delete_tessellation_unchecked(name).await?;
+        if deleted && files {
+            // Its trashed files go too; garbage collection frees their content.
+            self.drop_trash_of(name).await?;
+        }
+        Ok(deleted)
     }
 
     /// Delete a tessellation without the write guard (replication).

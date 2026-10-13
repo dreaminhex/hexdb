@@ -92,6 +92,7 @@ pub fn app_router(
         .route("/lattice/catalog", get(crate::lattice::catalog))
         .route("/lattice/snapshot/{tessellation}", get(crate::lattice::snapshot_page))
         .route("/lattice/changes", get(crate::lattice::changes))
+        .route("/lattice/chunks/{id}", get(crate::lattice::chunk))
         .route("/lattice/revoke", post(crate::lattice::revoke))
         .route("/lattice/audit", post(crate::lattice::audit))
         .route("/lattice/throttle", post(crate::lattice::throttle))
@@ -100,6 +101,7 @@ pub fn app_router(
         .route("/backup", post(backup))
         .route("/backups", get(list_backups))
         .route("/compact", post(compact))
+        .route("/scrub", post(scrub))
         .route("/shutdown", post(shutdown))
 
         // GraphQL (the admin UI's Queries page is the console)
@@ -152,6 +154,29 @@ pub fn app_router(
             "/{tessellation}/_update",
             post(update_where).layer(DefaultBodyLimit::max(body_limit)),
         )
+        // Files tessellations (uploads stream, so they have no body limit here;
+        // files.max_file_mb and storage.disk_mb apply)
+        .route(
+            "/{tessellation}/_files/{*path}",
+            get(crate::files::download_path).put(crate::files::upload).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/{tessellation}/_trash", get(crate::files::trash).delete(crate::files::empty_trash))
+        .route("/{tessellation}/_reextract", post(crate::files::reextract))
+        .route("/{tessellation}/_uploads", post(crate::files::begin_upload))
+        .route(
+            "/{tessellation}/_uploads/{id}",
+            get(crate::files::upload_status)
+                .patch(crate::files::upload_part)
+                .delete(crate::files::abort_upload)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route("/{tessellation}/_uploads/{id}/complete", post(crate::files::complete_upload))
+        .route("/{tessellation}/_trash/{id}", axum::routing::delete(crate::files::purge))
+        .route("/{tessellation}/_trash/{id}/restore", post(crate::files::restore))
+        .route("/{tessellation}/{id}/content", get(crate::files::download))
+        .route("/{tessellation}/{id}/versions", get(crate::files::versions))
+        .route("/{tessellation}/{id}/thumbnail", get(crate::files::thumbnail))
+        .route("/{tessellation}/{id}/versions/{version}/restore", post(crate::files::restore_version))
         .route(
             "/{tessellation}/{id}",
             get(get_doc).put(replace_doc).patch(patch_doc).delete(delete_doc).layer(DefaultBodyLimit::max(document_limit)),

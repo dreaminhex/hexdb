@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
 import { api, errorMessage } from "@/lib/api"
@@ -67,6 +68,7 @@ function CreateTessellationDialog({
   onCreated: (name: string) => void
 }) {
   const [name, setName] = useState("")
+  const [kind, setKind] = useState<"user" | "files">("user")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const valid = NAME_PATTERN.test(name)
@@ -77,7 +79,7 @@ function CreateTessellationDialog({
     setBusy(true)
     setError(null)
     try {
-      await api.createTessellation(name)
+      await api.createTessellation(name, kind)
       toast.success(`Created tessellation '${name}'.`)
       onCreated(name)
       onOpenChange(false)
@@ -95,8 +97,20 @@ function CreateTessellationDialog({
         <form onSubmit={submit} className="grid gap-4">
           <DialogHeader>
             <DialogTitle>New tessellation</DialogTitle>
-            <DialogDescription>A tessellation is a collection of documents.</DialogDescription>
+            <DialogDescription>A tessellation is a collection of documents, or of files with their metadata.</DialogDescription>
           </DialogHeader>
+          <div className="grid gap-2">
+            <Label>Holds</Label>
+            <Select value={kind} onValueChange={(v) => setKind(v as "user" | "files")}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="user">JSON documents</SelectItem>
+                <SelectItem value="files">Files (photos, audio, video, documents...)</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <div className="grid gap-2">
             <Label htmlFor="tess-name">Name</Label>
             <Input id="tess-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="orders" autoFocus autoComplete="off" />

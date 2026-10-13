@@ -17,6 +17,10 @@
 // MACs are keyed BLAKE3 with keys derived from the lattice key, compared in
 // constant time.
 //
+// Data that must stay secret on the wire even without TLS (file chunks, the
+// content key) is sealed with AES-256-GCM under a transfer key derived from
+// the lattice key (`seal` / `open`).
+//
 // Rotation: a hex can hold previous lattice keys (`previous_lattice_secrets`).
 // It signs with the current key and accepts any of them, answering a hello
 // with the key the hello used. A hex whose signed request or hello isn't
@@ -81,6 +85,7 @@ impl NonceCache {
 struct KeySet {
     discovery: [u8; 32],
     requests: [u8; 32],
+    transfer: [u8; 32],
 }
 
 impl KeySet {
@@ -88,6 +93,7 @@ impl KeySet {
         KeySet {
             discovery: blake3::derive_key("HexDB 2026 discovery handshake v1", lattice_key),
             requests: blake3::derive_key("HexDB 2026 replication request v1", lattice_key),
+            transfer: blake3::derive_key("HexDB 2026 lattice transfer v1", lattice_key),
         }
     }
 }
@@ -185,6 +191,31 @@ impl LatticeKeys {
             &[b"request", ts.to_string().as_bytes(), nonce.as_bytes(), method.as_bytes(), path_and_query.as_bytes(), body_hash.as_bytes()],
         );
         format!("{}.{}.{}", ts, nonce, tag.to_hex())
+    }
+
+    // --- sealed data ------------------------------------------------------------
+
+    /// Encrypt data for another hex with the current transfer key:
+    /// `nonce || AES-256-GCM(data)`, with `aad` authenticated.
+    pub fn seal(&self, data: &[u8], aad: &[u8]) -> Vec<u8> {
+        use aes_gcm::aead::{Aead, KeyInit, Payload};
+        let cipher = aes_gcm::Aes256Gcm::new(aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&self.sets[0].transfer));
+        let nonce = crate::crypt::random_bytes(crate::crypt::NONCE_LEN);
+        let sealed = cipher.encrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: data, aad }).expect("AES-GCM encryption of a bounded message");
+        [nonce, sealed].concat()
+    }
+
+    /// Decrypt data sealed by a hex holding any of these keys.
+    pub fn open(&self, sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
+        use aes_gcm::aead::{Aead, KeyInit, Payload};
+        if sealed.len() < crate::crypt::NONCE_LEN {
+            return None;
+        }
+        let (nonce, body) = sealed.split_at(crate::crypt::NONCE_LEN);
+        self.sets.iter().find_map(|set| {
+            let cipher = aes_gcm::Aes256Gcm::new(aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&set.transfer));
+            cipher.decrypt(aes_gcm::Nonce::from_slice(nonce), Payload { msg: body, aad }).ok()
+        })
     }
 
     /// Verify a request signature made with any held key (fresh, single use,

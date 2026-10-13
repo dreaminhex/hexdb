@@ -90,6 +90,8 @@ pub struct StorageMetrics {
     /// encryption, or with a previous key). Compaction rewrites them; at 0, the
     /// previous keys can be removed from the configuration.
     pub sstable_files_on_old_keys: usize,
+    /// The chunk store holding files tessellations' content.
+    pub files: crate::blobs::BlobStats,
 }
 
 /// Operation counters since startup.
@@ -267,6 +269,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             sstable_files: stats.sst_files,
             next_sequence: stats.next_seq,
             sstable_files_on_old_keys: engine.sst_files_needing_rewrite().await,
+            files: engine.files_stats(),
         },
         operations: OperationMetrics {
             reads_total: stats.reads_total,
@@ -372,7 +375,7 @@ pub async fn sample(engine: &HexDBEngine) -> MetricsSample {
     let stats = engine.stats().await;
     let mut documents = std::collections::BTreeMap::new();
     for (name, kind) in engine.tessellations() {
-        if kind == "user" {
+        if kind == "user" || kind == crate::files::FILES_KIND {
             documents.insert(name.clone(), engine.count_documents(&name).await.unwrap_or(0));
         }
     }

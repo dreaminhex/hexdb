@@ -33,6 +33,9 @@ pub mod triggers;
 pub mod sql;
 pub mod compress;
 pub mod erasure;
+pub mod blobs;
+pub mod files;
+pub mod extract;
 pub mod network {
     pub mod discovery;
     pub mod lattice_auth;
@@ -65,7 +68,7 @@ pub use replication::{spawn_replication_task, ReplicationStatus, LATTICE_SIGNATU
 pub use changes::{Change, ChangeFeed, ChangeKind, HistoryExpired, CHANGE_HISTORY};
 pub use sql::{SqlColumn, SqlColumnInfo, SqlPage, SqlQuery, SqlResult, DEFAULT_SQL_PAGE_SIZE, MAX_SQL_PAGE_SIZE};
 pub use aggregate::{parse_aggregates, AggregateOp, AggregateResult, AggregateSpec, Aggregation};
-pub use tasks::{spawn_vertex_monitoring_task, spawn_ttl_sweep_task, spawn_flush_task, spawn_compaction_task, spawn_metrics_task};
+pub use tasks::{spawn_vertex_monitoring_task, spawn_ttl_sweep_task, spawn_flush_task, spawn_compaction_task, spawn_metrics_task, spawn_scrub_task, spawn_extraction_task};
 pub use network::discovery::{
     discover_peers, discovery_round, elect, local_identity, parse_preference, resolve_hex_identity, spawn_discovery_task, start_discovery_listener, NameSource,
     LatticeMember, PeerHex, ROLE_HARVESTER, ROLE_OVERSEER, ROLE_REPLICANT,

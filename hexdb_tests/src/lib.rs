@@ -641,6 +641,32 @@ admin_email = "admin@example.com"
         self.client.post(self.url("/flush")).send()?.error_for_status()?;
         Ok(())
     }
+
+    /// Send raw bytes as the body (a file upload) and return the JSON response.
+    pub fn send_bytes(&self, method: Method, path: &str, bytes: Vec<u8>, headers: &[(&str, &str)]) -> Result<ApiResponse> {
+        let mut builder = self.client.request(method, self.url(path)).timeout(Duration::from_secs(120)).body(bytes);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let res = builder.send()?;
+        let status = res.status();
+        let headers = res.headers().clone();
+        let text = res.text()?;
+        let body = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
+        Ok(ApiResponse { status, headers, body })
+    }
+
+    /// GET a raw response body (a file download): status, headers and bytes.
+    pub fn get_bytes(&self, path: &str, headers: &[(&str, &str)]) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+        let mut builder = self.client.get(self.url(path)).timeout(Duration::from_secs(120));
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let res = builder.send()?;
+        let status = res.status();
+        let headers = res.headers().clone();
+        Ok((status, headers, res.bytes()?.to_vec()))
+    }
 }
 
 impl Drop for TestServer {

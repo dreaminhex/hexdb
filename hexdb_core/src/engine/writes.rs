@@ -175,6 +175,7 @@ pub struct QueryPage {
 }
 
 /// One operation in an atomic commit.
+#[derive(Clone)]
 pub(crate) struct BatchItem {
     pub(crate) key: DocKey,
     pub(crate) op: WalOp,
@@ -756,7 +757,6 @@ impl HexDBEngine {
         }
         let mut items = self.plan_insert_unchecked(tess, fields, ttl);
         self.run_before_triggers(&mut items).await?;
-        self.run_before_triggers(&mut items).await?;
         let (items, docs) = self.stored_forms(items).await?;
         for doc in &docs {
             if !write.allows(doc) {
@@ -781,6 +781,7 @@ impl HexDBEngine {
     /// `_schema` stamp) so the response shows exactly what is stored. The
     /// commit applies it again, which changes nothing.
     async fn stored_forms(&self, mut items: Vec<BatchItem>) -> Result<(Vec<BatchItem>, Vec<Document>)> {
+        self.guard_file_writes(&mut items).await?;
         self.apply_schemas(&mut items).await?;
         let docs = items
             .iter()
@@ -1101,6 +1102,7 @@ impl HexDBEngine {
 
         let mut items = items;
         if !replicated {
+            self.guard_file_writes(&mut items).await?;
             self.apply_schemas(&mut items).await?;
         }
         let user_writes = items.iter().filter(|i| i.key.tessellation != IDEMPOTENCY_TESSELLATION).count() as u64;

@@ -7,7 +7,7 @@ use axum::Router;
 use hexdb_api::{handlers::ShutdownHandle, init::init_security, routes::app_router};
 use hexdb_core::{
     config::CONFIG_FILE_NAME, discover_peers, init_logging, load_config_from,
-    spawn_compaction_task, spawn_flush_task, spawn_ttl_sweep_task,
+    spawn_compaction_task, spawn_extraction_task, spawn_flush_task, spawn_scrub_task, spawn_ttl_sweep_task,
     elect, parse_preference, spawn_discovery_task, spawn_metrics_task, spawn_vertex_monitoring_task,
     start_discovery_listener, LatticeMember, NameSource, ROLE_OVERSEER,
     HexDBEngine, HexIdentity, PeerHex, RuntimeInfo,
@@ -231,6 +231,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn a task to monitor vertices
     info!("🏃‍➡️  Starting the vertex monitoring task (4 of 4)...");
+    spawn_extraction_task(engine.clone(), shutdown_rx.clone());
+    if config.files.scrub_hours > 0 {
+        spawn_scrub_task(engine.clone(), Duration::from_secs(config.files.scrub_hours * 3600), shutdown_rx.clone());
+    }
     spawn_vertex_monitoring_task(
         engine.clone(),
         Duration::from_secs(config.memory.vertex_integrity_check_frequency.max(1)),

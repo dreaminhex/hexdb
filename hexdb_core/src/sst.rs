@@ -580,7 +580,7 @@ impl SstFile {
 
 /// Read exactly `buf.len()` bytes at `offset`, without moving a shared cursor
 /// (so concurrent reads of one file don't interfere).
-fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+pub(crate) fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
     while !buf.is_empty() {
         #[cfg(unix)]
         let n = std::os::unix::fs::FileExt::read_at(file, buf, offset)?;

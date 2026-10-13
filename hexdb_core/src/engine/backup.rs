@@ -11,6 +11,11 @@
 //   3. The SSTables (immutable once written) are hard-linked into the backup,
 //      or copied when the backup is on another file system; the closed WAL
 //      segments and the encrypted metadata files are copied.
+//   4. File content: sealed pack files are hard-linked (or copied) into
+//      `blobs/vertex-<n>/`, and each vertex's active pack is copied up to its
+//      current length. Chunks are durable before the documents that use them
+//      commit, so every file in the backup has its content. Garbage collection
+//      waits while the packs are copied.
 //
 // Restoring is starting a hex on the backup folder (with the same encryption
 // keys): recovery replays the copied WAL segments on top of the SSTables, as
@@ -80,6 +85,17 @@ impl CopyStats {
         self.files += 1;
         Ok(())
     }
+
+    /// Copy the first `len` bytes of a file that's still being appended to.
+    fn copy_prefix(&mut self, from: &Path, to: &Path, len: u64) -> Result<()> {
+        use std::io::Read;
+        let mut source = fs::File::open(from).with_context(|| format!("can't read {}", from.display()))?.take(len);
+        let mut dest = fs::File::create(to).with_context(|| format!("can't write {}", to.display()))?;
+        self.bytes += std::io::copy(&mut source, &mut dest)?;
+        dest.sync_all()?;
+        self.files += 1;
+        Ok(())
+    }
 }
 
 fn invalid(message: String) -> anyhow::Error {
@@ -98,6 +114,7 @@ struct CopyJob {
     dest: PathBuf,
     root: PathBuf,
     manifest: serde_json::Value,
+    blobs: std::sync::Arc<crate::blobs::BlobStore>,
 }
 
 impl CopyJob {
@@ -143,6 +160,22 @@ impl CopyJob {
                 stats.copy(&from, &self.partial.join(file))?;
             }
         }
+
+        // File content, in the default layout (a restored hex finds it there).
+        let blobs = self.partial.join("blobs");
+        self.blobs.with_snapshot(|packs| -> Result<()> {
+            for (v, path, len, active) in packs {
+                let dir = blobs.join(format!("vertex-{}", v));
+                fs::create_dir_all(&dir).with_context(|| format!("can't create {}", dir.display()))?;
+                let to = dir.join(path.file_name().unwrap());
+                if *active {
+                    stats.copy_prefix(path, &to, *len)?;
+                } else {
+                    stats.link_or_copy(path, &to)?;
+                }
+            }
+            Ok(())
+        })?;
 
         self.manifest["files"] = serde_json::json!(stats.files);
         self.manifest["bytes"] = serde_json::json!(stats.bytes);
@@ -215,6 +248,7 @@ impl HexDBEngine {
             partial: partial.clone(),
             dest: dest.clone(),
             root: root.clone(),
+            blobs: self.blobs.clone(),
             manifest: serde_json::json!({
                 "format": 1,
                 "created": created,

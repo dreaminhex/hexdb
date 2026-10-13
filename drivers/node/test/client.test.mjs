@@ -99,3 +99,44 @@ test("change feed and streams", async () => {
   assert.deepEqual(got, [1, 2])
   assert.equal((await events.read({ group: "workers" })).messages.length, 0, "committed")
 })
+
+test("files", async () => {
+  const media = db.files("media")
+  assert.equal((await media.create()).kind, "files")
+  await media.create()
+  const text = new TextEncoder().encode("Glacier lagoon field notes")
+  const doc = await media.upload("notes/hello.txt", text)
+  assert.equal(doc.path, "/notes/")
+  assert.equal(doc.size, 26)
+  assert.deepEqual(await media.download("notes/hello.txt"), text)
+  assert.deepEqual(await media.download(doc.id), text)
+  assert.equal(new TextDecoder().decode(await media.readRange(doc.id, 8, 14)), "lagoon")
+  assert.equal((await media.stat("notes/hello.txt")).id, doc.id)
+  assert.equal(await media.stat("notes/missing.txt"), null)
+  assert.deepEqual((await media.list("notes")).map((f) => f.name), ["hello.txt"])
+
+  const v2 = await media.upload("notes/hello.txt", new TextEncoder().encode("second draft"))
+  assert.equal(v2.version, 2)
+  assert.deepEqual(await media.download("notes/hello.txt", { version: 1 }), text)
+  assert.equal((await media.restoreVersion(doc.id, 1)).version, 3)
+
+  const big = new Uint8Array(17 * 1024 * 1024)
+  for (let i = 0; i < big.length; i += 4096) big[i] = (i / 4096) % 251
+  let progress = 0
+  const bigDoc = await media.upload("raw/big.bin", big, { onProgress: (n) => (progress = n) })
+  assert.equal(bigDoc.size, big.length)
+  assert.equal(progress, big.length)
+  const back = await media.download(bigDoc.id)
+  assert.equal(back.length, big.length)
+  assert.ok(back.every((b, i) => b === big[i]))
+
+  for (let i = 0; i < 50 && (await media.get(doc.id)).extract.status !== "done"; i++) await new Promise((r) => setTimeout(r, 200))
+  assert.deepEqual((await media.search("glacier")).map((f) => f.name), ["hello.txt"])
+
+  assert.equal(await media.delete(doc.id), true)
+  assert.deepEqual((await media.trash()).map((f) => f.id), [doc.id])
+  assert.equal((await media.restore(doc.id)).name, "hello.txt")
+  await media.delete(doc.id)
+  await media.purge(doc.id)
+  assert.deepEqual(await media.trash(), [])
+})

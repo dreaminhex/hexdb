@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod files;
 mod lattice;
 
 #[derive(Parser)]
@@ -107,6 +108,51 @@ enum Commands {
         /// List existing backups instead of making one
         #[arg(long)]
         list: bool,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// Upload files to a files tessellation (needs a token with write access)
+    Put {
+        /// The files tessellation, e.g. media
+        tessellation: String,
+        /// Files (and with -r, folders) to upload
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Folder to upload into, e.g. /photos/2024
+        #[arg(long, default_value = "/")]
+        to: String,
+        /// Upload folders with their contents
+        #[arg(short, long)]
+        recursive: bool,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// Download a file from a files tessellation, by path (folder/name) or ID
+    Get {
+        tessellation: String,
+        /// The file: photos/2024/IMG_1.jpg, or its ID
+        file: String,
+        /// Where to save it (a file or a folder; default: its name, here)
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// An earlier version
+        #[arg(long)]
+        version: Option<u64>,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// List a folder of a files tessellation, or search its names and metadata
+    Ls {
+        tessellation: String,
+        /// Folder, e.g. /photos/2024
+        #[arg(default_value = "/")]
+        folder: String,
+        /// Full-text search instead of listing a folder
+        #[arg(short, long)]
+        search: Option<String>,
         /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
         #[arg(short, long)]
         url: Option<String>,
@@ -236,6 +282,18 @@ async fn main() -> Result<()> {
                 print_table(&columns, &rows);
             }
             Ok(())
+        }
+        Commands::Put { tessellation, paths, to, recursive, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            files::put(&config, &base, token, &tessellation, &paths, &to, recursive).await
+        }
+        Commands::Get { tessellation, file, out, version, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            files::get(&config, &base, token, &tessellation, &file, out, version).await
+        }
+        Commands::Ls { tessellation, folder, search, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            files::ls(&config, &base, token, &tessellation, &folder, search.as_deref()).await
         }
         Commands::Backup { name, list, url } => {
             let (base, config) = base_url(config_path, url)?;

@@ -24,6 +24,7 @@ const QueriesPage = lazy(() => import("@/pages/queries").then((m) => ({ default:
 const DocumentsPage = lazy(() => import("@/pages/documents").then((m) => ({ default: m.DocumentsPage })))
 const StreamsPage = lazy(() => import("@/pages/streams").then((m) => ({ default: m.StreamsPage })))
 const FunctionsPage = lazy(() => import("@/pages/functions").then((m) => ({ default: m.FunctionsPage })))
+const FilesPage = lazy(() => import("@/pages/files").then((m) => ({ default: m.FilesPage })))
 
 interface Page {
   title: string
@@ -37,6 +38,7 @@ const PAGES: Record<string, Page> = {
   "/queries": { title: "Query Console", element: QueriesPage },
   "/tessellations": { title: "Tessellations", element: TessellationsPage },
   "/documents": { title: "Documents", element: DocumentsPage },
+  "/files": { title: "Files", element: FilesPage },
   "/streams": { title: "Streams", element: StreamsPage },
   "/functions": { title: "Functions", element: FunctionsPage },
   "/users": { title: "Users", element: UsersPage, requires: "admin" },

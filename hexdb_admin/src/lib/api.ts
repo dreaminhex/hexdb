@@ -487,6 +487,131 @@ export interface DocumentQuery {
   sort?: SortKey[] | string
   limit?: number
   offset?: number
+  /** Field paths to return. */
+  fields?: string[]
+  /** false skips counting every match. */
+  total?: boolean
+}
+
+/** A file in a files tessellation: its document. */
+export interface FileDoc {
+  id: string
+  name: string
+  path: string
+  size: number
+  content_type: string
+  sha256: string
+  version: number
+  versions?: FileVersion[]
+  created_at?: string
+  modified_at?: string
+  uploaded_at?: string
+  uploaded_by?: string
+  tags?: string[]
+  description?: string
+  thumbnail?: { chunk: string; width: number; height: number; content_type: string }
+  meta?: Record<string, unknown>
+  extract?: { status: "pending" | "done"; version?: number; extractors?: string[]; errors?: string[]; at?: string }
+  /** Trashed files only. */
+  trashed_at?: string
+  trashed_by?: string
+  _expires_at?: string
+  [field: string]: unknown
+}
+
+export interface FileVersion {
+  version: number
+  size: number
+  content_type: string
+  sha256: string
+  modified_at?: string
+  uploaded_at?: string
+  uploaded_by?: string
+}
+
+export interface UploadSession {
+  id: string
+  path: string
+  offset: number
+  size: number | null
+  expires_at: string | null
+}
+
+/** Uploads at least this large use a resumable session, in parts of `UPLOAD_PART` bytes. */
+export const RESUMABLE_FROM = 16 * 1024 * 1024
+export const UPLOAD_PART = 8 * 1024 * 1024
+
+/** Path of a file's content (or `kind` = thumbnail) for <img>/<audio>/<video> and links. */
+export function fileUrl(tess: string, id: string, kind: "content" | "thumbnail" = "content", query = ""): string {
+  return `/${enc(tess)}/${enc(id)}/${kind}${query}`
+}
+
+/** Encode a folder path plus file name for /_files/ URLs, keeping the slashes. */
+export function filePathUrl(folder: string, name: string): string {
+  return `${folder}${name}`.split("/").filter(Boolean).map(enc).join("/")
+}
+
+/** PUT bytes with upload progress (fetch can't report it). */
+function putWithProgress(url: string, method: string, body: Blob, onProgress: (sent: number) => void, headers: Record<string, string> = {}): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open(method, url)
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v)
+    xhr.upload.onprogress = (e) => onProgress(e.loaded)
+    xhr.onerror = () => reject(new ApiError(0, "unreachable", "The upload was interrupted."))
+    xhr.onload = () => {
+      let json: unknown = undefined
+      try {
+        json = xhr.responseText ? JSON.parse(xhr.responseText) : undefined
+      } catch {
+        // not JSON
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(json)
+      else {
+        const error = (json as { error?: { code?: string; message?: string } } | undefined)?.error
+        if (xhr.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+        reject(new ApiError(xhr.status, error?.code ?? "error", error?.message ?? xhr.statusText))
+      }
+    }
+    xhr.send(body)
+  })
+}
+
+/**
+ * Upload one file to `folder` (e.g. "/photos/2024/"). Small files go in one
+ * request; large ones in resumable parts. `onProgress` gets bytes sent.
+ */
+export async function uploadFile(tess: string, folder: string, file: File, onProgress: (sent: number) => void): Promise<FileDoc> {
+  const modified = new Date(file.lastModified || Date.now()).toISOString()
+  if (file.size < RESUMABLE_FROM) {
+    const url = `/${enc(tess)}/_files/${filePathUrl(folder, file.name)}?modified=${enc(modified)}`
+    return (await putWithProgress(url, "PUT", file, onProgress, file.type ? { "Content-Type": file.type } : {})) as FileDoc
+  }
+  const session = await request<UploadSession>("POST", `/${enc(tess)}/_uploads`, {
+    path: `${folder}${file.name}`,
+    size: file.size,
+    content_type: file.type || undefined,
+    modified,
+  })
+  let offset = 0
+  while (offset < file.size) {
+    const end = Math.min(offset + UPLOAD_PART, file.size)
+    const start = offset
+    // A failed part is retried a few times from where the server says it is.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await putWithProgress(`/${enc(tess)}/_uploads/${enc(session.id)}?offset=${start}`, "PATCH", file.slice(start, end), (sent) => onProgress(start + sent))
+        break
+      } catch (e) {
+        if (attempt >= 3) throw e
+        const status = await request<UploadSession>("GET", `/${enc(tess)}/_uploads/${enc(session.id)}`)
+        if (status.offset >= end) break
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
+      }
+    }
+    offset = end
+  }
+  return request<FileDoc>("POST", `/${enc(tess)}/_uploads/${enc(session.id)}/complete`)
 }
 
 export interface RoleGrant {
@@ -640,7 +765,7 @@ export const api = {
 
   tessellations: () => request<{ tessellations: Tessellation[] }>("GET", "/tessellations").then((r) => r.tessellations),
   tessellation: (name: string) => request<Tessellation>("GET", `/tessellations/${enc(name)}`),
-  createTessellation: (name: string) => request<Tessellation>("POST", "/tessellations", { name }),
+  createTessellation: (name: string, kind: "user" | "files" = "user") => request<Tessellation>("POST", "/tessellations", { name, kind }),
   deleteTessellation: (name: string) => request<void>("DELETE", `/tessellations/${enc(name)}`),
   indexes: (tess: string) => request<{ indexes: IndexInfo[] }>("GET", `/tessellations/${enc(tess)}/indexes`).then((r) => r.indexes),
   createIndex: (tess: string, index: NewIndex) => request<IndexInfo>("POST", `/tessellations/${enc(tess)}/indexes`, index),
@@ -653,6 +778,22 @@ export const api = {
   replaceDocument: (tess: string, id: string, data: unknown, ttl?: number) =>
     request<ApiDocument>("PUT", `/${enc(tess)}/${enc(id)}${ttl ? `?ttl=${ttl}` : ""}`, data),
   deleteDocument: (tess: string, id: string) => request<void>("DELETE", `/${enc(tess)}/${enc(id)}`),
+  aggregate: (tess: string, aggregation: unknown) =>
+    request<{ rows: Record<string, unknown>[]; total_groups: number; matched: number }>("POST", `/${enc(tess)}/_aggregate`, aggregation),
+
+  files: (tess: string, query: DocumentQuery) =>
+    request<{ documents: FileDoc[]; total: number | null; next: string | null }>("POST", `/${enc(tess)}/_query`, query),
+  file: (tess: string, id: string) => request<FileDoc>("GET", `/${enc(tess)}/${enc(id)}`),
+  patchFile: (tess: string, id: string, changes: Partial<Pick<FileDoc, "name" | "path" | "tags" | "description">>) =>
+    request<FileDoc>("PATCH", `/${enc(tess)}/${enc(id)}`, changes),
+  trashFile: (tess: string, id: string) => request<void>("DELETE", `/${enc(tess)}/${enc(id)}`),
+  trash: (tess: string) => request<{ documents: FileDoc[]; total: number }>("GET", `/${enc(tess)}/_trash`),
+  restoreFile: (tess: string, id: string, name?: string) =>
+    request<FileDoc>("POST", `/${enc(tess)}/_trash/${enc(id)}/restore${name ? `?name=${enc(name)}` : ""}`),
+  purgeFile: (tess: string, id: string) => request<void>("DELETE", `/${enc(tess)}/_trash/${enc(id)}`),
+  emptyTrash: (tess: string) => request<{ purged: number }>("DELETE", `/${enc(tess)}/_trash`),
+  restoreVersion: (tess: string, id: string, version: number) => request<FileDoc>("POST", `/${enc(tess)}/${enc(id)}/versions/${version}/restore`),
+  reextract: (tess: string, id?: string) => request<{ queued: number }>("POST", `/${enc(tess)}/_reextract${id ? `?id=${enc(id)}` : ""}`),
 
   users: () => request<{ users: User[] }>("GET", "/users").then((r) => r.users),
   createUser: (user: NewUser) => request<User>("POST", "/users", user),

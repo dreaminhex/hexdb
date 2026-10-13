@@ -104,7 +104,7 @@ fn tessellation_range(tessellation: &str, after: Option<Ulid>) -> (Bound<DocKey>
 
 /// Split bytes into four data shards (zero-padded to an even length, as the
 /// codec requires) and compute two parity shards: six shards in all.
-fn encode(bytes: &[u8]) -> Vec<Vec<u8>> {
+pub(crate) fn encode(bytes: &[u8]) -> Vec<Vec<u8>> {
     let shard_len = bytes.len().div_ceil(DATA_SHARDS).max(1).next_multiple_of(2);
     let mut shards: Vec<Vec<u8>> = (0..DATA_SHARDS)
         .map(|i| {
@@ -130,7 +130,7 @@ fn encode(bytes: &[u8]) -> Vec<Vec<u8>> {
 const LARGE_SHARD: usize = 16 * 1024;
 
 /// Fill in missing shards (`None`) from any four present ones.
-fn reconstruct(shards: &mut [Option<Vec<u8>>]) -> Result<(), ()> {
+pub(crate) fn reconstruct(shards: &mut [Option<Vec<u8>>]) -> Result<(), ()> {
     let present = shards.iter().filter(|s| s.is_some()).count();
     if present < DATA_SHARDS {
         return Err(());

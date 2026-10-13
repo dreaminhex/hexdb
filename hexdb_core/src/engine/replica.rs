@@ -213,6 +213,7 @@ impl HexDBEngine {
             last.insert(w.key(), i);
         }
         let mut items = Vec::with_capacity(last.len() + 1);
+        let mut manifests = Vec::new();
         for (i, w) in writes.into_iter().enumerate() {
             let key = w.key();
             if last.get(&key) != Some(&i) {
@@ -220,7 +221,12 @@ impl HexDBEngine {
             }
             self.ensure_replicated_tessellation(&key.tessellation)?;
             let op = match w {
-                ReplicaWrite::Put(doc) => WalOp::Put(doc),
+                ReplicaWrite::Put(doc) => {
+                    if self.holds_files(&doc.tessellation) {
+                        manifests.extend(super::files::manifests_of_doc(&doc));
+                    }
+                    WalOp::Put(doc)
+                }
                 ReplicaWrite::Delete { tessellation, id } => WalOp::Delete { tessellation, id },
             };
             items.push(BatchItem { key, op, expected_seq: None });
@@ -233,7 +239,12 @@ impl HexDBEngine {
             let doc = Document { id: cursor_id(), tessellation: REPLICATION_TESSELLATION.into(), data, ttl: None };
             items.push(BatchItem { key: DocKey::new(REPLICATION_TESSELLATION, doc.id), op: WalOp::Put(doc), expected_seq: None });
         }
-        self.commit_replicated(items).await
+        self.commit_replicated(items).await?;
+        // Fetch the content of the files that arrived.
+        for manifest in manifests {
+            self.queue_chunk_sync(manifest);
+        }
+        Ok(())
     }
 
     /// The saved replication cursor, if this hex has been a replica.

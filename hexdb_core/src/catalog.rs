@@ -25,13 +25,13 @@ const RESERVED_NAMES: &[&str] = &[
     "health", "status", "flush", "shutdown", "tessellation", "tessellations", "ui", "wal", "graphql",
     "logs", "changes", "indexes", "auth", "transactions", "plugins", "lattice", "replication", "compact",
     "audit", "settings", "join", "streams", "functions", "schedules", "analyzers", "schemas", "openapi", "backup", "backups", "triggers",
-    "sql",
+    "sql", "scrub",
 ];
 const MAX_NAME_LEN: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TessellationInfo {
-    /// "user" or "system".
+    /// "user", "files" (binary files; see `crate::files`) or "system".
     pub kind: String,
     /// Creation time in epoch milliseconds.
     pub created: i64,
@@ -41,6 +41,17 @@ pub struct TessellationInfo {
     /// Schema versions, oldest first (none: schemaless).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<crate::schema::SchemaVersion>,
+}
+
+impl TessellationInfo {
+    /// User data (documents or files), as opposed to HexDB's own system tessellations.
+    pub fn is_user_data(&self) -> bool {
+        self.kind == "user" || self.kind == crate::files::FILES_KIND
+    }
+
+    pub fn is_files(&self) -> bool {
+        self.kind == crate::files::FILES_KIND
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -64,6 +75,10 @@ pub struct Catalog {
     /// This hex's name, kept across restarts when the config doesn't set one.
     #[serde(default)]
     pub hex_name: String,
+    /// Keys chunk IDs in the chunk store (hex; see `crate::blobs`). Shared by
+    /// the lattice so every hex names a chunk the same way.
+    #[serde(default)]
+    pub content_key: String,
 }
 
 impl Catalog {

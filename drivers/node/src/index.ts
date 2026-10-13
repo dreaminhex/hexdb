@@ -6,6 +6,10 @@
 //   const orders = db.tessellation("orders")
 //   const { id } = await orders.insert({ customer: "ada", total: 12 })
 //   const page = await orders.query({ filter: { total: { $gt: 10 } }, sort: "-total" })
+//
+//   const media = db.files("media")            // a files tessellation
+//   await media.upload("photos/IMG_1.jpg", bytes)
+//   const hits = await media.search("glacier")  // names, tags and extracted metadata
 
 export interface Options {
   /** Base URL of any hex, e.g. http://127.0.0.1:7700 (replicas forward writes to the Overseer). */
@@ -144,6 +148,37 @@ export class HexDB {
     }
   }
 
+  /** Send raw bytes (or nothing) and get the raw response; throws HexDBError on an error answer. */
+  async requestRaw(method: Method, path: string, body?: BodyInit, headers: Record<string, string> = {}, timeoutMs = 600_000): Promise<Response> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    let response: Response
+    try {
+      response = await this.fetcher(this.base + path, {
+        method,
+        headers: { ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}), ...headers },
+        body,
+        signal: controller.signal,
+      })
+    } catch (e) {
+      clearTimeout(timer)
+      throw new HexDBError(0, "unreachable", `Couldn't reach HexDB at ${this.base}: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    // The body may still be streaming; the timer covers the headers only.
+    clearTimeout(timer)
+    if (!response.ok) {
+      const text = await response.text()
+      const error = (safeJson(text) as { error?: { code?: string; message?: string } } | undefined)?.error
+      throw new HexDBError(response.status, error?.code ?? "error", error?.message ?? (text || response.statusText))
+    }
+    return response
+  }
+
+  /** A files tessellation (photos, audio, video, documents: any binary file). */
+  files(name: string): Files {
+    return new Files(this, name)
+  }
+
   /** Sign in with a login and password (and a one-time code with MFA); later requests use the session. */
   async login(login: string, password: string, code?: string): Promise<{ user: unknown; expires_at: number }> {
     const result = await this.request<{ token: string; user: unknown; expires_at: number }>("POST", "/auth/login", { login, password, code, return_token: true })
@@ -240,11 +275,11 @@ function ttl(options: WriteOptions): string {
 
 export class Tessellation {
   constructor(
-    private readonly db: HexDB,
+    protected readonly db: HexDB,
     readonly name: string,
   ) {}
 
-  private get path() {
+  protected get path() {
     return `/${enc(this.name)}`
   }
 
@@ -368,3 +403,172 @@ export class Stream {
 }
 
 export default HexDB
+
+// ---------------------------------------------------------------------------
+// Files
+// ---------------------------------------------------------------------------
+
+/** A file's document: its metadata. */
+export type FileDocument = Document & {
+  name: string
+  path: string
+  size: number
+  content_type: string
+  sha256: string
+  version: number
+  meta?: Record<string, unknown>
+  extract?: { status: "pending" | "done"; extractors?: string[]; errors?: string[] }
+  thumbnail?: { width: number; height: number; content_type: string }
+}
+
+export interface UploadOptions {
+  contentType?: string
+  /** When the file was last modified (RFC 3339 or epoch milliseconds). */
+  modified?: string | number
+  /** Bytes sent so far, for progress. */
+  onProgress?: (sent: number) => void
+}
+
+const RESUMABLE_FROM = 16 * 1024 * 1024
+const PART = 8 * 1024 * 1024
+const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/
+
+function filePath(path: string): string {
+  return path
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .map(enc)
+    .join("/")
+}
+
+/**
+ * A files tessellation: each file's metadata is a document (query it like
+ * any tessellation); its content is uploaded and downloaded here. Paths are
+ * `folder/name`. Uploading to a path that has a file makes a new version.
+ */
+export class Files extends Tessellation {
+  /** Create the files tessellation (no error if it exists). */
+  async create(): Promise<{ name: string; kind: string }> {
+    try {
+      return await this.db.request("POST", "/tessellations", { name: this.name, kind: "files" })
+    } catch (e) {
+      if (e instanceof HexDBError && e.status === 409) return this.db.request("GET", `/tessellations/${enc(this.name)}`)
+      throw e
+    }
+  }
+
+  /** Upload bytes or a Blob to `path`. Files of 16 MB and more go in resumable parts. */
+  async upload(path: string, data: Uint8Array | ArrayBuffer | Blob, options: UploadOptions = {}): Promise<FileDocument> {
+    const blob = data instanceof Blob ? data : new Blob([data as BlobPart])
+    const modified = options.modified === undefined ? undefined : String(options.modified)
+    if (blob.size < RESUMABLE_FROM) {
+      const query = modified ? `?modified=${enc(modified)}` : ""
+      const response = await this.db.requestRaw("PUT", `${this.path}/_files/${filePath(path)}${query}`, blob, options.contentType ? { "Content-Type": options.contentType } : {})
+      options.onProgress?.(blob.size)
+      return (await response.json()) as FileDocument
+    }
+    const session = await this.db.request<{ id: string }>("POST", `${this.path}/_uploads`, { path, size: blob.size, content_type: options.contentType, modified })
+    const url = `${this.path}/_uploads/${enc(session.id)}`
+    for (let offset = 0; offset < blob.size; ) {
+      const end = Math.min(offset + PART, blob.size)
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await this.db.requestRaw("PATCH", `${url}?offset=${offset}`, blob.slice(offset, end))
+          break
+        } catch (e) {
+          if (attempt >= 3) throw e
+          await sleep(1000 * (attempt + 1))
+          const status = await this.db.request<{ offset: number }>("GET", url)
+          if (status.offset >= end) break
+        }
+      }
+      offset = end
+      options.onProgress?.(offset)
+    }
+    return this.db.request("POST", `${url}/complete`, undefined, {}, 600_000)
+  }
+
+  private contentPath(pathOrId: string, version?: number): string {
+    const query = version === undefined ? "" : `?version=${version}`
+    return ULID.test(pathOrId) ? `${this.path}/${enc(pathOrId)}/content${query}` : `${this.path}/_files/${filePath(pathOrId)}${query}`
+  }
+
+  /** A file's content (by `folder/name` or ID), or an earlier version's. */
+  async download(pathOrId: string, options: { version?: number } = {}): Promise<Uint8Array> {
+    const response = await this.db.requestRaw("GET", this.contentPath(pathOrId, options.version))
+    return new Uint8Array(await response.arrayBuffer())
+  }
+
+  /** A file's content as a stream (for large files). */
+  async downloadStream(pathOrId: string, options: { version?: number } = {}): Promise<ReadableStream<Uint8Array>> {
+    const response = await this.db.requestRaw("GET", this.contentPath(pathOrId, options.version))
+    if (!response.body) throw new HexDBError(0, "empty", "The response had no body.")
+    return response.body
+  }
+
+  /** Bytes `start` to `end` (exclusive) of a file. */
+  async readRange(pathOrId: string, start: number, end: number): Promise<Uint8Array> {
+    const response = await this.db.requestRaw("GET", this.contentPath(pathOrId), undefined, { Range: `bytes=${start}-${end - 1}` })
+    return new Uint8Array(await response.arrayBuffer())
+  }
+
+  /** A file's document (metadata), or null. */
+  async stat(pathOrId: string): Promise<FileDocument | null> {
+    if (ULID.test(pathOrId)) return (await this.get(pathOrId)) as FileDocument | null
+    const parts = pathOrId.split(/[\\/]/).filter(Boolean)
+    const name = parts.pop() ?? ""
+    const folder = parts.length ? `/${parts.join("/")}/` : "/"
+    const page = await this.query({ filter: { path: folder, name }, limit: 1 })
+    return (page.documents[0] as FileDocument | undefined) ?? null
+  }
+
+  /** The files directly in a folder, by name. */
+  async list(folder = "/", limit = 1000): Promise<FileDocument[]> {
+    const parts = folder.split(/[\\/]/).filter(Boolean)
+    const path = parts.length ? `/${parts.join("/")}/` : "/"
+    return (await this.query({ filter: { path }, sort: "name", limit })).documents as FileDocument[]
+  }
+
+  /** Files whose name, folders, tags or extracted metadata contain every word of `text`. */
+  async search(text: string, filter: Record<string, unknown> = {}, limit = 100): Promise<FileDocument[]> {
+    return (await this.query({ filter: { $text: text, ...filter }, limit })).documents as FileDocument[]
+  }
+
+  /** A small JPEG or PNG of an image (once its metadata has been read). */
+  async thumbnail(id: string): Promise<Uint8Array> {
+    const response = await this.db.requestRaw("GET", `${this.path}/${enc(id)}/thumbnail`)
+    return new Uint8Array(await response.arrayBuffer())
+  }
+
+  versions(id: string): Promise<{ id: string; current: Record<string, unknown>; versions: Record<string, unknown>[] }> {
+    return this.db.request("GET", `${this.path}/${enc(id)}/versions`)
+  }
+
+  /** Make an earlier version current again (as a new version). */
+  restoreVersion(id: string, version: number): Promise<FileDocument> {
+    return this.db.request("POST", `${this.path}/${enc(id)}/versions/${version}/restore`)
+  }
+
+  /** Deleted files (`delete` moves a file to the trash). */
+  async trash(): Promise<FileDocument[]> {
+    return (await this.db.request<{ documents: FileDocument[] }>("GET", `${this.path}/_trash`)).documents
+  }
+
+  restore(id: string, options: { name?: string; path?: string } = {}): Promise<FileDocument> {
+    const params = new URLSearchParams()
+    if (options.name) params.set("name", options.name)
+    if (options.path) params.set("path", options.path)
+    const query = params.toString()
+    return this.db.request("POST", `${this.path}/_trash/${enc(id)}/restore${query ? `?${query}` : ""}`)
+  }
+
+  /** Delete a trashed file for good. */
+  async purge(id: string): Promise<void> {
+    await this.db.request("DELETE", `${this.path}/_trash/${enc(id)}`)
+  }
+
+  /** Read metadata again (one file, or all); returns how many were queued. */
+  async reextract(id?: string): Promise<number> {
+    return (await this.db.request<{ queued: number }>("POST", `${this.path}/_reextract${id ? `?id=${enc(id)}` : ""}`)).queued
+  }
+}

@@ -36,6 +36,9 @@ pub struct HexConfig {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub replication: ReplicationConfig,
+    /// Binary file storage (see `crate::files`).
+    #[serde(default)]
+    pub files: FilesConfig,
     /// Script runtimes for functions (see `crate::functions`).
     #[serde(default)]
     pub functions: crate::functions::FunctionsConfig,
@@ -230,6 +233,103 @@ fn default_ack_timeout_ms() -> u64 {
 impl Default for ReplicationConfig {
     fn default() -> Self {
         ReplicationConfig { min_acks: 0, ack_timeout_ms: default_ack_timeout_ms(), forward_writes: true, quorum: 0 }
+    }
+}
+
+/// Binary file storage: files tessellations and the chunk store.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FilesConfig {
+    /// Largest file accepted, in MB (0: no limit beyond `storage.disk_mb`).
+    #[serde(default)]
+    pub max_file_mb: u64,
+    /// Days a deleted file stays in the trash before it's purged.
+    #[serde(default = "default_trash_days")]
+    pub trash_days: u64,
+    /// Earlier versions kept per file (0: none).
+    #[serde(default = "default_max_versions")]
+    pub max_versions: usize,
+    /// Days earlier versions are kept (0: until `max_versions` pushes them out).
+    #[serde(default)]
+    pub version_days: u64,
+    /// Six directories for the vertices' shard packs, e.g. on six disks
+    /// (empty: `blobs/vertex-0` to `blobs/vertex-5` in the data directory).
+    #[serde(default)]
+    pub vertex_paths: Vec<String>,
+    /// Memory for recently read chunks, in MB.
+    #[serde(default = "default_files_cache_mb")]
+    pub cache_mb: u64,
+    /// Hours between scrubs that verify every shard (0: never).
+    #[serde(default = "default_scrub_hours")]
+    pub scrub_hours: u64,
+    /// Read metadata (EXIF, ID3, XMP, ...) from uploaded files into `meta`.
+    #[serde(default = "default_true")]
+    pub extract: bool,
+    /// Bytes of one file extraction may read, in MB.
+    #[serde(default = "default_extract_max_mb")]
+    pub extract_max_mb: u64,
+    /// Seconds extraction may take per file.
+    #[serde(default = "default_extract_timeout_seconds")]
+    pub extract_timeout_seconds: u64,
+    /// Text kept per file for full-text search (`meta.text`), in KB.
+    #[serde(default = "default_text_kb")]
+    pub text_kb: u64,
+    /// Make thumbnails of images (and Photoshop previews).
+    #[serde(default = "default_true")]
+    pub thumbnails: bool,
+    /// The longest side of a thumbnail, in pixels.
+    #[serde(default = "default_thumbnail_px")]
+    pub thumbnail_px: u32,
+}
+
+fn default_thumbnail_px() -> u32 {
+    320
+}
+
+fn default_extract_max_mb() -> u64 {
+    64
+}
+
+fn default_extract_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_text_kb() -> u64 {
+    64
+}
+
+fn default_trash_days() -> u64 {
+    30
+}
+
+fn default_max_versions() -> usize {
+    10
+}
+
+fn default_files_cache_mb() -> u64 {
+    64
+}
+
+fn default_scrub_hours() -> u64 {
+    24
+}
+
+impl Default for FilesConfig {
+    fn default() -> Self {
+        FilesConfig {
+            max_file_mb: 0,
+            trash_days: default_trash_days(),
+            max_versions: default_max_versions(),
+            version_days: 0,
+            vertex_paths: Vec::new(),
+            cache_mb: default_files_cache_mb(),
+            scrub_hours: default_scrub_hours(),
+            extract: true,
+            extract_max_mb: default_extract_max_mb(),
+            extract_timeout_seconds: default_extract_timeout_seconds(),
+            text_kb: default_text_kb(),
+            thumbnails: true,
+            thumbnail_px: default_thumbnail_px(),
+        }
     }
 }
 
@@ -441,6 +541,7 @@ impl Default for HexConfig {
             tls: TlsConfig::default(),
             limits: LimitsConfig::default(),
             replication: ReplicationConfig::default(),
+            files: FilesConfig::default(),
             analyzers: Default::default(),
             ai: Default::default(),
             functions: Default::default(),
@@ -462,6 +563,15 @@ impl HexConfig {
         }
         let data = crate::config::absolute(&self.storage_dir());
         data.parent().map(|p| p.join("backups")).unwrap_or_else(|| PathBuf::from("backups"))
+    }
+
+    /// The six vertex directories of the chunk store.
+    pub fn blob_dirs(&self) -> Vec<PathBuf> {
+        if self.files.vertex_paths.len() == crate::hex::VERTEX_COUNT {
+            return self.files.vertex_paths.iter().map(PathBuf::from).collect();
+        }
+        let blobs = self.storage_dir().join("blobs");
+        (0..crate::hex::VERTEX_COUNT).map(|v| blobs.join(format!("vertex-{}", v))).collect()
     }
 
     /// The resolved admin UI directory.
@@ -595,6 +705,9 @@ pub fn load_config_from(explicit: Option<&Path>) -> Result<HexConfig, config::Co
     hex_config.ui.path = resolve_path(&base, &hex_config.ui.path);
     if !hex_config.storage.backup_path.is_empty() {
         hex_config.storage.backup_path = resolve_path(&base, &hex_config.storage.backup_path);
+    }
+    for path in hex_config.files.vertex_paths.iter_mut() {
+        *path = resolve_path(&base, path);
     }
     for path in [&mut hex_config.tls.cert_file, &mut hex_config.tls.key_file, &mut hex_config.tls.ca_file] {
         if !path.is_empty() {

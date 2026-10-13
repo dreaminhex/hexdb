@@ -28,7 +28,7 @@ pub fn spawn_flush_task(engine: Arc<HexDBEngine>, interval: Duration, mut shutdo
     });
 }
 
-/// Compact SSTables every `interval`.
+/// Compact SSTables, and remove file content nothing references, every `interval`.
 pub fn spawn_compaction_task(engine: Arc<HexDBEngine>, interval: Duration, mut shutdown_rx: watch::Receiver<()>) {
     tokio::spawn(async move {
         loop {
@@ -40,6 +40,9 @@ pub fn spawn_compaction_task(engine: Arc<HexDBEngine>, interval: Duration, mut s
                 _ = tokio::time::sleep(interval) => {
                     if let Err(e) = engine.compact().await {
                         error!("❌ Compaction failed: {:#}", e);
+                    }
+                    if let Err(e) = engine.collect_file_garbage().await {
+                        error!("❌ File garbage collection failed: {:#}", e);
                     }
                 }
             }
@@ -58,6 +61,32 @@ pub fn spawn_ttl_sweep_task(engine: Arc<HexDBEngine>, interval: Duration, mut sh
                 }
                 _ = tokio::time::sleep(interval) => {
                     engine.sweep_expired().await;
+                }
+            }
+        }
+    });
+}
+
+/// Extract metadata from uploaded files (see `crate::extract`), and copy file
+/// content from other hexes.
+pub fn spawn_extraction_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
+    tokio::spawn(engine.clone().run_extraction(shutdown_rx.clone()));
+    tokio::spawn(engine.run_file_sync(shutdown_rx));
+}
+
+/// Verify every shard in the chunk store and repair bad ones every `interval`.
+pub fn spawn_scrub_task(engine: Arc<HexDBEngine>, interval: Duration, mut shutdown_rx: watch::Receiver<()>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    debug!("🛑 Scrub task is shutting down...");
+                    break;
+                }
+                _ = tokio::time::sleep(interval) => {
+                    if let Err(e) = engine.scrub_files().await {
+                        error!("❌ Scrub failed: {:#}", e);
+                    }
                 }
             }
         }

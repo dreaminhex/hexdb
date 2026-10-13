@@ -34,6 +34,20 @@ hmac = "0.12"
 sha1 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlparser = "0.63.0"
+fastcdc = "5.0.0"
+infer = "0.22.0"
+mime_guess = "2.0.5"
+sha2 = "0.10"
+lofty = "0.25.4"
+nom-exif = "3.8.0"
+imagesize = "0.15.0"
+quick-xml = "0.37"
+lopdf = { version = "0.45.0", default-features = false }
+ttf-parser = "0.25.1"
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1.10"
+zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

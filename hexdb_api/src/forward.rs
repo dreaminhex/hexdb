@@ -13,6 +13,10 @@
 // are always handled locally. GraphQL requests are forwarded only when they
 // contain a mutation.
 //
+// File uploads (`/_files/`, and parts of resumable uploads) are streamed to the Overseer as they arrive, with
+// no size limit or timeout here; other bodies are read first (up to
+// `limits.max_request_mb`).
+//
 // Without a reachable Overseer, the request is handled locally, which refuses
 // writes with 421 `read_only_replica`.
 
@@ -87,6 +91,61 @@ fn copy_headers(from: &HeaderMap, to: &mut HeaderMap) {
     }
 }
 
+/// The client used for forwarding, made once.
+fn forward_client(engine: &HexDBEngine) -> Option<reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| match hexdb_core::replication::lattice_client(&engine.config, Duration::from_secs(300)) {
+            Ok(client) => Some(client),
+            Err(e) => {
+                warn!("⚠️ Can't forward writes to the Overseer: {:#}", e);
+                None
+            }
+        })
+        .clone()
+}
+
+/// Stream a file upload to the Overseer.
+async fn forward_upload(engine: &Arc<HexDBEngine>, overseer: hexdb_core::network::discovery::PeerHex, request: Request) -> Response {
+    let Some(http) = forward_client(engine) else { return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", "This hex can't reach the Overseer.").into_response() };
+    let (parts, body) = request.into_parts();
+    let client = crate::auth::client_address(&parts.extensions);
+    let path_and_query = parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| parts.uri.path().to_string());
+    let url = format!("{}{}", hexdb_core::replication::peer_base_url(&overseer), path_and_query);
+    let mut headers = HeaderMap::new();
+    copy_headers(&parts.headers, &mut headers);
+    let signature = engine.lattice_keys.sign_request(parts.method.as_str(), &signed_target(&path_and_query, &client), b"");
+    if let (Ok(c), Ok(s)) = (HeaderValue::from_str(&client), HeaderValue::from_str(&signature)) {
+        headers.insert(HeaderName::from_static(FORWARDED_FOR_HEADER), c);
+        headers.insert(HeaderName::from_static(FORWARD_SIGNATURE_HEADER), s);
+    }
+    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::PUT);
+    debug!("↪️ Streaming {} {} to the Overseer '{}'.", parts.method, parts.uri.path(), overseer.name);
+    let streamed = reqwest::Body::wrap_stream(body.into_data_stream());
+    let response = match http.request(method, &url).timeout(Duration::from_secs(24 * 3600)).headers(headers).body(streamed).send().await {
+        Ok(response) => response,
+        Err(e) => {
+            warn!("⚠️ Forwarding an upload to the Overseer failed: {}", e);
+            return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", format!("The upload couldn't be passed on to the Overseer '{}': {}", overseer.name, e)).into_response();
+        }
+    };
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut out_headers = HeaderMap::new();
+    copy_headers(response.headers(), &mut out_headers);
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(e) => return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", format!("The Overseer's response was cut off: {}", e)).into_response(),
+    };
+    let mut out = Response::new(Body::from(body));
+    *out.status_mut() = status;
+    *out.headers_mut() = out_headers;
+    if let Ok(name) = HeaderValue::from_str(&overseer.name) {
+        out.headers_mut().insert(HeaderName::from_static(FORWARDED_TO_HEADER), name);
+    }
+    out.headers_mut().remove(header::CONTENT_LENGTH);
+    out
+}
+
 /// Forward writes to the Overseer when this hex is a replica.
 pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
@@ -98,6 +157,9 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
         peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone())
     };
     let Some(overseer) = overseer else { return next.run(request).await };
+    if path.contains("/_files/") || (request.method() == Method::PATCH && path.contains("/_uploads/")) {
+        return forward_upload(&engine, overseer, request).await;
+    }
 
     let (parts, body) = request.into_parts();
     let bytes: Bytes = match axum::body::to_bytes(body, crate::routes::bulk_body_limit(&engine)).await {
@@ -111,15 +173,7 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     let client = crate::auth::client_address(&parts.extensions);
     let path_and_query = parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or(path.clone());
     let url = format!("{}{}", hexdb_core::replication::peer_base_url(&overseer), path_and_query);
-    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
-    let client_or_none = CLIENT.get_or_init(|| match hexdb_core::replication::lattice_client(&engine.config, Duration::from_secs(300)) {
-        Ok(client) => Some(client),
-        Err(e) => {
-            warn!("⚠️ Can't forward writes to the Overseer: {:#}", e);
-            None
-        }
-    });
-    let Some(http) = client_or_none.clone() else {
+    let Some(http) = forward_client(&engine) else {
         return next.run(Request::from_parts(parts, Body::from(bytes))).await;
     };
     let timeout = Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1));

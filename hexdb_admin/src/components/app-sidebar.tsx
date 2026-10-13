@@ -3,6 +3,7 @@ import {
   IconBrandGoogleBigQuery,
   IconDashboard,
   IconFileCode2,
+  IconFolders,
   IconHexagon3d,
   IconListCheck,
   IconMathFunction,
@@ -57,6 +58,7 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
     items: [
       { title: "Tessellations", route: "/tessellations", icon: IconHexagon3d },
       { title: "Documents", route: "/documents", icon: IconFileCode2 },
+      { title: "Files", route: "/files", icon: IconFolders },
       { title: "Streams", route: "/streams", icon: IconArrowsSplit },
       { title: "Functions", route: "/functions", icon: IconMathFunction },
     ],

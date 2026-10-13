@@ -6,19 +6,26 @@
     orders = db.tessellation("orders")
     doc = orders.insert({"customer": "ada", "total": 12})
     page = orders.query(filter={"total": {"$gt": 10}}, sort="-total")
+
+    media = db.files("media")          # a files tessellation
+    photo = media.upload("photos/IMG_1.jpg", "IMG_1.jpg")
+    hits = media.search("glacier")      # names, tags and extracted metadata
 """
 
 from __future__ import annotations
 
+import io
 import json
+import os
+import re
 import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
+from typing import Any, BinaryIO, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
-__all__ = ["HexDB", "HexDBError", "Tessellation", "Stream"]
+__all__ = ["HexDB", "HexDBError", "Tessellation", "Stream", "Files"]
 __version__ = "1.0.0"
 
 Json = Any
@@ -98,6 +105,32 @@ class HexDB:
                 raise HexDBError(e.code, error.get("code", "error"), error.get("message", text or e.reason), retry_after) from None
             except urllib.error.URLError as e:
                 raise HexDBError(0, "unreachable", f"Couldn't reach HexDB at {self.base}: {e.reason}") from None
+
+    def request_raw(
+        self, method: str, path: str, data: Optional[bytes] = None, headers: Optional[Dict[str, str]] = None, timeout: Optional[float] = None
+    ) -> Tuple[int, Dict[str, str], "urllib.response.addinfourl"]:
+        """Send raw bytes; returns (status, headers, open response). Close the response when done."""
+        headers = dict(headers or {})
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
+        try:
+            response = urllib.request.urlopen(req, timeout=timeout or self.timeout, context=self._context)
+        except urllib.error.HTTPError as e:
+            text = e.read().decode("utf-8", "replace")
+            e.close()
+            try:
+                error = json.loads(text).get("error", {})
+            except ValueError:
+                error = {}
+            raise HexDBError(e.code, error.get("code", "error"), error.get("message", text or e.reason)) from None
+        except urllib.error.URLError as e:
+            raise HexDBError(0, "unreachable", f"Couldn't reach HexDB at {self.base}: {e.reason}") from None
+        return response.status, dict(response.headers.items()), response
+
+    def files(self, name: str) -> "Files":
+        """A files tessellation (photos, audio, video, documents: any binary file)."""
+        return Files(self, name)
 
     # -- session -----------------------------------------------------------
 
@@ -293,3 +326,168 @@ class Stream:
                     break
             if handled:
                 self.commit(group, handled)
+
+
+# -- files ---------------------------------------------------------------------
+
+_ULID = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
+RESUMABLE_FROM = 16 * 1024 * 1024
+PART = 8 * 1024 * 1024
+
+
+def _file_path(path: str) -> str:
+    return "/".join(_quote(part) for part in path.replace("\\", "/").split("/") if part)
+
+
+class Files(Tessellation):
+    """A files tessellation: each file's metadata is a document (query it like
+    any tessellation); its content is uploaded and downloaded with these methods.
+
+    Paths are ``folder/name`` (``"photos/2024/IMG_1.jpg"``). Uploading to a path
+    that has a file makes a new version of it.
+    """
+
+    def create(self) -> Dict[str, Any]:
+        """Create the files tessellation (no error if it exists)."""
+        try:
+            return self.db.request("POST", "/tessellations", {"name": self.name, "kind": "files"})
+        except HexDBError as e:
+            if e.status == 409:
+                return self.db.request("GET", f"/tessellations/{_quote(self.name)}")
+            raise
+
+    def upload(
+        self,
+        path: str,
+        source: Union[bytes, str, "os.PathLike[str]", BinaryIO],
+        *,
+        content_type: Optional[str] = None,
+        modified: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Upload bytes, a local file (by path) or a binary file object to ``path``.
+        Returns the file's document. Files of 16 MB and more go in resumable parts."""
+        stream: BinaryIO
+        close = False
+        if isinstance(source, (bytes, bytearray)):
+            stream, size = io.BytesIO(bytes(source)), len(source)
+        elif isinstance(source, (str, os.PathLike)):
+            stream, size, close = open(source, "rb"), os.path.getsize(source), True
+            if modified is None:
+                modified = str(int(os.path.getmtime(source) * 1000))
+        else:
+            stream = source
+            here = stream.tell()
+            size = stream.seek(0, io.SEEK_END) - here
+            stream.seek(here)
+        try:
+            if size < RESUMABLE_FROM:
+                query = f"?modified={_quote(modified)}" if modified else ""
+                headers = {"Content-Type": content_type} if content_type else {}
+                _, _, response = self.db.request_raw("PUT", f"{self.path}/_files/{_file_path(path)}{query}", stream.read(), headers, timeout=max(self.db.timeout, 600))
+                with response:
+                    return json.loads(response.read().decode("utf-8"))
+            session = self.db.request("POST", f"{self.path}/_uploads", {"path": path, "size": size, "content_type": content_type, "modified": modified})
+            url = f"{self.path}/_uploads/{_quote(session['id'])}"
+            offset = 0
+            start = stream.tell()
+            while offset < size:
+                stream.seek(start + offset)
+                part = stream.read(min(PART, size - offset))
+                for attempt in range(4):
+                    try:
+                        _, _, response = self.db.request_raw("PATCH", f"{url}?offset={offset}", part, timeout=max(self.db.timeout, 600))
+                        response.close()
+                        break
+                    except HexDBError:
+                        if attempt == 3:
+                            raise
+                        time.sleep(attempt + 1)
+                        if self.db.request("GET", url)["offset"] >= offset + len(part):
+                            break
+                offset += len(part)
+            return self.db.request("POST", f"{url}/complete", timeout=max(self.db.timeout, 600))
+        finally:
+            if close:
+                stream.close()
+
+    def _content_path(self, path_or_id: str, version: Optional[int]) -> str:
+        query = f"?version={int(version)}" if version is not None else ""
+        if _ULID.match(path_or_id):
+            return f"{self.path}/{_quote(path_or_id)}/content{query}"
+        return f"{self.path}/_files/{_file_path(path_or_id)}{query}"
+
+    def download(self, path_or_id: str, *, version: Optional[int] = None) -> bytes:
+        """A file's content (by ``folder/name`` or ID), or an earlier version's."""
+        _, _, response = self.db.request_raw("GET", self._content_path(path_or_id, version), timeout=max(self.db.timeout, 600))
+        with response:
+            return response.read()
+
+    def download_to(self, path_or_id: str, destination: Union[str, "os.PathLike[str]", BinaryIO], *, version: Optional[int] = None) -> int:
+        """Stream a file's content to a local path or binary file object; returns bytes written."""
+        _, _, response = self.db.request_raw("GET", self._content_path(path_or_id, version), timeout=max(self.db.timeout, 600))
+        written = 0
+        with response:
+            out = open(destination, "wb") if isinstance(destination, (str, os.PathLike)) else destination
+            try:
+                while True:
+                    block = response.read(1024 * 1024)
+                    if not block:
+                        break
+                    out.write(block)
+                    written += len(block)
+            finally:
+                if out is not destination:
+                    out.close()
+        return written
+
+    def read_range(self, path_or_id: str, start: int, end: int) -> bytes:
+        """Bytes ``start`` to ``end`` (exclusive) of a file."""
+        _, _, response = self.db.request_raw("GET", self._content_path(path_or_id, None), headers={"Range": f"bytes={start}-{end - 1}"})
+        with response:
+            return response.read()
+
+    def stat(self, path_or_id: str) -> Optional[Dict[str, Any]]:
+        """A file's document (metadata), or None."""
+        if _ULID.match(path_or_id):
+            return self.get(path_or_id)
+        folder, _, name = path_or_id.replace("\\", "/").strip("/").rpartition("/")
+        page = self.query(filter={"path": f"/{folder}/" if folder else "/", "name": name}, limit=1)
+        return page["documents"][0] if page["documents"] else None
+
+    def list(self, folder: str = "/", *, limit: int = 1000) -> List[Dict[str, Any]]:
+        """The files directly in a folder, by name."""
+        folder = "/" + "/".join(p for p in folder.replace("\\", "/").split("/") if p) + "/"
+        return self.query(filter={"path": folder.replace("//", "/")}, sort="name", limit=limit)["documents"]
+
+    def search(self, text: str, *, filter: Optional[Dict[str, Any]] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """Files whose name, folders, tags or extracted metadata contain every word of ``text``."""
+        return self.query(filter={"$text": text, **(filter or {})}, limit=limit)["documents"]
+
+    def thumbnail(self, id: str) -> bytes:
+        """A small JPEG or PNG of an image (once its metadata has been read)."""
+        _, _, response = self.db.request_raw("GET", f"{self.path}/{_quote(id)}/thumbnail")
+        with response:
+            return response.read()
+
+    def versions(self, id: str) -> Dict[str, Any]:
+        return self.db.request("GET", f"{self.path}/{_quote(id)}/versions")
+
+    def restore_version(self, id: str, version: int) -> Dict[str, Any]:
+        """Make an earlier version current again (as a new version)."""
+        return self.db.request("POST", f"{self.path}/{_quote(id)}/versions/{int(version)}/restore")
+
+    def trash(self) -> List[Dict[str, Any]]:
+        """Deleted files (``delete`` moves a file here)."""
+        return self.db.request("GET", f"{self.path}/_trash")["documents"]
+
+    def restore(self, id: str, *, name: Optional[str] = None, path: Optional[str] = None) -> Dict[str, Any]:
+        params = urllib.parse.urlencode({k: v for k, v in (("name", name), ("path", path)) if v})
+        return self.db.request("POST", f"{self.path}/_trash/{_quote(id)}/restore" + (f"?{params}" if params else ""))
+
+    def purge(self, id: str) -> None:
+        """Delete a trashed file for good."""
+        self.db.request("DELETE", f"{self.path}/_trash/{_quote(id)}")
+
+    def reextract(self, id: Optional[str] = None) -> int:
+        """Read metadata again (one file, or all); returns how many were queued."""
+        return self.db.request("POST", f"{self.path}/_reextract" + (f"?id={_quote(id)}" if id else ""))["queued"]

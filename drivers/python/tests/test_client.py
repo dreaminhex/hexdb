@@ -5,6 +5,7 @@
 HEXDB_URL and HEXDB_API_KEY name the server (set by server.mjs).
 """
 
+import io
 import os
 import threading
 import time
@@ -96,6 +97,51 @@ class ClientTest(unittest.TestCase):
         events.consume("workers", lambda m: got.append(m["payload"]["n"]), stop=lambda: len(got) >= 2)
         self.assertEqual(got, [1, 2])
         self.assertEqual(events.read(group="workers")["messages"], [])
+
+
+    def test_files(self):
+        media = self.db.files(f"{self.prefix}-media")
+        self.assertEqual(media.create()["kind"], "files")
+        media.create()  # again: no error
+
+        doc = media.upload("notes/hello.txt", b"Glacier lagoon field notes")
+        self.assertEqual(doc["path"], "/notes/")
+        self.assertEqual(doc["size"], 26)
+        self.assertEqual(media.download("notes/hello.txt"), b"Glacier lagoon field notes")
+        self.assertEqual(media.download(doc["id"]), b"Glacier lagoon field notes")
+        self.assertEqual(media.read_range(doc["id"], 8, 14), b"lagoon")
+        self.assertEqual(media.stat("notes/hello.txt")["id"], doc["id"])
+        self.assertIsNone(media.stat("notes/missing.txt"))
+        self.assertEqual([f["name"] for f in media.list("notes")], ["hello.txt"])
+
+        # A new version, then back to the first.
+        v2 = media.upload("notes/hello.txt", b"second draft")
+        self.assertEqual(v2["version"], 2)
+        self.assertEqual(media.download("notes/hello.txt", version=1), b"Glacier lagoon field notes")
+        self.assertEqual(media.restore_version(doc["id"], 1)["version"], 3)
+
+        # Big files go in resumable parts.
+        big = os.urandom(17 * 1024 * 1024)
+        doc_big = media.upload("raw/big.bin", io.BytesIO(big))
+        self.assertEqual(doc_big["size"], len(big))
+        out = io.BytesIO()
+        self.assertEqual(media.download_to(doc_big["id"], out), len(big))
+        self.assertEqual(out.getvalue(), big)
+
+        # Metadata is read in the background, then searchable.
+        for _ in range(50):
+            if media.get(doc["id"])["extract"]["status"] == "done":
+                break
+            time.sleep(0.2)
+        self.assertEqual([f["name"] for f in media.search("glacier")], ["hello.txt"])
+
+        # Trash.
+        self.assertTrue(media.delete(doc["id"]))
+        self.assertEqual([f["id"] for f in media.trash()], [doc["id"]])
+        self.assertEqual(media.restore(doc["id"])["name"], "hello.txt")
+        media.delete(doc["id"])
+        media.purge(doc["id"])
+        self.assertEqual(media.trash(), [])
 
 
 if __name__ == "__main__":

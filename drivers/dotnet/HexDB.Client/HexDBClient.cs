@@ -5,6 +5,10 @@
 //   var orders = db.Tessellation("orders");
 //   var doc = await orders.InsertAsync(new { customer = "ada", total = 12 });
 //   var page = await orders.QueryAsync(new Query { Filter = new { total = new Dictionary<string, object> { ["$gt"] = 10 } }, Sort = "-total" });
+//
+//   var media = db.Files("media");                       // a files tessellation
+//   var photo = await media.UploadFileAsync("photos/IMG_1.jpg", @"C:\Pictures\IMG_1.jpg");
+//   var hits = await media.SearchAsync("glacier");        // names, tags and extracted metadata
 
 using System.Net;
 using System.Net.Http.Headers;
@@ -14,6 +18,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace HexDB.Client;
 
@@ -167,6 +172,40 @@ public sealed class HexDBClient : IDisposable
     public Task<JsonNode?> StatusAsync(CancellationToken cancel = default) => RequestAsync(HttpMethod.Get, "/status", cancel: cancel);
 
     public Tessellation Tessellation(string name) => new(this, name);
+
+    /// <summary>A files tessellation (photos, audio, video, documents: any binary file).</summary>
+    public Files Files(string name) => new(this, name);
+
+    /// <summary>Send raw content and get the raw response (dispose it); throws <see cref="HexDBException"/> on an error answer.</summary>
+    public async Task<HttpResponseMessage> SendRawAsync(HttpMethod method, string path, HttpContent? content = null, IDictionary<string, string>? headers = null, CancellationToken cancel = default)
+    {
+        using var request = new HttpRequestMessage(method, path.TrimStart('/')) { Content = content };
+        if (_token is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+        foreach (var (name, value) in headers ?? new Dictionary<string, string>()) request.Headers.TryAddWithoutValidation(name, value);
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancel).ConfigureAwait(false);
+        }
+        catch (HttpRequestException e)
+        {
+            throw new HexDBException(0, "unreachable", $"Couldn't reach HexDB at {_http.BaseAddress}: {e.Message}");
+        }
+        if (response.IsSuccessStatusCode) return response;
+        using (response)
+        {
+            var text = await response.Content.ReadAsStringAsync(cancel).ConfigureAwait(false);
+            string code = "error", message = text;
+            try
+            {
+                var error = JsonNode.Parse(text)?["error"];
+                code = error?["code"]?.GetValue<string>() ?? code;
+                message = error?["message"]?.GetValue<string>() ?? message;
+            }
+            catch (JsonException) { }
+            throw new HexDBException((int)response.StatusCode, code, message);
+        }
+    }
 
     public Stream Stream(string name) => new(this, name);
 
@@ -340,4 +379,201 @@ public sealed class Stream
             if (handled is not null) await CommitAsync(group, handled, CancellationToken.None).ConfigureAwait(false);
         }
     }
+}
+
+/// <summary>
+/// A files tessellation: each file's metadata is a document (query it through
+/// <see cref="Documents"/>); its content is uploaded and downloaded here.
+/// Paths are <c>folder/name</c>. Uploading to a path that has a file makes a new version.
+/// </summary>
+public sealed partial class Files
+{
+    private const long ResumableFrom = 16L * 1024 * 1024;
+    private const int Part = 8 * 1024 * 1024;
+    private readonly HexDBClient _db;
+    private readonly string _path;
+
+    internal Files(HexDBClient db, string name)
+    {
+        _db = db;
+        Name = name;
+        _path = "/" + Uri.EscapeDataString(name);
+        Documents = db.Tessellation(name);
+    }
+
+    public string Name { get; }
+
+    /// <summary>The files' documents, for queries, counts and aggregations.</summary>
+    public Tessellation Documents { get; }
+
+    [GeneratedRegex("^[0-9A-HJKMNP-TV-Z]{26}$")]
+    private static partial Regex Ulid();
+
+    private static string FilePath(string path) =>
+        string.Join("/", path.Split('/', '\\').Where(p => p.Length > 0).Select(Uri.EscapeDataString));
+
+    /// <summary>Create the files tessellation (no error if it exists).</summary>
+    public async Task<JsonNode?> CreateAsync(CancellationToken cancel = default)
+    {
+        try
+        {
+            return await _db.RequestAsync(HttpMethod.Post, "/tessellations", new { name = Name, kind = "files" }, cancel: cancel).ConfigureAwait(false);
+        }
+        catch (HexDBException e) when (e.Status == 409)
+        {
+            return await _db.RequestAsync(HttpMethod.Get, $"/tessellations/{Uri.EscapeDataString(Name)}", cancel: cancel).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Upload a local file to <paramref name="path"/>, keeping its modification time.</summary>
+    public async Task<JsonObject> UploadFileAsync(string path, string localPath, string? contentType = null, IProgress<long>? progress = null, CancellationToken cancel = default)
+    {
+        await using var file = File.OpenRead(localPath);
+        return await UploadAsync(path, file, contentType, File.GetLastWriteTimeUtc(localPath), progress, cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>Upload bytes to <paramref name="path"/>.</summary>
+    public Task<JsonObject> UploadAsync(string path, byte[] content, string? contentType = null, DateTimeOffset? modified = null, IProgress<long>? progress = null, CancellationToken cancel = default) =>
+        UploadAsync(path, new MemoryStream(content, writable: false), contentType, modified, progress, cancel);
+
+    /// <summary>
+    /// Upload a stream to <paramref name="path"/>. Seekable streams under 16 MB go in
+    /// one request; larger or unseekable ones in resumable 8 MB parts.
+    /// </summary>
+    public async Task<JsonObject> UploadAsync(string path, System.IO.Stream content, string? contentType = null, DateTimeOffset? modified = null, IProgress<long>? progress = null, CancellationToken cancel = default)
+    {
+        var modifiedText = modified?.ToUnixTimeMilliseconds().ToString();
+        long? size = content.CanSeek ? content.Length - content.Position : null;
+        if (size is < ResumableFrom)
+        {
+            var url = $"{_path}/_files/{FilePath(path)}" + (modifiedText is null ? "" : $"?modified={modifiedText}");
+            var body = new StreamContent(content);
+            if (contentType is not null) body.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+            using var response = await _db.SendRawAsync(HttpMethod.Put, url, body, cancel: cancel).ConfigureAwait(false);
+            progress?.Report(size.Value);
+            return (await response.Content.ReadFromJsonAsync<JsonObject>(cancel).ConfigureAwait(false))!;
+        }
+        var session = await _db.RequestAsync(HttpMethod.Post, $"{_path}/_uploads", new { path, size, content_type = contentType, modified = modifiedText }, cancel: cancel).ConfigureAwait(false);
+        var sessionUrl = $"{_path}/_uploads/{Uri.EscapeDataString(session!["id"]!.GetValue<string>())}";
+        var buffer = new byte[Part];
+        long offset = 0;
+        while (true)
+        {
+            var filled = 0;
+            int read;
+            while (filled < Part && (read = await content.ReadAsync(buffer.AsMemory(filled, Part - filled), cancel).ConfigureAwait(false)) > 0) filled += read;
+            if (filled == 0) break;
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    using var response = await _db.SendRawAsync(HttpMethod.Patch, $"{sessionUrl}?offset={offset}", new ByteArrayContent(buffer, 0, filled), cancel: cancel).ConfigureAwait(false);
+                    break;
+                }
+                catch (HexDBException) when (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(attempt + 1), cancel).ConfigureAwait(false);
+                    var status = await _db.RequestAsync(HttpMethod.Get, sessionUrl, cancel: cancel).ConfigureAwait(false);
+                    if (status!["offset"]!.GetValue<long>() >= offset + filled) break;
+                }
+            }
+            offset += filled;
+            progress?.Report(offset);
+            if (filled < Part) break;
+        }
+        return (await _db.RequestAsync(HttpMethod.Post, $"{sessionUrl}/complete", cancel: cancel).ConfigureAwait(false))!.AsObject();
+    }
+
+    private string ContentPath(string pathOrId, int? version)
+    {
+        var query = version is null ? "" : $"?version={version}";
+        return Ulid().IsMatch(pathOrId) ? $"{_path}/{Uri.EscapeDataString(pathOrId)}/content{query}" : $"{_path}/_files/{FilePath(pathOrId)}{query}";
+    }
+
+    /// <summary>A file's content (by <c>folder/name</c> or ID), or an earlier version's.</summary>
+    public async Task<byte[]> DownloadAsync(string pathOrId, int? version = null, CancellationToken cancel = default)
+    {
+        using var response = await _db.SendRawAsync(HttpMethod.Get, ContentPath(pathOrId, version), cancel: cancel).ConfigureAwait(false);
+        return await response.Content.ReadAsByteArrayAsync(cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>Copy a file's content to a stream (for large files).</summary>
+    public async Task DownloadToAsync(string pathOrId, System.IO.Stream destination, int? version = null, CancellationToken cancel = default)
+    {
+        using var response = await _db.SendRawAsync(HttpMethod.Get, ContentPath(pathOrId, version), cancel: cancel).ConfigureAwait(false);
+        await response.Content.CopyToAsync(destination, cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>Bytes <paramref name="start"/> to <paramref name="end"/> (exclusive) of a file.</summary>
+    public async Task<byte[]> ReadRangeAsync(string pathOrId, long start, long end, CancellationToken cancel = default)
+    {
+        var headers = new Dictionary<string, string> { ["Range"] = $"bytes={start}-{end - 1}" };
+        using var response = await _db.SendRawAsync(HttpMethod.Get, ContentPath(pathOrId, null), headers: headers, cancel: cancel).ConfigureAwait(false);
+        return await response.Content.ReadAsByteArrayAsync(cancel).ConfigureAwait(false);
+    }
+
+    /// <summary>A file's document (metadata), or null.</summary>
+    public async Task<JsonObject?> StatAsync(string pathOrId, CancellationToken cancel = default)
+    {
+        if (Ulid().IsMatch(pathOrId)) return await Documents.GetAsync(pathOrId, cancel).ConfigureAwait(false);
+        var parts = pathOrId.Split('/', '\\').Where(p => p.Length > 0).ToList();
+        var name = parts.Count > 0 ? parts[^1] : "";
+        var folder = parts.Count > 1 ? "/" + string.Join("/", parts.Take(parts.Count - 1)) + "/" : "/";
+        var page = await Documents.QueryAsync(new Query { Filter = new { path = folder, name }, Limit = 1 }, cancel).ConfigureAwait(false);
+        return page.Documents.FirstOrDefault();
+    }
+
+    /// <summary>The files directly in a folder, by name.</summary>
+    public async Task<List<JsonObject>> ListAsync(string folder = "/", int limit = 1000, CancellationToken cancel = default)
+    {
+        var parts = folder.Split('/', '\\').Where(p => p.Length > 0).ToList();
+        var path = parts.Count > 0 ? "/" + string.Join("/", parts) + "/" : "/";
+        return (await Documents.QueryAsync(new Query { Filter = new { path }, Sort = "name", Limit = limit }, cancel).ConfigureAwait(false)).Documents;
+    }
+
+    /// <summary>Files whose name, folders, tags or extracted metadata contain every word of <paramref name="text"/>.</summary>
+    public async Task<List<JsonObject>> SearchAsync(string text, int limit = 100, CancellationToken cancel = default) =>
+        (await Documents.QueryAsync(new Query { Filter = new Dictionary<string, object> { ["$text"] = text }, Limit = limit }, cancel).ConfigureAwait(false)).Documents;
+
+    /// <summary>A small JPEG or PNG of an image (once its metadata has been read).</summary>
+    public async Task<byte[]> ThumbnailAsync(string id, CancellationToken cancel = default)
+    {
+        using var response = await _db.SendRawAsync(HttpMethod.Get, $"{_path}/{Uri.EscapeDataString(id)}/thumbnail", cancel: cancel).ConfigureAwait(false);
+        return await response.Content.ReadAsByteArrayAsync(cancel).ConfigureAwait(false);
+    }
+
+    public Task<JsonNode?> VersionsAsync(string id, CancellationToken cancel = default) =>
+        _db.RequestAsync(HttpMethod.Get, $"{_path}/{Uri.EscapeDataString(id)}/versions", cancel: cancel);
+
+    /// <summary>Make an earlier version current again (as a new version).</summary>
+    public async Task<JsonObject> RestoreVersionAsync(string id, int version, CancellationToken cancel = default) =>
+        (await _db.RequestAsync(HttpMethod.Post, $"{_path}/{Uri.EscapeDataString(id)}/versions/{version}/restore", cancel: cancel).ConfigureAwait(false))!.AsObject();
+
+    /// <summary>Move a file to the trash; false if it doesn't exist.</summary>
+    public Task<bool> DeleteAsync(string id, CancellationToken cancel = default) => Documents.DeleteAsync(id, cancel: cancel);
+
+    /// <summary>Deleted files.</summary>
+    public async Task<List<JsonObject>> TrashAsync(CancellationToken cancel = default)
+    {
+        var trash = await _db.RequestAsync(HttpMethod.Get, $"{_path}/_trash", cancel: cancel).ConfigureAwait(false);
+        return trash!["documents"]!.AsArray().Select(d => d!.AsObject()).ToList();
+    }
+
+    /// <summary>Put a trashed file back (optionally under another name or folder).</summary>
+    public async Task<JsonObject> RestoreAsync(string id, string? name = null, string? path = null, CancellationToken cancel = default)
+    {
+        var query = new List<string>();
+        if (name is not null) query.Add($"name={Uri.EscapeDataString(name)}");
+        if (path is not null) query.Add($"path={Uri.EscapeDataString(path)}");
+        var url = $"{_path}/_trash/{Uri.EscapeDataString(id)}/restore" + (query.Count > 0 ? "?" + string.Join("&", query) : "");
+        return (await _db.RequestAsync(HttpMethod.Post, url, cancel: cancel).ConfigureAwait(false))!.AsObject();
+    }
+
+    /// <summary>Delete a trashed file for good.</summary>
+    public Task PurgeAsync(string id, CancellationToken cancel = default) =>
+        _db.RequestAsync(HttpMethod.Delete, $"{_path}/_trash/{Uri.EscapeDataString(id)}", cancel: cancel);
+
+    /// <summary>Read metadata again (one file, or all); returns how many were queued.</summary>
+    public async Task<int> ReextractAsync(string? id = null, CancellationToken cancel = default) =>
+        (await _db.RequestAsync(HttpMethod.Post, $"{_path}/_reextract" + (id is null ? "" : $"?id={Uri.EscapeDataString(id)}"), cancel: cancel).ConfigureAwait(false))!["queued"]!.GetValue<int>();
 }

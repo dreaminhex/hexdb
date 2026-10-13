@@ -25,7 +25,7 @@ pub async fn tables(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     let mut names: Vec<String> = engine
         .tessellation_details()
         .into_iter()
-        .filter(|(name, info)| info.kind == "user" && !name.starts_with('_') && principal.can(Permission::Read, name))
+        .filter(|(name, info)| info.is_user_data() && !name.starts_with('_') && principal.can(Permission::Read, name))
         .map(|(name, _)| name)
         .collect();
     names.sort();

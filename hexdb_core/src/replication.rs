@@ -165,6 +165,10 @@ pub struct SnapshotMeta {
     /// Follow changes after this sequence number once the documents are copied.
     pub seq: u64,
     pub tessellations: Vec<(String, TessellationInfo)>,
+    /// The key that names file chunks, sealed with the lattice transfer key
+    /// (hex). Every hex in a lattice names a chunk the same way.
+    #[serde(default)]
+    pub content_key: String,
 }
 
 /// `GET /lattice/snapshot/{tessellation}`: one page of documents with versions.
@@ -210,6 +214,7 @@ impl HexDBEngine {
             available_after: self.history_available_after(),
             seq,
             tessellations: self.tessellation_details().into_iter().filter(|(name, _)| name != REPLICATION_TESSELLATION).collect(),
+            content_key: self.sealed_content_key(),
         }
     }
 }
@@ -411,6 +416,7 @@ impl Follower {
         info!("📥 Full sync from Overseer '{}' at sequence {}...", meta.source_name, meta.seq);
 
         let engine = self.engine.clone();
+        engine.adopt_content_key(&meta.content_key)?;
         let wanted: HashSet<&str> = meta.tessellations.iter().map(|(n, _)| n.as_str()).collect();
         for (name, _) in engine.tessellation_details() {
             if name != REPLICATION_TESSELLATION && !wanted.contains(name.as_str()) {
@@ -420,8 +426,9 @@ impl Follower {
 
         let mut guard = HashMap::new();
         let mut copied = 0u64;
-        for (name, _) in &meta.tessellations {
+        for (name, info) in &meta.tessellations {
             engine.ensure_replicated_tessellation(name)?;
+            engine.set_replicated_kind(name, &info.kind)?;
             let mut seen: HashSet<Ulid> = HashSet::new();
             let mut after: Option<Ulid> = None;
             loop {
@@ -465,6 +472,8 @@ impl Follower {
         let cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: meta.seq };
         engine.apply_replicated(Vec::new(), Some(&cursor)).await?;
         info!("✅ Full sync from '{}' complete: {} documents in {} tessellations.", meta.source_name, copied, meta.tessellations.len());
+        // Fetch the content of every file the snapshot brought.
+        engine.request_chunk_catch_up();
         self.set_status(|s| {
             s.state = "streaming".into();
             s.applied_seq = meta.seq;
@@ -567,8 +576,10 @@ impl Follower {
     /// Pick up tessellations and index definitions created on the Overseer.
     async fn sync_catalog(&mut self, base: &str) -> Result<()> {
         let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
+        self.engine.adopt_content_key(&meta.content_key)?;
         for (name, info) in &meta.tessellations {
             self.engine.ensure_replicated_tessellation(name)?;
+            self.engine.set_replicated_kind(name, &info.kind)?;
             self.engine.reconcile_indexes(name, &info.indexes).await?;
             self.engine.set_schemas_unchecked(name, &info.schemas)?;
         }

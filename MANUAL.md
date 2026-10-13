@@ -21,15 +21,16 @@ Examples use `curl` against `http://localhost:7700` and leave out credentials. A
 13. [Schemas](#13-schemas)
 14. [Change data](#14-change-data)
 15. [Streams](#15-streams)
-16. [Functions, schedules and triggers](#16-functions-schedules-and-triggers)
-17. [Plugins](#17-plugins)
-18. [Security](#18-security)
-19. [Lattices and replication](#19-lattices-and-replication)
-20. [Storage internals](#20-storage-internals)
-21. [Limits and configuration reference](#21-limits-and-configuration-reference)
-22. [Operations](#22-operations)
-23. [Drivers](#23-drivers)
-24. [FAQ](#24-faq)
+16. [Files](#16-files)
+17. [Functions, schedules and triggers](#17-functions-schedules-and-triggers)
+18. [Plugins](#18-plugins)
+19. [Security](#19-security)
+20. [Lattices and replication](#20-lattices-and-replication)
+21. [Storage internals](#21-storage-internals)
+22. [Limits and configuration reference](#22-limits-and-configuration-reference)
+23. [Operations](#23-operations)
+24. [Drivers](#24-drivers)
+25. [FAQ](#25-faq)
 
 ---
 
@@ -42,6 +43,7 @@ What it provides:
 | Area | Features |
 | --- | --- |
 | Data | Documents with generated, time-sortable IDs; replace, merge-patch, delete; bulk writes; upserts; update-by-filter; per-document TTLs; idempotency keys; optional versioned schemas |
+| Files | Any binary file, deduplicated, compressed when that helps, encrypted and split across the six vertices; metadata (EXIF, IPTC, XMP, ID3, Vorbis, QuickTime, Matroska, Broadcast WAV, PDF, Office, ...) extracted and searchable; thumbnails; versions with rollback; a trash; resumable uploads; ranged downloads |
 | Reading | A JSON filter language, sorting, cursor and offset paging, counts, aggregations, full-text search with analyzers, GraphQL, SQL `SELECT` |
 | Consistency | Every write is atomic and durable before it's acknowledged; multi-document transactions are serializable for the documents they touch |
 | Performance | Field, composite, unique and text indexes; an index advisor; an LRU memory cache; SSTables with Bloom filters; Zstandard compression |
@@ -62,6 +64,10 @@ What it doesn't do (yet):
 **Vertex.** One of the six regions of a hex's memory. Every document held in memory is split into six shards with Reed-Solomon coding (four data, two parity), one shard per vertex. Any two vertices can be lost or corrupted and the document is still rebuilt. See [Memory and vertices](#memory-and-vertices).
 
 **Tessellation.** A collection of documents, like a table or a MongoDB collection. Roles are granted per tessellation. Names are 1-64 letters, digits, `_` or `-`, unique ignoring case. They can't start with `_` (reserved for system tessellations) or match an API route name (`users`, `roles`, `streams`, `functions`, `settings`, ...).
+
+**Files tessellation.** A tessellation of kind `files`: each document describes a stored file, whose content is in the chunk store. See [Files](#16-files).
+
+**Chunk.** A piece of a file's content (about 2 MB), stored once however many files contain it, and split into six shards across the vertices.
 
 **Document.** A JSON object with an `id`. HexDB generates IDs as ULIDs: 26-character strings that sort by creation time.
 
@@ -147,7 +153,9 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - An activity chart: documents per tessellation, operations per minute, or storage, over 15 minutes to 6 hours.
 - Vertex health: a hexagon of the six shards.
 - The lattice card: each hex's role, address, replication state and lag. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
-- A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#22-operations)).
+- A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#23-operations)).
+
+**Files.** Browse a files tessellation by folder, as a grid with thumbnails or as a list. Upload by dropping files or with the Upload button (large files resume after a dropped connection), search names, tags and metadata, and open a file to preview it (images, audio, video), read its metadata, edit its name, folder, tags and description, download or restore earlier versions, or move it to the trash. The Trash view restores or deletes trashed files.
 
 **Queries.** A console for GraphQL and SQL, switched at the top left. GraphQL has schema-aware completion and validation, and variables; SQL has table and column completion, `?` or `$1` parameters (a JSON array), and runs read-only `SELECT`s (see [SQL](#10-sql)). Both have examples written against the tessellations the hex has, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
 
@@ -789,7 +797,220 @@ Creating a stream needs `manage` on its name. A grant on `*` covers every tessel
 
 **Storage.** Messages are documents in the system tessellation `_stream_<name>`, so they're encrypted, replicated, and expire by TTL. Configurations live in `_streams` and offsets in `_stream_offsets`. Sources and destinations run on the Overseer.
 
-## 16. Functions, schedules and triggers
+## 16. Files
+
+A files tessellation stores files of any kind: photos, audio, video, Photoshop and Illustrator files, office documents, archives. Each file is a document describing it, so everything that works on documents works on files: filters, full-text search, aggregations, SQL, GraphQL, roles, row filters, field masks, the change feed and replication. The bytes live in a separate chunk store, compressed when that helps, encrypted, split across the six vertices, and copied to every hex in the lattice.
+
+HexDB reads what each file says about itself (EXIF, IPTC, XMP, ID3, Vorbis comments, QuickTime, Matroska, Broadcast WAV, PDF and Office properties, and more) into the file's document, so files can be found by camera, artist, place, date or the words inside them.
+
+### Creating a files tessellation
+
+```bash
+curl -X POST http://localhost:7700/tessellations -H "Content-Type: application/json" \
+  -d '{ "name": "media", "kind": "files" }'
+```
+
+It starts with two indexes: `path_name` (unique on folder and name) and `search` (a text index over `name`, `path`, `tags`, `description` and `meta`). The admin UI's Tessellations page creates one with "Holds: Files"; its Files page browses, uploads, previews and searches them.
+
+### Uploading
+
+```bash
+curl -X PUT --data-binary @IMG_0042.jpg \
+  "http://localhost:7700/media/_files/2024/Iceland/IMG_0042.jpg?modified=2024-06-01T12:30:45Z"
+```
+
+- The path after `_files/` is the folder and the file name. `201` creates a file; `200` adds a version to the file already at that path. Uploading content identical to the current version stores nothing and answers `200` with `X-HexDB-Unchanged: true`.
+- `?modified=` and `?created=` take RFC 3339 times or epoch milliseconds (default: now).
+- The content type is taken from the file's first bytes, then its name's extension, then the `Content-Type` header, then `application/octet-stream`.
+- Names are 1-255 bytes without `/`, `\`, control characters, `.` or `..`. Folders are stored as `/a/b/` (at most 64 levels and 1,024 bytes); `/` and `\` both separate them.
+- Uploads stream; the request size and time limits don't apply. `files.max_file_mb` and `storage.disk_mb` do (413 and 507).
+- Uploads sent to a replica are streamed on to the Overseer.
+
+**Resumable uploads**, for large files and unreliable connections:
+
+| Request | Does |
+| --- | --- |
+| `POST /media/_uploads` `{"path", "size"?, "content_type"?, "modified"?, "created"?}` | Starts a session: `{"id", "path", "offset": 0, "size", "expires_at"}` |
+| `PATCH /media/_uploads/{id}?offset=N` (or `Upload-Offset: N`) | Sends the next part, raw, starting at byte N. A part at the wrong offset gets 409 |
+| `GET /media/_uploads/{id}` | Where the session is, to resume after a failure |
+| `POST /media/_uploads/{id}/complete` | Creates the file (or its new version), as an upload would |
+| `DELETE /media/_uploads/{id}` | Abandons the session |
+
+Sessions expire after a day. Only the user who started one (or an administrator) can continue it. The admin UI, the CLI and the drivers use sessions in 8 MB parts for files of 16 MB and more.
+
+### The file document
+
+```json
+{
+  "id": "01JZ...", "name": "IMG_0042.jpg", "path": "/2024/Iceland/",
+  "size": 4823112, "content_type": "image/jpeg", "sha256": "9f2c...",
+  "version": 2, "versions": [{ "version": 1, "size": 4810022, "sha256": "...", "uploaded_at": "...", "uploaded_by": "ada", ... }],
+  "created_at": "...", "modified_at": "...", "uploaded_at": "...", "uploaded_by": "ada",
+  "content": { "manifest": "<chunk ID>", "chunks": 3, "compressed": false },
+  "thumbnail": { "chunk": "<chunk ID>", "width": 320, "height": 213, "content_type": "image/jpeg" },
+  "meta": { "title": "Glacier Lagoon", "taken_at": "2024-06-01T12:30:45", "width": 6240, "height": 4160,
+            "camera": { "make": "FUJIFILM", "model": "X-T5" }, "gps": { "lat": 64.0784, "lon": -16.2306 },
+            "keywords": ["iceland", "ice"], "exif": { ... }, "iptc": { ... }, "xmp": { ... } },
+  "extract": { "status": "done", "version": 1, "extractors": ["exif", "iptc", "image", "xmp", "thumbnail"], "errors": [] },
+  "tags": ["holiday"], "description": "..."
+}
+```
+
+- `size`, `content_type`, `sha256`, `content`, `version`, `versions`, `created_at`, `modified_at`, `uploaded_at`, `uploaded_by`, `meta`, `extract` and `thumbnail` are written only by HexDB. Document writes (PUT, PATCH, bulk, `_update`, transactions, GraphQL) keep their stored values whatever the request says.
+- `name` and `path` can be changed with a PATCH: that renames or moves the file. A clash with another file's folder and name is a 409.
+- Any other field (`tags`, `description`, your own) is yours.
+- Files can't be created with `POST /media`; they're uploaded.
+
+### Downloading
+
+```bash
+curl -O -J http://localhost:7700/media/01JZ.../content
+curl http://localhost:7700/media/_files/2024/Iceland/IMG_0042.jpg -o IMG_0042.jpg
+curl -H "Range: bytes=0-1023" http://localhost:7700/media/01JZ.../content
+```
+
+- `Range` (one range; several ranges get the whole file), `If-Range`, `ETag` (the SHA-256) with `If-None-Match` (304), `Last-Modified`, and `HEAD` work as browsers and media players expect, so audio and video can seek.
+- `?version=N` reads an earlier version.
+- `Content-Disposition` is `inline` for images (except SVG), audio, video, PDF and plain text, and `attachment` for everything else or with `?download=true`. With `X-Content-Type-Options: nosniff` and the API's `default-src 'none'` Content Security Policy, a stored HTML or SVG file can't run scripts in a browser.
+- `GET /media/{id}/thumbnail` returns a file's thumbnail (404 if it has none).
+- `GET /media/{id}` returns the document, as for any tessellation.
+
+### Finding files
+
+Searches run against the documents; content is read only when downloaded.
+
+```bash
+# By any field, including extracted metadata
+curl -X POST http://localhost:7700/media/_query -H "Content-Type: application/json" \
+  -d '{ "filter": { "meta.camera.model": "X-T5", "meta.taken_at": { "$gte": "2024-06-01" } }, "fields": ["name", "path", "meta.gps"] }'
+
+# Every word of the query in the name, folders, tags, description or any metadata
+curl -X POST http://localhost:7700/media/_query -d '{ "filter": { "$text": "glacier lagoon" } }' -H "Content-Type: application/json"
+
+# One folder's files, and the folders under it
+curl -X POST http://localhost:7700/media/_query -d '{ "filter": { "path": "/2024/" }, "sort": "name" }' -H "Content-Type: application/json"
+curl -X POST http://localhost:7700/media/_aggregate -H "Content-Type: application/json" \
+  -d '{ "filter": { "path": { "$startsWith": "/2024/" } }, "group_by": ["path"], "aggregates": { "files": { "$count": "*" }, "bytes": { "$sum": "size" } } }'
+
+# SQL and GraphQL (dotted paths go in GraphQL variables, since literals can't contain dots)
+curl -X POST http://localhost:7700/sql -d '{ "sql": "SELECT name, meta.title FROM media WHERE meta.artist = '\''Miles Davis'\''" }' -H "Content-Type: application/json"
+```
+
+Indexes on metadata fields (for example `meta.camera.model` or `meta.artist`) make such filters fast, as for any field.
+
+### Metadata extraction
+
+After each upload, new version or version restore, the Overseer reads the file in the background: `extract.status` is `pending` until `meta` (and `thumbnail`) are written, then `done`, with the extractors that found something and any errors. A file that can't be read is still stored and searchable by name, folder, type, size, hash and dates. `POST /media/_reextract` (or `?id=` for one file) reads files again. Files that are pending, or were read by an older version of the extractors, are queued again when a hex becomes the Overseer.
+
+**Common fields.** The first source that has a value wins; format-specific tags are read before XMP:
+
+| Field | From |
+| --- | --- |
+| `title`, `description`, `subject`, `author`, `keywords`, `copyright`, `language`, `publisher`, `creator_tool`, `rating` | Any family below |
+| `artist`, `album`, `album_artist`, `composer`, `genre`, `year`, `track`, `disc`, `comment`, `label`, `isrc`, `bpm` | Audio and video tags |
+| `taken_at`, `recorded_at` | EXIF, IPTC, XMP, QuickTime, Broadcast WAV |
+| `duration_ms`, `bitrate_kbps`, `sample_rate`, `channels`, `bit_depth`, `codec` | Audio and video streams |
+| `width`, `height`, `orientation`, `color_mode`, `layers` | Images, video, Photoshop, DICOM |
+| `camera` (`make`, `model`, `lens`, `serial`), `exposure` (`f_number`, `exposure_time`, `focal_length`, `iso`, ...) | EXIF, XMP, QuickTime, DICOM |
+| `gps` (`lat`, `lon`, `alt`), `location` (`city`, `state`, `country`, `sublocation`) | EXIF, QuickTime, IPTC, XMP |
+| `pages`, `words`, `lines`, `slides` | PDF, Office, OpenDocument, text |
+| `text` | The start of the file's text (plain text, Markdown, Word, PowerPoint, Excel, OpenDocument, SVG, archive listings), for `$text` |
+
+**Tag families.** Each is kept under its own key in `meta`:
+
+| Key | Read from |
+| --- | --- |
+| `exif` (with `GPS`) | JPEG, TIFF, HEIC/HEIF, AVIF, PNG, WebP, and camera RAW (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2, PEF, ...) |
+| `iptc` | IPTC-IIM in JPEG (Photoshop APP13), PSD, TIFF |
+| `xmp` | Any file with an XMP packet: JPEG, TIFF, PNG, PSD, AI, PDF, MP4, InDesign, SVG (RDF) and more |
+| `png` | PNG `tEXt`, `zTXt` and `iTXt` chunks |
+| `psd` | Photoshop documents (PSD, PSB): size, channels, depth, color mode, layers, writer |
+| `image` | Image format and dimensions (most formats) |
+| `id3v1`, `id3v2`, `ape`, `vorbis`, `mp4`, `riff_info`, `aiff` | MP3, AAC, FLAC, Ogg Vorbis/Opus/Speex, M4A/MP4, WAV, AIFF, APE, WavPack, Musepack |
+| `bext`, `ixml` | Broadcast WAV (BWF) description, originator, time reference, loudness, coding history; iXML from field recorders (project, scene, take, notes, track names) |
+| `asf` | WMA and WMV |
+| `quicktime` | MOV, MP4, 3GP and Matroska/WebM track metadata (make, model, creation date, duration, size, ISO 6709 location) |
+| `matroska` | MKV and WebM Info, Tracks and Tags |
+| `mpeg7` | MPEG-7 descriptions (titles, people, keywords, annotations, genres), in XML files or embedded |
+| `pdf` | PDF and Illustrator (AI) Info dictionaries and page counts (files up to 64 MB) |
+| `eps` | EPS/PostScript DSC comments |
+| `office`, `odf`, `epub` | Word, Excel and PowerPoint properties; OpenDocument meta; EPUB package metadata |
+| `font` | TrueType and OpenType name tables |
+| `svg` | SVG size, title and description |
+| `dicom` | Non-identifying DICOM tags (modality, study and series description, manufacturer, size). Patient names and IDs are never read |
+| `archive` | ZIP, JAR, APK, TAR and `.tar.gz` entry names and counts |
+| `c2pa` | Whether a file carries C2PA content credentials, and its claim generator |
+
+**Limits.** Extraction reads at most `files.extract_max_mb` (64) of a file and stops after `files.extract_timeout_seconds` (30). Each extractor runs on its own: one that fails or panics adds a line to `extract.errors` and the others still run. Strings are cut at 4,096 bytes, arrays and objects at 500 items; `meta.text` is at most `files.text_kb` (64) KB. A `meta` larger than 256 KB loses its largest tag families first (listed in `meta.dropped`). Binary data (embedded thumbnails, maker notes, cover art) is left out.
+
+Not read yet: PDF body text, GoPro GPMF telemetry, ICC profile descriptions (other than PNG `iCCP` names), video frames.
+
+### Thumbnails
+
+Images that the server can decode (JPEG, PNG, GIF, WebP, BMP, TIFF) and Photoshop files (their embedded preview) get a thumbnail during extraction: at most `files.thumbnail_px` (320) on the longest side, never enlarged, with EXIF orientation applied; JPEG, or PNG when the image has transparency. Turn them off with `files.thumbnails = false`.
+
+### Versions
+
+Uploading to a path that has a file makes a new version. The previous one moves to `versions` (newest first), up to `files.max_versions` (10) and, with `files.version_days` set, no older than that. Versions share unchanged chunks, so a small edit to a large file stores little.
+
+```bash
+curl http://localhost:7700/media/01JZ.../versions                      # {"current", "versions"}
+curl -O -J "http://localhost:7700/media/01JZ.../content?version=1"
+curl -X POST http://localhost:7700/media/01JZ.../versions/1/restore    # version 1's content becomes the next version
+```
+
+A restore makes a new version (with `restored_from`), so the version it replaced is kept and the rollback can itself be undone.
+
+### Trash
+
+Deleting a file's document (`DELETE /media/{id}`, or a delete in a transaction or GraphQL) moves it to the trash, with `from`, `trashed_at`, `trashed_by` and an expiry `files.trash_days` (30) later. Expired files are gone for good.
+
+| Request | Does |
+| --- | --- |
+| `GET /media/_trash` | Trashed files from `media`: `{"documents", "total"}` |
+| `POST /media/_trash/{id}/restore` | Puts the file back. If its folder and name are taken: 409; add `?name=` or `?path=` |
+| `DELETE /media/_trash/{id}` | Deletes it for good |
+| `DELETE /media/_trash` | Empties the trash |
+
+Dropping a files tessellation drops its trashed files too.
+
+### How file content is stored
+
+1. **Chunks.** A file is cut into content-defined chunks (FastCDC: 512 KB to 8 MB, 2 MB on average), so an edit changes only the chunks around it. A chunk's ID is a keyed BLAKE3 hash of its content, keyed with a random content key kept in the catalog, so identical content is stored once across all files, versions and tessellations, while the ID doesn't reveal a known file's plain hash.
+2. **Compression.** Images, audio and video, lossless or not (WAV, AIFF, FLAC, TIFF, RAW, PSD, JPEG, MP3, MP4, ...), and already-compressed formats (ZIP, gzip, 7z, Office files, EPUB, ...) are stored byte for byte. Other chunks are compressed with Zstandard when that saves at least 5%. Zstandard is lossless either way.
+3. **Encryption.** Each chunk is encrypted with AES-256-GCM under the storage key, with its ID as authenticated data.
+4. **Vertices.** The encrypted chunk is split with the hex's Reed-Solomon code into four data and two parity shards, and shard *n* is appended to vertex *n*'s pack file, with a BLAKE3 hash. Any two vertices can lose or corrupt a chunk's shards and it's still read: the missing shards are rebuilt and written back. `files.vertex_paths` puts the six vertices in six directories, for example on six disks, so a chunk survives losing any two of them.
+5. **Durability.** A file's chunks are written and fsynced before its document commits, so every file in the index has its content. A crash mid-upload leaves unreferenced chunks, which garbage collection removes.
+6. **Manifest.** A file's chunk list is itself stored as a chunk, referenced by `content.manifest`.
+
+**Garbage collection** runs with each compaction (`storage.compaction_frequency`, or `POST /compact`, whose answer includes `chunks`): chunks no file, version, trashed file or upload session references are removed, packs that are mostly dead are rewritten, and chunks still under a previous storage key are re-encrypted. Chunks of uploads in progress are kept.
+
+**Scrubbing** verifies every shard every `files.scrub_hours` (24), or on `POST /scrub` (needs `maintenance`), and rewrites bad ones. A chunk that can't be rebuilt from this hex's vertices is copied from another hex.
+
+**Memory.** The chunk index takes about 80 MB per TB stored. Recently read chunks are cached in `files.cache_mb` (64). File content counts against `storage.disk_mb`: with parity, about 1.5 times the (compressed) content.
+
+`/status` reports `storage.files`: chunks, content and stored bytes, pack files, degraded chunks, chunks on old keys, chunks copied from other hexes, and per-vertex bytes, corrupt shards found and repairs.
+
+### Files in a lattice
+
+- Replicas create files tessellations as files tessellations, and use the Overseer's content key (sent sealed with the lattice transfer key) so a chunk has the same ID on every hex.
+- As file documents arrive, a replica copies the chunks it's missing from the Overseer (four at a time), and checks every file after a full sync and every 10 minutes.
+- A read of content a replica doesn't have yet (or can't rebuild) is fetched from another hex and kept.
+- Chunks travel sealed with AES-256-GCM under a key derived from the lattice key, bound to their ID, so they stay secret without TLS. `GET /lattice/chunks/{id}` needs a lattice signature and is served by every hex, so hexes repair each other.
+- Uploads and resumable parts sent to a replica are streamed to the Overseer. Metadata extraction runs on the Overseer; replicas receive the results.
+
+### Command line
+
+```bash
+export HEXDB_TOKEN=hxk_...
+hexdb put media IMG_0042.jpg IMG_0043.jpg --to /2024/Iceland   # files of 16 MB and more go in resumable parts
+hexdb put media ./Pictures -r --to /photos                     # a folder, keeping its structure
+hexdb ls media /2024                                           # subfolders and files
+hexdb ls media --search "glacier lagoon"
+hexdb get media 2024/Iceland/IMG_0042.jpg -o ~/Downloads       # by path or ID; --version N for an earlier one
+```
+
+## 17. Functions, schedules and triggers
 
 A function is saved on the server and run by name with parameters.
 
@@ -930,7 +1151,7 @@ Other kinds of function receive the values their declared parameters name; for e
 - Internal writes (schema migrations, replication) don't fire triggers either.
 - `GET /triggers` shows each trigger with its status on this hex: runs, failures, refused writes, last run and last error.
 
-## 17. Plugins
+## 18. Plugins
 
 Plugins extend HexDB without changing it. Each is a folder with a `plugin.toml` manifest, listed in the registry (`plugins.registry`, default `plugins.json` next to the config file):
 
@@ -1058,7 +1279,7 @@ All of these are listed, disabled, in [plugins.json](plugins.json).
 
 **How do I ship the audit trail to a SIEM?** Use a `stream` plugin with `audit = true` and `tessellations = []` (or just `_audit`).
 
-## 18. Security
+## 19. Security
 
 ### Authentication
 
@@ -1239,7 +1460,8 @@ Filters: `actor`, `action` (a value ending in `.` matches that area), `target`, 
 
 - Cookie-authenticated changes must come from the same origin (CSRF protection), and cross-site sign-in is refused.
 - Responses carry `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a Content Security Policy. The admin UI loads nothing from other origins.
-- API responses are `Cache-Control: no-store`.
+- API responses are `Cache-Control: no-store` (file content and thumbnails are `private` and revalidated with their ETag).
+- Stored files are served `inline` only for images (not SVG), audio, video, PDF and plain text, and otherwise as attachments; with `nosniff` and `default-src 'none'`, a stored HTML or SVG file can't run scripts.
 - No CORS headers are sent, so other sites can't read responses.
 
 ### Transport
@@ -1262,6 +1484,7 @@ All data and metadata on disk is encrypted with AES-256-GCM using `storage.encry
 | WAL records | `[length][nonce][ciphertext]`, the record compressed with Zstandard first |
 | SSTable bodies | Each authenticated with its document ID and sequence number, so bodies can't be swapped between entries |
 | SSTable indexes | In chunks of 64 records, each authenticated with its chunk number |
+| File chunks | Each encrypted before it's split into shards, authenticated with its chunk ID and flags; the shards' headers (chunk ID, lengths, key ID, shard hash) are plaintext |
 | Catalog, settings, metrics history, index snapshots | Sealed files: `HXE1` magic, key ID, nonce and ciphertext, authenticated with the file name so files can't be swapped |
 
 Only SSTable headers (format, counts, offsets, key ID) are plaintext. Every nonce is random (96 bits). Documents in memory aren't encrypted.
@@ -1270,8 +1493,8 @@ Only SSTable headers (format, counts, offsets, key ID) are plaintext. Every nonc
 
 1. Set a new `storage.encryption_key` and move the old one to `storage.previous_encryption_keys`.
 2. Restart. Old data stays readable, and everything new uses the new key.
-3. Compaction (scheduled, or `POST /compact`) rewrites SSTables, and every sealed file is rewritten on its next save.
-4. When `/status` shows `storage.sstable_files_on_old_keys: 0`, remove the old key.
+3. Compaction (scheduled, or `POST /compact`) rewrites SSTables and re-encrypts file chunks, and every sealed file is rewritten on its next save.
+4. When `/status` shows `storage.sstable_files_on_old_keys: 0` and `storage.files.chunks_on_old_keys: 0`, remove the old key.
 
 A server whose data needs a key that isn't configured refuses to start, rather than discard anything. The error names the setting to fix.
 
@@ -1281,6 +1504,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 - **Discovery** is a mutual challenge-response. The prober sends a hello with a timestamp, a nonce and a MAC. The responder answers only a fresh (within 60 seconds), never-seen, valid hello, with an identity MAC bound to the prober's nonce. Strangers learn nothing, and a replayed or forged reply can't impersonate an Overseer.
 - **Replication and other `/lattice/*` requests** carry `X-HexDB-Lattice-Signature`: a timestamp, a nonce, and a MAC over the method, path, query and body hash. Each is valid for 60 seconds and once. User sessions and API keys are never accepted there.
+- File chunks and the content key are sent sealed with AES-256-GCM under a transfer key derived from the lattice key, so they stay secret without TLS.
 - MACs are keyed BLAKE3 with keys derived from the lattice key, compared in constant time.
 - Session tokens are signed with a key derived from the lattice key, which is why a session works on every hex.
 
@@ -1296,7 +1520,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 - Secrets belong in `hexdb.local.toml` or environment variables, never in a committed `hexdb.toml`.
 - `GET /settings` hides secrets in the effective configuration.
 
-## 19. Lattices and replication
+## 20. Lattices and replication
 
 ### Discovery and election
 
@@ -1382,7 +1606,7 @@ For hexes on different machines:
 
 Each hex can have its own `storage.encryption_key` when a `lattice_secret` is set.
 
-## 20. Storage internals
+## 21. Storage internals
 
 ### Write path
 
@@ -1449,7 +1673,9 @@ A document in memory takes about 1.5 times its JSON size: four data shards plus 
 │   ├── <first-seq>.wal        active write-ahead log segments
 │   └── archive/<first-seq>.wal  the change history
 ├── indexes/<tessellation>/<index>.hxi   index snapshots (sealed)
-└── <tessellation>/<ulid>.hxs  SSTables, including system tessellations such as users, _audit, _streams
+├── blobs/vertex-<n>/<number>.hxp   file content: one pack file series per vertex (see files.vertex_paths)
+└── <tessellation>/<ulid>.hxs  SSTables, including system tessellations such as users, _audit, _streams,
+                               _files_trash (trashed files) and _uploads (resumable uploads in progress)
 ```
 
 ### File formats
@@ -1485,7 +1711,26 @@ Versions 2 (unencrypted) and 3 (encrypted bodies, plaintext index) are still rea
 
 **Sealed file.** `HXE1 | key ID (8) | nonce (12) | AES-256-GCM(content)`, authenticated with the file name.
 
-## 21. Limits and configuration reference
+**Pack file** (file content, one series per vertex). An 8-byte header (`HXP1`, version 1, the vertex number), then records appended one after another; a new pack starts at 256 MB. A record is a 98-byte header and one shard:
+
+| Field | Size |
+| --- | --- |
+| Magic `SHRD` | 4 |
+| Chunk ID (keyed BLAKE3 of the plaintext) | 32 |
+| Shard number (0-3 data, 4-5 parity) | 1 |
+| Flags (bit 0: Zstandard) | 1 |
+| Key ID | 8 |
+| Plaintext length | 4 |
+| Ciphertext length | 4 |
+| Shard length | 4 |
+| BLAKE3 of the shard | 32 |
+| Check (first 8 bytes of BLAKE3 over the fields above) | 8 |
+
+The ciphertext is `nonce (12) | AES-256-GCM(chunk, maybe compressed)` with the chunk ID and flags as authenticated data, padded and split into four equal data shards, plus two Reed-Solomon parity shards. At startup the index is rebuilt from the record headers. A torn record at the end of a vertex's newest pack (a crash mid-write) is cut off; a bad record elsewhere ends that pack's scan, and its shards are rebuilt from the other vertices when read or scrubbed.
+
+**File manifest** (stored as a chunk). `HXM1 | count (4) | (chunk ID (32) | length (4))*`, the file's chunks in order.
+
+## 22. Limits and configuration reference
 
 ### Limits
 
@@ -1498,6 +1743,10 @@ Versions 2 (unencrypted) and 3 (encrypted bodies, plaintext index) are still rea
 | Documents per bulk request | 10,000 | fixed |
 | Operations per transaction | 1,000 | fixed |
 | Page size | 1,000 (default 100) | fixed |
+| File size | No limit beyond the disk budget | `files.max_file_mb` |
+| Upload and download time | No limit (exempt from the request time) | fixed |
+| Extraction per file | 64 MB read, 30 s | `files.extract_max_mb`, `files.extract_timeout_seconds` |
+| Upload sessions | Expire after 24 hours | fixed |
 | Disk space | 8 GB (the sample config uses 16 GB) | `storage.disk_mb` (live). Over it, writes that add data get 507 and deletes still work |
 | Memory for documents | 1 GB | `memory.ram_mb` |
 | Open connections | 1,024; 128 per client address | `limits.max_connections`, `max_connections_per_client` |
@@ -1547,6 +1796,16 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 | `storage.compaction_frequency` | 1800 | Seconds between compactions |
 | `storage.change_history_hours`, `change_history_mb` | 24, 512 | Change history kept on disk |
 | `storage.backup_path` | `backups` next to the data directory | Where backups are written; must be outside the data directory |
+| `files.max_file_mb` | 0 (no limit) | Largest file accepted |
+| `files.trash_days` | 30 | Days a deleted file stays in the trash |
+| `files.max_versions`, `version_days` | 10, 0 | Earlier versions kept per file, and for how long (0: until pushed out) |
+| `files.vertex_paths` | `[]` | Six directories for the vertices' shards (default `blobs/vertex-0` ... `vertex-5` in the data directory) |
+| `files.cache_mb` | 64 | Memory for recently read chunks |
+| `files.scrub_hours` | 24 | Hours between scrubs of every shard (0: never) |
+| `files.extract` | `true` | Read metadata from uploaded files |
+| `files.extract_max_mb`, `extract_timeout_seconds` | 64, 30 | What extraction may read and how long it may take, per file |
+| `files.text_kb` | 64 | Text kept per file for full-text search |
+| `files.thumbnails`, `thumbnail_px` | `true`, 320 | Image thumbnails and their size (32-2048) |
 | `memory.ram_mb` | 1024 | Memory budget for documents |
 | `memory.ttl_scan_frequency` | 600 | Seconds between expiry sweeps |
 | `memory.vertex_integrity_check_frequency` | 300 | Seconds between vertex checks |
@@ -1567,7 +1826,7 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 | `ui.path` | `../hexdb_admin/dist` | Built admin UI |
 | `ui.notice` | empty | A short notice the admin UI shows above every page and on the sign-in screen (also returned by `GET /health`, to everyone) |
 
-## 22. Operations
+## 23. Operations
 
 ```bash
 curl http://localhost:7700/health                       # public: {"status": "ok"}; signed-in users also get name, role, version
@@ -1575,7 +1834,8 @@ curl http://localhost:7700/status                       # documents, memory, dis
 curl "http://localhost:7700/status/history?minutes=60"  # a metrics sample every 15 s, kept for 6 hours (survives restarts)
 curl "http://localhost:7700/logs?level=warn&limit=100"  # recent log records; ?after= tails, ?q= searches, ?target= filters by module
 curl -X POST http://localhost:7700/flush                # write unflushed data to SSTables
-curl -X POST http://localhost:7700/compact              # merge SSTables now
+curl -X POST http://localhost:7700/compact              # merge SSTables and collect unreferenced file chunks now
+curl -X POST http://localhost:7700/scrub                # verify every file shard now and repair bad ones
 curl -X POST http://localhost:7700/backup -d '{"name": "nightly-1"}' -H "Content-Type: application/json"
 curl http://localhost:7700/backups                      # backups in storage.backup_path
 curl http://localhost:7700/plugins
@@ -1587,7 +1847,7 @@ curl http://localhost:7700/openapi.json                 # the REST API as OpenAP
 **Backups.** `POST /backup` (or `hexdb backup`, both needing the `maintenance` permission) writes a consistent copy of the data directory while the hex keeps serving reads and writes:
 
 1. The backup holds off flushes and compaction, fixes a sequence number, rotates the WAL so every write up to that number is in a closed segment, and captures the catalog.
-2. SSTables are immutable, so they're hard-linked into the backup when it's on the same file system (copied otherwise). The closed WAL segments, index snapshots and encrypted metadata are copied.
+2. SSTables are immutable, so they're hard-linked into the backup when it's on the same file system (copied otherwise). The closed WAL segments, index snapshots and encrypted metadata are copied. File content comes along: full pack files are hard-linked (or copied), each vertex's current pack is copied up to its length, and garbage collection waits meanwhile. A backup's file content is in `blobs/vertex-<n>/`; with `files.vertex_paths` set, point those paths at the backup's folders to restore it.
 3. The backup is built in `<name>.partial/` and renamed when complete, with a plaintext `backup.json` manifest (time, sequence number, file count; no names or data).
 
 Writes continue throughout, but flushes wait until the backup finishes; with hard links that's moments. `GET /backups` (or `hexdb backup --list`) lists backups. A backup name may contain letters, digits, `-` and `_`; without one, the name is the time and sequence number.
@@ -1600,7 +1860,7 @@ Hard-linked backups share disk blocks with the live data, so they don't protect 
 
 **Monitoring.** Use the `@sinks/otlp` plugin for metrics, a logs plugin for logs, and the audit trail for security events. `/status` is suitable for health checks that need more than `/health`.
 
-## 23. Drivers
+## 24. Drivers
 
 | Language | Folder | Install |
 | --- | --- | --- |
@@ -1615,7 +1875,8 @@ The Node.js, Python and .NET drivers each cover:
 - transactions and idempotency keys;
 - the change feed;
 - streams with consumer groups;
-- functions and GraphQL.
+- functions and GraphQL;
+- files: `files(name)` (`Files(name)` in .NET) uploads (resumable from 16 MB), downloads by path or ID (whole, streamed or a byte range), lists folders, searches, and handles versions, the trash, thumbnails and re-extraction.
 
 The Entity Framework Core provider and the ODBC driver, described below, build on them or on SQL. The three client drivers authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
 
@@ -1739,7 +2000,7 @@ See [drivers/odbc/README.md](drivers/odbc/README.md) for installation on each pl
 
 The driver is tested with pyodbc through unixODBC on Linux and through the Windows driver manager (in CI). Desktop tools such as Excel and Power BI haven't been tested with it yet. There's no JDBC driver.
 
-## 24. FAQ
+## 25. FAQ
 
 **How do I choose between `_update`, a transaction and a function?**
 - `_update` applies one merge patch to everything a filter matches.

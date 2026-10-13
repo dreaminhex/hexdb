@@ -72,13 +72,13 @@ impl ApiError {
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
     }
-    fn not_found(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", message)
     }
     pub(crate) fn forbidden(message: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, "forbidden", message)
     }
-    fn conflict(message: impl Into<String>) -> Self {
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
@@ -333,7 +333,7 @@ fn idempotency(
 }
 
 /// A JSON response, marked as replayed if it came from an idempotency record.
-fn respond(status: StatusCode, body: Value, replayed: bool) -> Response {
+pub(crate) fn respond(status: StatusCode, body: Value, replayed: bool) -> Response {
     let mut response = (status, Json(body)).into_response();
     if replayed {
         response
@@ -343,14 +343,14 @@ fn respond(status: StatusCode, body: Value, replayed: bool) -> Response {
     response
 }
 
-fn with_location(mut response: Response, location: &str) -> Response {
+pub(crate) fn with_location(mut response: Response, location: &str) -> Response {
     if let Ok(value) = HeaderValue::from_str(location) {
         response.headers_mut().insert(header::LOCATION, value);
     }
     response
 }
 
-fn no_content(replayed: bool) -> Response {
+pub(crate) fn no_content(replayed: bool) -> Response {
     let mut response = StatusCode::NO_CONTENT.into_response();
     if replayed {
         response
@@ -368,7 +368,7 @@ fn millis_to_rfc3339(millis: i64) -> Value {
 
 /// Reject names that aren't valid user tessellations. System tessellations
 /// (users, roles, idempotency records) have their own APIs.
-fn user_tessellation(engine: &HexDBEngine, tess: &str) -> Result<(), ApiError> {
+pub(crate) fn user_tessellation(engine: &HexDBEngine, tess: &str) -> Result<(), ApiError> {
     hexdb_core::validate_tessellation_name(tess).map_err(|e| ApiError::invalid(e.to_string()))?;
     if engine.is_system_tessellation(tess) {
         return Err(ApiError::forbidden(format!(
@@ -387,7 +387,7 @@ pub(crate) fn existing_tessellation(engine: &HexDBEngine, tess: &str) -> Result<
     Ok(())
 }
 
-fn docs_json(docs: &[Document]) -> Value {
+pub(crate) fn docs_json(docs: &[Document]) -> Value {
     Value::Array(docs.iter().map(Document::to_api_json).collect())
 }
 
@@ -540,6 +540,7 @@ pub async fn list_backups(State(engine): Engine, Auth(principal): Auth) -> ApiRe
 pub async fn compact(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     principal.require_action(Action::Maintenance)?;
     let stats = engine.compact().await?;
+    let chunks = engine.collect_file_garbage().await?;
     engine.audit(&principal.login, "maintenance.compact", &engine.name, json!({ "files_merged": stats.files_merged })).await;
     Ok(Json(json!({
         "tessellations": stats.tessellations,
@@ -547,8 +548,18 @@ pub async fn compact(State(engine): Engine, Auth(principal): Auth) -> ApiResult 
         "entries_kept": stats.entries_kept,
         "entries_dropped": stats.entries_dropped,
         "sstable_files_on_old_keys": engine.sst_files_needing_rewrite().await,
+        "chunks": chunks,
+        "chunks_on_old_keys": engine.blobs().stats().chunks_on_old_keys,
     }))
     .into_response())
+}
+
+/// Verify every shard in the chunk store now, and repair bad ones.
+pub async fn scrub(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_action(Action::Maintenance)?;
+    let report = engine.scrub_files().await?;
+    engine.audit(&principal.login, "maintenance.scrub", &engine.name, json!(report)).await;
+    Ok(Json(json!(report)).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -827,7 +838,7 @@ pub async fn list_tessellations(State(engine): Engine, Auth(principal): Auth) ->
             if principal.is_admin() {
                 return !name.starts_with('_');
             }
-            info.kind == "user" && principal.can(Permission::Read, name)
+            info.is_user_data() && principal.can(Permission::Read, name)
         })
         .map(|(name, info)| tessellation_json(name, info))
         .collect();
@@ -841,7 +852,8 @@ pub struct NewTessellation {
     pub kind: Option<String>,
 }
 
-/// Create a tessellation: `{"name": "...", "kind": "user"}`.
+/// Create a tessellation: `{"name": "...", "kind": "user"}` (documents, the
+/// default) or `"kind": "files"` (binary files).
 pub async fn create_tessellation(
     State(engine): Engine,
     Auth(principal): Auth,
@@ -849,11 +861,13 @@ pub async fn create_tessellation(
 ) -> ApiResult {
     let Json(input) = body?;
     principal.require(Permission::Write, &input.name)?;
-    if input.kind.as_deref().is_some_and(|k| k != "user") {
-        return Err(ApiError::invalid("Only \"user\" tessellations can be created through the API."));
+    let kind = input.kind.as_deref().unwrap_or("user");
+    if kind != "user" && kind != hexdb_core::files::FILES_KIND {
+        return Err(ApiError::invalid("A tessellation's kind is \"user\" (documents) or \"files\" (binary files)."));
     }
     user_tessellation(&engine, &input.name)?;
-    if !engine.create_tessellation(&input.name, "user")? {
+    let created = if kind == "user" { engine.create_tessellation(&input.name, "user")? } else { engine.create_files_tessellation(&input.name).await? };
+    if !created {
         return Err(ApiError::conflict(format!("Tessellation '{}' already exists.", input.name)));
     }
     let info = engine.tessellation_info(&input.name).ok_or_else(|| ApiError::not_found("Tessellation vanished."))?;
