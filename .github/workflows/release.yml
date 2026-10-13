@@ -96,7 +96,7 @@ jobs:
           cp "target/$TARGET/release/hexdb_api$exe" "target/$TARGET/release/hexdb$exe" "$name/"
           cp -r ui "$name/ui"
           cp packaging/hexdb.toml "$name/hexdb.toml"
-          cp README.md MANUAL.md LICENSE "$name/"
+          cp README.md MANUAL.md LICENSE THIRD-PARTY-NOTICES.md "$name/"
           # The ODBC driver library (and, on Windows, its installer script).
           mkdir -p "$name/odbc"
           case "$TARGET" in

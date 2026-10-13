@@ -29,7 +29,7 @@ $numeric = ($Version.TrimStart("v") -split "[-+]")[0]
 $stage = (Resolve-Path $StageDir).Path
 $Out = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path (Get-Location) $Out }))
 
-foreach ($f in "hexdb.exe", "hexdb_api.exe", "ui\index.html", "odbc\hexdb_odbc.dll", "README.md", "MANUAL.md", "LICENSE") {
+foreach ($f in "hexdb.exe", "hexdb_api.exe", "ui\index.html", "odbc\hexdb_odbc.dll", "README.md", "MANUAL.md", "LICENSE", "THIRD-PARTY-NOTICES.md") {
     if (-not (Test-Path (Join-Path $stage $f))) { throw "Missing $f in $stage" }
 }
 

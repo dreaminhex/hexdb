@@ -55,5 +55,6 @@ assets = [
     ["../packaging/systemd/hexdb.service", "lib/systemd/system/hexdb.service", "644"],
     ["target/release/libhexdb_odbc.so", "usr/lib/hexdb/libhexdb_odbc.so", "644"],
     ["../README.md", "usr/share/doc/hexdb/README.md", "644"],
+    ["../THIRD-PARTY-NOTICES.md", "usr/share/doc/hexdb/THIRD-PARTY-NOTICES.md", "644"],
     ["../MANUAL.md", "usr/share/doc/hexdb/MANUAL.md", "644"],
 ]

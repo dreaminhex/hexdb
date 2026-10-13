@@ -584,7 +584,7 @@ export function FunctionsPage() {
             )}
           </div>
           {functions.error && <p className="text-destructive text-sm">{functions.error.message}</p>}
-          <Card className="gap-0 overflow-hidden py-0">
+          <Card className="gap-0 overflow-x-auto py-0">
             <Table>
               <TableHeader className="bg-muted/60">
                 <TableRow>
@@ -597,7 +597,7 @@ export function FunctionsPage() {
               <TableBody>
                 {(functions.data ?? []).map((f) => (
                   <TableRow key={f.name}>
-                    <TableCell className="pl-6">
+                    <TableCell className="pl-6 whitespace-normal">
                       <div className="font-medium">{f.name}</div>
                       <div className="text-muted-foreground text-xs">{f.description}</div>
                     </TableCell>
@@ -605,9 +605,9 @@ export function FunctionsPage() {
                       <Badge variant="outline">{f.kind === "script" ? `${f.runtime} script` : f.kind}</Badge>
                       {f.tessellation && <span className="text-muted-foreground ml-1.5 text-xs">on {f.tessellation}</span>}
                     </TableCell>
-                    <TableCell className="text-muted-foreground font-mono text-xs">{f.params.map((p) => `${p.name}${p.required ? "" : "?"}: ${p.type}`).join(", ") || "—"}</TableCell>
-                    <TableCell className="pr-6">
-                      <div className="flex justify-end gap-1">
+                    <TableCell className="text-muted-foreground font-mono text-xs whitespace-normal break-words">{f.params.map((p) => `${p.name}${p.required ? "" : "?"}: ${p.type}`).join(", ") || "—"}</TableCell>
+                    <TableCell className="w-32 pr-6">
+                      <div className="flex shrink-0 justify-end gap-1">
                         <Button variant="ghost" size="icon" className="text-muted-foreground size-8" aria-label={`Run ${f.name}`} onClick={() => setRunning(f)}>
                           <IconPlayerPlay />
                         </Button>
@@ -644,7 +644,7 @@ export function FunctionsPage() {
                 <IconPlus /> New schedule
               </Button>
             </div>
-            <Card className="gap-0 overflow-hidden py-0">
+            <Card className="gap-0 overflow-x-auto py-0">
               <Table>
                 <TableHeader className="bg-muted/60">
                   <TableRow>
@@ -715,7 +715,7 @@ export function FunctionsPage() {
                 <IconPlus /> New trigger
               </Button>
             </div>
-            <Card className="gap-0 overflow-hidden py-0">
+            <Card className="gap-0 overflow-x-auto py-0">
               <Table>
                 <TableHeader className="bg-muted/60">
                   <TableRow>

@@ -43,6 +43,7 @@ RUN apt-get update \
 COPY --from=build /usr/local/bin/hexdb_api /usr/local/bin/hexdb /usr/local/bin/
 COPY --from=ui /src/hexdb_admin/dist /usr/share/hexdb/ui
 COPY docker/hexdb.toml /etc/hexdb/hexdb.toml
+COPY LICENSE THIRD-PARTY-NOTICES.md /usr/share/doc/hexdb/
 COPY plugins /usr/share/hexdb/plugins
 USER hexdb
 WORKDIR /var/lib/hexdb

@@ -155,7 +155,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - The lattice card: each hex's role, address, replication state and lag. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
 - A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#23-operations)).
 
-**Files.** Browse a files tessellation by folder, as a grid with thumbnails or as a list. Upload by dropping files or with the Upload button (large files resume after a dropped connection), search names, tags and metadata, and open a file to preview it (images, audio, video), read its metadata, edit its name, folder, tags and description, download or restore earlier versions, or move it to the trash. The Trash view restores or deletes trashed files.
+**Files.** Browse a files tessellation by folder, as a grid with thumbnails or as a list, or pick a type (audio, images, video, documents, archives) to list those files from every folder below. Upload by dropping files or with the Upload button (large files resume after a dropped connection), and search names, tags and metadata. When a search finds nothing, the page looks for close matches instead, so a typo such as "tatoo" still finds "tattooed". Videos without a server thumbnail show a frame the browser decodes itself. Open a file to preview it (images, audio, video), read its metadata, edit its name, folder, tags and description, download or restore earlier versions, or move it to the trash. The Trash view restores or deletes trashed files.
 
 **Queries.** A console for GraphQL and SQL, switched at the top left. GraphQL has schema-aware completion and validation, and variables; SQL has table and column completion, `?` or `$1` parameters (a JSON array), and runs read-only `SELECT`s (see [SQL](#10-sql)). Both have examples written against the tessellations the hex has, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
 
@@ -943,11 +943,13 @@ After each upload, new version or version restore, the Overseer reads the file i
 
 **Limits.** Extraction reads at most `files.extract_max_mb` (64) of a file and stops after `files.extract_timeout_seconds` (30). Each extractor runs on its own: one that fails or panics adds a line to `extract.errors` and the others still run. Strings are cut at 4,096 bytes, arrays and objects at 500 items; `meta.text` is at most `files.text_kb` (64) KB. A `meta` larger than 256 KB loses its largest tag families first (listed in `meta.dropped`). Binary data (embedded thumbnails, maker notes, cover art) is left out.
 
-Not read yet: PDF body text, GoPro GPMF telemetry, ICC profile descriptions (other than PNG `iCCP` names), video frames.
+Not read yet: PDF body text, GoPro GPMF telemetry, ICC profile descriptions (other than PNG `iCCP` names), frames of video that isn't H.264.
 
 ### Thumbnails
 
 Images that the server can decode (JPEG, PNG, GIF, WebP, BMP, TIFF) and Photoshop files (their embedded preview) get a thumbnail during extraction: at most `files.thumbnail_px` (320) on the longest side, never enlarged, with EXIF orientation applied; JPEG, or PNG when the image has transparency. Turn them off with `files.thumbnails = false`.
+
+So do H.264 videos in MP4, MOV, M4V and 3GP files, uploaded any way (API, CLI, drivers or the admin UI). HexDB reads the file's index, picks the keyframe about a third of the way in, past intros and fades from black, and decodes only that frame, within the same read budget and deadline as extraction; the video's rotation is applied. Fragmented MP4 (browser recordings, DASH) uses its first frame. The decoder is Cisco's OpenH264, built into the binary (see THIRD-PARTY-NOTICES.md); HEVC, VP9 and AV1 videos get no server thumbnail, and the admin UI shows a frame the browser decodes instead. Building with `cargo build --no-default-features` leaves the decoder out. Files read by an older version of the extractors, including videos uploaded before this, are read again when a hex becomes the Overseer.
 
 ### Versions
 

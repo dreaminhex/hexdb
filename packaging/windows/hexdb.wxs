@@ -76,6 +76,9 @@
       <Component>
         <File Source="$(StageDir)\LICENSE" KeyPath="yes" />
       </Component>
+      <Component>
+        <File Source="$(StageDir)\THIRD-PARTY-NOTICES.md" KeyPath="yes" />
+      </Component>
       <!-- Puts C:\Program Files\HexDB on the system PATH, and takes it off again on uninstall. -->
       <Component Id="SystemPath" Guid="7BE1EC4A-FCE5-4BB2-80A6-07AE8A765084">
         <RegistryValue Root="HKLM" Key="SOFTWARE\Dream In Hex\HexDB" Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />

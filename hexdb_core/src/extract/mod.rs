@@ -36,7 +36,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::time::{Duration, Instant};
 
 /// Bumped whenever extraction changes what it finds.
-pub const VERSION: u64 = 1;
+/// 2: thumbnails from H.264 video keyframes.
+pub const VERSION: u64 = 2;
 
 /// Longest string kept in a value.
 const MAX_STRING: usize = 4096;

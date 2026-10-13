@@ -35,6 +35,7 @@ lipo -create "$arm/odbc/libhexdb_odbc.dylib" "$intel/odbc/libhexdb_odbc.dylib" -
 cp -R "$arm/ui" "$root/ui"
 cp "$arm/README.md" "$arm/MANUAL.md" "$root/"
 [ -f "$arm/LICENSE" ] && cp "$arm/LICENSE" "$root/"
+[ -f "$arm/THIRD-PARTY-NOTICES.md" ] && cp "$arm/THIRD-PARTY-NOTICES.md" "$root/"
 cp "$here/uninstall.sh" "$root/uninstall.sh"
 chmod 755 "$root/uninstall.sh"
 lipo -info "$root/hexdb"
