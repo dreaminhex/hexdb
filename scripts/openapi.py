@@ -35,6 +35,10 @@ IDEM = param("Idempotency-Key", "header", "Makes the write safe to retry: the sa
 TTL = param("ttl", "query", "Expire the document after this many seconds.", {"type": "integer"})
 
 # (method, path, tag, summary, extra)
+BINARY = {"type": "string", "format": "binary"}
+FILE_PATH = {"name": "path", "in": "path", "required": True, "description": "folder/name, e.g. photos/2024/IMG_1.jpg", "schema": {"type": "string"}}
+FILE_CONTENT = {"200": {"description": "The content", "content": {"application/octet-stream": {"schema": BINARY}}}, "206": {"description": "A byte range"}, "304": {"description": "Not modified"}, "416": {"description": "Range not satisfiable"}}
+
 ROUTES = [
     # Authentication
     ("post", "/auth/login", "Authentication", "Sign in", {"security": [], "requestBody": body({"type": "object", "required": ["login", "password"], "properties": {"login": {"type": "string"}, "password": {"type": "string"}, "code": {"type": "string", "description": "One-time code with MFA"}, "return_token": {"type": "boolean"}}}), "responses": ok("Signed in; sets the session cookie")}),
@@ -96,6 +100,23 @@ ROUTES = [
     ("put", "/{tessellation}/{id}", "Documents", "Replace a document", {"parameters": [TESS, ID, TTL, IDEM], "requestBody": body(), "responses": ok()}),
     ("patch", "/{tessellation}/{id}", "Documents", "Merge fields into a document (null removes)", {"parameters": [TESS, ID, TTL, IDEM], "requestBody": body(), "responses": ok()}),
     ("delete", "/{tessellation}/{id}", "Documents", "Delete a document", {"parameters": [TESS, ID, IDEM], "responses": no_content()}),
+    ("put", "/{tessellation}/_files/{path}", "Files", "Upload a file to folder/name (raw body; a new version if the path has a file; X-HexDB-Unchanged when identical)", {"parameters": [TESS, FILE_PATH, param("modified", "query", "RFC 3339 or epoch ms"), param("created", "query", "RFC 3339 or epoch ms")], "requestBody": {"required": True, "content": {"application/octet-stream": {"schema": BINARY}}}, "responses": {**ok("Created", status="201"), **ok("A new version")}}),
+    ("get", "/{tessellation}/_files/{path}", "Files", "Download a file by folder/name (Range, If-None-Match, ?version=, ?download=true)", {"parameters": [TESS, FILE_PATH, param("version", "query", schema={"type": "integer"}), param("download", "query", schema={"type": "boolean"})], "responses": FILE_CONTENT}),
+    ("get", "/{tessellation}/{id}/content", "Files", "Download a file by ID (Range, If-None-Match, ?version=, ?download=true)", {"parameters": [TESS, ID, param("version", "query", schema={"type": "integer"}), param("download", "query", schema={"type": "boolean"})], "responses": FILE_CONTENT}),
+    ("get", "/{tessellation}/{id}/thumbnail", "Files", "A file's thumbnail (images and Photoshop files)", {"parameters": [TESS, ID], "responses": {"200": {"description": "JPEG or PNG", "content": {"image/jpeg": {"schema": BINARY}, "image/png": {"schema": BINARY}}}}}),
+    ("get", "/{tessellation}/{id}/versions", "Files", "A file's current and earlier versions", {"parameters": [TESS, ID], "responses": ok()}),
+    ("post", "/{tessellation}/{id}/versions/{version}/restore", "Files", "Make an earlier version current again (as a new version)", {"parameters": [TESS, ID, param("version", schema={"type": "integer"})], "responses": ok()}),
+    ("get", "/{tessellation}/_trash", "Files", "Deleted files", {"parameters": [TESS], "responses": ok("{\"documents\", \"total\"}")}),
+    ("delete", "/{tessellation}/_trash", "Files", "Empty the trash", {"parameters": [TESS], "responses": ok("{\"purged\"}")}),
+    ("post", "/{tessellation}/_trash/{id}/restore", "Files", "Restore a deleted file (?name=, ?path= when the original is taken)", {"parameters": [TESS, ID, param("name", "query"), param("path", "query")], "responses": ok()}),
+    ("delete", "/{tessellation}/_trash/{id}", "Files", "Delete a trashed file for good", {"parameters": [TESS, ID], "responses": no_content()}),
+    ("post", "/{tessellation}/_reextract", "Files", "Read metadata again (?id= for one file)", {"parameters": [TESS, param("id", "query")], "responses": ok("{\"queued\"}", status="202")}),
+    ("post", "/{tessellation}/_uploads", "Files", "Start a resumable upload", {"parameters": [TESS], "requestBody": body({"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}, "size": {"type": "integer"}, "content_type": {"type": "string"}, "modified": {"type": "string"}, "created": {"type": "string"}}}), "responses": ok("{\"id\", \"path\", \"offset\", \"size\", \"expires_at\"}", status="201")}),
+    ("get", "/{tessellation}/_uploads/{id}", "Files", "How far a resumable upload got", {"parameters": [TESS, ID], "responses": ok()}),
+    ("patch", "/{tessellation}/_uploads/{id}", "Files", "Send the next part (raw body) starting at ?offset= or Upload-Offset", {"parameters": [TESS, ID, param("offset", "query", schema={"type": "integer"}, required=False)], "requestBody": {"required": True, "content": {"application/octet-stream": {"schema": BINARY}}}, "responses": ok()}),
+    ("post", "/{tessellation}/_uploads/{id}/complete", "Files", "Finish a resumable upload", {"parameters": [TESS, ID], "responses": {**ok("Created", status="201"), **ok("A new version")}}),
+    ("delete", "/{tessellation}/_uploads/{id}", "Files", "Abandon a resumable upload", {"parameters": [TESS, ID], "responses": no_content()}),
+    ("post", "/scrub", "Maintenance", "Verify every file shard now and repair bad ones", {"responses": ok()}),
     ("post", "/transactions", "Documents", "Operations across tessellations, all or nothing", {"parameters": [IDEM], "requestBody": body(description="{\"operations\": [{\"op\": \"insert|replace|patch|delete|get|check\", \"tessellation\", \"id\", \"data\", \"if_version\"}]}"), "responses": ok()}),
     ("post", "/sql", "SQL", "Run a SQL SELECT (read-only; one page of rows, then pass next as cursor)", {"requestBody": body({"type": "object", "required": ["sql"], "properties": {"sql": {"type": "string"}, "params": {"type": "array", "description": "values for ? or $1, $2, ... placeholders"}, "page_size": {"type": "integer", "description": "rows per page, 1-10000 (default 1000)"}, "cursor": {"type": "string", "description": "next from the previous page"}}}), "responses": ok("{\"columns\": [{\"name\", \"type\"}], \"rows\": [[...]], \"next\", \"translated\"}")}),
     ("get", "/sql/tables", "SQL", "Tessellations the caller can read (a catalog for SQL clients)", {"responses": ok("{\"tables\": [{\"name\"}]}")}),
@@ -163,7 +184,7 @@ def build():
         "openapi": "3.1.0",
         "info": {
             "title": "HexDB REST API",
-            "version": "1.0.0",
+            "version": "1.5.0",
             "description": "HexDB's REST API. Authenticate with `Authorization: Bearer <API key or session token>` or the `hexdb_session` cookie (admin UI). Errors are `{\"error\": {\"code\", \"message\"}}`. See MANUAL.md for filters, aggregations, permissions and everything else.",
         },
         "servers": [{"url": "http://127.0.0.1:7700"}],
