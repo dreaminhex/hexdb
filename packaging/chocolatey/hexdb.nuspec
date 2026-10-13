@@ -17,14 +17,14 @@
     <iconUrl>https://cdn.jsdelivr.net/gh/dreaminhex/hexdb@v1.0.0/hexdb_admin/public/favicon-192.png</iconUrl>
     <licenseUrl>https://github.com/dreaminhex/hexdb/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <releaseNotes>https://github.com/dreaminhex/hexdb/releases</releaseNotes>
+    <releaseNotes>https://github.com/dreaminhex/hexdb/releases/tag/v1.0.0</releaseNotes>
     <tags>hexdb database document-database nosql graphql sql odbc admin foss</tags>
     <summary>Document database with REST, GraphQL, SQL, replication and an admin UI, in one program.</summary>
     <description>HexDB is a document database in a single program: JSON documents served over REST, GraphQL and read-only SQL, with an admin UI, AES-256 encryption at rest, replication with automatic failover, streams, functions and plugins.
 
 This package runs the HexDB installer (MSI), which puts the server (`hexdb_api`), the CLI (`hexdb`) and the admin UI in C:\Program Files\HexDB, adds them to the PATH and registers the 64-bit ODBC driver.
 
-After installing, open a new terminal and run `hexdb start`. The first start creates your configuration and encryption key in %LOCALAPPDATA%\HexDB. Then open http://127.0.0.1:7700/ui/ and sign in as hexdbadmin.</description>
+After installing, open a new terminal and run `hexdb start`. The first start creates your configuration and encryption key in %LOCALAPPDATA%\HexDB. Then open the admin UI in a browser (port 7700 on this machine, path /ui/) and sign in as hexdbadmin.</description>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

@@ -382,7 +382,7 @@ jobs:
           $sha = ((Select-String -Path SHA256SUMS -Pattern ' hexdb-windows-x64\.msi$').Line -split '\s+')[0]
           if (-not $sha) { throw "hexdb-windows-x64.msi is missing from SHA256SUMS" }
           $nuspec = "packaging/chocolatey/hexdb.nuspec"
-          (Get-Content $nuspec -Raw) -replace '<version>[^<]+</version>', "<version>$version</version>" -replace 'hexdb@v[^/]+/', "hexdb@$tag/" | Set-Content $nuspec -NoNewline
+          (Get-Content $nuspec -Raw) -replace '<version>[^<]+</version>', "<version>$version</version>" -replace 'hexdb@v[^/]+/', "hexdb@$tag/" -replace 'releases/tag/v[^<]+<', "releases/tag/$tag<" | Set-Content $nuspec -NoNewline
           $install = "packaging/chocolatey/tools/chocolateyinstall.ps1"
           (Get-Content $install -Raw) -replace 'download/v[^/]+/', "download/$tag/" -replace "checksum64     = '[^']*'", "checksum64     = '$sha'" | Set-Content $install -NoNewline
           choco pack $nuspec --outputdirectory out
