@@ -1124,7 +1124,7 @@ impl HexDBEngine {
         };
         let op = WalOp::Delete { tessellation: TRASH_TESSELLATION.into(), id: trashed.id };
         let items = vec![BatchItem { key: DocKey::new(TRASH_TESSELLATION, trashed.id), op, expected_seq: Some(seq) }];
-        Ok(files::as_internal(self.commit(items)).await?)
+        files::as_internal(self.commit(items)).await
     }
 
     /// Purge every file in `tess`'s trash that the caller may change. Returns how many.

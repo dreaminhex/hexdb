@@ -1,0 +1,7 @@
+# cargo audit configuration (CI runs `cargo audit --deny warnings`).
+[advisories]
+ignore = [
+    # paste: unmaintained, not vulnerable. A compile-time macro crate used only
+    # by lofty (audio tag extraction). Revisit when lofty drops it.
+    "RUSTSEC-2024-0436",
+]

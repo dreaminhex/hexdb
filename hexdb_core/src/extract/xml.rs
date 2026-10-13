@@ -4,6 +4,7 @@
 
 use super::{decode_text, Ctx};
 use quick_xml::events::Event;
+use quick_xml::XmlVersion;
 use serde_json::{json, Map, Value};
 
 /// Elements parsed at most per document (entity bombs and huge files stop here).
@@ -98,17 +99,24 @@ pub(crate) fn parse(bytes: &[u8]) -> Option<Node> {
                     stack.last_mut()?.children.push(done);
                 }
             }
-            Ok(Event::Text(t)) => {
-                if let Some(top) = stack.last_mut() {
-                    let piece = t.unescape().map(|c| c.into_owned()).unwrap_or_else(|_| String::from_utf8_lossy(&t).into_owned());
-                    if top.text.len() < 1 << 20 {
-                        top.text.push_str(&piece);
+            Ok(Event::Text(t)) => push_text(&mut stack, &t.xml_content(XmlVersion::Implicit1_0)),
+            Ok(Event::CData(t)) => push_text(&mut stack, &t.into_inner()),
+            // Entities arrive on their own: the five predefined ones and character references.
+            Ok(Event::GeneralRef(r)) => {
+                let resolved = if r.is_char_ref() {
+                    r.resolve_char_ref().ok().flatten().map(String::from)
+                } else {
+                    match &*r {
+                        "amp" => Some("&".into()),
+                        "lt" => Some("<".into()),
+                        "gt" => Some(">".into()),
+                        "quot" => Some("\"".into()),
+                        "apos" => Some("'".into()),
+                        _ => None,
                     }
-                }
-            }
-            Ok(Event::CData(t)) => {
-                if let Some(top) = stack.last_mut() {
-                    top.text.push_str(&String::from_utf8_lossy(&t));
+                };
+                if let Some(text) = resolved {
+                    push_text(&mut stack, &text);
                 }
             }
             Ok(Event::Eof) => break,
@@ -125,14 +133,22 @@ pub(crate) fn parse(bytes: &[u8]) -> Option<Node> {
     document.children.into_iter().next()
 }
 
+fn push_text(stack: &mut [Node], piece: &str) {
+    if let Some(top) = stack.last_mut() {
+        if top.text.len() < 1 << 20 {
+            top.text.push_str(piece);
+        }
+    }
+}
+
 fn element(e: &quick_xml::events::BytesStart) -> Node {
-    let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+    let name = e.name().as_ref().to_string();
     let attrs = e
         .attributes()
         .flatten()
         .map(|a| {
-            let key = String::from_utf8_lossy(a.key.as_ref()).into_owned();
-            let value = a.unescape_value().map(|v| v.into_owned()).unwrap_or_else(|_| String::from_utf8_lossy(&a.value).into_owned());
+            let key = a.key.as_ref().to_string();
+            let value = a.normalized_value(XmlVersion::Implicit1_0).map(|v| v.into_owned()).unwrap_or_else(|_| a.value.to_string());
             (key, value)
         })
         .collect();

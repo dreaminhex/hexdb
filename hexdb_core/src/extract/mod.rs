@@ -64,6 +64,9 @@ impl Default for Limits {
 /// Random access to a file's bytes.
 pub trait ByteSource: Send {
     fn len(&self) -> u64;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// Read up to `buf.len()` bytes at `offset`.
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
 }
@@ -366,7 +369,9 @@ fn fit(meta: &mut Map<String, Value>) {
         match largest {
             Some(key) => {
                 meta.remove(&key);
-                meta.entry("dropped".to_string()).or_insert_with(|| json!([])).as_array_mut().map(|a| a.push(json!(key)));
+                if let Some(list) = meta.entry("dropped".to_string()).or_insert_with(|| json!([])).as_array_mut() {
+                    list.push(json!(key));
+                }
             }
             None => {
                 if let Some(Value::String(text)) = meta.get_mut("text") {

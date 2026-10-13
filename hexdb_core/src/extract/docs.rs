@@ -326,36 +326,73 @@ pub(crate) fn font(ctx: &mut Ctx) -> anyhow::Result<bool> {
         return Ok(false);
     }
     let bytes = ctx.source.all(32 * 1024 * 1024)?;
-    let face = ttf_parser::Face::parse(&bytes, 0)?;
-    let mut raw = Map::new();
-    for name in face.names() {
-        let label = match name.name_id {
-            ttf_parser::name_id::COPYRIGHT_NOTICE => "copyright",
-            ttf_parser::name_id::FAMILY => "family",
-            ttf_parser::name_id::SUBFAMILY => "subfamily",
-            ttf_parser::name_id::FULL_NAME => "full_name",
-            ttf_parser::name_id::VERSION => "version",
-            ttf_parser::name_id::POST_SCRIPT_NAME => "postscript_name",
-            ttf_parser::name_id::MANUFACTURER => "manufacturer",
-            ttf_parser::name_id::DESIGNER => "designer",
-            ttf_parser::name_id::DESCRIPTION => "description",
-            ttf_parser::name_id::LICENSE => "license",
-            _ => continue,
-        };
-        if raw.contains_key(label) || !name.is_unicode() {
-            continue;
-        }
-        if let Some(text) = name.to_string() {
-            raw.insert(label.into(), json!(text));
-        }
-    }
-    raw.insert("glyphs".into(), json!(face.number_of_glyphs()));
+    let raw = font_names(&bytes).ok_or_else(|| anyhow::anyhow!("not a readable TrueType/OpenType font"))?;
     let t = |k: &str| raw.get(k).and_then(Value::as_str).map(String::from);
     ctx.norm_str("title", t("full_name").or_else(|| t("family")).as_deref());
     ctx.norm_str("author", t("designer").or_else(|| t("manufacturer")).as_deref());
     ctx.norm_str("copyright", t("copyright").as_deref());
     ctx.raw("font", raw);
     Ok(true)
+}
+
+/// The `name` table (and glyph count) of a TrueType/OpenType font, or the
+/// first font of a collection. Unicode (platform 0, or Windows 3/1 and 3/10)
+/// records only, in UTF-16BE.
+fn font_names(bytes: &[u8]) -> Option<Map<String, Value>> {
+    let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let u32_at = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let font = if bytes.starts_with(b"ttcf") { u32_at(12)? as usize } else { 0 };
+    let tables = u16_at(font + 4)? as usize;
+    let mut name_table = None;
+    let mut glyphs = None;
+    for i in 0..tables.min(512) {
+        let record = font + 12 + i * 16;
+        let tag = bytes.get(record..record + 4)?;
+        let offset = u32_at(record + 8)? as usize;
+        match tag {
+            b"name" => name_table = Some(offset),
+            b"maxp" => glyphs = u16_at(offset + 4),
+            _ => {}
+        }
+    }
+    let table = name_table?;
+    let count = u16_at(table + 2)? as usize;
+    let strings = table + u16_at(table + 4)? as usize;
+    let mut raw = Map::new();
+    for i in 0..count.min(4096) {
+        let record = table + 6 + i * 12;
+        let (platform, encoding) = (u16_at(record)?, u16_at(record + 2)?);
+        let (name_id, length, offset) = (u16_at(record + 6)?, u16_at(record + 8)? as usize, u16_at(record + 10)? as usize);
+        if !(platform == 0 || (platform == 3 && (encoding == 1 || encoding == 10))) {
+            continue;
+        }
+        let label = match name_id {
+            0 => "copyright",
+            1 => "family",
+            2 => "subfamily",
+            4 => "full_name",
+            5 => "version",
+            6 => "postscript_name",
+            8 => "manufacturer",
+            9 => "designer",
+            10 => "description",
+            13 => "license",
+            _ => continue,
+        };
+        if raw.contains_key(label) {
+            continue;
+        }
+        let Some(data) = bytes.get(strings + offset..strings + offset + length) else { continue };
+        let units: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let text = String::from_utf16_lossy(&units).trim().to_string();
+        if !text.is_empty() {
+            raw.insert(label.into(), json!(text));
+        }
+    }
+    if let Some(n) = glyphs {
+        raw.insert("glyphs".into(), json!(n));
+    }
+    Some(raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +608,37 @@ pub(crate) fn c2pa(ctx: &mut Ctx) -> anyhow::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_name_tables() {
+        // Offset table with two tables (maxp, name), then the tables.
+        let name_text: Vec<u8> = "Hexa Sans".encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        let mut name = Vec::new();
+        name.extend(0u16.to_be_bytes()); // format
+        name.extend(1u16.to_be_bytes()); // count
+        name.extend(18u16.to_be_bytes()); // string storage offset
+        for v in [3u16, 1, 0x409, 4, name_text.len() as u16, 0] {
+            name.extend(v.to_be_bytes());
+        }
+        name.extend(&name_text);
+        let maxp = [0u8, 0, 0x50, 0, 0x01, 0x2C]; // version 0.5, 300 glyphs
+        let mut font = vec![0, 1, 0, 0];
+        font.extend(2u16.to_be_bytes());
+        font.extend([0u8; 6]);
+        let (maxp_at, name_at) = (12 + 32, 12 + 32 + maxp.len());
+        for (tag, at, len) in [(b"maxp", maxp_at, maxp.len()), (b"name", name_at, name.len())] {
+            font.extend(tag);
+            font.extend([0u8; 4]);
+            font.extend((at as u32).to_be_bytes());
+            font.extend((len as u32).to_be_bytes());
+        }
+        font.extend(maxp);
+        font.extend(&name);
+        let raw = font_names(&font).unwrap();
+        assert_eq!(raw["full_name"], "Hexa Sans");
+        assert_eq!(raw["glyphs"], 300);
+        assert!(font_names(b"OTTO").is_none());
+    }
 
     #[test]
     fn pdf_dates() {

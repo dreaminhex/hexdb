@@ -41,9 +41,8 @@ sha2 = "0.10"
 lofty = "0.25.4"
 nom-exif = "3.8.0"
 imagesize = "0.15.0"
-quick-xml = "0.37"
+quick-xml = "0.42"
 lopdf = { version = "0.45.0", default-features = false }
-ttf-parser = "0.25.1"
 tar = { version = "0.4.46", default-features = false }
 flate2 = "1.1.10"
 zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }

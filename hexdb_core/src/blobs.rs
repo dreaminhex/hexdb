@@ -561,12 +561,12 @@ impl BlobStore {
         let len = entry.shard_len();
         let mut shards: Vec<Option<Vec<u8>>> = vec![None; VERTEX_COUNT];
         let mut bad = Vec::new();
-        for v in 0..VERTEX_COUNT {
+        for (v, slot) in shards.iter_mut().enumerate() {
             if v >= DATA_SHARDS && bad.is_empty() {
                 break;
             }
             match self.read_shard(v, entry.shards[v], id, entry, len) {
-                Ok(shard) => shards[v] = Some(shard),
+                Ok(shard) => *slot = Some(shard),
                 Err(_) => bad.push(v),
             }
         }
