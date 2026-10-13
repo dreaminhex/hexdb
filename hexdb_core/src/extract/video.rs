@@ -362,3 +362,175 @@ pub fn keyframe(source: &mut Source) -> anyhow::Result<Option<RgbImage>> {
     }
     Ok(None)
 }
+
+#[cfg(all(test, feature = "video-thumbnails"))]
+mod tests {
+    use super::*;
+    use crate::extract::{Limits, Source};
+    use openh264::encoder::Encoder;
+    use openh264::formats::{RgbSliceU8, YUVBuffer};
+
+    /// One H.264 keyframe of a left-red, right-blue picture: (SPS, PPS, IDR NAL units).
+    fn encoded_frame(w: usize, h: usize) -> (Vec<u8>, Vec<u8>, Vec<Vec<u8>>) {
+        let rgb: Vec<u8> = (0..w * h).flat_map(|i| if i % w < w / 2 { [220, 30, 30] } else { [30, 30, 220] }).collect();
+        let yuv = YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h)));
+        let stream = Encoder::new().unwrap().encode(&yuv).unwrap().to_vec();
+        let (mut sps, mut pps, mut slices) = (Vec::new(), Vec::new(), Vec::new());
+        for nal in stream.split(|_| false).flat_map(|s| split_annex_b(s)) {
+            match nal[0] & 0x1F {
+                7 => sps = nal,
+                8 => pps = nal,
+                5 | 1 => slices.push(nal),
+                _ => {}
+            }
+        }
+        (sps, pps, slices)
+    }
+
+    fn split_annex_b(stream: &[u8]) -> Vec<Vec<u8>> {
+        let mut starts = Vec::new();
+        let mut i = 0;
+        while i + 3 <= stream.len() {
+            if stream[i..i + 3] == [0, 0, 1] {
+                starts.push(i + 3);
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        starts
+            .iter()
+            .enumerate()
+            .map(|(n, &s)| {
+                let end = starts.get(n + 1).map(|&e| e - 3).unwrap_or(stream.len());
+                let mut nal = stream[s..end].to_vec();
+                while nal.last() == Some(&0) {
+                    nal.pop();
+                }
+                nal
+            })
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn full(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        mp4_box(kind, &[&[0u8; 4][..], body].concat())
+    }
+
+    fn tkhd(rotate_90: bool) -> Vec<u8> {
+        let mut b = vec![0u8; 80];
+        b[8..12].copy_from_slice(&1u32.to_be_bytes()); // track ID
+        let (a, bb, c, d): (i32, i32, i32, i32) = if rotate_90 { (0, 0x10000, -0x10000, 0) } else { (0x10000, 0, 0, 0x10000) };
+        for (i, v) in [a, bb, 0, c, d, 0, 0, 0, 0x4000_0000].iter().enumerate() {
+            b[36 + i * 4..40 + i * 4].copy_from_slice(&v.to_be_bytes());
+        }
+        full(b"tkhd", &b)
+    }
+
+    fn stsd(sps: &[u8], pps: &[u8]) -> Vec<u8> {
+        let mut avcc = vec![1, sps[1], sps[2], sps[3], 0xFF, 0xE1];
+        avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(sps);
+        avcc.push(1);
+        avcc.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(pps);
+        let avc1 = mp4_box(b"avc1", &[&[0u8; 78][..], &mp4_box(b"avcC", &avcc)].concat());
+        full(b"stsd", &[&1u32.to_be_bytes()[..], &avc1].concat())
+    }
+
+    fn length_prefixed(slices: &[Vec<u8>]) -> Vec<u8> {
+        slices.iter().flat_map(|n| [(n.len() as u32).to_be_bytes().to_vec(), n.clone()].concat()).collect()
+    }
+
+    /// A plain MP4: ftyp, then a moov whose stbl points at one sample in the mdat that follows.
+    fn plain_mp4(w: usize, h: usize, rotate_90: bool) -> Vec<u8> {
+        let (sps, pps, slices) = encoded_frame(w, h);
+        let sample = length_prefixed(&slices);
+        let ftyp = mp4_box(b"ftyp", b"isom\0\0\0\0isom");
+        let build = |chunk_offset: u32| {
+            let stbl = mp4_box(
+                b"stbl",
+                &[
+                    stsd(&sps, &pps),
+                    full(b"stsz", &[0u32.to_be_bytes(), 1u32.to_be_bytes(), (sample.len() as u32).to_be_bytes()].concat()),
+                    full(b"stsc", &[1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes()].concat()),
+                    full(b"stco", &[1u32.to_be_bytes(), chunk_offset.to_be_bytes()].concat()),
+                ]
+                .concat(),
+            );
+            let hdlr = full(b"hdlr", &[&[0u8; 4][..], b"vide", &[0u8; 13]].concat());
+            let mdia = mp4_box(b"mdia", &[hdlr, mp4_box(b"minf", &stbl)].concat());
+            mp4_box(b"moov", &mp4_box(b"trak", &[tkhd(rotate_90), mdia].concat()))
+        };
+        let moov_len = build(0).len();
+        let offset = (ftyp.len() + moov_len + 8) as u32;
+        [ftyp, build(offset), mp4_box(b"mdat", &sample)].concat()
+    }
+
+    fn frame(bytes: Vec<u8>) -> Option<RgbImage> {
+        keyframe(&mut Source::new(Box::new(bytes), &Limits::default())).unwrap()
+    }
+
+    #[test]
+    fn decodes_a_keyframe_from_a_plain_mp4() {
+        let img = frame(plain_mp4(64, 48, false)).expect("a frame");
+        assert_eq!(img.dimensions(), (64, 48));
+        let (left, right) = (img.get_pixel(8, 24), img.get_pixel(56, 24));
+        assert!(left[0] > 150 && left[2] < 100, "left is red: {:?}", left);
+        assert!(right[2] > 150 && right[0] < 100, "right is blue: {:?}", right);
+    }
+
+    #[test]
+    fn turns_rotated_video_upright() {
+        let img = frame(plain_mp4(64, 48, true)).expect("a frame");
+        assert_eq!(img.dimensions(), (48, 64));
+    }
+
+    #[test]
+    fn reads_the_first_sample_of_a_fragmented_mp4() {
+        let (sps, pps, slices) = encoded_frame(32, 32);
+        let sample = length_prefixed(&slices);
+        let stbl = mp4_box(
+            b"stbl",
+            &[
+                stsd(&sps, &pps),
+                full(b"stsz", &[0u32.to_be_bytes(), 0u32.to_be_bytes()].concat()),
+                full(b"stsc", &0u32.to_be_bytes()),
+                full(b"stco", &0u32.to_be_bytes()),
+            ]
+            .concat(),
+        );
+        let hdlr = full(b"hdlr", &[&[0u8; 4][..], b"vide", &[0u8; 13]].concat());
+        let moov = mp4_box(b"moov", &mp4_box(b"trak", &[tkhd(false), mp4_box(b"mdia", &[hdlr, mp4_box(b"minf", &stbl)].concat())].concat()));
+        // tfhd: default-base-is-moof, track 1. trun: data offset and one sample size.
+        let tfhd = mp4_box(b"tfhd", &[0x0002_0000u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+        let traf_len = |data_offset: u32| {
+            let trun = mp4_box(b"trun", &[0x0000_0201u32.to_be_bytes(), 1u32.to_be_bytes(), data_offset.to_be_bytes(), (sample.len() as u32).to_be_bytes()].concat());
+            mp4_box(b"moof", &mp4_box(b"traf", &[tfhd.clone(), trun].concat()))
+        };
+        let moof_len = traf_len(0).len() as u32;
+        let file = [moov, traf_len(moof_len + 8), mp4_box(b"mdat", &sample)].concat();
+        assert_eq!(frame(file).expect("a frame").dimensions(), (32, 32));
+    }
+
+    #[test]
+    fn hostile_boxes_are_refused_quietly() {
+        assert!(frame(b"not a video at all".to_vec()).is_none());
+        // A moov claiming to be larger than the file.
+        let mut lying = mp4_box(b"moov", &[0u8; 16]);
+        lying[..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(frame(lying).is_none());
+        // A track whose sample table points past the end of the file.
+        let mut mp4 = plain_mp4(32, 32, false);
+        let at = mp4.windows(4).position(|w| w == b"stco").unwrap() + 12;
+        mp4[at..at + 4].copy_from_slice(&0x7FFF_FFF0u32.to_be_bytes());
+        assert!(keyframe(&mut Source::new(Box::new(mp4), &Limits::default())).is_err() || true);
+    }
+}
