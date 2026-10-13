@@ -320,7 +320,7 @@ pub(crate) fn truncate(s: &str, max: usize) -> &str {
 pub(crate) fn decode_text(bytes: &[u8]) -> String {
     let text = if bytes.starts_with(&[0xFE, 0xFF]) || bytes.starts_with(&[0xFF, 0xFE]) {
         let be = bytes[0] == 0xFE;
-        let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| if be { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_le_bytes([c[0], c[1]]) }).collect();
+        let units: Vec<u16> = bytes[2..].as_chunks::<2>().0.iter().map(|c| if be { u16::from_be_bytes(*c) } else { u16::from_le_bytes(*c) }).collect();
         String::from_utf16_lossy(&units)
     } else {
         match std::str::from_utf8(bytes) {

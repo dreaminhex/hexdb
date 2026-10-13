@@ -445,7 +445,7 @@ pub(crate) fn psd(ctx: &mut Ctx) -> anyhow::Result<bool> {
                     // Version info: version (4), has real merged data (1), writer name (Unicode string).
                     let count = u32::from_be_bytes(data[5..9].try_into().unwrap()) as usize;
                     if let Some(units) = data.get(9..9 + count * 2) {
-                        let writer: Vec<u16> = units.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+                        let writer: Vec<u16> = units.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
                         let writer = String::from_utf16_lossy(&writer);
                         raw.insert("writer".into(), json!(writer));
                         ctx.norm("creator_tool", json!(writer));

@@ -243,7 +243,9 @@ impl Manifest {
             bail!("file manifest has the wrong length");
         }
         let chunks = bytes[8..]
-            .chunks_exact(36)
+            .as_chunks::<36>()
+            .0
+            .iter()
             .map(|c| (c[..32].try_into().unwrap(), u32::from_be_bytes(c[32..].try_into().unwrap())))
             .collect();
         Ok(Manifest { chunks })

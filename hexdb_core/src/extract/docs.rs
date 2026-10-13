@@ -383,7 +383,7 @@ fn font_names(bytes: &[u8]) -> Option<Map<String, Value>> {
             continue;
         }
         let Some(data) = bytes.get(strings + offset..strings + offset + length) else { continue };
-        let units: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = data.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect();
         let text = String::from_utf16_lossy(&units).trim().to_string();
         if !text.is_empty() {
             raw.insert(label.into(), json!(text));
