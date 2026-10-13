@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react"
-import { IconEye, IconEyeOff, IconFileDescription, IconHexagon, IconKey, IconLoader2, IconLock, IconPlus, IconTrash } from "@tabler/icons-react"
+import { IconEye, IconEyeOff, IconFileDescription, IconFolders, IconHexagon, IconKey, IconLoader2, IconLock, IconPlus, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -159,10 +159,14 @@ export function TessellationsPage() {
 
   const metrics = new Map((status.data?.metrics.tessellations ?? []).map((t) => [t.name, t]))
   const all = [...(tessellations.data ?? [])].sort((a, b) => a.name.localeCompare(b.name))
-  const userRows = all.filter((t) => t.kind === "user")
-  const systemRows = all.filter((t) => t.kind !== "user")
+  // Files tessellations are collections like any other, so they sit with the user ones.
+  const isUser = (t: { kind?: string }) => t.kind === "user" || t.kind === "files"
+  const userRows = all.filter(isUser)
+  const systemRows = all.filter((t) => !isUser(t))
   const rows = showSystem ? [...userRows, ...systemRows] : userRows
   const documentsRoute = (name: string) => `/documents?tessellation=${encodeURIComponent(name)}`
+  const filesRoute = (name: string) => `/files?tessellation=${encodeURIComponent(name)}`
+  const openRoute = (t: { name: string; kind?: string }) => (t.kind === "files" ? filesRoute(t.name) : documentsRoute(t.name))
   const toggleSystem = () => {
     setShowSystem((v) => {
       try {
@@ -224,8 +228,9 @@ export function TessellationsPage() {
           <TableBody>
             {rows.map((t, i) => {
               const m = metrics.get(t.name)
-              const user = t.kind === "user"
-              const firstSystem = !user && (i === 0 || rows[i - 1].kind === "user")
+              const user = isUser(t)
+              const files = t.kind === "files"
+              const firstSystem = !user && (i === 0 || isUser(rows[i - 1]))
               return [
                 firstSystem && (
                   <TableRow key="__system" className="bg-muted/40 hover:bg-muted/40">
@@ -243,7 +248,7 @@ export function TessellationsPage() {
                 <TableRow
                   key={t.name}
                   className={cn(user ? "cursor-pointer" : "bg-muted/15 text-muted-foreground hover:bg-muted/25")}
-                  onClick={user ? () => navigate(documentsRoute(t.name)) : undefined}
+                  onClick={user ? () => navigate(openRoute(t)) : undefined}
                 >
                   <TableCell className="pl-6 font-medium">
                     <span className="flex items-center gap-2.5">
@@ -254,14 +259,14 @@ export function TessellationsPage() {
                         )}
                         aria-hidden
                       >
-                        {user ? <IconHexagon className="size-4" /> : <IconLock className="size-3.5" />}
+                        {files ? <IconFolders className="size-4" /> : user ? <IconHexagon className="size-4" /> : <IconLock className="size-3.5" />}
                       </span>
                       {user ? (
                         <a
-                          href={href(documentsRoute(t.name))}
+                          href={href(openRoute(t))}
                           onClick={(e) => {
                             e.stopPropagation()
-                            linkHandler(documentsRoute(t.name))(e)
+                            linkHandler(openRoute(t))(e)
                           }}
                           className="hover:underline"
                         >
@@ -276,6 +281,11 @@ export function TessellationsPage() {
                       {!user && (
                         <Badge variant="secondary" className="ml-1 h-4.5 px-1.5 text-[10px] tracking-wide uppercase">
                           system
+                        </Badge>
+                      )}
+                      {files && (
+                        <Badge variant="outline" className="border-primary/30 text-primary ml-1 h-4.5 px-1.5 text-[10px] tracking-wide uppercase">
+                          files
                         </Badge>
                       )}
                     </span>
@@ -307,6 +317,7 @@ export function TessellationsPage() {
                   <TableCell className="pr-6">
                     {user && can(me, "manage", t.name) && (
                       <div className="flex justify-end gap-1">
+                        {!files && (
                         <Button
                           variant="ghost"
                           size="icon"
@@ -320,6 +331,7 @@ export function TessellationsPage() {
                         >
                           <IconFileDescription />
                         </Button>
+                        )}
                         <Button
                           variant="ghost"
                           size="icon"

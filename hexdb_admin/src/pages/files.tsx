@@ -8,6 +8,7 @@ import {
   IconFileZip,
   IconFolder,
   IconFolderPlus,
+  IconFolders,
   IconHistory,
   IconLayoutGrid,
   IconList,
@@ -39,6 +40,7 @@ import { api, ApiError, errorMessage, type FileDoc, filePathUrl, fileUrl, upload
 import { can, useAuth } from "@/lib/auth"
 import { formatBytes, formatTimestamp } from "@/lib/format"
 import { setQueryParam, useQueryParam } from "@/lib/router"
+import { cn } from "@/lib/utils"
 
 /** Fields the listing needs (meta.text can be large). */
 const LIST_FIELDS = ["name", "path", "size", "content_type", "modified_at", "version", "thumbnail", "extract.status", "meta.title", "meta.artist", "meta.duration_ms", "meta.width", "meta.height"]
@@ -59,6 +61,226 @@ function formatDuration(ms: number): string {
   const m = Math.floor((total % 3600) / 60)
   const s = total % 60
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`
+}
+
+// ---------------------------------------------------------------------------
+// Kinds of file
+// ---------------------------------------------------------------------------
+
+type Filter = Record<string, unknown>
+
+const startsWith = (prefix: string): Filter => ({ content_type: { $startsWith: prefix } })
+
+/** The type picker: each kind is a filter on content_type. */
+const KINDS: { value: string; label: string; filter?: Filter }[] = [
+  { value: "all", label: "All types" },
+  { value: "audio", label: "Audio", filter: startsWith("audio/") },
+  { value: "image", label: "Images", filter: startsWith("image/") },
+  { value: "video", label: "Video", filter: startsWith("video/") },
+  {
+    value: "document",
+    label: "Documents",
+    filter: {
+      $or: [
+        { content_type: "application/pdf" },
+        startsWith("text/"),
+        startsWith("application/vnd.openxmlformats"),
+        startsWith("application/vnd.oasis"),
+        startsWith("application/vnd.ms-"),
+        { content_type: "application/msword" },
+        { content_type: "application/epub+zip" },
+        { content_type: "application/rtf" },
+      ],
+    },
+  },
+  {
+    value: "archive",
+    label: "Archives",
+    filter: {
+      $or: [
+        { content_type: "application/zip" },
+        { content_type: "application/x-tar" },
+        { content_type: "application/gzip" },
+        { content_type: "application/x-7z-compressed" },
+        { content_type: "application/vnd.rar" },
+        { content_type: "application/java-archive" },
+      ],
+    },
+  },
+]
+
+// ---------------------------------------------------------------------------
+// Close matches, for when a search has a typo
+// ---------------------------------------------------------------------------
+
+/** Fields the close-match search reads; small, so a few thousand files are cheap to fetch. */
+const MATCH_FIELDS = [...LIST_FIELDS, "tags", "description", "meta.album", "meta.keywords"]
+
+const words = (text: string) =>
+  text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+
+/** Edit distance with transpositions (optimal string alignment), stopping early past `max`. */
+function distance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1
+  const rows: number[][] = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)])
+  for (let j = 1; j <= b.length; j++) rows[0][j] = j
+  for (let i = 1; i <= a.length; i++) {
+    let best = Infinity
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      let v = Math.min(rows[i - 1][j] + 1, rows[i][j - 1] + 1, rows[i - 1][j - 1] + cost)
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) v = Math.min(v, rows[i - 2][j - 2] + 1)
+      rows[i][j] = v
+      best = Math.min(best, v)
+    }
+    if (best > max) return max + 1
+  }
+  return rows[a.length][b.length]
+}
+
+/**
+ * How well one typed word matches a word in a file: 0 for a prefix match, the number of
+ * typos otherwise (also against the word's start, so "tatoo" finds "tattooed"), or null.
+ */
+function wordMatch(typed: string, word: string): number | null {
+  if (word.startsWith(typed)) return 0
+  const max = typed.length < 4 ? 0 : typed.length < 6 ? 1 : 2
+  if (max === 0) return null
+  let best = max + 1
+  for (const len of [typed.length - 1, typed.length, typed.length + 1, word.length]) {
+    if (len < 1 || len > word.length) continue
+    best = Math.min(best, distance(typed, word.slice(0, len), max))
+  }
+  return best <= max ? best : null
+}
+
+/** Files where every typed word is close to some word of the file, best first. */
+function closeMatches(query: string, files: FileDoc[]): FileDoc[] {
+  const typed = words(query)
+  if (typed.length === 0) return []
+  const scored: [FileDoc, number][] = []
+  for (const file of files) {
+    const meta = (file.meta ?? {}) as Record<string, unknown>
+    const text = [file.name, file.path, ...(file.tags ?? []), file.description, meta.title, meta.artist, meta.album, ...(Array.isArray(meta.keywords) ? meta.keywords : [])]
+      .filter((v) => typeof v === "string")
+      .join(" ")
+    const vocabulary = [...new Set(words(text))]
+    let total = 0
+    let ok = true
+    for (const t of typed) {
+      let best: number | null = null
+      for (const w of vocabulary) {
+        const m = wordMatch(t, w)
+        if (m !== null && (best === null || m < best)) best = m
+        if (best === 0) break
+      }
+      if (best === null) {
+        ok = false
+        break
+      }
+      total += best
+    }
+    if (ok) scored.push([file, total])
+  }
+  return scored.sort((a, b) => a[1] - b[1] || a[0].name.localeCompare(b[0].name)).map(([f]) => f)
+}
+
+// ---------------------------------------------------------------------------
+// Video frames
+// ---------------------------------------------------------------------------
+
+/** Frames already grabbed this session, so a card keeps its picture while you browse. */
+const frames = new Map<string, string>()
+/** At most two videos load at once; the rest wait their turn. */
+let decoding = 0
+const waiting: (() => void)[] = []
+const take = () => (decoding < 2 ? (decoding++, Promise.resolve()) : new Promise<void>((r) => waiting.push(() => (decoding++, r()))))
+const release = () => {
+  decoding--
+  waiting.shift()?.()
+}
+
+/**
+ * A frame from somewhere in the middle of a video, decoded by the browser: the server
+ * doesn't read video frames. Only starts once the card is near the screen, and Range
+ * requests mean only the bytes around that moment are fetched.
+ */
+function grabFrame(src: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video")
+    const done = () => {
+      video.removeAttribute("src")
+      video.load()
+    }
+    video.muted = true
+    video.playsInline = true
+    video.preload = "metadata"
+    video.onerror = () => {
+      done()
+      reject(new Error("can't decode"))
+    }
+    video.onloadedmetadata = () => {
+      const d = video.duration
+      video.currentTime = Number.isFinite(d) && d > 0 ? d * (0.15 + Math.random() * 0.7) : 1
+    }
+    video.onseeked = () => {
+      try {
+        const canvas = document.createElement("canvas")
+        canvas.width = 480
+        canvas.height = video.videoWidth ? Math.round((480 * video.videoHeight) / video.videoWidth) : 270
+        canvas.getContext("2d")?.drawImage(video, 0, 0, canvas.width, canvas.height)
+        resolve(canvas.toDataURL("image/jpeg", 0.8))
+      } catch (e) {
+        reject(e)
+      } finally {
+        done()
+      }
+    }
+    video.src = src
+  })
+}
+
+function VideoFrame({ id, src, className, iconClassName }: { id: string; src: string; className?: string; iconClassName?: string }) {
+  const [image, setImage] = useState<string | null>(frames.get(id) ?? null)
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (image || !box.current) return
+    let cancelled = false
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return
+        observer.disconnect()
+        void take().then(async () => {
+          try {
+            if (cancelled) return
+            const url = await grabFrame(src)
+            frames.set(id, url)
+            if (!cancelled) setImage(url)
+          } catch {
+            // Not decodable here (an unusual codec): the icon stays.
+          } finally {
+            release()
+          }
+        })
+      },
+      { rootMargin: "200px" },
+    )
+    observer.observe(box.current)
+    return () => {
+      cancelled = true
+      observer.disconnect()
+    }
+  }, [id, src, image])
+  return (
+    <div ref={box} className={cn("flex items-center justify-center", className)}>
+      {image ? <img src={image} alt="" className="h-full w-full object-cover" /> : <IconMovie className={cn("text-muted-foreground", iconClassName)} stroke={1.2} />}
+    </div>
+  )
 }
 
 /** "/a/b/" -> ["a", "b"]. */
@@ -206,7 +428,7 @@ function Preview({ tess, file }: { tess: string; file: FileDoc }) {
   }
   if (type === "image/svg+xml") return <img src={url} alt={file.name} className="bg-muted max-h-80 w-full rounded object-contain" />
   if (type.startsWith("audio/")) return <audio controls preload="metadata" src={url} className="w-full" />
-  if (type.startsWith("video/")) return <video controls preload="metadata" src={url} className="bg-muted max-h-80 w-full rounded" />
+  if (type.startsWith("video/")) return <video controls preload="metadata" src={url} poster={frames.get(file.id)} className="bg-muted max-h-80 w-full rounded" />
   if (file.thumbnail) return <img src={fileUrl(tess, file.id, "thumbnail")} alt={file.name} className="bg-muted max-h-80 w-full rounded object-contain" />
   const Icon = iconFor(type)
   return (
@@ -673,6 +895,8 @@ export function FilesPage() {
   const chosen = useQueryParam("tessellation")
   const tess = chosen && filesTess.some((t) => t.name === chosen) ? chosen : filesTess[0]?.name
   const folder = useQueryParam("path") || "/"
+  const kindParam = useQueryParam("type")
+  const kind = KINDS.find((k) => k.value === kindParam) ?? KINDS[0]
   const [view, setView] = useState<"grid" | "list">("grid")
   const [mode, setMode] = useState<"files" | "trash">("files")
   const [searchText, setSearchText] = useState("")
@@ -692,10 +916,25 @@ export function FilesPage() {
   const listing = usePoll(
     async () => {
       if (!tess) return undefined
-      const filter = query ? { $text: query } : { path: folder }
+      // A type or a search lists matching files from this folder down; otherwise, this folder.
+      const flat = !!query || !!kind.filter
+      const scope: Filter = flat ? (folder === "/" ? {} : { path: { $startsWith: folder } }) : { path: folder }
+      const filter: Filter = { ...scope, ...(kind.filter ?? {}), ...(query ? { $text: query } : {}) }
       const files = await api.files(tess, { filter, sort: query ? undefined : "name", limit: 500, fields: LIST_FIELDS, total: true })
+      // Nothing for the exact words: look for close ones, so a typo still finds the file.
+      if (query && files.documents.length === 0) {
+        // Pages of 1,000 (the server's largest), up to 5,000 files.
+        const candidates: FileDoc[] = []
+        for (let offset = 0; offset < 5000; offset += 1000) {
+          const page = await api.files(tess, { filter: { ...scope, ...(kind.filter ?? {}) }, limit: 1000, offset, fields: MATCH_FIELDS, total: false })
+          candidates.push(...page.documents)
+          if (page.documents.length < 1000) break
+        }
+        const close = closeMatches(query, candidates)
+        return { files: close, total: close.length, folders: [] as [string, number][], close: true }
+      }
       let folders: [string, number][] = []
-      if (!query) {
+      if (!flat) {
         const groups = await api.aggregate(tess, { filter: { path: { $startsWith: folder } }, group_by: ["path"], aggregates: { files: { $count: "*" } }, limit: 10000 })
         const depth = segments(folder).length
         const counts = new Map<string, number>()
@@ -705,11 +944,13 @@ export function FilesPage() {
         }
         folders = [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]))
       }
-      return { files: files.documents, total: files.total ?? files.documents.length, folders }
+      return { files: files.documents, total: files.total ?? files.documents.length, folders, close: false }
     },
     0,
-    [tess, folder, query],
+    [tess, folder, query, kind.value],
   )
+  const trashCount = usePoll(async () => (tess ? (await api.trash(tess)).documents.length : 0), 30_000, [tess, mode])
+  const flat = !!query || !!kind.filter
 
   const go = (path: string) => {
     setQueryParam("path", path === "/" ? null : path)
@@ -749,6 +990,8 @@ export function FilesPage() {
           <div className="bg-muted flex aspect-[4/3] items-center justify-center overflow-hidden">
             {file.thumbnail && tess ? (
               <img src={fileUrl(tess, file.id, "thumbnail")} alt="" loading="lazy" className="h-full w-full object-cover" />
+            ) : file.content_type.startsWith("video/") && tess ? (
+              <VideoFrame id={file.id} src={fileUrl(tess, file.id)} className="h-full w-full" iconClassName="size-10" />
             ) : (
               <Icon className="text-muted-foreground size-10" stroke={1.2} />
             )}
@@ -760,13 +1003,13 @@ export function FilesPage() {
             <div className="text-muted-foreground truncate text-xs">
               {typeof meta.duration_ms === "number" ? `${formatDuration(meta.duration_ms)} · ` : ""}
               {formatBytes(file.size)}
-              {query ? ` · ${file.path}` : ""}
+              {flat ? ` · ${file.path}` : ""}
             </div>
           </div>
         </button>
       )
     },
-    [tess, query],
+    [tess, flat],
   )
 
   if (tessellations.loading && !tessellations.data) {
@@ -802,14 +1045,33 @@ export function FilesPage() {
       }}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={tess} onValueChange={(v) => { setQueryParam("path", null); setQueryParam("tessellation", v) }}>
-          <SelectTrigger className="w-44">
+        {filesTess.length > 1 ? (
+          <Select value={tess} onValueChange={(v) => { setQueryParam("path", null); setQueryParam("tessellation", v) }}>
+            <SelectTrigger className="w-44" aria-label="Files tessellation">
+              <IconFolders className="text-muted-foreground size-4" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {filesTess.map((t) => (
+                <SelectItem key={t.name} value={t.name}>
+                  {t.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <span className="inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium" title="Files tessellation">
+            <IconFolders className="text-muted-foreground size-4" /> {tess}
+          </span>
+        )}
+        <Select value={kind.value} onValueChange={(v) => setQueryParam("type", v === "all" ? null : v)} disabled={mode === "trash"}>
+          <SelectTrigger className="w-36" aria-label="Type of file">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {filesTess.map((t) => (
-              <SelectItem key={t.name} value={t.name}>
-                {t.name}
+            {KINDS.map((k) => (
+              <SelectItem key={k.value} value={k.value}>
+                {k.label}
               </SelectItem>
             ))}
           </SelectContent>
@@ -818,10 +1080,40 @@ export function FilesPage() {
           <IconSearch className="text-muted-foreground absolute top-2.5 left-2.5 size-4" />
           <Input value={searchText} onChange={(e) => setSearchText(e.target.value)} placeholder="Search names, tags and metadata" className="pl-8" disabled={mode === "trash"} />
         </div>
-        <ToggleGroup type="single" value={mode} onValueChange={(v) => v && setMode(v as "files" | "trash")} variant="outline" size="sm">
-          <ToggleGroupItem value="files">Files</ToggleGroupItem>
-          <ToggleGroupItem value="trash">Trash</ToggleGroupItem>
-        </ToggleGroup>
+        <div className="bg-muted inline-flex rounded-lg p-1" role="tablist" aria-label="Files or trash">
+          {(
+            [
+              ["files", "Files", IconFolders],
+              ["trash", "Trash", IconTrash],
+            ] as const
+          ).map(([value, label, Icon]) => {
+            const active = mode === value
+            const count = value === "trash" ? trashCount.data ?? 0 : 0
+            return (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setMode(value)}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 text-sm font-medium transition-colors",
+                  active
+                    ? value === "trash"
+                      ? "bg-destructive text-white shadow-sm"
+                      : "bg-primary text-primary-foreground shadow-sm"
+                    : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
+                )}
+              >
+                <Icon className="size-4" />
+                {label}
+                {count > 0 && (
+                  <span className={cn("rounded-full px-1.5 text-xs tabular-nums", active ? "bg-white/20" : "bg-background text-foreground")}>{count}</span>
+                )}
+              </button>
+            )
+          })}
+        </div>
         {mode === "files" && (
           <ToggleGroup type="single" value={view} onValueChange={(v) => v && setView(v as "grid" | "list")} variant="outline" size="sm">
             <ToggleGroupItem value="grid" aria-label="Grid">
@@ -849,9 +1141,22 @@ export function FilesPage() {
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-1 text-sm">
-            {query ? (
+            {flat ? (
               <span className="text-muted-foreground">
-                {listing.data ? `${listing.data.total} result(s) for “${query}”` : "Searching…"}
+                {!listing.data
+                  ? "Searching…"
+                  : listing.data.close
+                    ? listing.data.total
+                      ? `No exact matches for “${query}”. Showing ${listing.data.total} close match${listing.data.total === 1 ? "" : "es"}.`
+                      : `Nothing matches “${query}”.`
+                    : query
+                      ? `${listing.data.total} result(s) for “${query}”${kind.filter ? ` in ${kind.label.toLowerCase()}` : ""}`
+                      : `${listing.data.total} ${kind.label.toLowerCase()} file(s)${folder === "/" ? "" : ` in ${folder}`}`}
+                {kind.filter && (
+                  <button type="button" className="ml-2 underline underline-offset-4 hover:text-foreground" onClick={() => setQueryParam("type", null)}>
+                    Show all types
+                  </button>
+                )}
               </span>
             ) : (
               <>
@@ -890,7 +1195,7 @@ export function FilesPage() {
           {empty && (
             <div className="text-muted-foreground flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-12 text-sm">
               <IconUpload className="size-8" stroke={1.2} />
-              {query ? "Nothing matches." : writable ? "This folder is empty. Drop files here or use Upload." : "This folder is empty."}
+              {flat ? "Nothing matches." : writable ? "This folder is empty. Drop files here or use Upload." : "This folder is empty."}
             </div>
           )}
 
@@ -913,7 +1218,7 @@ export function FilesPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>Name</TableHead>
-                    {query && <TableHead>Folder</TableHead>}
+                    {flat && <TableHead>Folder</TableHead>}
                     <TableHead>Type</TableHead>
                     <TableHead>Size</TableHead>
                     <TableHead>Modified</TableHead>
@@ -925,7 +1230,7 @@ export function FilesPage() {
                       <TableCell className="flex items-center gap-2 font-medium">
                         <IconFolder className="text-muted-foreground size-4" /> {name}
                       </TableCell>
-                      {query && <TableCell />}
+                      {flat && <TableCell />}
                       <TableCell className="text-muted-foreground">Folder</TableCell>
                       <TableCell className="text-muted-foreground">{count} file(s)</TableCell>
                       <TableCell />
@@ -938,7 +1243,7 @@ export function FilesPage() {
                         <TableCell className="flex items-center gap-2 font-medium">
                           <Icon className="text-muted-foreground size-4" /> {file.name}
                         </TableCell>
-                        {query && <TableCell className="text-muted-foreground">{file.path}</TableCell>}
+                        {flat && <TableCell className="text-muted-foreground">{file.path}</TableCell>}
                         <TableCell className="text-muted-foreground">{file.content_type}</TableCell>
                         <TableCell>{formatBytes(file.size)}</TableCell>
                         <TableCell>{formatTimestamp(file.modified_at)}</TableCell>

@@ -1,8 +1,9 @@
 // Thumbnails for files tessellations: a small JPEG (or PNG when the image has
 // transparency) that fits in a square, made from images the `image` crate
-// decodes (JPEG, PNG, GIF, WebP, BMP, TIFF) and from the preview Photoshop
-// embeds in PSD files. EXIF orientation is applied. Decoding has memory and
-// size limits, and runs inside the same bounded `Source` as extraction.
+// decodes (JPEG, PNG, GIF, WebP, BMP, TIFF), from the preview Photoshop
+// embeds in PSD files, and from a keyframe of H.264 MP4 and QuickTime video
+// (see `video`). EXIF orientation and video rotation are applied. Decoding has
+// memory and size limits, and runs inside the same bounded `Source` as extraction.
 
 use super::Source;
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, ImageDecoder, ImageFormat, ImageReader};
@@ -22,11 +23,17 @@ const DECODED: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp",
 
 /// Whether a thumbnail can be made for this type.
 pub fn supported(content_type: &str) -> bool {
-    DECODED.contains(&content_type) || content_type == "image/vnd.adobe.photoshop"
+    DECODED.contains(&content_type) || content_type == "image/vnd.adobe.photoshop" || (cfg!(feature = "video-thumbnails") && super::video::TYPES.contains(&content_type))
 }
 
 /// A thumbnail at most `max_px` on each side, or `None` for types without one.
 pub fn make(source: &mut Source, content_type: &str, max_px: u32) -> anyhow::Result<Option<Thumbnail>> {
+    if super::video::TYPES.contains(&content_type) {
+        return match super::video::keyframe(source)? {
+            Some(frame) => encode(DynamicImage::ImageRgb8(frame), max_px).map(Some),
+            None => Ok(None),
+        };
+    }
     let encoded = if DECODED.contains(&content_type) {
         source.all(MAX_SOURCE)?
     } else if content_type == "image/vnd.adobe.photoshop" {
@@ -47,6 +54,11 @@ pub fn make(source: &mut Source, content_type: &str, max_px: u32) -> anyhow::Res
     let orientation = decoder.orientation()?;
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
+    encode(image, max_px).map(Some)
+}
+
+/// Shrink to fit `max_px` (never enlarged) and encode: PNG to keep transparency, JPEG otherwise.
+fn encode(image: DynamicImage, max_px: u32) -> anyhow::Result<Thumbnail> {
     let small = if image.width() <= max_px && image.height() <= max_px { image } else { image.thumbnail(max_px, max_px) };
     let mut bytes = Vec::new();
     let content_type = if small.color().has_alpha() {
@@ -56,7 +68,7 @@ pub fn make(source: &mut Source, content_type: &str, max_px: u32) -> anyhow::Res
         small.to_rgb8().write_with_encoder(JpegEncoder::new_with_quality(&mut bytes, 80))?;
         "image/jpeg"
     };
-    Ok(Some(Thumbnail { bytes, width: small.width(), height: small.height(), content_type }))
+    Ok(Thumbnail { bytes, width: small.width(), height: small.height(), content_type })
 }
 
 /// The JPEG preview Photoshop stores in image resource 0x040C (0x0409 in old files).

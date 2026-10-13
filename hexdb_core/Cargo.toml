@@ -47,6 +47,13 @@ tar = { version = "0.4.46", default-features = false }
 flate2 = "1.1.10"
 zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+# Video thumbnails: Cisco's OpenH264, built from source into the binary (BSD-2). Only an H.264
+# keyframe is ever decoded. Optional so a build can leave H.264 out (--no-default-features).
+openh264 = { version = "0.9.8", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[features]
+default = ["video-thumbnails"]
+video-thumbnails = ["dep:openh264"]
