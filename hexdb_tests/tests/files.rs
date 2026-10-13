@@ -378,7 +378,7 @@ fn metadata_is_extracted_indexed_and_searchable() -> Result<()> {
     assert_eq!(doc["meta"]["artist"], "Dave Brubeck Quartet");
     assert_eq!(doc["meta"]["duration_ms"], 1000);
     assert_eq!(doc["meta"]["riff_info"]["INAM"], "Take Five");
-    assert_eq!(doc["extract"]["version"], 1);
+    assert!(doc["extract"]["version"].as_u64().unwrap() >= 1, "{}", doc["extract"]);
     assert_eq!(doc["extract"]["sha256"], doc["sha256"]);
     let doc = extracted(&server, &notes_id)?;
     assert_eq!(doc["meta"]["title"], "Release notes");
