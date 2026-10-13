@@ -376,7 +376,7 @@ mod tests {
         let yuv = YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h)));
         let stream = Encoder::new().unwrap().encode(&yuv).unwrap().to_vec();
         let (mut sps, mut pps, mut slices) = (Vec::new(), Vec::new(), Vec::new());
-        for nal in stream.split(|_| false).flat_map(|s| split_annex_b(s)) {
+        for nal in split_annex_b(&stream) {
             match nal[0] & 0x1F {
                 7 => sps = nal,
                 8 => pps = nal,
@@ -427,8 +427,8 @@ mod tests {
     fn tkhd(rotate_90: bool) -> Vec<u8> {
         let mut b = vec![0u8; 80];
         b[8..12].copy_from_slice(&1u32.to_be_bytes()); // track ID
-        let (a, bb, c, d): (i32, i32, i32, i32) = if rotate_90 { (0, 0x10000, -0x10000, 0) } else { (0x10000, 0, 0, 0x10000) };
-        for (i, v) in [a, bb, 0, c, d, 0, 0, 0, 0x4000_0000].iter().enumerate() {
+        let (a, b2, c, d): (i32, i32, i32, i32) = if rotate_90 { (0, 0x10000, -0x10000, 0) } else { (0x10000, 0, 0, 0x10000) };
+        for (i, v) in [a, b2, 0, c, d, 0, 0, 0, 0x4000_0000].iter().enumerate() {
             b[36 + i * 4..40 + i * 4].copy_from_slice(&v.to_be_bytes());
         }
         full(b"tkhd", &b)
@@ -531,6 +531,6 @@ mod tests {
         let mut mp4 = plain_mp4(32, 32, false);
         let at = mp4.windows(4).position(|w| w == b"stco").unwrap() + 12;
         mp4[at..at + 4].copy_from_slice(&0x7FFF_FFF0u32.to_be_bytes());
-        assert!(keyframe(&mut Source::new(Box::new(mp4), &Limits::default())).is_err() || true);
+        assert!(keyframe(&mut Source::new(Box::new(mp4), &Limits::default())).ok().flatten().is_none());
     }
 }
