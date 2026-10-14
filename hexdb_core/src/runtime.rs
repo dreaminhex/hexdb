@@ -163,7 +163,12 @@ pub fn local_base_url_with(endpoint: &str, tls: bool) -> String {
         endpoint.to_string()
     };
 
-    format!("{}://{}", if tls { "https" } else { "http" }, endpoint)
+    // A bare public host name (no port), e.g. hexdb.example.com, is an HTTPS site.
+    let public_name = !endpoint.contains(':')
+        && endpoint != "localhost"
+        && endpoint.parse::<std::net::Ipv4Addr>().is_err()
+        && endpoint.contains('.');
+    format!("{}://{}", if tls || public_name { "https" } else { "http" }, endpoint)
 }
 
 #[cfg(test)]
@@ -191,6 +196,15 @@ mod tests {
         RuntimeInfo::remove(&dir);
         assert!(RuntimeInfo::read(&dir).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn public_host_names_use_https() {
+        assert_eq!(local_base_url_with("hexdb-play-1.fly.dev", false), "https://hexdb-play-1.fly.dev");
+        assert_eq!(local_base_url_with("hexdb.example.com:8080", false), "http://hexdb.example.com:8080");
+        assert_eq!(local_base_url_with("localhost", false), "http://localhost");
+        assert_eq!(local_base_url_with("10.0.0.5", false), "http://10.0.0.5");
+        assert_eq!(local_base_url_with("http://plain.example.com", false), "http://plain.example.com");
     }
 
     #[test]
