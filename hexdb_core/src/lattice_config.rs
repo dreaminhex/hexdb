@@ -184,6 +184,9 @@ pub fn validate(def: &ConfigDef, value: &Value) -> Result<Value> {
                 if !ok {
                     return Err(invalid(format!("{} must be an http:// or https:// URL, or empty.", key)));
                 }
+                if is_metadata_host(s) {
+                    return Err(invalid(format!("{} can't point at a cloud metadata service.", key)));
+                }
             }
             Ok(Value::String(s.trim_end_matches('/').to_string()))
         }
@@ -214,6 +217,19 @@ pub fn validate(def: &ConfigDef, value: &Value) -> Result<Value> {
             Ok(Value::Array(choices.iter().filter(|c| seen.contains(*c)).map(|c| Value::String(c.to_string())).collect()))
         }
     }
+}
+
+/// True for the well-known cloud instance metadata endpoints (they hand out
+/// credentials, and a provider's error text could echo them back). A name that
+/// merely resolves to one isn't caught; this is defense in depth for settings
+/// only administrators can change.
+fn is_metadata_host(url: &str) -> bool {
+    let after = url.split("://").nth(1).unwrap_or_default();
+    let authority = after.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let host = if host.starts_with('[') { host.split(']').next().unwrap_or_default().trim_start_matches('[') } else { host.split(':').next().unwrap_or_default() };
+    let host = host.to_ascii_lowercase();
+    matches!(host.as_str(), "169.254.169.254" | "169.254.170.2" | "fd00:ec2::254" | "metadata.google.internal" | "metadata.goog" | "metadata" | "100.100.100.200")
 }
 
 fn validate_hex_name(name: &str) -> Result<()> {
@@ -940,6 +956,10 @@ mod tests {
         let url = definition("ai.base_url").unwrap();
         assert_eq!(validate(url, &json!("https://example.com/v1/")).unwrap(), json!("https://example.com/v1"));
         assert!(validate(url, &json!("file:///etc/passwd")).is_err());
+        for metadata in ["http://169.254.169.254/latest/meta-data", "http://metadata.google.internal/computeMetadata/v1", "http://user@169.254.169.254:80/", "http://[fd00:ec2::254]/"] {
+            assert!(validate(url, &json!(metadata)).is_err(), "{}", metadata);
+        }
+        assert!(validate(url, &json!("http://localhost:11434/v1")).is_ok(), "a local model server is fine");
         let budget = definition("ai.monthly_token_budget").unwrap();
         assert!(validate(budget, &json!(-1)).is_err());
         let key = definition("ai.api_key").unwrap();
@@ -974,6 +994,58 @@ mod tests {
         let diff = version_diff(&old, &new);
         assert_eq!(diff["changed"], json!(["ai.provider", "hex:Tosa/file_storage.backend"]));
         assert_eq!(diff["removed"], json!(["ai.model"]));
+    }
+
+    /// Store a version document directly, as a damaged or newer copy would arrive.
+    async fn store_raw(engine: &HexDBEngine, version: u64, body: &str, sha256: &str) {
+        let doc = json!({ "version": version, "time": 1, "author": "x", "sha256": sha256, "body": body });
+        engine.put_system_document(CONFIG_TESSELLATION, doc_id(version), doc, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_hex_rejects_versions_that_dont_check_out_and_keeps_the_last_good_one() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        let change = |changes: Value| ConfigChange { changes: changes.as_object().unwrap().clone(), ..Default::default() };
+        engine.update_lattice_config("admin", change(json!({ "ai.provider": "anthropic", "ai.api_key": "sk-1" }))).await.unwrap();
+        let good = engine.lattice_config();
+        assert_eq!((good.version, good.state()), (1, "applied"));
+        assert_eq!(engine.config_secret("ai.api_key").unwrap().expose(), "sk-1");
+
+        // Version 2 arrives damaged: its body doesn't match its checksum.
+        let mut next = engine.head().await.unwrap();
+        next.version = 2;
+        next.parent = 1;
+        next.lattice.settings.insert("ai.provider".into(), json!("openai"));
+        let (body, sha) = next.canonical();
+        store_raw(&engine, 2, &body.replace("openai", "evilco"), &sha).await;
+        engine.refresh_lattice_config().await;
+        let now = engine.lattice_config();
+        assert_eq!((now.version, now.state(), now.rejected.as_ref().map(|r| r.0)), (1, "rejected", Some(2)));
+        assert!(now.rejected.as_ref().unwrap().1.contains("checksum"), "{:?}", now.rejected);
+        assert_eq!(engine.config_value("ai.provider"), json!("anthropic"), "the last good version stays in effect");
+        // New changes are refused until it's rolled back.
+        assert!(engine.update_lattice_config("admin", change(json!({ "ai.model": "m" }))).await.is_err());
+
+        // Version 3 checks out but names a setting this build doesn't know (a newer HexDB wrote it).
+        let mut newer = next.clone();
+        newer.version = 3;
+        newer.parent = 2;
+        newer.lattice.settings.insert("ai.future_feature".into(), json!(true));
+        let (body, sha) = newer.canonical();
+        store_raw(&engine, 3, &body, &sha).await;
+        engine.refresh_lattice_config().await;
+        let now = engine.lattice_config();
+        assert_eq!((now.version, now.rejected.as_ref().map(|r| r.0)), (1, Some(3)));
+        assert!(now.rejected.as_ref().unwrap().1.contains("unknown setting"), "{:?}", now.rejected);
+
+        // Rolling back to version 1 recovers.
+        let restored = engine.rollback_lattice_config("admin", 1, None).await.unwrap();
+        assert_eq!(restored.version, 4);
+        let now = engine.lattice_config();
+        assert_eq!((now.version, now.state()), (4, "applied"));
+        assert_eq!(engine.config_secret("ai.api_key").unwrap().expose(), "sk-1");
+        engine.shutdown().await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

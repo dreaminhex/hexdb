@@ -410,8 +410,9 @@ async fn exchange(token_url: &str, form: &[(&str, &str)]) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("the provider returned no refresh token (for Google, remove HexDB's access at myaccount.google.com/permissions and connect again)"))
 }
 
-/// Wait for one request to http://127.0.0.1:<port>/?code=... and return the code.
-fn wait_for_code(listener: std::net::TcpListener) -> Result<String> {
+/// Wait for the sign-in to come back to http://127.0.0.1:<port>/?code=...&state=...
+/// with our `state`, and return the code. Requests without it are answered and ignored.
+fn wait_for_code(listener: std::net::TcpListener, state: &str) -> Result<String> {
     use std::io::Read as _;
     for stream in listener.incoming() {
         let mut stream = stream?;
@@ -421,6 +422,11 @@ fn wait_for_code(listener: std::net::TcpListener) -> Result<String> {
         let target = request.split_whitespace().nth(1).unwrap_or_default().to_string();
         let query = target.split_once('?').map(|(_, q)| q).unwrap_or_default();
         let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{}=", name))).map(|v| v.replace('+', " "));
+        if param("state").as_deref() != Some(state) {
+            let page = "This doesn't belong to the sign-in HexDB started.";
+            let _ = write!(stream, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", page.len(), page);
+            continue;
+        }
         let (status, page) = match (param("code"), param("error")) {
             (Some(_), _) => ("200 OK", "HexDB received the sign-in. You can close this tab and go back to the terminal."),
             (None, Some(_)) => ("400 Bad Request", "The sign-in was cancelled or refused. Go back to the terminal."),
@@ -468,14 +474,17 @@ pub async fn connect(target: &Target<'_>, provider: &str, hex: Option<&str>) -> 
             let client_secret = read_secret("Client secret", false)?;
             let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
             let redirect = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
+            // A random state ties the answer to this sign-in.
+            let state = hexdb_core::random_bytes(16).iter().map(|b| format!("{:02x}", b)).collect::<String>();
             let url = format!(
-                "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
+                "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}",
                 encode(&client_id),
                 encode(&redirect),
-                encode("https://www.googleapis.com/auth/drive")
+                encode("https://www.googleapis.com/auth/drive"),
+                state
             );
             println!("\nOpen this address in a browser on this computer and allow access:\n\n{}\n", url);
-            let code = tokio::task::spawn_blocking(move || wait_for_code(listener)).await??;
+            let code = tokio::task::spawn_blocking(move || wait_for_code(listener, &state)).await??;
             let refresh = exchange(
                 "https://oauth2.googleapis.com/token",
                 &[("grant_type", "authorization_code"), ("code", &code), ("client_id", &client_id), ("client_secret", &client_secret), ("redirect_uri", &redirect)],

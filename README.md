@@ -7,8 +7,10 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 ## Features
 
 - **Documents and queries.** Insert, replace, patch, delete, bulk writes, upserts, update-by-filter, TTLs and idempotency keys. A JSON filter language with sorting and paging, shared by REST and GraphQL, and SQL `SELECT` (with `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` and paging) translated onto it.
-- **Files.** Photos, audio, video, Photoshop and Illustrator files, office documents, archives: any file, deduplicated, compressed when that helps, encrypted, and split across the six vertices so any two can be lost. Metadata (EXIF and GPS, IPTC, XMP, ID3, Vorbis comments, MP4 and QuickTime, Matroska, Broadcast WAV and iXML, PDF, Office, EPUB, ...) is extracted into each file's document, so files are found with the same filters, full-text search, SQL and GraphQL as documents. Thumbnails for images and H.264 video, versions with rollback, a trash, resumable uploads, ranged downloads for media players, `hexdb put`/`get`, and a Files page in the admin UI.
-- **Indexes and search.** Field, composite and unique indexes. Full-text indexes with configurable analyzers (stemming, n-grams, autocomplete). A query advisor that suggests indexes from observed queries, with an optional second opinion from Claude.
+- **Files.** Photos, audio, video, Photoshop and Illustrator files, office documents, archives: any file, deduplicated, compressed when that helps, encrypted, and split across the six vertices so any two can be lost. Metadata (EXIF and GPS, IPTC, XMP, ID3, Vorbis comments, MP4 and QuickTime, Matroska, Broadcast WAV and iXML, PDF, Office, EPUB, ...) is extracted into each file's document, so files are found with the same filters, full-text search, SQL and GraphQL as documents. Thumbnails for images and H.264 video, versions with rollback, a trash, resumable uploads, ranged downloads for media players, `hexdb put`/`get`, and a Files page in the admin UI with an audio player. Content can stay on the hexes' disks or go to Amazon S3 (or any S3-compatible service), Azure Blob Storage, Google Drive or Dropbox, encrypted before it leaves.
+- **Indexes and search.** Field, composite and unique indexes. Full-text indexes with configurable analyzers (stemming, n-grams, autocomplete). A query advisor that suggests indexes from observed queries, with an optional second opinion from an AI model.
+- **AI, with your own key.** Claude, OpenAI, GitHub Models, Azure OpenAI or a local model server (Ollama and other OpenAI-compatible servers). Optional AI tags and descriptions for uploaded files and AI-chosen video thumbnails, with token estimates before anything is spent, usage per feature and a monthly budget. Nothing is sent unless an administrator turns it on.
+- **Configuration.** Lattice-wide settings (file storage, AI) edited in the admin UI or with `hexdb config`, stored encrypted and versioned, with an audit trail, checksums checked on every hex, and rollback. Secrets can be replaced but never read back.
 - **Aggregations and transactions.** Group-by with count, distinct count, sum, average, min and max. Multi-document ACID transactions across tessellations, with version and filter preconditions.
 - **Schemas.** Optional, versioned per tessellation, with compatibility checks, background migrations (rename, copy, remove, default, convert, or a function you write), and rollback to an earlier version.
 - **Change data.** An ordered change feed (polling, long polling, Server-Sent Events) backed by an on-disk history, so consumers can resume after a restart.
@@ -18,7 +20,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 - **Replication.** Automatic discovery and Overseer election, snapshot plus change-stream replication, and failover. Optional synchronous acknowledgements, a write quorum, and write forwarding from replicas.
 - **Security.**
   - Authentication: sessions, API keys and TOTP multi-factor authentication.
-  - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region) and hidden fields per role.
+  - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region) and hidden fields per role. Uploading, deleting and restoring files are separate permissions that can be limited to folders.
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon sharding that repairs corrupted memory.
@@ -235,6 +237,9 @@ hexdb status                     status and metrics (needs HEXDB_TOKEN)
 hexdb secret                     print a new random key
 hexdb backup [--name N] [--list] back up the running server (needs HEXDB_TOKEN)
 hexdb sql "SELECT ..." [-p V]   run a SQL query and print a table (needs HEXDB_TOKEN)
+hexdb put|get|ls TESS ...        upload, download and list files (needs HEXDB_TOKEN)
+hexdb config get|set|history ... the lattice configuration: settings, secrets, history, rollback (admins)
+hexdb config connect gdrive      sign in to Google Drive or Dropbox for file storage
 hexdb plugins add|remove|list    manage the plugin registry
 hexdb lattice spawn --count 2    start more hexes on this machine that join its lattice
 hexdb lattice list|stop          list or stop them (stop --remove deletes their data)
@@ -249,16 +254,18 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | Page | What it does |
 | --- | --- |
 | Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, and "Add a hex" for joining new servers; flush and back up |
-| Queries | A GraphQL console with schema-aware completion, examples and history |
+| Queries | GraphQL and SQL consoles with completion, examples and history |
 | Tessellations | Create and delete tessellations; manage indexes (with analyzer choice and index suggestions) and schemas (with version history and rollback) |
-| Documents | Browse with filters and sorting; create, edit and delete documents |
+| Documents | Browse with filters and sorting; create, edit and delete documents (files tessellations too, to filter on their metadata) |
+| Files | Folders, thumbnails, search, uploads, previews and an audio player, metadata and AI tags, versions and the trash |
 | Streams | Create streams, publish, read messages, and watch consumer groups and deliveries |
 | Functions | Create and run functions; manage schedules and triggers |
 | Users, Roles | Accounts, role grants, user attributes, custom roles with row filters and hidden fields, MFA resets |
 | Audit Trail | Security events, filterable by user, action and time |
 | Plugins | Loaded plugins, their state and deliveries |
 | Logs | The server log, tailed live |
-| Settings | Runtime settings and the effective configuration |
+| Configuration | Lattice-wide file storage and AI settings, write-only secrets, AI usage and estimates, each hex's applied version, history and rollback |
+| Settings | This hex's runtime settings and its effective configuration |
 | Account | Your password, MFA and API keys |
 
 ## Drivers

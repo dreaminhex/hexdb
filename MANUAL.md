@@ -43,14 +43,16 @@ What it provides:
 | Area | Features |
 | --- | --- |
 | Data | Documents with generated, time-sortable IDs; replace, merge-patch, delete; bulk writes; upserts; update-by-filter; per-document TTLs; idempotency keys; optional versioned schemas |
-| Files | Any binary file, deduplicated, compressed when that helps, encrypted and split across the six vertices; metadata (EXIF, IPTC, XMP, ID3, Vorbis, QuickTime, Matroska, Broadcast WAV, PDF, Office, ...) extracted and searchable; thumbnails; versions with rollback; a trash; resumable uploads; ranged downloads |
+| Files | Any binary file, deduplicated, compressed when that helps, encrypted and split across the six vertices; metadata (EXIF, IPTC, XMP, ID3, Vorbis, QuickTime, Matroska, Broadcast WAV, PDF, Office, ...) extracted and searchable; thumbnails; versions with rollback; a trash; resumable uploads; ranged downloads; content on local disks or S3, Azure Blob Storage, Google Drive or Dropbox |
+| AI | Your own provider and key (Claude, OpenAI, GitHub Models, Azure OpenAI, local OpenAI-compatible servers): AI tags and descriptions for files, AI-chosen video thumbnails, a second opinion from the index advisor; token estimates, usage per feature and a monthly budget |
+| Configuration | Lattice-wide settings in the admin UI and `hexdb config`: encrypted, versioned, audited, checked on every hex, with rollback and write-only secrets |
 | Reading | A JSON filter language, sorting, cursor and offset paging, counts, aggregations, full-text search with analyzers, GraphQL, SQL `SELECT` |
 | Consistency | Every write is atomic and durable before it's acknowledged; multi-document transactions are serializable for the documents they touch |
 | Performance | Field, composite, unique and text indexes; an index advisor; an LRU memory cache; SSTables with Bloom filters; Zstandard compression |
 | Change data | An ordered change feed with an on-disk history; streams (publish/subscribe) with consumer groups; plugins for Kafka, Kinesis, OpenTelemetry and more |
 | Logic | Functions (saved queries, aggregations, transactions, scripts in Python, TypeScript or JavaScript), schedules, and triggers that run code before or after writes |
 | Distribution | Several servers form a lattice with automatic discovery, election, replication and failover. Synchronous acknowledgements, a quorum, and write forwarding are optional |
-| Security | Sessions, API keys, TOTP MFA, built-in and custom roles with row filters and field masks, an audit trail, AES-256-GCM encryption at rest, TLS, authenticated hex-to-hex traffic |
+| Security | Sessions, API keys, TOTP MFA, built-in and custom roles with row filters, field masks and folder limits for files, an audit trail, AES-256-GCM encryption at rest, TLS, authenticated hex-to-hex traffic |
 
 What it doesn't do (yet):
 
@@ -224,10 +226,12 @@ Errors have one shape:
 | 422 | `idempotency_key_reused` | An `Idempotency-Key` reused with a different request |
 | 422 | `schema_violation` | A document that doesn't fit the tessellation's schema |
 | 422 | `trigger_rejected` | A before trigger refused the write, or failed |
-| 429 | `rate_limited` | Too many failed sign-ins; see `Retry-After` |
+| 429 | `rate_limited` | Too many failed sign-ins (see `Retry-After`), this month's AI token budget is used up, or the AI provider is rate limiting |
 | 502 | `overseer_unreachable` | A replica couldn't forward a write to the Overseer |
+| 502 | `ai_provider_error` | The AI provider returned an error (its message, without the key) |
 | 503 | `replication_timeout` | Committed, but fewer than `replication.min_acks` replicas confirmed in time |
 | 503 | `no_quorum` | The Overseer can't see `replication.quorum` hexes, so it refuses writes |
+| 503 | `content_unavailable` | A file's content can't be read here, from another hex or from the storage backend right now |
 | 507 | `disk_full` | The data directory is over `storage.disk_mb`; deletes still work |
 
 ### Single documents
@@ -1561,6 +1565,15 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 - `hexdb.pid` (the shutdown token) and `initial-admin-password.txt` are readable by the owner only: mode 0600 on Unix, and on Windows inherited permissions are removed, leaving the current user and SYSTEM.
 - Secrets belong in `hexdb.local.toml` or environment variables, never in a committed `hexdb.toml`.
 - `GET /settings` hides secrets in the effective configuration.
+
+### Configuration, AI and storage
+
+- **Secrets** in the [lattice configuration](#lattice-configuration) are sealed with the lattice transfer key, bound to their setting name. They're never returned, logged or written to the audit trail; reads show a keyed fingerprint. Every hex holds them decrypted in memory to use them. A change sent to a replica is forwarded to the Overseer like any write, so without TLS between hexes it crosses the network in the clear (see Transport).
+- **Who can change what.** The configuration, its history and rollback, AI usage and estimates, tagging existing files and the storage test are for administrators. `POST /ai/complete` needs the `ai` permission and draws on the lattice's monthly budget, which caps what a holder can spend.
+- **What leaves the hex.** AI calls send what `ai.tagging.send` allows to the configured provider at the configured URL; an `http://` URL (fine for a local model server) sends the key unencrypted. Remote storage backends only ever receive encrypted, sharded packs. AI base URLs and storage endpoints can't name the well-known cloud metadata services (169.254.169.254, `metadata.google.internal`, ...); a host name that resolves to one isn't caught.
+- **Field masks.** Fields any role hides in a files tessellation are left out of what AI tagging sends, so an AI description can't reveal them to that role. Images are sent as they are when `thumbnail` or `image` is allowed.
+- **Prompt injection.** A file's contents can try to steer its own AI tags and description; the instructions tell the model to treat them as data, and the AI only writes the `ai` field of that file. Treat AI tags as suggestions, not trusted labels.
+- **OAuth.** `hexdb config connect` keeps the app secret and refresh token out of the shell history and checks the OAuth `state` on the sign-in it receives.
 
 ## 20. Lattices and replication
 

@@ -1092,3 +1092,40 @@ async fn migrate_legacy(engine: &HexDBEngine) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn custom_roles_with_write_get_the_file_permissions_once() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        engine.create_tessellation(ROLES_TESSELLATION, "system").unwrap();
+        let role = |name: &str, permissions: &[&str]| RoleInput {
+            name: Some(name.into()),
+            description: Some(name.into()),
+            permissions: Some(permissions.iter().map(|p| p.to_string()).collect()),
+            restrictions: None,
+        };
+        create_role(&engine, role("editors", &["read", "write"])).await.unwrap();
+        create_role(&engine, role("readers2", &["read"])).await.unwrap();
+
+        grant_file_permissions(&engine).await.unwrap();
+        let get = |name: &'static str| {
+            let engine = &engine;
+            async move { get_role(engine, name).await.unwrap().unwrap().permissions }
+        };
+        let editors = get("editors").await;
+        for action in [Action::Upload, Action::Delete, Action::Restore] {
+            assert!(editors.contains(&action), "{:?}", editors);
+        }
+        assert_eq!(get("readers2").await, vec![Action::Read], "roles without write are left alone");
+
+        // Once only: a role made (or narrowed) afterwards keeps exactly its permissions.
+        create_role(&engine, role("later", &["read", "write"])).await.unwrap();
+        grant_file_permissions(&engine).await.unwrap();
+        assert_eq!(get("later").await, vec![Action::Read, Action::Write]);
+        engine.shutdown().await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

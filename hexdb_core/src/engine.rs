@@ -299,6 +299,20 @@ pub struct HexDBEngine {
 }
 
 const MAX_WRITE_RETRIES: usize = 16;
+
+/// An Overseer in a fresh temporary directory, for in-crate tests. Returns the
+/// engine and the directory (delete it when done).
+#[cfg(test)]
+pub(crate) async fn test_engine() -> (HexDBEngine, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("hexdb-engine-test-{}", Ulid::new()));
+    let mut config = HexConfig::default();
+    config.storage.path = dir.join("data").to_string_lossy().into_owned();
+    config.storage.encryption_key = "base64:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=".into();
+    let keys = Arc::new(crate::crypt::KeyRing::new(&[7u8; 32], &[]));
+    let identity = HexIdentity { id: Ulid::new(), name: "Test".into(), hex_type: crate::network::discovery::ROLE_OVERSEER.into() };
+    let engine = HexDBEngine::open(config, identity, keys).await.expect("a test engine");
+    (engine, dir)
+}
 /// The saved metrics history in the data directory.
 const METRICS_FILE: &str = "metrics-history.hxe";
 /// The query advisor's saved statistics.

@@ -134,6 +134,29 @@ fn providers_keys_usage_budget_and_permissions() -> Result<()> {
     }
     assert_eq!(usage(&server)?["input_tokens"], 18);
 
+    // OpenAI's own API takes max_completion_tokens; Azure OpenAI authenticates with an api-key header.
+    set(&server, json!({ "ai.provider": "openai", "ai.base_url": format!("http://127.0.0.1:{}/v1", port), "ai.model": "gpt-test" }))?;
+    assert_eq!(server.request(Method::POST, "/ai/test", None, &[])?.body["ok"], true);
+    {
+        let calls = seen.lock().unwrap();
+        let (_, headers, body) = calls.last().unwrap();
+        assert!(body["max_completion_tokens"].as_u64().is_some() && body.get("max_tokens").is_none(), "{}", body);
+        assert_eq!(header(headers, "authorization").map(String::from), Some(format!("Bearer {}", KEY)));
+    }
+    set(&server, json!({ "ai.provider": "azure_openai", "ai.base_url": format!("http://127.0.0.1:{}/openai/v1", port), "ai.model": "deployment-test" }))?;
+    assert_eq!(server.request(Method::POST, "/ai/test", None, &[])?.body["ok"], true);
+    {
+        let calls = seen.lock().unwrap();
+        let (path, headers, _) = calls.last().unwrap();
+        assert_eq!(path, "/openai/v1/chat/completions");
+        assert_eq!(header(headers, "api-key"), Some(KEY));
+        assert_eq!(header(headers, "authorization"), None);
+    }
+    // Without a model, only Claude has a default.
+    set(&server, json!({ "ai.provider": "github", "ai.model": null, "ai.base_url": null }))?;
+    assert_eq!(server.request(Method::POST, "/ai/test", None, &[])?.status, StatusCode::BAD_REQUEST);
+    set(&server, json!({ "ai.provider": "openai_compatible", "ai.base_url": format!("http://127.0.0.1:{}/v1", port), "ai.model": "llama-test" }))?;
+
     // A provider error comes back without the key.
     *fail.lock().unwrap() = true;
     let res = server.request(Method::POST, "/ai/test", None, &[])?;
@@ -282,6 +305,19 @@ fn files_are_tagged_and_videos_get_an_ai_thumbnail() -> Result<()> {
     assert_eq!(res.status, StatusCode::ACCEPTED, "{}", res.body);
     assert!(res.body["queued"].as_u64().unwrap() >= 1, "{}", res.body);
     wait_for(&server, &early, "the early file's tags", |d| d["ai"]["status"] == "done")?;
+
+    // A field some role can't see is never sent, so the AI can't repeat it to that role.
+    let res = server.request(Method::POST, "/roles", Some(&json!({ "name": "no-text", "permissions": ["read"], "restrictions": { "media": { "hide": ["meta.text"] } } })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    let secret = upload(&server, "notes/plans.txt", b"The launch codes are 0000.".to_vec())?;
+    wait_for(&server, &secret, "tags without hidden fields", |d| d["ai"]["status"] == "done")?;
+    {
+        let calls = seen.lock().unwrap();
+        let call = calls.iter().rev().find(|c| system_of(c).contains("tag files")).unwrap();
+        let sent = call.2.to_string();
+        assert!(sent.contains("plans.txt"), "the file is still described");
+        assert!(!sent.contains("launch codes"), "hidden text was sent: {}", sent);
+    }
 
     let u = usage(&server)?;
     assert!(u["features"]["files.tagging"]["calls"].as_u64().unwrap() >= 2, "{}", u);

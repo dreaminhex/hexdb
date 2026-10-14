@@ -14,7 +14,9 @@
 // thumbnail). The answer is stored as `ai` on the file document: `tags`,
 // `description`, the model, the tokens used and the content's SHA-256, so the
 // same content is never tagged twice. User `tags` and `description` are
-// never touched; `ai` is in the files text index. File contents are data for
+// never touched; `ai` is in the files text index. Fields that any role hides
+// in the tessellation (e.g. `meta.gps`) are left out of what's sent, so the AI's
+// description can't reveal them to those roles. File contents are data for
 // the model, and the instructions say so, but a file can still try to steer
 // its own tags: treat AI tags as suggestions, not as trusted labels.
 //
@@ -81,6 +83,23 @@ impl Default for AiQueue {
     fn default() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         AiQueue { tx, rx: std::sync::Mutex::new(Some(rx)) }
+    }
+}
+
+/// Remove a dotted path (`meta.gps`) from a JSON object.
+fn remove_path(value: &mut Value, path: &str) {
+    let mut parts = path.split('.').peekable();
+    let mut current = value;
+    while let Some(part) = parts.next() {
+        let Some(map) = current.as_object_mut() else { return };
+        if parts.peek().is_none() {
+            map.remove(part);
+            return;
+        }
+        match map.get_mut(part) {
+            Some(next) => current = next,
+            None => return,
+        }
     }
 }
 
@@ -230,6 +249,21 @@ impl HexDBEngine {
         }
     }
 
+    /// Every field some role hides in `tess` (field masks of all roles, by tessellation or `*`).
+    async fn fields_hidden_by_any_role(&self, tess: &str) -> Vec<String> {
+        let Ok(definitions) = crate::users::role_definitions(self).await else { return Vec::new() };
+        let mut out: Vec<String> = definitions
+            .0
+            .values()
+            .flat_map(|rules| [rules.restrictions.get(tess), rules.restrictions.get("*")])
+            .flatten()
+            .flat_map(|r| r.hide.iter().map(|h| h.trim().to_string()))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Read a file's whole content (at most `max` bytes).
     async fn file_bytes(&self, manifest: Manifest, max: u64) -> Result<Vec<u8>> {
         let store = self.blobs.clone();
@@ -283,8 +317,21 @@ impl HexDBEngine {
         let send: Vec<String> = self.config_value("ai.tagging.send").as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
         let wants = |what: &str| send.iter().any(|s| s == what);
 
+        // Nothing a role hides in this tessellation is sent.
+        let hidden = self.fields_hidden_by_any_role(tess).await;
+        let mut visible = Value::Object(map.clone());
+        for path in &hidden {
+            remove_path(&mut visible, path);
+        }
+        let shown = |field: &str| !hidden.iter().any(|h| h == field);
         let mut about = json!({ "name": text(&map, "name"), "folder": text(&map, "path"), "type": content_type, "size_bytes": map.get("size") });
-        let meta = map.get("meta").and_then(Value::as_object).cloned().unwrap_or_default();
+        for field in ["name", "path", "content_type", "size"] {
+            if !shown(field) {
+                let key = match field { "path" => "folder", "content_type" => "type", "size" => "size_bytes", other => other };
+                about.as_object_mut().expect("an object").remove(key);
+            }
+        }
+        let meta = visible.get("meta").and_then(Value::as_object).cloned().unwrap_or_default();
         if wants("metadata") {
             let mut without_text = meta.clone();
             without_text.remove("text");
@@ -499,6 +546,14 @@ mod tests {
         assert!(json_object("no json here").is_err());
         let many: Vec<String> = (0..40).map(|i| format!("t{}", i)).collect();
         assert_eq!(clean_tags(&json!(many)).len(), MAX_TAGS);
+    }
+
+    #[test]
+    fn hidden_paths_are_removed() {
+        let mut v = json!({ "meta": { "gps": { "lat": 1 }, "title": "t" }, "name": "n" });
+        remove_path(&mut v, "meta.gps");
+        remove_path(&mut v, "missing.path");
+        assert_eq!(v, json!({ "meta": { "title": "t" }, "name": "n" }));
     }
 
     #[test]
