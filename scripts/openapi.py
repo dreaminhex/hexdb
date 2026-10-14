@@ -66,6 +66,7 @@ ROUTES = [
     ("get", "/config/history", "Configuration", "Configuration versions, newest first, with what each changed (admins)", {"parameters": [param(n, "query") for n in ("limit", "offset")], "responses": ok()}),
     ("get", "/config/versions/{version}", "Configuration", "One configuration version, secrets as fingerprints (admins)", {"parameters": [param("version", schema={"type": "integer"})], "responses": ok()}),
     ("post", "/config/rollback", "Configuration", "Save an earlier version's settings as a new version (admins)", {"requestBody": body({"type": "object", "properties": {"version": {"type": "integer"}, "comment": {"type": "string"}}, "required": ["version"]}), "responses": ok()}),
+    ("post", "/config/storage-test", "Configuration", "Write, read back and delete a small object on this hex's storage backend (admins)", {"responses": ok()}),
     ("get", "/ai", "Configuration", "The AI provider in use and this month's token usage and budget (admins)", {"responses": ok()}),
     ("post", "/ai/test", "Configuration", "A tiny call to the AI provider: ok, model, tokens, or the provider's error (admins)", {"responses": ok()}),
     ("post", "/ai/complete", "Configuration", "Run a prompt through the lattice's AI provider (ai permission); 429 over budget, 502 provider error", {"requestBody": body({"type": "object", "properties": {"prompt": {"type": "string"}, "system": {"type": "string"}, "max_tokens": {"type": "integer"}}, "required": ["prompt"]}), "responses": ok()}),

@@ -5,6 +5,7 @@
 //   GET  /config/history             versions, newest first, with what each changed (?limit=&offset=)
 //   GET  /config/versions/{version}  one version
 //   POST /config/rollback            {"version": n, "comment"?}: a new version with version n's contents
+//   POST /config/storage-test        write, read back and delete a small object on this hex's storage backend (admins)
 //   GET  /ai                         the AI provider in use and this month's token usage (admins)
 //   POST /ai/test                    a tiny call that shows whether the provider, model and key work (admins)
 //   POST /ai/complete                {"prompt", "system"?, "max_tokens"?}: run a prompt (the `ai` permission)
@@ -183,4 +184,10 @@ pub async fn ai_thumbnails(Path(tess): Path<String>, params: Result<Query<AiFile
     principal.require_admin()?;
     let Query(params) = params?;
     queue_ai(&engine, &principal.login, &tess, hexdb_core::engine::AiTask::Thumbnail, params).await
+}
+
+/// Check the storage backend the saved configuration chooses for this hex.
+pub async fn storage_test(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    Ok(Json(engine.test_file_storage().await).into_response())
 }

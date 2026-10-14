@@ -1213,6 +1213,38 @@
         }
       }
     },
+    "/config/storage-test": {
+      "post": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "Write, read back and delete a small object on this hex's storage backend (admins)",
+        "operationId": "post_config_storage-test",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ai": {
       "get": {
         "tags": [

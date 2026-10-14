@@ -195,6 +195,7 @@ export interface Status {
     disk_bytes: number
     sstable_files: number
     next_sequence: number
+    files?: { remote?: RemoteStorageStatus }
   }
   operations: { reads_total: number; writes_total: number; queries_total: number }
   network: {
@@ -203,6 +204,30 @@ export interface Status {
     lattice: { name: string; hexes: LatticeHex[] }
   }
   replication: ReplicationStatus
+}
+
+/** The chunk store's remote backend on one hex (`/status` storage.files.remote). */
+export interface RemoteStorageStatus {
+  backend: string | null
+  backend_id: string | null
+  uploaded_packs: number
+  pending_packs: number
+  remote_only_packs: number
+  moving_packs: number
+  local_bytes: number
+  bytes_uploaded: number
+  bytes_downloaded: number
+  last_upload_at: string | null
+  last_error: string | null
+  last_error_at: string | null
+}
+
+export interface StorageTestResult {
+  ok: boolean
+  backend: string
+  hex?: string
+  message?: string
+  error?: string
 }
 
 export interface LogRecord {
@@ -909,6 +934,7 @@ export const api = {
     request<LatticeConfig>("PUT", "/config", { changes, ...options }),
   configHistory: (limit = 50) => request<{ versions: ConfigVersionSummary[]; total: number }>("GET", `/config/history?limit=${limit}`),
   aiStatus: () => request<AiStatus>("GET", "/ai"),
+  storageTest: () => request<StorageTestResult>("POST", "/config/storage-test", {}),
   aiTest: () => request<AiTestResult>("POST", "/ai/test", {}),
   aiEstimate: () => request<AiEstimate>("GET", "/ai/estimate"),
   aiTagFiles: (tess: string) => request<{ queued: number }>("POST", `/${enc(tess)}/_ai_tag`),

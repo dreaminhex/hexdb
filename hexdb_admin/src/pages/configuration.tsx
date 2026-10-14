@@ -11,8 +11,8 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
-import { api, errorMessage, type AiTestResult, type ConfigDef, type ConfigVersionSummary, type LatticeConfig, type SecretInfo } from "@/lib/api"
-import { formatNumber } from "@/lib/format"
+import { api, errorMessage, type StorageTestResult, type AiTestResult, type ConfigDef, type ConfigVersionSummary, type LatticeConfig, type SecretInfo } from "@/lib/api"
+import { formatBytes, formatNumber, formatTimestamp } from "@/lib/format"
 
 const LATTICE = "__lattice__"
 
@@ -166,6 +166,60 @@ function SettingInput({
       onChange={(e) => onChange(e.target.value)}
       aria-label={def.key}
     />
+  )
+}
+
+/** This hex's remote storage: what's uploaded, what's waiting, problems, and a connection test. */
+function StorageCard() {
+  const status = usePoll(api.status, 10000)
+  const [testing, setTesting] = useState(false)
+  const [result, setResult] = useState<StorageTestResult | null>(null)
+  const remote = status.data?.storage.files?.remote
+  const test = async () => {
+    setTesting(true)
+    setResult(null)
+    try {
+      setResult(await api.storageTest())
+    } catch (e) {
+      setResult({ ok: false, backend: "?", error: errorMessage(e) })
+    } finally {
+      setTesting(false)
+    }
+  }
+  return (
+    <Card className="gap-2">
+      <CardHeader className="flex flex-row items-start justify-between gap-2">
+        <div>
+          <CardTitle>File storage on this hex</CardTitle>
+          <CardDescription>
+            {remote?.backend ? `Packs go to ${remote.backend}; this hex keeps ${formatBytes(remote.local_bytes)} locally.` : "File content is kept on this hex's disks."} Test after saving.
+          </CardDescription>
+        </div>
+        <Button size="sm" variant="outline" disabled={testing} onClick={() => void test()}>
+          {testing ? <IconLoader2 className="animate-spin" /> : <IconPlugConnected />} Test
+        </Button>
+      </CardHeader>
+      <CardContent className="grid gap-1 text-sm">
+        {result &&
+          (result.ok ? (
+            <p className="text-status-good">{result.message ?? `Works: wrote, read back and deleted a test object on ${result.backend}.`}</p>
+          ) : (
+            <p className="text-destructive">Failed: {result.error}</p>
+          ))}
+        {remote && (remote.backend || remote.moving_packs > 0) && (
+          <p className="text-muted-foreground text-xs">
+            {remote.uploaded_packs} pack(s) uploaded, {remote.pending_packs} waiting, {remote.remote_only_packs} kept only remotely
+            {remote.moving_packs > 0 ? `, ${remote.moving_packs} being moved from the previous backend` : ""}. {formatBytes(remote.bytes_uploaded)} uploaded and{" "}
+            {formatBytes(remote.bytes_downloaded)} read since the hex started.
+          </p>
+        )}
+        {remote?.last_error && (
+          <p className="text-destructive text-xs">
+            Last problem ({formatTimestamp(remote.last_error_at)}): {remote.last_error}
+          </p>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -622,6 +676,7 @@ export function ConfigurationPage() {
         {section("File storage", "Where file content is kept. It is encrypted and split into shards before it leaves the hex, so the provider only sees ciphertext.", "file_storage.")}
         {scope === LATTICE && section("AI", "AI features use this lattice's own provider and key, never anyone else's. Everything is off until you turn it on.", "ai.")}
       </div>
+      <StorageCard />
       {scope === LATTICE && <AiCard refreshKey={historyKey} />}
       {scope === LATTICE && <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} />}
       {data && <HexesCard config={data} />}

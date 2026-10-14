@@ -61,6 +61,7 @@ fn to_gql(e: anyhow::Error) -> async_graphql::Error {
         Some(EngineError::Unauthorized(m)) | Some(EngineError::MfaRequired(m)) => gql_error("UNAUTHENTICATED", m.clone()),
         Some(EngineError::ReplicationTimeout(m)) => gql_error("REPLICATION_TIMEOUT", m.clone()),
         Some(EngineError::NoQuorum(m)) => gql_error("NO_QUORUM", m.clone()),
+        Some(EngineError::Unavailable(m)) => gql_error("CONTENT_UNAVAILABLE", m.clone()),
         Some(EngineError::TooLarge(m)) => gql_error("DOCUMENT_TOO_LARGE", m.clone()),
         Some(EngineError::SchemaViolation(m)) => gql_error("SCHEMA_VIOLATION", m.clone()),
         Some(EngineError::TriggerRejected(m)) => gql_error("TRIGGER_REJECTED", m.clone()),

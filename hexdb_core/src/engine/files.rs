@@ -37,6 +37,7 @@ use tracing::{debug, info, warn};
 use ulid::Ulid;
 
 pub(crate) mod ai_files;
+mod remote_files;
 
 /// What the client says about an upload.
 #[derive(Debug, Clone, Default)]
@@ -747,7 +748,7 @@ impl HexDBEngine {
             Ok(data) => Ok(data),
             Err(local) => match self.fetch_chunk(id).await {
                 Ok(data) => Ok(data),
-                Err(remote) => Err(EngineError::Unprocessable(format!(
+                Err(remote) => Err(EngineError::Unavailable(format!(
                     "The file's content can't be read on this hex ({:#}) or fetched from another ({:#}).",
                     local, remote
                 ))

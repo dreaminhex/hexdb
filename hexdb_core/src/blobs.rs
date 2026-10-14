@@ -24,6 +24,11 @@
 // shard is) is rebuilt at startup from the record headers. A torn record at
 // the end of a vertex's newest pack (a crash mid-append) is cut off.
 //
+// With a remote backend (see `remote_tier` and `crate::remote`), sealed packs
+// are also uploaded, and beyond a local budget their local files are dropped:
+// a small `.hxi` file keeps their record headers so the index still rebuilds,
+// and reads fetch the byte ranges they need from the backend.
+//
 // Unreferenced chunks are removed by mark and sweep: the caller starts a mark
 // (`begin_mark`), collects every chunk its documents reference, and calls
 // `sweep`. Chunks written, reused or released after the mark began (by
@@ -42,6 +47,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::{info, warn};
+
+mod remote_tier;
+pub use remote_tier::{RemoteStatus, Tier};
 
 /// A chunk's ID: keyed BLAKE3 of its plaintext.
 pub type ChunkId = [u8; 32];
@@ -198,6 +206,8 @@ struct ActivePack {
     file: File,
     size: u64,
     dirty: bool,
+    /// When a record was last appended.
+    written: std::time::Instant,
 }
 
 /// One vertex's pack files.
@@ -206,6 +216,8 @@ struct VertexPacks {
     /// Pack number -> size in bytes.
     packs: BTreeMap<u32, u64>,
     active: Option<ActivePack>,
+    /// Which packs are on a remote backend, and which of those have no local file.
+    remote: remote_tier::VertexRemote,
 }
 
 #[derive(Default)]
@@ -280,6 +292,8 @@ pub struct BlobStats {
     pub fetched_from_peers: u64,
     /// Chunks that couldn't be copied from any hex since startup.
     pub fetch_failures: u64,
+    /// The remote backend's state (see `remote_tier`).
+    pub remote: RemoteStatus,
     pub vertices: Vec<BlobVertexStats>,
 }
 
@@ -296,6 +310,8 @@ pub struct BlobVertexStats {
 /// Outcome of a scrub.
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq)]
 pub struct ScrubReport {
+    /// Chunks with shards only on the remote backend (not verified here).
+    pub remote_skipped: usize,
     pub chunks: usize,
     pub corrupt_shards: usize,
     pub repaired_shards: usize,
@@ -328,6 +344,9 @@ pub struct BlobStore {
     handles: Mutex<HashMap<(usize, u32), Arc<File>>>,
     cache: Mutex<ChunkCache>,
     counters: [VertexCounters; VERTEX_COUNT],
+    /// The remote backend in use, and the one being moved away from.
+    tiers: RwLock<remote_tier::Tiers>,
+    remote_status: Mutex<RemoteStatus>,
 }
 
 impl BlobStore {
@@ -351,21 +370,29 @@ impl BlobStore {
                 })
                 .collect();
             numbers.sort_unstable();
+            let mut remote = remote_tier::VertexRemote::load(dir);
+            // A pack still here was never dropped (or the drop didn't finish): use the local file.
+            remote.evicted.retain(|n| !numbers.contains(n));
             let mut packs = BTreeMap::new();
             for (i, &number) in numbers.iter().enumerate() {
-                let last = i + 1 == numbers.len();
+                let last = i + 1 == numbers.len() && remote.evicted.range(number..).next().is_none();
                 let (size, count) = scan_pack(&pack_path(dir, number), v, number, last, &mut variants)?;
                 records += count;
                 packs.insert(number, size);
             }
-            let active = match packs.iter().next_back() {
+            for &number in &remote.evicted {
+                let (size, count) = remote_tier::scan_index(&remote_tier::index_path(dir, number), v, number, &mut variants)?;
+                records += count;
+                packs.insert(number, size);
+            }
+            let active = match packs.iter().next_back().filter(|(n, _)| !remote.evicted.contains(n) && !remote.uploaded.contains_key(n)) {
                 Some((&number, &size)) if size < MAX_PACK_BYTES => {
                     let file = OpenOptions::new().append(true).open(pack_path(dir, number))?;
-                    Some(ActivePack { number, file, size, dirty: false })
+                    Some(ActivePack { number, file, size, dirty: false, written: std::time::Instant::now() })
                 }
                 _ => None,
             };
-            vertices.push(VertexPacks { dir: dir.clone(), packs, active });
+            vertices.push(VertexPacks { dir: dir.clone(), packs, active, remote });
         }
 
         // A chunk re-encrypted after a key rotation has records in two
@@ -393,6 +420,8 @@ impl BlobStore {
             handles: Mutex::new(HashMap::new()),
             cache: Mutex::new(ChunkCache { budget: cache_bytes, bytes: 0, tick: 0, entries: HashMap::new() }),
             counters: Default::default(),
+            tiers: RwLock::new((None, None)),
+            remote_status: Mutex::new(RemoteStatus::default()),
         })
     }
 
@@ -609,9 +638,8 @@ impl BlobStore {
         if !loc.is_some() {
             bail!("missing");
         }
-        let file = self.handle(v, loc.pack)?;
         let mut buf = vec![0u8; RECORD_HEADER_LEN + len];
-        let result = read_exact_at(&file, &mut buf, loc.offset).map_err(anyhow::Error::from).and_then(|_| {
+        let result = self.read_record(v, loc, &mut buf).and_then(|_| {
             let header = RecordHeader::decode(&buf).ok_or_else(|| anyhow!("bad record header"))?;
             if header.id != *id || header.index as usize != v || header.shard_len as usize != len || header.key_id != entry.key_id {
                 bail!("record doesn't belong to this chunk");
@@ -644,6 +672,26 @@ impl BlobStore {
         Ok(())
     }
 
+    /// Read a record from a pack: the local file, or the remote copy of a dropped pack.
+    fn read_record(&self, v: usize, loc: ShardLoc, buf: &mut [u8]) -> Result<()> {
+        let remote_key = {
+            let vertices = self.vertices.lock().unwrap();
+            let vertex = &vertices[v];
+            vertex.remote.evicted.contains(&loc.pack).then(|| vertex.remote.uploaded.get(&loc.pack).cloned()).flatten()
+        };
+        match remote_key {
+            None => {
+                let file = self.handle(v, loc.pack)?;
+                read_exact_at(&file, buf, loc.offset).map_err(anyhow::Error::from)
+            }
+            Some(backend) => {
+                let data = self.read_remote(&backend, v, loc.pack, loc.offset, buf.len())?;
+                buf.copy_from_slice(&data);
+                Ok(())
+            }
+        }
+    }
+
     fn handle(&self, v: usize, pack: u32) -> Result<Arc<File>> {
         if let Some(file) = self.handles.lock().unwrap().get(&(v, pack)) {
             return Ok(file.clone());
@@ -667,6 +715,11 @@ impl BlobStore {
         for id in ids {
             let Some(entry) = self.index.read().unwrap().get(&id).cloned() else { continue };
             report.chunks += 1;
+            // Shards on a remote backend are its to keep; only local shards are verified.
+            if self.has_remote_shards(&entry) {
+                report.remote_skipped += 1;
+                continue;
+            }
             let len = entry.shard_len();
             let mut shards: Vec<Option<Vec<u8>>> =
                 (0..VERTEX_COUNT).map(|v| self.read_shard(v, entry.shards[v], &id, &entry, len).ok()).collect();
@@ -787,6 +840,7 @@ impl BlobStore {
         // Delete packs no chunk points into any more.
         let live_bytes = self.live_bytes();
         let mut doomed = Vec::new();
+        let mut remote_doomed = Vec::new();
         {
             let mut vertices = self.vertices.lock().unwrap();
             for (v, vertex) in vertices.iter_mut().enumerate() {
@@ -801,17 +855,30 @@ impl BlobStore {
                     if let Some(size) = vertex.packs.remove(&number) {
                         report.bytes_freed += size;
                     }
-                    doomed.push((v, pack_path(&vertex.dir, number)));
+                    let evicted = vertex.remote.evicted.remove(&number);
+                    if let Some(backend) = vertex.remote.uploaded.remove(&number) {
+                        remote_doomed.push((backend, v, number));
+                        doomed.push((v, remote_tier::index_path(&vertex.dir, number)));
+                        vertex.remote.save(&vertex.dir);
+                    }
+                    if !evicted {
+                        doomed.push((v, pack_path(&vertex.dir, number)));
+                    }
                     self.handles.lock().unwrap().remove(&(v, number));
                 }
             }
         }
         for (_, path) in &doomed {
             if let Err(e) = fs::remove_file(path) {
-                warn!("⚠️ Couldn't delete {}: {}", path.display(), e);
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!("⚠️ Couldn't delete {}: {}", path.display(), e);
+                }
             }
         }
-        report.packs_deleted = doomed.len();
+        for (backend, v, number) in &remote_doomed {
+            self.delete_remote(backend, *v, *number);
+        }
+        report.packs_deleted = doomed.iter().filter(|(_, p)| p.extension().is_some_and(|e| e == "hxp")).count() + remote_doomed.len();
         Ok(report)
     }
 
@@ -828,7 +895,24 @@ impl BlobStore {
                 .enumerate()
                 .flat_map(|(v, vertex)| {
                     let active = vertex.active.as_ref().map(|a| a.number);
-                    vertex.packs.iter().map(move |(&n, &size)| (v, pack_path(&vertex.dir, n), size, Some(n) == active)).collect::<Vec<_>>()
+                    let mut list: Vec<(usize, PathBuf, u64, bool)> = vertex
+                        .packs
+                        .iter()
+                        .filter(|(n, _)| !vertex.remote.evicted.contains(n))
+                        .map(|(&n, &size)| (v, pack_path(&vertex.dir, n), size, Some(n) == active))
+                        .collect();
+                    // Packs kept only remotely: their index files and the remote state (a
+                    // restore reads them from the same backend).
+                    for &n in &vertex.remote.evicted {
+                        let path = remote_tier::index_path(&vertex.dir, n);
+                        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        list.push((v, path, len, false));
+                    }
+                    let state = remote_tier::VertexRemote::path(&vertex.dir);
+                    if let Ok(meta) = fs::metadata(&state) {
+                        list.push((v, state, meta.len(), false));
+                    }
+                    list
                 })
                 .collect()
         };
@@ -871,6 +955,7 @@ impl BlobStore {
                 }
             }
         }
+        stats.remote = self.remote_status();
         let vertices = self.vertices.lock().unwrap();
         for (v, vertex) in vertices.iter().enumerate() {
             let bytes: u64 = vertex.packs.values().sum();
@@ -947,7 +1032,7 @@ fn append(vertex: &mut VertexPacks, v: usize, header: &RecordHeader, shard: &[u8
         file.sync_all()?;
         crate::wal::sync_dir(&vertex.dir);
         vertex.packs.insert(number, PACK_HEADER_LEN);
-        vertex.active = Some(ActivePack { number, file, size: PACK_HEADER_LEN, dirty: false });
+        vertex.active = Some(ActivePack { number, file, size: PACK_HEADER_LEN, dirty: false, written: std::time::Instant::now() });
     }
     let active = vertex.active.as_mut().unwrap();
     let mut record = Vec::with_capacity(RECORD_HEADER_LEN + shard.len());
@@ -957,6 +1042,7 @@ fn append(vertex: &mut VertexPacks, v: usize, header: &RecordHeader, shard: &[u8
     let loc = ShardLoc { pack: active.number, offset: active.size };
     active.size += record.len() as u64;
     active.dirty = true;
+    active.written = std::time::Instant::now();
     vertex.packs.insert(active.number, active.size);
     Ok(loc)
 }

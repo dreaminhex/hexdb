@@ -234,6 +234,17 @@ enum ConfigCommand {
         #[arg(long)]
         all: bool,
     },
+    /// Write, read back and delete a small object on the storage backend the saved configuration chooses
+    StorageTest,
+    /// Sign in to Google Drive or Dropbox and save the app credentials and refresh token
+    Connect {
+        /// gdrive or dropbox
+        #[arg(value_parser = ["gdrive", "dropbox"])]
+        provider: String,
+        /// Save them as this hex's storage override instead of the lattice's
+        #[arg(long)]
+        hex: Option<String>,
+    },
     /// Save an earlier version's settings as a new version
     Rollback {
         version: u64,
@@ -393,6 +404,8 @@ async fn main() -> Result<()> {
                 ConfigCommand::AiEstimate => config::ai_estimate(&target).await,
                 ConfigCommand::AiTag { tessellation, all } => config::ai_queue(&target, &tessellation, "_ai_tag", all).await,
                 ConfigCommand::AiThumbnails { tessellation, all } => config::ai_queue(&target, &tessellation, "_ai_thumbnails", all).await,
+                ConfigCommand::StorageTest => config::storage_test(&target).await,
+                ConfigCommand::Connect { provider, hex } => config::connect(&target, &provider, hex.as_deref()).await,
                 ConfigCommand::AiUsage { json } => config::ai_usage(&target, json).await,
                 ConfigCommand::Rollback { version, message } => config::rollback(&target, version, message.as_deref()).await,
             }

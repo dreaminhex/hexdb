@@ -119,11 +119,13 @@ pub const AI_INPUTS: &[&str] = &["metadata", "text", "thumbnail", "image"];
 pub const CONFIG: &[ConfigDef] = &[
     def("file_storage.backend", ConfigKind::Choice { choices: BACKENDS }, "\"local\"", "Where file content is stored: this hex's disks (local), Amazon S3 or an S3-compatible service, Azure Blob Storage, Google Drive or Dropbox. Content is encrypted before it leaves the hex."),
     text("file_storage.prefix", "Folder or key prefix inside the bucket, container or drive folder."),
+    def("file_storage.local_cache_gb", ConfigKind::Integer { min: 0, max: 1_000_000 }, "20", "With a remote backend: how much file content (GB) each hex keeps on its own disks. Beyond it, the oldest content uploaded is read from the backend (0: keep only what isn't uploaded yet)."),
     text("file_storage.s3.bucket", "S3 bucket name."),
     text("file_storage.s3.region", "S3 region, e.g. us-east-1 (some S3-compatible services use auto)."),
     def("file_storage.s3.endpoint", ConfigKind::Url, "\"\"", "Endpoint of an S3-compatible service (Cloudflare R2, Backblaze B2, Wasabi, MinIO); empty for Amazon S3."),
     text("file_storage.s3.access_key_id", "S3 access key ID."),
     secret("file_storage.s3.secret_access_key", "S3 secret access key."),
+    def("file_storage.azure.endpoint", ConfigKind::Url, "\"\"", "Blob endpoint of the account (empty: https://<account>.blob.core.windows.net); for the Azurite emulator, e.g. http://127.0.0.1:10000/devstoreaccount1."),
     text("file_storage.azure.account", "Azure storage account name."),
     text("file_storage.azure.container", "Azure Blob container name."),
     secret("file_storage.azure.account_key", "Azure storage account key."),
@@ -613,6 +615,13 @@ impl HexDBEngine {
     /// A secret's value on this hex, when set.
     pub fn config_secret(&self, key: &str) -> Option<Secret> {
         self.lattice_config.applied.read().unwrap().secrets.get(key).cloned()
+    }
+
+    /// What an earlier version means for this hex (to reach a storage backend
+    /// its settings chose). `None` if it's missing or doesn't check out.
+    pub async fn resolved_config_at(&self, version: u64) -> Option<AppliedConfig> {
+        let stored = self.stored_version(version).await.ok()??;
+        resolve(self, stored.body.as_ref()?, &self.name).ok()
     }
 
     /// Stored versions, newest first.

@@ -61,6 +61,7 @@ pub fn app_router(
         .route("/config/history", get(crate::config::config_history))
         .route("/config/versions/{version}", get(crate::config::config_version))
         .route("/config/rollback", post(crate::config::rollback_config))
+        .route("/config/storage-test", post(crate::config::storage_test))
         .route("/ai", get(crate::config::ai_status))
         .route("/ai/test", post(crate::config::ai_test))
         .route("/ai/complete", post(crate::config::ai_complete))

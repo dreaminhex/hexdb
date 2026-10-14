@@ -279,6 +279,14 @@ pub struct FilesConfig {
     /// The longest side of a thumbnail, in pixels.
     #[serde(default = "default_thumbnail_px")]
     pub thumbnail_px: u32,
+    /// With a remote backend: seal a pack that hasn't been written for this
+    /// many seconds, so it's uploaded without waiting to fill (256 MB).
+    #[serde(default = "default_remote_seal_seconds")]
+    pub remote_seal_seconds: u64,
+}
+
+fn default_remote_seal_seconds() -> u64 {
+    60
 }
 
 fn default_thumbnail_px() -> u32 {
@@ -329,6 +337,7 @@ impl Default for FilesConfig {
             text_kb: default_text_kb(),
             thumbnails: true,
             thumbnail_px: default_thumbnail_px(),
+            remote_seal_seconds: default_remote_seal_seconds(),
         }
     }
 }

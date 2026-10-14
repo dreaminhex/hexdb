@@ -72,6 +72,7 @@ pub fn spawn_ttl_sweep_task(engine: Arc<HexDBEngine>, interval: Duration, mut sh
 pub fn spawn_extraction_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
     tokio::spawn(engine.clone().run_extraction(shutdown_rx.clone()));
     tokio::spawn(engine.clone().run_ai_files(shutdown_rx.clone()));
+    tokio::spawn(engine.clone().run_remote_storage(shutdown_rx.clone()));
     tokio::spawn(engine.run_file_sync(shutdown_rx));
 }
 

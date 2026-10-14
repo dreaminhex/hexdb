@@ -1001,6 +1001,29 @@ Dropping a files tessellation drops its trashed files too.
 - Chunks travel sealed with AES-256-GCM under a key derived from the lattice key, bound to their ID, so they stay secret without TLS. `GET /lattice/chunks/{id}` needs a lattice signature and is served by every hex, so hexes repair each other.
 - Uploads and resumable parts sent to a replica are streamed to the Overseer. Metadata extraction runs on the Overseer; replicas receive the results.
 
+### Remote storage
+
+File content can also live on Amazon S3 or an S3-compatible service (Cloudflare R2, Backblaze B2, Wasabi, MinIO, SeaweedFS), Azure Blob Storage, Google Drive or Dropbox, set by `file_storage.backend` in the [lattice configuration](#lattice-configuration). A hex can override its storage settings (for example a nearer bucket); every other setting is the lattice's.
+
+- **What goes there.** Pack files, the six vertices' shard files, once they're sealed: full (256 MB), or with no writes for `files.remote_seal_seconds` (60) when a backend is set. Their content is already encrypted and Reed-Solomon sharded, so the provider only holds ciphertext. Objects are named `<file_storage.prefix>/<hex ID>/vertex-<n>/<number>.hxp`; every hex keeps its own copy, as on local disks.
+- **What stays local.** The pack being written to, and uploaded packs up to `file_storage.local_cache_gb` (20; 0 keeps only what isn't uploaded yet). Beyond that the oldest packs lose their local file. A small `<number>.hxi` file keeps each one's record headers, so the chunk index still rebuilds at startup, and reads fetch only the byte ranges they need. Recently read chunks are also cached in memory (`files.cache_mb`).
+- **Changing backend.** Packs kept only on the old backend are downloaded with the old backend's settings (from the configuration version they were set up with), then uploaded to the new one. Setting `local` brings everything back to this hex's disks (it must have room). Objects on the old backend are left in place; delete them yourself once the move is done.
+- **Status.** `/status` has `storage.files.remote`: the backend, packs uploaded, waiting, kept only remotely and being moved, bytes uploaded and read, and the last error. The Configuration page shows it with a Test button; `POST /config/storage-test` (and `hexdb config storage-test`) writes, reads back and deletes a small object with the saved settings.
+- **Failures.** Calls retry 429s, server errors and dropped connections with backoff (honoring Retry-After). An upload that still fails is tried again 30 seconds later; reads of content that can't be fetched answer `503 content_unavailable`.
+- **Scrubs** verify local shards only; remote copies are the provider's to keep.
+- **Backups** copy local packs and, for packs kept only remotely, their index files and `remote.json`: a restored hex reads those packs from the same backend, so keep its settings.
+
+Credentials:
+
+| Backend | Settings | Notes |
+| --- | --- | --- |
+| `s3` | `bucket`, `region` (default `us-east-1`; R2 uses `auto`), `endpoint` (empty for AWS), `access_key_id`, `secret_access_key` | Signed with AWS Signature Version 4; path-style requests when `endpoint` is set |
+| `azure` | `account`, `container`, `account_key`, `endpoint` (empty for `https://<account>.blob.core.windows.net`) | Shared Key; the container must exist |
+| `gdrive` | `folder_id`, `client_id`, `client_secret`, `refresh_token` | Files go flat into the folder (`/` in names becomes `__`); shared drives are supported |
+| `dropbox` | `folder` (e.g. `/HexDB`), `app_key`, `app_secret`, `refresh_token` | Uploaded in 64 MB pieces |
+
+Google Drive and Dropbox need an app of your own and a refresh token. `hexdb config connect gdrive` (a Google Cloud OAuth client of type Desktop app, with the Drive API enabled) and `hexdb config connect dropbox` (an app from the Dropbox App Console with `files.content.read` and `files.content.write`) ask for the app's ID and secret, open the sign-in, and save the ID, secret and refresh token in the configuration (`--hex <name>` for one hex). Then set `file_storage.backend` and the folder, and test. If the provider revokes the token, `/status` shows the error; connect again.
+
 ### Command line
 
 ```bash
@@ -1794,7 +1817,7 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 
 Settings that belong to the whole lattice rather than one machine are kept in the lattice configuration: where file content is stored (`file_storage.*`) and the AI provider and AI features (`ai.*`). Administrators change them on the Configuration page, with `hexdb config`, or through the API. `hexdb.toml` keeps what belongs to one hex (addresses, data directory, keys), and the runtime settings above stay per hex.
 
-The AI settings are used by the AI features below. The storage backend settings are stored and distributed; remote file storage arrives in a later 1.6 build.
+The `file_storage.*` settings choose where file content is kept (see [Remote storage](#remote-storage)); the `ai.*` settings are used by the [AI](#ai) features.
 
 ```bash
 curl http://localhost:7700/config                                # newest version, schema, each hex's state
@@ -1818,6 +1841,8 @@ hexdb config unset ai.model
 hexdb config history
 hexdb config diff 3 5                              # secrets compared by fingerprint
 hexdb config rollback 3 -m "bad key"
+hexdb config storage-test                          # check the storage backend
+hexdb config connect dropbox                       # sign in and save Dropbox (or gdrive) credentials
 ```
 
 - **Versions.** Every change writes a new, immutable version with its author, time, comment and a SHA-256 over its canonical form. `null` clears a setting. Saving values that are already in effect writes nothing. With `base_version`, a change made against an older version is refused with 409. A rollback writes a new version with an earlier version's contents, secrets included; history is never rewritten.
@@ -1831,7 +1856,8 @@ hexdb config rollback 3 -m "bad key"
 | `file_storage.backend` | `local` | `local`, `s3` (Amazon S3 or S3-compatible), `azure`, `gdrive`, `dropbox` |
 | `file_storage.prefix` | empty | Folder or key prefix inside the bucket, container or folder |
 | `file_storage.s3.bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key` | empty | S3; `endpoint` for S3-compatible services (R2, B2, Wasabi, MinIO) |
-| `file_storage.azure.account`, `container`, `account_key` | empty | Azure Blob Storage |
+| `file_storage.azure.account`, `container`, `account_key`, `endpoint` | empty | Azure Blob Storage (`endpoint` for an emulator or a custom domain) |
+| `file_storage.local_cache_gb` | 20 | With a remote backend: file content each hex keeps locally (0: only what isn't uploaded yet) |
 | `file_storage.gdrive.folder_id`, `client_id`, `client_secret`, `refresh_token` | empty | Google Drive |
 | `file_storage.dropbox.folder`, `app_key`, `app_secret`, `refresh_token` | empty | Dropbox |
 | `ai.provider` | `none` | `none`, `anthropic`, `openai`, `github` (GitHub Models), `azure_openai`, `openai_compatible` |
@@ -1916,6 +1942,7 @@ Estimates are rough: about 450 tokens of instructions and answer per file, plus 
 | `files.vertex_paths` | `[]` | Six directories for the vertices' shards (default `blobs/vertex-0` ... `vertex-5` in the data directory) |
 | `files.cache_mb` | 64 | Memory for recently read chunks |
 | `files.scrub_hours` | 24 | Hours between scrubs of every shard (0: never) |
+| `files.remote_seal_seconds` | 60 | With a remote backend: seal a pack with no writes for this long, so it's uploaded |
 | `files.extract` | `true` | Read metadata from uploaded files |
 | `files.extract_max_mb`, `extract_timeout_seconds` | 64, 30 | What extraction may read and how long it may take, per file |
 | `files.text_kb` | 64 | Text kept per file for full-text search |
