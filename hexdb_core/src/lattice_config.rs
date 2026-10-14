@@ -142,6 +142,7 @@ pub const CONFIG: &[ConfigDef] = &[
     def("ai.monthly_token_budget", ConfigKind::Integer { min: 0, max: 1_000_000_000_000 }, "1000000", "Most tokens AI features may use per calendar month; they pause when it is reached (0: no limit)."),
     def("ai.max_tokens_per_file", ConfigKind::Integer { min: 100, max: 1_000_000 }, "4000", "Most tokens one file may use (input and output)."),
     def("ai.tagging.enabled", ConfigKind::Boolean, "false", "Let the AI add tags and a description to files as they are uploaded."),
+    text("ai.tagging.tessellations", "Files tessellations whose new files are tagged, comma-separated (empty: every files tessellation)."),
     def("ai.tagging.send", ConfigKind::Set { choices: AI_INPUTS }, "[\"metadata\",\"text\"]", "What auto-tagging sends to the AI: extracted metadata, extracted text, the thumbnail, the full image."),
     def("ai.video_thumbnails.enabled", ConfigKind::Boolean, "false", "Let the AI pick the most representative frame for video thumbnails."),
     def("ai.video_thumbnails.frames", ConfigKind::Integer { min: 2, max: 16 }, "6", "Candidate frames the AI chooses from."),
@@ -313,6 +314,11 @@ pub struct Secret(String);
 impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
+    }
+
+    /// A secret read from the environment (the pre-1.6 advisor key).
+    pub(crate) fn from_env(value: &str) -> Self {
+        Secret(value.to_string())
     }
 }
 

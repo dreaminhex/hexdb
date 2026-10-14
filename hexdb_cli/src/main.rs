@@ -212,6 +212,28 @@ enum ConfigCommand {
     Show { version: u64 },
     /// Show what differs between two versions
     Diff { from: u64, to: u64 },
+    /// Make a tiny call to the configured AI provider to check the provider, model and key
+    AiTest,
+    /// Show the AI provider in use and this month's token usage and budget
+    AiUsage {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Estimate the tokens AI tagging and AI video thumbnails would use, per files tessellation
+    AiEstimate,
+    /// Tag a files tessellation's existing files with the AI (those not tagged for their current content)
+    AiTag {
+        tessellation: String,
+        /// Every file, even those already tagged
+        #[arg(long)]
+        all: bool,
+    },
+    /// Let the AI choose the thumbnails of a files tessellation's existing videos
+    AiThumbnails {
+        tessellation: String,
+        #[arg(long)]
+        all: bool,
+    },
     /// Save an earlier version's settings as a new version
     Rollback {
         version: u64,
@@ -367,6 +389,11 @@ async fn main() -> Result<()> {
                 ConfigCommand::History { limit, json } => config::history(&target, limit, json).await,
                 ConfigCommand::Show { version } => config::show(&target, version).await,
                 ConfigCommand::Diff { from, to } => config::diff(&target, from, to).await,
+                ConfigCommand::AiTest => config::ai_test(&target).await,
+                ConfigCommand::AiEstimate => config::ai_estimate(&target).await,
+                ConfigCommand::AiTag { tessellation, all } => config::ai_queue(&target, &tessellation, "_ai_tag", all).await,
+                ConfigCommand::AiThumbnails { tessellation, all } => config::ai_queue(&target, &tessellation, "_ai_thumbnails", all).await,
+                ConfigCommand::AiUsage { json } => config::ai_usage(&target, json).await,
                 ConfigCommand::Rollback { version, message } => config::rollback(&target, version, message.as_deref()).await,
             }
         }

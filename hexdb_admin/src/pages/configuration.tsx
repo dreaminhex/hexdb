@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { IconAlertTriangle, IconCircleCheck, IconHistory, IconKey, IconLoader2, IconRestore } from "@tabler/icons-react"
+import { IconAlertTriangle, IconCircleCheck, IconHistory, IconKey, IconLoader2, IconPlugConnected, IconRestore } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -11,7 +11,8 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
-import { api, errorMessage, type ConfigDef, type ConfigVersionSummary, type LatticeConfig, type SecretInfo } from "@/lib/api"
+import { api, errorMessage, type AiTestResult, type ConfigDef, type ConfigVersionSummary, type LatticeConfig, type SecretInfo } from "@/lib/api"
+import { formatNumber } from "@/lib/format"
 
 const LATTICE = "__lattice__"
 
@@ -165,6 +166,164 @@ function SettingInput({
       onChange={(e) => onChange(e.target.value)}
       aria-label={def.key}
     />
+  )
+}
+
+/** The AI provider in use, a test call, and this month's token usage. */
+function AiCard({ refreshKey }: { refreshKey: number }) {
+  const status = usePoll(api.aiStatus, 15000, [refreshKey])
+  const [testing, setTesting] = useState(false)
+  const [result, setResult] = useState<AiTestResult | null>(null)
+  const data = status.data
+  const usage = data?.usage
+  const test = async () => {
+    setTesting(true)
+    setResult(null)
+    try {
+      setResult(await api.aiTest())
+      void status.refresh()
+    } catch (e) {
+      setResult({ ok: false, error: errorMessage(e) })
+    } finally {
+      setTesting(false)
+    }
+  }
+  return (
+    <Card className="gap-2">
+      <CardHeader className="flex flex-row items-start justify-between gap-2">
+        <div>
+          <CardTitle>AI usage</CardTitle>
+          <CardDescription>
+            {data?.ai.configured ? `${data.ai.provider} · ${data.ai.model}` : (data?.ai.problem ?? "No AI provider configured.")}
+          </CardDescription>
+        </div>
+        <Button size="sm" variant="outline" disabled={testing || !data?.ai.configured} onClick={() => void test()}>
+          {testing ? <IconLoader2 className="animate-spin" /> : <IconPlugConnected />} Test
+        </Button>
+      </CardHeader>
+      <CardContent className="grid gap-2 text-sm">
+        {result &&
+          (result.ok ? (
+            <p className="text-status-good">
+              Works: answered "{result.reply}" in {result.millis} ms ({result.input_tokens} input, {result.output_tokens} output tokens).
+            </p>
+          ) : (
+            <p className="text-destructive">Failed: {result.error}</p>
+          ))}
+        {usage && (
+          <>
+            <p>
+              {usage.month}: <span className="font-semibold tabular-nums">{formatNumber(usage.total_tokens)}</span> tokens (
+              {formatNumber(usage.input_tokens)} input, {formatNumber(usage.output_tokens)} output) in {usage.calls} call
+              {usage.calls === 1 ? "" : "s"}
+              {usage.failures > 0 ? `, ${usage.failures} failed` : ""}.{" "}
+              {usage.budget > 0 ? `Budget ${formatNumber(usage.budget)}, ${formatNumber(usage.remaining ?? 0)} left.` : "No monthly budget."}
+            </p>
+            {Object.keys(usage.features).length > 0 && (
+              <ul className="text-muted-foreground text-xs">
+                {Object.entries(usage.features).map(([name, f]) => (
+                  <li key={name}>
+                    <span className="font-mono">{name}</span>: {formatNumber((f.input_tokens ?? 0) + (f.output_tokens ?? 0))} tokens, {f.calls ?? 0} call
+                    {f.calls === 1 ? "" : "s"}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+/** What tagging and video thumbnails would cost in tokens, and buttons to process existing files. */
+function AiEstimateCard({ refreshKey, configured }: { refreshKey: number; configured: boolean }) {
+  const estimate = usePoll(api.aiEstimate, 0, [refreshKey])
+  const [confirm, setConfirm] = useState<{ tess: string; kind: "tag" | "thumbnails"; files: number; tokens: number } | null>(null)
+  const rows = estimate.data?.tessellations ?? []
+  if (rows.length === 0) return null
+  return (
+    <Card className="gap-2">
+      <CardHeader>
+        <CardTitle>AI token estimates</CardTitle>
+        <CardDescription>
+          Rough figures from file sizes, metadata and image dimensions (providers count tokens differently). Turning a feature on only affects files
+          uploaded afterwards; existing files are processed only with the buttons below.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Tessellation</TableHead>
+              <TableHead>Tagging</TableHead>
+              <TableHead>Video thumbnails</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r) => (
+              <TableRow key={r.tessellation}>
+                <TableCell className="font-medium">{r.tessellation}</TableCell>
+                <TableCell className="text-xs">
+                  about {formatNumber(r.tagging.tokens_per_file)} tokens per file
+                  {r.tagging.untagged > 0 && (
+                    <div className="mt-1 flex items-center gap-2">
+                      {formatNumber(r.tagging.untagged)} untagged: about {formatNumber(r.tagging.tokens_for_untagged)}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 text-xs"
+                        disabled={!configured}
+                        onClick={() => setConfirm({ tess: r.tessellation, kind: "tag", files: r.tagging.untagged, tokens: r.tagging.tokens_for_untagged })}
+                      >
+                        Tag them
+                      </Button>
+                    </div>
+                  )}
+                </TableCell>
+                <TableCell className="text-xs">
+                  {r.video_thumbnails.videos === 0 ? (
+                    <span className="text-muted-foreground">no videos</span>
+                  ) : (
+                    <>
+                      about {formatNumber(r.video_thumbnails.tokens_per_video)} tokens per video
+                      {r.video_thumbnails.without_ai_thumbnail > 0 && (
+                        <div className="mt-1 flex items-center gap-2">
+                          {r.video_thumbnails.without_ai_thumbnail} without: about {formatNumber(r.video_thumbnails.tokens_for_those)}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-6 text-xs"
+                            disabled={!configured}
+                            onClick={() =>
+                              setConfirm({ tess: r.tessellation, kind: "thumbnails", files: r.video_thumbnails.without_ai_thumbnail, tokens: r.video_thumbnails.tokens_for_those })
+                            }
+                          >
+                            Choose them
+                          </Button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+      <ConfirmDialog
+        open={confirm !== null}
+        onOpenChange={(open) => !open && setConfirm(null)}
+        title={confirm?.kind === "tag" ? `Tag ${confirm?.files} file(s) in ${confirm?.tess}?` : `Choose thumbnails for ${confirm?.files} video(s) in ${confirm?.tess}?`}
+        description={`This sends them to the AI provider and uses about ${formatNumber(confirm?.tokens ?? 0)} tokens of this lattice's budget. It runs in the background, one file at a time, and stops if the monthly budget runs out.`}
+        confirmLabel="Start"
+        onConfirm={async () => {
+          if (!confirm) return
+          const result = confirm.kind === "tag" ? await api.aiTagFiles(confirm.tess) : await api.aiPickThumbnails(confirm.tess)
+          toast.success(`Queued ${result.queued} file(s).`)
+        }}
+      />
+    </Card>
   )
 }
 
@@ -463,6 +622,8 @@ export function ConfigurationPage() {
         {section("File storage", "Where file content is kept. It is encrypted and split into shards before it leaves the hex, so the provider only sees ciphertext.", "file_storage.")}
         {scope === LATTICE && section("AI", "AI features use this lattice's own provider and key, never anyone else's. Everything is off until you turn it on.", "ai.")}
       </div>
+      {scope === LATTICE && <AiCard refreshKey={historyKey} />}
+      {scope === LATTICE && <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} />}
       {data && <HexesCard config={data} />}
       <HistoryCard
         refreshKey={historyKey}

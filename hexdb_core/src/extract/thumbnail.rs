@@ -57,6 +57,13 @@ pub fn make(source: &mut Source, content_type: &str, max_px: u32) -> anyhow::Res
     encode(image, max_px).map(Some)
 }
 
+/// Candidate video thumbnails: `count` keyframes spread through the video
+/// (fewer when keyframes repeat), each at most `max_px` on a side.
+pub fn video_frames(source: &mut Source, count: usize, max_px: u32) -> anyhow::Result<Vec<Thumbnail>> {
+    let fractions: Vec<f64> = (1..=count).map(|i| i as f64 / (count + 1) as f64).collect();
+    super::video::keyframes(source, &fractions)?.into_iter().map(|f| encode(DynamicImage::ImageRgb8(f), max_px)).collect()
+}
+
 /// Shrink to fit `max_px` (never enlarged) and encode: PNG to keep transparency, JPEG otherwise.
 fn encode(image: DynamicImage, max_px: u32) -> anyhow::Result<Thumbnail> {
     let small = if image.width() <= max_px && image.height() <= max_px { image } else { image.thumbnail(max_px, max_px) };

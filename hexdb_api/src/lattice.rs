@@ -223,6 +223,14 @@ pub async fn audit(method: Method, uri: Uri, headers: HeaderMap, axum::extract::
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Add AI usage recorded on a replica to the month's total.
+pub async fn ai_usage(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let entry: hexdb_core::ai::UsageEntry = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    engine.store_ai_usage(&entry).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 /// Ask the Overseer to record a sign-out made on this replica.
 pub async fn forward_revocation(engine: &HexDBEngine, session_id: &str, expires_at: i64) -> Result<(), ApiError> {
     let body = serde_json::json!({ "session_id": session_id, "expires_at": expires_at });

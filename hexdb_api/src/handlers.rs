@@ -770,7 +770,7 @@ pub async fn advice(
     let suggestions = hexdb_core::advisor::suggest(&shapes, &indexes, documents);
     let ai = if params.ai {
         match hexdb_core::advisor::ai_suggestions(&engine, &name, &shapes).await {
-            Ok(list) => json!({ "available": true, "model": engine.config.ai.model, "suggestions": list }),
+            Ok(list) => json!({ "available": true, "model": engine.ai_summary().get("model").cloned().unwrap_or_else(|| json!(engine.config.ai.model)), "suggestions": list }),
             Err(e) => json!({ "available": false, "error": format!("{:#}", e) }),
         }
     } else {

@@ -49,6 +49,7 @@ pub const SYSTEM_FIELDS: &[&str] = &[
     "uploaded_by",
     "meta",
     "extract",
+    "ai",
 ];
 
 /// Fields of a trashed file's document that aren't the file's own.

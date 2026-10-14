@@ -28,7 +28,7 @@ mod docs;
 mod image;
 mod media;
 pub mod thumbnail;
-mod video;
+pub mod video;
 mod xml;
 
 use serde_json::{json, Map, Value};

@@ -20,6 +20,10 @@ pub struct AccessConfig {
     /// Tessellations the role applies to ("*" for all).
     #[serde(default)]
     pub tessellations: Vec<String>,
+    /// Also grant the built-in `ai` role, so the plugin can use the lattice's
+    /// AI provider through `POST /ai/complete` (no key of its own).
+    #[serde(default)]
+    pub ai: bool,
 }
 
 /// The login of a plugin's user.
@@ -39,8 +43,11 @@ pub fn login_for(plugin_id: &str) -> String {
 /// A new API key for the plugin's user (created or updated to the manifest's role).
 pub async fn api_key(engine: &HexDBEngine, manifest: &Manifest, access: &AccessConfig) -> Result<String> {
     let login = login_for(&manifest.id);
-    let grant = RoleGrant { name: access.role.clone(), tessellations: access.tessellations.clone() };
-    let (user_id, user) = users::ensure_service_user(engine, &login, vec![grant]).await?;
+    let mut grants = vec![RoleGrant { name: access.role.clone(), tessellations: access.tessellations.clone() }];
+    if access.ai {
+        grants.push(RoleGrant { name: "ai".into(), tessellations: Vec::new() });
+    }
+    let (user_id, user) = users::ensure_service_user(engine, &login, grants).await?;
     // Revoke the keys of earlier runs.
     let definitions = users::role_definitions(engine).await?;
     let principal = Principal::new(user_id.clone(), user.login.clone(), user.email_address.clone(), user.roles.clone(), Credential::ApiKey { key_id: String::new() }, &definitions)

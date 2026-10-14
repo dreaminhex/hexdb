@@ -429,6 +429,45 @@ export interface ConfigVersionSummary {
   diff?: { changed: string[]; removed: string[] }
 }
 
+export interface AiUsage {
+  month: string
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  calls: number
+  failures: number
+  budget: number
+  remaining: number | null
+  features: Record<string, { input_tokens?: number; output_tokens?: number; calls?: number; failures?: number }>
+}
+
+export interface AiStatus {
+  ai: { configured: boolean; provider?: string; model?: string; base_url?: string; problem?: string }
+  usage: AiUsage
+}
+
+export interface AiTestResult {
+  ok: boolean
+  provider?: string
+  model?: string
+  reply?: string
+  input_tokens?: number
+  output_tokens?: number
+  millis?: number
+  error?: string
+}
+
+export interface AiEstimate {
+  send: string[]
+  frames: number
+  tessellations: {
+    tessellation: string
+    files: number
+    tagging: { untagged: number; tokens_for_untagged: number; tokens_per_file: number }
+    video_thumbnails: { videos: number; without_ai_thumbnail: number; tokens_for_those: number; tokens_per_video: number }
+  }[]
+}
+
 export interface SettingsResponse {
   settings: Setting[]
   restart_required: boolean
@@ -567,7 +606,9 @@ export interface FileDoc {
   uploaded_by?: string
   tags?: string[]
   description?: string
-  thumbnail?: { chunk: string; width: number; height: number; content_type: string }
+  thumbnail?: { chunk: string; width: number; height: number; content_type: string; chosen_by?: "ai"; frame?: number; of?: number }
+  /** AI tags and description (see the lattice configuration's ai.tagging settings). */
+  ai?: { status: "done" | "failed" | "skipped"; tags?: string[]; description?: string; model?: string; input_tokens?: number; output_tokens?: number; error?: string; at?: string }
   meta?: Record<string, unknown>
   extract?: { status: "pending" | "done"; version?: number; extractors?: string[]; errors?: string[]; at?: string }
   /** Trashed files only. */
@@ -867,6 +908,11 @@ export const api = {
   saveConfig: (changes: Record<string, unknown>, options: { hex?: string; comment?: string; base_version?: number }) =>
     request<LatticeConfig>("PUT", "/config", { changes, ...options }),
   configHistory: (limit = 50) => request<{ versions: ConfigVersionSummary[]; total: number }>("GET", `/config/history?limit=${limit}`),
+  aiStatus: () => request<AiStatus>("GET", "/ai"),
+  aiTest: () => request<AiTestResult>("POST", "/ai/test", {}),
+  aiEstimate: () => request<AiEstimate>("GET", "/ai/estimate"),
+  aiTagFiles: (tess: string) => request<{ queued: number }>("POST", `/${enc(tess)}/_ai_tag`),
+  aiPickThumbnails: (tess: string) => request<{ queued: number }>("POST", `/${enc(tess)}/_ai_thumbnails`),
   rollbackConfig: (version: number, comment?: string) => request<LatticeConfig>("POST", "/config/rollback", { version, comment }),
   joinInfo: (password: string) => request<JoinInfo>("POST", "/join", { password }),
 

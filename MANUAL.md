@@ -161,10 +161,10 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 
 **Tessellations**
 - Create and delete tessellations and see their sizes.
-- The key button opens the indexes dialog. It lists indexes, creates field or text indexes (choosing an analyzer for text), and has a Suggestions section. "From recent queries" runs the rule-based advisor; "Ask Claude" adds the AI's suggestions. Each suggestion has a button to apply it.
+- The key button opens the indexes dialog. It lists indexes, creates field or text indexes (choosing an analyzer for text), and has a Suggestions section. "From recent queries" runs the rule-based advisor; "Ask Claude" adds the configured AI provider's suggestions. Each suggestion has a button to apply it.
 - The document button opens the schema dialog. It shows the version history and any migration in progress, and edits the next version. Check reports compatibility and how many existing documents wouldn't fit (running migration functions on them); Save registers the version. "Roll back to" restores an earlier version's fields.
 
-**Documents.** Pick a tessellation, filter with JSON, sort and page. A side panel creates, edits (with an optional TTL) and deletes documents. The footer shows which index answered the query.
+**Documents.** Pick a tessellation, filter with JSON, sort and page. Files tessellations are listed too: each file is a document whose `meta` holds its extracted metadata, so `{"meta.artist": "Ashes Gone"}` filters files (files are added on the Files page, not here). A side panel creates, edits (with an optional TTL) and deletes documents. The footer shows which index answered the query.
 
 **Streams**
 - Lists the streams you can read. Administrators and stream managers create and edit them: retention, sources and destinations as JSON.
@@ -619,18 +619,14 @@ The rule-based suggestions are:
 
 Small tessellations get no index suggestions, because scanning them is already cheap.
 
-With `?ai=true` and an Anthropic API key configured, HexDB also asks Claude for a second opinion and returns its suggestions separately (`source: "ai"`). It sends:
+With `?ai=true` and an AI provider configured (see [AI](#ai)), HexDB also asks the model for a second opinion and returns its suggestions separately (`source: "ai"`). It sends:
 - the query shapes;
 - the existing indexes;
 - the field names and types of a sample of documents.
 
 It never sends field values.
 
-```toml
-[ai]
-api_key_env = "ANTHROPIC_API_KEY"   # the environment variable holding the key
-model = "claude-sonnet-5-5"
-```
+Before 1.6 the advisor read an Anthropic key from the environment variable named by `[ai] api_key_env` in hexdb.toml. That still works while `ai.provider` is `none`, for the advisor only; set the provider in the lattice configuration instead.
 
 Query statistics are kept per hex and saved with the metrics history (`query-stats.hxe`), so they survive restarts. Shapes not seen for 30 days are dropped. Needs `manage` on the tessellation.
 
@@ -860,7 +856,7 @@ Sessions expire after a day. Only the user who started one (or an administrator)
 }
 ```
 
-- `size`, `content_type`, `sha256`, `content`, `version`, `versions`, `created_at`, `modified_at`, `uploaded_at`, `uploaded_by`, `meta`, `extract` and `thumbnail` are written only by HexDB. Document writes (PUT, PATCH, bulk, `_update`, transactions, GraphQL) keep their stored values whatever the request says.
+- `size`, `content_type`, `sha256`, `content`, `version`, `versions`, `created_at`, `modified_at`, `uploaded_at`, `uploaded_by`, `meta`, `extract`, `thumbnail` and `ai` (AI tags; see [AI](#ai)) are written only by HexDB. Document writes (PUT, PATCH, bulk, `_update`, transactions, GraphQL) keep their stored values whatever the request says.
 - `name` and `path` can be changed with a PATCH: that renames or moves the file. A clash with another file's folder and name is a 409.
 - Any other field (`tags`, `description`, your own) is yours.
 - Files can't be created with `POST /media`; they're uploaded.
@@ -1273,7 +1269,7 @@ All of these are listed, disabled, in [plugins.json](plugins.json).
 | [sources/postgres](plugins/sources/postgres) | source | Copies a PostgreSQL table and keeps it in sync by an updated-at column |
 | [sources/mssql](plugins/sources/mssql) | source | The same for SQL Server |
 | [sources/s3](plugins/sources/s3) | source | Imports JSON and JSON-lines objects from an S3 bucket |
-| [enrichers/ai-keywords](plugins/enrichers/ai-keywords) | stream | Adds keywords to new documents with Claude |
+| [enrichers/ai-keywords](plugins/enrichers/ai-keywords) | stream | Adds keywords to new documents with the lattice's AI provider |
 
 ### Plugin FAQ
 
@@ -1371,6 +1367,7 @@ A role is a set of permissions:
 | `audit` | The audit trail | no |
 | `plugins` | Plugins and their delivery state | no |
 | `maintenance` | Flush, compact and back up | no |
+| `ai` | Run prompts through the lattice's AI provider (`POST /ai/complete`), within its token budget | no |
 | `admin` | Everything: users, roles, settings, functions, schedules, joining hexes, shutdown | no |
 
 Built-in roles:
@@ -1383,6 +1380,7 @@ Built-in roles:
 | `owner` | `read`, `write`, `manage`, `upload`, `delete`, `restore` |
 | `operator` | `status`, `logs`, `plugins`, `maintenance` (including backups) |
 | `auditor` | `status`, `audit` |
+| `ai` | `ai` (for plugins and scripts that use the lattice's AI provider) |
 
 Administrators create custom roles from any set of permissions:
 
@@ -1796,11 +1794,12 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 
 Settings that belong to the whole lattice rather than one machine are kept in the lattice configuration: where file content is stored (`file_storage.*`) and the AI provider and AI features (`ai.*`). Administrators change them on the Configuration page, with `hexdb config`, or through the API. `hexdb.toml` keeps what belongs to one hex (addresses, data directory, keys), and the runtime settings above stay per hex.
 
-The storage backend and AI settings are stored and distributed now; the features that use them (remote file storage, AI tagging, AI video thumbnails) arrive in later 1.6 builds.
+The AI settings are used by the AI features below. The storage backend settings are stored and distributed; remote file storage arrives in a later 1.6 build.
 
 ```bash
 curl http://localhost:7700/config                                # newest version, schema, each hex's state
-curl -X PUT http://localhost:7700/config -H "Content-Type: application/json"   -d '{ "changes": { "ai.provider": "anthropic", "ai.api_key": "sk-..." }, "comment": "Use Claude", "base_version": 3 }'
+curl -X PUT http://localhost:7700/config -H "Content-Type: application/json" \
+  -d '{ "changes": { "ai.provider": "anthropic", "ai.api_key": "sk-..." }, "comment": "Use Claude", "base_version": 3 }'
 curl http://localhost:7700/config/history                        # versions with what each changed
 curl http://localhost:7700/config/versions/2                     # one version
 curl -X POST http://localhost:7700/config/rollback -d '{ "version": 2 }'
@@ -1840,10 +1839,51 @@ hexdb config rollback 3 -m "bad key"
 | `ai.monthly_token_budget` | 1,000,000 | Tokens AI features may use per calendar month (0: no limit) |
 | `ai.max_tokens_per_file` | 4,000 | Tokens one file may use |
 | `ai.tagging.enabled` | false | AI tags and descriptions for uploaded files |
+| `ai.tagging.tessellations` | empty (all) | Files tessellations whose new files are tagged, comma-separated |
 | `ai.tagging.send` | `["metadata", "text"]` | What tagging sends: any of `metadata`, `text`, `thumbnail`, `image` |
 | `ai.video_thumbnails.enabled`, `frames` | false, 6 | The AI picks a video's thumbnail from this many frames |
 
 AI features only ever use the key entered here, for this lattice.
+
+### AI
+
+Every AI feature (the query advisor, file tagging, video thumbnails, and plugins) goes through one client that uses the lattice configuration's `ai.*` settings. Nothing is sent while `ai.provider` is `none`.
+
+| `ai.provider` | API | Default `ai.base_url` | `ai.model` |
+| --- | --- | --- | --- |
+| `anthropic` | Claude Messages API | `https://api.anthropic.com` | default `claude-opus-5-5` |
+| `openai` | Chat completions, `Authorization: Bearer` | `https://api.openai.com/v1` | required |
+| `github` | GitHub Models (a GitHub token with access to models) | `https://models.github.ai/inference` | required |
+| `azure_openai` | Chat completions, `api-key` header | required, e.g. `https://<resource>.openai.azure.com/openai/v1` | required (the deployment) |
+| `openai_compatible` | Chat completions (Ollama, LM Studio, vLLM...); the key is optional | required, e.g. `http://localhost:11434/v1` | required |
+
+A ChatGPT subscription can't be used by applications; `openai` needs an OpenAI API key. GitHub Copilot has no API for other applications; GitHub Models is the closest. With Claude models that support it, HexDB asks the API to retry a request the model declines on another model (`fallbacks: "default"`).
+
+- **Budget.** Each call's input and output tokens are added to the month's usage, per feature, in the `_ai_usage` system tessellation (replicas send theirs to the Overseer). Once the month's total reaches `ai.monthly_token_budget`, calls are refused with 429 until the next month or a higher budget (0: no limit). File features also stay within `ai.max_tokens_per_file` per call; other calls within 16,000 tokens.
+- **Errors.** A provider's error is returned as 502 `ai_provider_error` with any copy of the key removed; a provider's 429 is returned as 429, and so is a used-up budget. `POST /ai/test` answers 200 with `"ok": false` and the error instead, and 400 when no provider is configured.
+
+```bash
+curl http://localhost:7700/ai                       # provider, model, this month's usage and budget (admins)
+curl -X POST http://localhost:7700/ai/test          # a tiny call: does the provider, model and key work? (admins)
+curl -X POST http://localhost:7700/ai/complete -H "Content-Type: application/json" \
+  -d '{ "prompt": "Summarize: ...", "system": "Be brief.", "max_tokens": 2000 }'   # the `ai` permission
+```
+
+**AI tags and descriptions.** With `ai.tagging.enabled`, each file uploaded afterwards is sent to the AI once its metadata has been extracted, and the answer is stored on the file as `ai`: `tags` (up to 15, lowercase), `description`, `model`, `input_tokens`, `output_tokens` and the content's `sha256`, so the same content is never tagged twice (a new version is tagged again). `ai` is in the files text index, so `$text` finds files by their AI tags; it can't be written through the document routes, and the user's own `tags` and `description` are never changed. What is sent is set by `ai.tagging.send`: `metadata` (name, folder, type, size and the extracted metadata), `text` (the extracted text, up to 16,000 characters), `thumbnail`, and `image` (a JPEG, PNG, GIF or WebP up to 4.5 MB is sent whole; otherwise its thumbnail). `ai.tagging.tessellations` limits tagging to some files tessellations. The instructions tell the model that file contents are data, but a file can still try to steer its own tags: treat them as suggestions. A failure is recorded as `ai.status: "failed"` (or `"skipped"` when the budget is used up) with the error.
+
+**AI video thumbnails.** With `ai.video_thumbnails.enabled`, `ai.video_thumbnails.frames` keyframes spread through each new H.264 video are decoded and sent as thumbnail-sized images, and the frame the model picks becomes the thumbnail (`thumbnail.chosen_by: "ai"`, with `frame` and `of`). Re-reading the file's metadata keeps that choice while the content is the same.
+
+Turning either on affects files uploaded afterwards only. Existing files are processed when an administrator asks, after looking at the estimate:
+
+```bash
+curl http://localhost:7700/ai/estimate                  # per files tessellation: tokens per file, untagged files and their total
+curl -X POST http://localhost:7700/media/_ai_tag        # tag files not tagged for their current content (?id= one, ?all=true every file)
+curl -X POST http://localhost:7700/media/_ai_thumbnails # let the AI choose existing videos' thumbnails
+```
+
+Estimates are rough: about 450 tokens of instructions and answer per file, plus metadata and text at about 4 characters per token, plus image tokens (width x height / 750 after scaling to fit 1568 px, at most 1,600); per video, about 300 tokens plus each frame. Providers count differently. Work runs on the Overseer, one file at a time, through the same budget; the requests are audited as `ai.tag` and `ai.thumbnails`. The CLI has `hexdb config ai-estimate`, `ai-tag <tessellation>` and `ai-thumbnails <tessellation>`; the Configuration page shows the estimates with buttons, and the Files page shows a file's AI tags.
+
+`POST /ai/complete` lets plugins and scripts use the lattice's provider without a key of their own; it needs the `ai` permission (the built-in `ai` role) and its usage is recorded as `api:<login>`. A plugin gets it with `ai = true` in its manifest's `[access]` section. The Configuration page has a "Test" button and shows the month's usage; the CLI has `hexdb config ai-test` and `hexdb config ai-usage`.
 
 ### Configuration reference
 
@@ -1895,7 +1935,7 @@ AI features only ever use the key entered here, for this lattice.
 | `replication.min_acks`, `ack_timeout_ms`, `forward_writes`, `quorum` | 0, 5000, true, 0 | See [Durability options](#durability-options) |
 | `plugins.enabled`, `registry` | true, `plugins.json` | Plugin loading |
 | `functions.scripts`, `python`, `node` | true, `python3`/`python`, `node` | Script runtimes |
-| `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Query advisor AI |
+| `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Pre-1.6 query advisor key, used only while the lattice configuration's `ai.provider` is `none` |
 | `analyzers.<name>` | none | Custom text analyzers |
 | `ui.path` | `../hexdb_admin/dist` | Built admin UI |
 | `ui.notice` | empty | A short notice the admin UI shows above every page and on the sign-in screen (also returned by `GET /health`, to everyone) |

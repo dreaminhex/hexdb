@@ -204,7 +204,9 @@ function DocumentEditor({
 export function DocumentsPage() {
   const { me } = useAuth()
   const tessellations = usePoll(api.tessellations)
-  const userTessellations = (tessellations.data ?? []).filter((t) => t.kind === "user").map((t) => t.name).sort()
+  // Files tessellations are listed too: each file is a document holding its metadata (`meta`), so it can be filtered here.
+  const userTessellations = (tessellations.data ?? []).filter((t) => t.kind === "user" || t.kind === "files").map((t) => t.name).sort()
+  const filesTessellations = new Set((tessellations.data ?? []).filter((t) => t.kind === "files").map((t) => t.name))
   const selected = useQueryParam("tessellation")
   const tessellation = selected && userTessellations.includes(selected) ? selected : (userTessellations[0] ?? null)
 
@@ -305,7 +307,9 @@ export function DocumentsPage() {
         <Button type="submit" variant="outline" size="sm">
           <IconFilter /> Apply
         </Button>
-        <Button type="button" size="sm" onClick={() => setEditing(null)} disabled={!tessellation || !can(me, "write", tessellation)}>
+        <Button type="button" size="sm" onClick={() => setEditing(null)} disabled={!tessellation || !can(me, "write", tessellation) || filesTessellations.has(tessellation)}
+          title={tessellation && filesTessellations.has(tessellation) ? "Files are added by uploading them on the Files page." : undefined}
+        >
           <IconPlus /> New document
         </Button>
       </form>

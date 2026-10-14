@@ -43,7 +43,7 @@ use ulid::Ulid;
 
 pub(crate) mod backup;
 mod files;
-pub use files::{ExtractQueue, FileContent, FileSync, UploadOptions, UploadResult};
+pub use files::{ai_files::AiTask, ExtractQueue, FileContent, FileSync, UploadOptions, UploadResult};
 mod indexing;
 mod reads;
 mod history;
@@ -269,6 +269,8 @@ pub struct HexDBEngine {
     pub(crate) blobs: Arc<crate::blobs::BlobStore>,
     /// Files waiting for metadata extraction.
     pub(crate) extract_queue: files::ExtractQueue,
+    /// Files waiting for AI tagging or thumbnails.
+    pub(crate) ai_queue: files::ai_files::AiQueue,
     /// Copying file content from other hexes.
     pub(crate) file_sync: files::FileSync,
     /// The last TOTP step each user signed in with on this hex (replay protection
@@ -498,6 +500,7 @@ impl HexDBEngine {
             keys: keys.clone(),
             blobs,
             extract_queue: Default::default(),
+            ai_queue: Default::default(),
             file_sync: Default::default(),
             role_cache: std::sync::Mutex::new(None),
             history_id,

@@ -61,6 +61,10 @@ pub fn app_router(
         .route("/config/history", get(crate::config::config_history))
         .route("/config/versions/{version}", get(crate::config::config_version))
         .route("/config/rollback", post(crate::config::rollback_config))
+        .route("/ai", get(crate::config::ai_status))
+        .route("/ai/test", post(crate::config::ai_test))
+        .route("/ai/complete", post(crate::config::ai_complete))
+        .route("/ai/estimate", get(crate::config::ai_estimate))
         .route("/join", post(join_info))
 
         // Streams (publish/subscribe)
@@ -99,6 +103,7 @@ pub fn app_router(
         .route("/lattice/chunks/{id}", get(crate::lattice::chunk))
         .route("/lattice/revoke", post(crate::lattice::revoke))
         .route("/lattice/audit", post(crate::lattice::audit))
+        .route("/lattice/ai-usage", post(crate::lattice::ai_usage))
         .route("/lattice/throttle", post(crate::lattice::throttle))
         .route("/transactions", post(transaction).layer(DefaultBodyLimit::max(body_limit)))
         .route("/flush", post(flush))
@@ -166,6 +171,8 @@ pub fn app_router(
         )
         .route("/{tessellation}/_trash", get(crate::files::trash).delete(crate::files::empty_trash))
         .route("/{tessellation}/_reextract", post(crate::files::reextract))
+        .route("/{tessellation}/_ai_tag", post(crate::config::ai_tag))
+        .route("/{tessellation}/_ai_thumbnails", post(crate::config::ai_thumbnails))
         .route("/{tessellation}/_uploads", post(crate::files::begin_upload))
         .route(
             "/{tessellation}/_uploads/{id}",

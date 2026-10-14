@@ -36,6 +36,8 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 use ulid::Ulid;
 
+pub(crate) mod ai_files;
+
 /// What the client says about an upload.
 #[derive(Debug, Clone, Default)]
 pub struct UploadOptions {
@@ -263,8 +265,15 @@ impl HexDBEngine {
         }
         // Every string in a file's name, folders, tags, description and
         // extracted metadata is searchable with $text.
-        if !info.indexes.iter().any(|i| i.kind == IndexKind::Text) {
-            let fields = ["name", "path", "tags", "description", "meta"].map(String::from).to_vec();
+        let fields = ["name", "path", "tags", "description", "meta", "ai"].map(String::from).to_vec();
+        // Before 1.6 the search index didn't cover `ai` (AI tags and descriptions).
+        let old = ["name", "path", "tags", "description", "meta"].map(String::from).to_vec();
+        if let Some(existing) = info.indexes.iter().find(|i| i.name == files::SEARCH_INDEX && i.kind == IndexKind::Text && i.fields == old) {
+            info!("🔎 Adding AI tags to the search index of '{}'.", name);
+            self.drop_index_unchecked(name, &existing.name)?;
+            let def = IndexDef { name: files::SEARCH_INDEX.into(), kind: IndexKind::Text, fields: fields.clone(), unique: false, analyzer: existing.analyzer.clone() };
+            self.create_index_unchecked(name, def).await?;
+        } else if !info.indexes.iter().any(|i| i.kind == IndexKind::Text) {
             let def = IndexDef { name: files::SEARCH_INDEX.into(), kind: IndexKind::Text, fields, unique: false, analyzer: None };
             self.create_index_unchecked(name, def).await?;
         }
@@ -385,6 +394,7 @@ impl HexDBEngine {
                     map.insert("uploaded_by".into(), json!(login));
                     map.remove("meta");
                     map.remove("thumbnail");
+                    map.remove("ai");
                     map.insert("extract".into(), json!({ "status": "pending" }));
                     (document(tess, previous.id, map, previous.ttl), seq, false)
                 }
@@ -1028,6 +1038,7 @@ impl HexDBEngine {
             map.insert("restored_from".into(), json!(version));
             map.remove("meta");
             map.remove("thumbnail");
+            map.remove("ai");
             map.insert("extract".into(), json!({ "status": "pending" }));
             let doc = document(tess, doc.id, map, doc.ttl);
             let items = vec![BatchItem { key: DocKey::new(tess, doc.id), op: WalOp::Put(doc.clone()), expected_seq: Some(seq) }];
@@ -1351,7 +1362,11 @@ impl HexDBEngine {
             max_text_bytes: (self.config.files.text_kb as usize) * 1024,
         };
         let store = self.blobs.clone();
-        let thumbnail_px = (self.config.files.thumbnails && crate::extract::thumbnail::supported(&content_type)).then_some(self.config.files.thumbnail_px.clamp(32, 2048));
+        // A thumbnail the AI chose for this content is kept.
+        let kept_thumbnail = Self::kept_ai_thumbnail(&map);
+        let thumbnail_px = (kept_thumbnail.is_none() && self.config.files.thumbnails && crate::extract::thumbnail::supported(&content_type))
+            .then_some(self.config.files.thumbnail_px.clamp(32, 2048));
+        let file_type = content_type.clone();
         let work = tokio::task::spawn_blocking(move || {
             let mut source = crate::extract::Source::new(Box::new(BlobSource::new(store.clone(), &manifest)), &limits);
             let extracted = crate::extract::extract(&mut source, &name, &content_type, &limits);
@@ -1369,7 +1384,7 @@ impl HexDBEngine {
             Err(_) => (crate::extract::Extracted { errors: vec!["extraction took too long".into()], ..Default::default() }, None),
         };
         let mut pins = Pins::new(self.blobs.clone());
-        let mut thumbnail_field = None;
+        let mut thumbnail_field = kept_thumbnail;
         match thumbnail {
             Some(Ok(Some(thumb))) => {
                 let (back, stored) = self.put_chunk(pins, thumb.bytes, false).await?;
@@ -1407,6 +1422,7 @@ impl HexDBEngine {
             let items = vec![BatchItem { key: key.clone(), op: WalOp::Put(doc), expected_seq: Some(seq) }];
             if files::as_internal(self.commit(items)).await? {
                 drop(pins);
+                self.queue_ai_after_extraction(tess, id, &file_type);
                 return Ok(());
             }
         }

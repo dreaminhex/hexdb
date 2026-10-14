@@ -12,9 +12,10 @@
 //   * a text index for `$text` searches without one;
 //   * dropping indexes no query has used, which only cost write time.
 //
-// With `?ai=true` and an Anthropic API key (`[ai]` in hexdb.toml), the
-// shapes, the existing indexes and the documents' field names and types (no
-// values) are also sent to Claude for a second opinion, returned separately.
+// With `?ai=true` and an AI provider in the lattice configuration (see
+// `crate::ai`), the shapes, the existing indexes and the documents' field
+// names and types (no values) are also sent to the model for a second
+// opinion, returned separately.
 // Shapes are kept per hex, saved with the metrics history
 // (`query-stats.hxe`, encrypted) so they survive restarts; shapes not seen for
 // 30 days are dropped when they're loaded.
@@ -24,7 +25,7 @@ use crate::{
     filter::Filter,
     index::{IndexDef, IndexKind},
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -336,11 +337,9 @@ fn field_types(docs: &[crate::document::Document]) -> BTreeMap<String, BTreeSet<
     out
 }
 
-/// Ask Claude for index suggestions. Only shapes, index definitions and field
+/// Ask the configured AI for index suggestions. Only shapes, index definitions and field
 /// names and types are sent; no document values.
 pub async fn ai_suggestions(engine: &HexDBEngine, tess: &str, shapes: &[ShapeStats]) -> Result<Vec<Suggestion>> {
-    let config = &engine.config.ai;
-    let key = std::env::var(&config.api_key_env).map_err(|_| anyhow!("set {} in the server's environment to use AI advice", config.api_key_env))?;
     let sample = engine.list_documents(tess, None, 50).await?.documents;
     let indexes: Vec<Value> = engine.list_indexes(tess).iter().map(|i| json!({ "name": i.def.name, "kind": i.def.kind, "fields": i.def.fields, "unique": i.def.unique })).collect();
     let shapes: Vec<Value> = shapes
@@ -362,30 +361,18 @@ pub async fn ai_suggestions(engine: &HexDBEngine, tess: &str, shapes: &[ShapeSta
         indexes the observed queries would use, plus drops of clearly useless indexes. Reply with only a JSON array of objects: \
         {\"action\": \"create_index\" | \"drop_index\", \"kind\": \"field\" | \"text\", \"fields\": [...], \"analyzer\": optional, \
         \"name\": index name for drops, \"impact\": \"high\" | \"medium\" | \"low\", \"reason\": one or two sentences}.";
-    let body = json!({
-        "model": config.model,
-        "max_tokens": 1500,
-        "system": system,
-        "messages": [{ "role": "user", "content": format!("Workload summary:\n{}", serde_json::to_string_pretty(&context)?) }],
-    });
-    let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()?
-        .post(format!("{}/v1/messages", config.base_url.trim_end_matches('/')))
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .await
-        .context("calling the Claude API")?;
-    if !response.status().is_success() {
-        bail!("the Claude API returned {}: {}", response.status(), response.text().await.unwrap_or_default());
-    }
-    let reply: Value = response.json().await?;
-    let text = reply["content"].as_array().and_then(|c| c.iter().find_map(|p| p["text"].as_str())).unwrap_or("[]");
+    let reply = engine
+        .ai_complete(crate::ai::AiRequest {
+            feature: "advisor".into(),
+            system: system.into(),
+            parts: vec![crate::ai::Part::Text(format!("Workload summary:\n{}", serde_json::to_string_pretty(&context)?))],
+            max_tokens: 8000,
+        })
+        .await?;
+    let text = if reply.text.trim().is_empty() { "[]" } else { reply.text.as_str() };
     let start = text.find('[').unwrap_or(0);
     let end = text.rfind(']').map(|e| e + 1).unwrap_or(text.len());
-    let items: Vec<Value> = serde_json::from_str(&text[start..end]).context("Claude's answer wasn't the expected JSON")?;
+    let items: Vec<Value> = serde_json::from_str(&text[start..end]).context("the AI's answer wasn't the expected JSON")?;
     let mut out = Vec::new();
     for item in items {
         let impact = item["impact"].as_str().filter(|i| ["high", "medium", "low"].contains(i)).unwrap_or("medium").to_string();

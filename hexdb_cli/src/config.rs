@@ -298,3 +298,75 @@ pub async fn rollback(target: &Target<'_>, version: u64, message: Option<&str>) 
     println!("Rolled back to version {}'s settings as version {}.", version, view["version"]);
     Ok(())
 }
+
+pub async fn ai_test(target: &Target<'_>) -> Result<()> {
+    let result = target.send(reqwest::Method::POST, "/ai/test", &json!({})).await?;
+    if result["ok"] == true {
+        println!(
+            "OK: {} {} answered {:?} in {} ms ({} input, {} output tokens).",
+            result["provider"].as_str().unwrap_or("?"),
+            result["model"].as_str().unwrap_or("?"),
+            result["reply"].as_str().unwrap_or_default(),
+            result["millis"],
+            result["input_tokens"],
+            result["output_tokens"]
+        );
+        Ok(())
+    } else {
+        bail!("{} {} failed: {}", result["provider"].as_str().unwrap_or("?"), result["model"].as_str().unwrap_or("?"), result["error"].as_str().unwrap_or("unknown error"))
+    }
+}
+
+pub async fn ai_usage(target: &Target<'_>, json_out: bool) -> Result<()> {
+    let view = target.get("/ai").await?;
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+        return Ok(());
+    }
+    let ai = &view["ai"];
+    if ai["configured"] == true {
+        println!("Provider: {} ({})", ai["provider"].as_str().unwrap_or("?"), ai["model"].as_str().unwrap_or("?"));
+    } else {
+        println!("No AI provider: {}", ai["problem"].as_str().unwrap_or("not configured"));
+    }
+    let usage = &view["usage"];
+    let budget = usage["budget"].as_u64().unwrap_or(0);
+    println!(
+        "{}: {} tokens ({} input, {} output) in {} call(s), {} failed; budget {}",
+        usage["month"].as_str().unwrap_or("this month"),
+        usage["total_tokens"],
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["calls"],
+        usage["failures"],
+        if budget == 0 { "unlimited".to_string() } else { format!("{} ({} left)", budget, usage["remaining"]) }
+    );
+    for (feature, f) in usage["features"].as_object().into_iter().flatten() {
+        println!("  {:<24} {} in, {} out, {} call(s)", feature, f["input_tokens"], f["output_tokens"], f["calls"]);
+    }
+    Ok(())
+}
+
+pub async fn ai_estimate(target: &Target<'_>) -> Result<()> {
+    let view = target.get("/ai/estimate").await?;
+    println!("Estimates (rough; providers count tokens differently). Tagging sends: {}", view["send"]);
+    for t in view["tessellations"].as_array().into_iter().flatten() {
+        let (tag, vid) = (&t["tagging"], &t["video_thumbnails"]);
+        println!("{} ({} files)", t["tessellation"].as_str().unwrap_or("?"), t["files"]);
+        println!("  tagging: about {} tokens per file; {} untagged, about {} tokens to tag them", tag["tokens_per_file"], tag["untagged"], tag["tokens_for_untagged"]);
+        if vid["videos"].as_u64().unwrap_or(0) > 0 {
+            println!(
+                "  video thumbnails: about {} tokens per video; {} without one chosen by the AI, about {} tokens",
+                vid["tokens_per_video"], vid["without_ai_thumbnail"], vid["tokens_for_those"]
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn ai_queue(target: &Target<'_>, tessellation: &str, route: &str, all: bool) -> Result<()> {
+    let path = format!("/{}/{}{}", tessellation, route, if all { "?all=true" } else { "" });
+    let result = target.send(reqwest::Method::POST, &path, &json!({})).await?;
+    println!("Queued {} file(s); they're processed in the background, one at a time.", result["queued"]);
+    Ok(())
+}

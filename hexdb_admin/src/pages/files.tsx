@@ -621,6 +621,38 @@ function FileDetails({
                       </dd>
                     </>
                   )}
+                  {file.ai?.status === "done" && (
+                    <>
+                      <dt className="text-muted-foreground">AI tags</dt>
+                      <dd className="flex flex-wrap gap-1" title={`By ${file.ai.model} (${(file.ai.input_tokens ?? 0) + (file.ai.output_tokens ?? 0)} tokens)`}>
+                        {(file.ai.tags ?? []).map((t) => (
+                          <Badge key={t} variant="secondary">
+                            {t}
+                          </Badge>
+                        ))}
+                      </dd>
+                      {file.ai.description && (
+                        <>
+                          <dt className="text-muted-foreground">AI description</dt>
+                          <dd>{file.ai.description}</dd>
+                        </>
+                      )}
+                    </>
+                  )}
+                  {file.ai && file.ai.status !== "done" && (
+                    <>
+                      <dt className="text-muted-foreground">AI tags</dt>
+                      <dd className="text-muted-foreground text-xs">{file.ai.status === "skipped" ? "Skipped" : "Failed"}: {file.ai.error}</dd>
+                    </>
+                  )}
+                  {file.thumbnail?.chosen_by === "ai" && (
+                    <>
+                      <dt className="text-muted-foreground">Thumbnail</dt>
+                      <dd>
+                        Frame {file.thumbnail.frame} of {file.thumbnail.of}, chosen by the AI
+                      </dd>
+                    </>
+                  )}
                   <dt className="text-muted-foreground">Modified</dt>
                   <dd>{formatTimestamp(file.modified_at)}</dd>
                   <dt className="text-muted-foreground">Uploaded</dt>

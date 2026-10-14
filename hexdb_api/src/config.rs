@@ -5,6 +5,12 @@
 //   GET  /config/history             versions, newest first, with what each changed (?limit=&offset=)
 //   GET  /config/versions/{version}  one version
 //   POST /config/rollback            {"version": n, "comment"?}: a new version with version n's contents
+//   GET  /ai                         the AI provider in use and this month's token usage (admins)
+//   POST /ai/test                    a tiny call that shows whether the provider, model and key work (admins)
+//   POST /ai/complete                {"prompt", "system"?, "max_tokens"?}: run a prompt (the `ai` permission)
+//   GET  /ai/estimate                token estimates for AI tagging and video thumbnails, per files tessellation (admins)
+//   POST /{tess}/_ai_tag             tag files not tagged for their current content (?id= one file, ?all=true every file) (admins)
+//   POST /{tess}/_ai_thumbnails      let the AI choose video thumbnails, the same way (admins)
 //
 // Secret values are accepted by PUT and never returned, logged or audited.
 // Writes are forwarded to the Overseer like other writes.
@@ -83,4 +89,98 @@ pub async fn rollback_config(State(engine): Engine, Auth(principal): Auth, body:
         .await;
     info!("⚙️ '{}' rolled the lattice configuration back to version {} (now version {}).", principal.login, request.version, version.version);
     Ok(Json(engine.lattice_config_view().await?).into_response())
+}
+
+pub async fn ai_status(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    Ok(Json(json!({ "ai": engine.ai_summary(), "usage": engine.ai_usage_view().await? })).into_response())
+}
+
+pub async fn ai_test(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    let started = engine.ai_summary();
+    match engine.ai_test().await {
+        Ok(reply) => Ok(Json(json!({ "ok": true, "reply": reply.text.chars().take(200).collect::<String>(), "provider": reply.provider, "model": reply.model, "input_tokens": reply.input_tokens, "output_tokens": reply.output_tokens, "millis": reply.millis })).into_response()),
+        // Not configured: a plain 400.
+        Err(e) if matches!(e.downcast_ref::<hexdb_core::EngineError>(), Some(hexdb_core::EngineError::Invalid(_))) => Err(e.into()),
+        Err(e) => Ok(Json(json!({ "ok": false, "provider": started.get("provider"), "model": started.get("model"), "error": format!("{:#}", e) })).into_response()),
+    }
+}
+
+/// A provider's failure as 502, unless it's one of ours (not configured, budget, rate limit).
+fn provider_failure(e: anyhow::Error) -> ApiError {
+    if e.downcast_ref::<hexdb_core::EngineError>().is_some() {
+        return e.into();
+    }
+    ApiError::new(axum::http::StatusCode::BAD_GATEWAY, "ai_provider_error", format!("{:#}", e))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompleteRequest {
+    pub prompt: String,
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+}
+
+/// Run a prompt through the lattice's AI provider, for plugins and scripts
+/// (the `ai` permission). Usage is recorded under `api:<login>`.
+pub async fn ai_complete(State(engine): Engine, Auth(principal): Auth, body: Result<Json<CompleteRequest>, JsonRejection>) -> ApiResult {
+    principal.require_action(hexdb_core::Action::Ai)?;
+    let Json(request) = body?;
+    if request.prompt.trim().is_empty() || request.prompt.len() > 400_000 {
+        return Err(ApiError::invalid("prompt must be 1 to 400,000 bytes."));
+    }
+    let reply = engine
+        .ai_complete(hexdb_core::ai::AiRequest {
+            feature: format!("api:{}", principal.login),
+            system: request.system.unwrap_or_default(),
+            parts: vec![hexdb_core::ai::Part::Text(request.prompt)],
+            max_tokens: request.max_tokens.unwrap_or(4000),
+        })
+        .await
+        .map_err(provider_failure)?;
+    Ok(Json(json!(reply)).into_response())
+}
+
+pub async fn ai_estimate(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    Ok(Json(engine.ai_estimate().await?).into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiFilesParams {
+    pub id: Option<String>,
+    #[serde(default)]
+    pub all: bool,
+}
+
+async fn queue_ai(
+    engine: &hexdb_core::engine::HexDBEngine,
+    login: &str,
+    tess: &str,
+    task: hexdb_core::engine::AiTask,
+    params: AiFilesParams,
+) -> ApiResult {
+    let queued = engine.queue_ai_files(tess, task, params.id.as_deref(), params.all).await?;
+    let action = if task == hexdb_core::engine::AiTask::Tag { "ai.tag" } else { "ai.thumbnails" };
+    engine.audit(login, action, tess, json!({ "queued": queued, "id": params.id, "all": params.all })).await;
+    Ok((axum::http::StatusCode::ACCEPTED, Json(json!({ "queued": queued }))).into_response())
+}
+
+/// Tag existing files with the AI (it spends tokens, so administrators only).
+pub async fn ai_tag(Path(tess): Path<String>, params: Result<Query<AiFilesParams>, QueryRejection>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    let Query(params) = params?;
+    queue_ai(&engine, &principal.login, &tess, hexdb_core::engine::AiTask::Tag, params).await
+}
+
+/// Let the AI choose existing videos' thumbnails (administrators only).
+pub async fn ai_thumbnails(Path(tess): Path<String>, params: Result<Query<AiFilesParams>, QueryRejection>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    let Query(params) = params?;
+    queue_ai(&engine, &principal.login, &tess, hexdb_core::engine::AiTask::Thumbnail, params).await
 }

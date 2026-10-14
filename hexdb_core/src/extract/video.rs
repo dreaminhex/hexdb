@@ -169,13 +169,13 @@ fn sample_location(stbl: &[u8], sample: usize) -> Option<(u64, u64)> {
     None
 }
 
-/// The keyframe about a third of the way through, by sample number.
-fn pick_keyframe(stbl: &[u8]) -> Option<usize> {
+/// The keyframe at or before `fraction` of the way through (0.0-1.0), by sample number.
+fn pick_keyframe(stbl: &[u8], fraction: f64) -> Option<usize> {
     let count = u32_at(child(stbl, b"stsz")?, 8)? as usize;
     if count == 0 {
         return None;
     }
-    let target = count / 3;
+    let target = ((count as f64) * fraction.clamp(0.0, 1.0)) as usize;
     let Some(stss) = child(stbl, b"stss") else { return Some(target) }; // every sample is a keyframe
     let (n, body) = table(stss, 4)?;
     let syncs: Vec<usize> = (0..n).filter_map(|i| u32_at(body, i * 4)).filter(|&s| s >= 1).map(|s| s as usize - 1).collect();
@@ -289,8 +289,15 @@ fn decode(_stream: &[u8]) -> anyhow::Result<Option<RgbImage>> {
 /// One decoded frame from the video, already turned upright, or `None` when
 /// there's no H.264 video track (or this build has no decoder).
 pub fn keyframe(source: &mut Source) -> anyhow::Result<Option<RgbImage>> {
+    Ok(keyframes(source, &[1.0 / 3.0])?.into_iter().next())
+}
+
+/// Decoded keyframes near these points of the video (fractions of its length),
+/// upright and without repeats; empty when there's no H.264 video track (or no
+/// decoder). Fragmented MP4 gives its first keyframe only.
+pub fn keyframes(source: &mut Source, fractions: &[f64]) -> anyhow::Result<Vec<RgbImage>> {
     if !cfg!(feature = "video-thumbnails") {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     // Top-level boxes: find moov (anywhere: often at the end) and the fragments.
     let len = source.len();
@@ -321,7 +328,7 @@ pub fn keyframe(source: &mut Source) -> anyhow::Result<Option<RgbImage>> {
         }
         at += size;
     }
-    let Some((moov_at, moov_size, moov_header)) = moov else { return Ok(None) };
+    let Some((moov_at, moov_size, moov_header)) = moov else { return Ok(Vec::new()) };
     if moov_size > MAX_MOOV {
         bail!("the video's index is over {} MB", MAX_MOOV / (1024 * 1024));
     }
@@ -337,30 +344,144 @@ pub fn keyframe(source: &mut Source) -> anyhow::Result<Option<RgbImage>> {
             continue;
         }
         let Some(stbl) = path(trak, &[b"mdia", b"minf", b"stbl"]) else { continue };
-        let Some(avc) = child(stbl, b"stsd").and_then(avc_config) else { return Ok(None) }; // not H.264
+        let Some(avc) = child(stbl, b"stsd").and_then(avc_config) else { return Ok(Vec::new()) }; // not H.264
         let tkhd = child(trak, b"tkhd").unwrap_or_default();
 
-        let location = match pick_keyframe(stbl) {
-            Some(sample) => sample_location(stbl, sample),
-            None => match track_id(tkhd) {
-                Some(id) => first_fragment_sample(source, &moofs, id)?,
-                None => None,
-            },
+        let mut samples: Vec<usize> = fractions.iter().filter_map(|&f| pick_keyframe(stbl, f)).collect();
+        samples.dedup();
+        let locations: Vec<(u64, u64)> = if samples.is_empty() {
+            match track_id(tkhd) {
+                Some(id) => first_fragment_sample(source, &moofs, id)?.into_iter().collect(),
+                None => Vec::new(),
+            }
+        } else {
+            samples.iter().filter_map(|&s| sample_location(stbl, s)).collect()
         };
-        let Some((offset, size)) = location else { bail!("couldn't find a keyframe") };
-        if size == 0 || size > MAX_SAMPLE {
-            bail!("keyframe is {} bytes", size);
+        if locations.is_empty() {
+            bail!("couldn't find a keyframe");
         }
-        let sample = source.range(offset, size as usize)?;
-        let Some(frame) = decode(&annex_b(&avc, &sample))? else { bail!("the keyframe didn't decode") };
-        return Ok(Some(match rotation(tkhd) {
-            1 => image::imageops::rotate90(&frame),
-            2 => image::imageops::rotate180(&frame),
-            3 => image::imageops::rotate270(&frame),
-            _ => frame,
-        }));
+        let mut frames = Vec::new();
+        for (offset, size) in locations {
+            if size == 0 || size > MAX_SAMPLE {
+                bail!("keyframe is {} bytes", size);
+            }
+            let sample = source.range(offset, size as usize)?;
+            let Some(frame) = decode(&annex_b(&avc, &sample))? else { bail!("the keyframe didn't decode") };
+            frames.push(match rotation(tkhd) {
+                1 => image::imageops::rotate90(&frame),
+                2 => image::imageops::rotate180(&frame),
+                3 => image::imageops::rotate270(&frame),
+                _ => frame,
+            });
+        }
+        return Ok(frames);
     }
-    Ok(None)
+    Ok(Vec::new())
+}
+
+/// Builds small H.264 MP4 files for tests (here and in hexdb_tests).
+#[cfg(feature = "video-thumbnails")]
+#[doc(hidden)]
+pub mod fixtures {
+    use openh264::encoder::Encoder;
+    use openh264::formats::{RgbSliceU8, YUVBuffer};
+
+    fn nal_units(stream: &[u8]) -> Vec<Vec<u8>> {
+        let mut starts = Vec::new();
+        let mut i = 0;
+        while i + 3 <= stream.len() {
+            if stream[i..i + 3] == [0, 0, 1] {
+                starts.push(i + 3);
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        starts
+            .iter()
+            .enumerate()
+            .map(|(n, &s)| {
+                let end = starts.get(n + 1).map(|&e| e - 3).unwrap_or(stream.len());
+                let mut nal = stream[s..end].to_vec();
+                while nal.last() == Some(&0) {
+                    nal.pop();
+                }
+                nal
+            })
+            .filter(|n| !n.is_empty())
+            .collect()
+    }
+
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn full(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        mp4_box(kind, &[&[0u8; 4][..], body].concat())
+    }
+
+    /// An MP4 of `w` x `h` keyframes, one per color, in order.
+    pub fn mp4(colors: &[[u8; 3]], w: usize, h: usize) -> Vec<u8> {
+        let (mut sps, mut pps, mut samples) = (Vec::new(), Vec::new(), Vec::new());
+        for color in colors {
+            let rgb: Vec<u8> = (0..w * h).flat_map(|_| *color).collect();
+            let yuv = YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h)));
+            let stream = Encoder::new().expect("an encoder").encode(&yuv).expect("encoded").to_vec();
+            let mut sample = Vec::new();
+            for nal in nal_units(&stream) {
+                match nal[0] & 0x1F {
+                    7 => sps = nal,
+                    8 => pps = nal,
+                    5 | 1 => {
+                        sample.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+                        sample.extend_from_slice(&nal);
+                    }
+                    _ => {}
+                }
+            }
+            samples.push(sample);
+        }
+        let mut avcc = vec![1, sps[1], sps[2], sps[3], 0xFF, 0xE1];
+        avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(&sps);
+        avcc.push(1);
+        avcc.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+        avcc.extend_from_slice(&pps);
+        let avc1 = mp4_box(b"avc1", &[&[0u8; 78][..], &mp4_box(b"avcC", &avcc)].concat());
+        let stsd = full(b"stsd", &[&1u32.to_be_bytes()[..], &avc1].concat());
+        let mut tkhd = vec![0u8; 80];
+        tkhd[8..12].copy_from_slice(&1u32.to_be_bytes());
+        for (i, v) in [0x10000i32, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000].iter().enumerate() {
+            tkhd[36 + i * 4..40 + i * 4].copy_from_slice(&v.to_be_bytes());
+        }
+        let tkhd = full(b"tkhd", &tkhd);
+        let mut stsz = [0u32.to_be_bytes(), (samples.len() as u32).to_be_bytes()].concat();
+        for sample in &samples {
+            stsz.extend_from_slice(&(sample.len() as u32).to_be_bytes());
+        }
+        let data: Vec<u8> = samples.concat();
+        let ftyp = mp4_box(b"ftyp", b"isom\0\0\0\0isom");
+        let build = |chunk_offset: u32| {
+            let stbl = mp4_box(
+                b"stbl",
+                &[
+                    stsd.clone(),
+                    full(b"stsz", &stsz),
+                    full(b"stsc", &[1u32.to_be_bytes(), 1u32.to_be_bytes(), (samples.len() as u32).to_be_bytes(), 1u32.to_be_bytes()].concat()),
+                    full(b"stco", &[1u32.to_be_bytes(), chunk_offset.to_be_bytes()].concat()),
+                ]
+                .concat(),
+            );
+            let hdlr = full(b"hdlr", &[&[0u8; 4][..], b"vide", &[0u8; 13]].concat());
+            let mdia = mp4_box(b"mdia", &[hdlr, mp4_box(b"minf", &stbl)].concat());
+            mp4_box(b"moov", &mp4_box(b"trak", &[tkhd.clone(), mdia].concat()))
+        };
+        let offset = (ftyp.len() + build(0).len() + 8) as u32;
+        [ftyp, build(offset), mp4_box(b"mdat", &data)].concat()
+    }
 }
 
 #[cfg(all(test, feature = "video-thumbnails"))]
@@ -485,6 +606,22 @@ mod tests {
         let (left, right) = (img.get_pixel(8, 24), img.get_pixel(56, 24));
         assert!(left[0] > 150 && left[2] < 100, "left is red: {:?}", left);
         assert!(right[2] > 150 && right[0] < 100, "right is blue: {:?}", right);
+    }
+
+    #[test]
+    fn decodes_keyframes_spread_through_the_video() {
+        let colors = [[220, 30, 30], [30, 200, 30], [30, 30, 220]];
+        let mp4 = fixtures::mp4(&colors, 32, 32);
+        let frames = keyframes(&mut Source::new(Box::new(mp4), &Limits::default()), &[0.1, 0.5, 0.9]).unwrap();
+        assert_eq!(frames.len(), 3);
+        for (frame, color) in frames.iter().zip(colors) {
+            let px = frame.get_pixel(16, 16);
+            let strongest = (0..3).max_by_key(|&c| px[c]).unwrap();
+            assert_eq!(strongest, (0..3).max_by_key(|&c| color[c]).unwrap(), "{:?} for {:?}", px, color);
+        }
+        // Points that land on the same keyframe give it once.
+        let mp4 = fixtures::mp4(&colors[..1], 32, 32);
+        assert_eq!(keyframes(&mut Source::new(Box::new(mp4), &Limits::default()), &[0.2, 0.4, 0.6]).unwrap().len(), 1);
     }
 
     #[test]

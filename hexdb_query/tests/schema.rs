@@ -175,7 +175,7 @@ async fn errors_carry_codes_and_system_data_is_protected() {
     // Users and roles are available, without secrets.
     let res = run(&schema, "{ users { login roles { name tessellations } } roles { name permissions builtin } }", json!({})).await;
     assert_eq!(res["data"]["users"][0]["login"], "hexdbadmin");
-    assert_eq!(res["data"]["roles"].as_array().unwrap().len(), 6, "the built-in roles");
+    assert_eq!(res["data"]["roles"].as_array().unwrap().len(), 7, "the built-in roles");
     assert!(res["data"]["roles"].as_array().unwrap().iter().all(|r| r["builtin"] == true));
 
     let res = run(&schema, "{ users { passwordHash } }", json!({})).await;

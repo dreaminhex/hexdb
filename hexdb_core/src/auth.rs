@@ -43,6 +43,8 @@
 //   delete       move files to the trash and delete them from it (files
 //                tessellations; deleting documents needs write)
 //   restore      restore files from the trash and earlier versions of files
+//   ai           run prompts through the lattice's AI provider (`POST
+//                /ai/complete`), which spends its token budget
 // A role's restrictions (see `crate::access`) narrow each of these, e.g. to
 // files whose `path` starts with a folder.
 //   status       server status, metrics history, lattice and storage details
@@ -150,10 +152,11 @@ pub enum Action {
     Upload,
     Delete,
     Restore,
+    Ai,
 }
 
 impl Action {
-    pub const ALL: [Action; 12] = [
+    pub const ALL: [Action; 13] = [
         Action::Read,
         Action::Write,
         Action::Manage,
@@ -166,6 +169,7 @@ impl Action {
         Action::Plugins,
         Action::Maintenance,
         Action::Admin,
+        Action::Ai,
     ];
 
     pub fn name(self) -> &'static str {
@@ -182,6 +186,7 @@ impl Action {
             Action::Upload => "upload",
             Action::Delete => "delete",
             Action::Restore => "restore",
+            Action::Ai => "ai",
         }
     }
 
@@ -208,6 +213,7 @@ impl Action {
             Action::Upload => "Upload files and new versions of files, and create files tessellations.",
             Action::Delete => "Move files to the trash and delete them from it.",
             Action::Restore => "Restore files from the trash and earlier versions of files.",
+            Action::Ai => "Run prompts through the lattice's AI provider, within its token budget.",
         }
     }
 }
@@ -923,7 +929,7 @@ mod tests {
         let auditor = principal(&[("auditor", &[])]);
         assert!(auditor.has(Action::Audit) && !auditor.has(Action::Logs));
         let admin = principal(&[("admin", &[])]);
-        assert_eq!(admin.global_permissions().len(), 6);
+        assert_eq!(admin.global_permissions().len(), 7);
     }
 
     #[test]
