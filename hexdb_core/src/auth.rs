@@ -38,14 +38,21 @@
 //   write        insert, replace, patch, delete documents (and create the
 //                tessellation by inserting into it)
 //   manage       delete the tessellation and manage its indexes and schemas
+//   upload       add files and new versions of files (files tessellations;
+//                also needed to create a files tessellation)
+//   delete       move files to the trash and delete them from it (files
+//                tessellations; deleting documents needs write)
+//   restore      restore files from the trash and earlier versions of files
+// A role's restrictions (see `crate::access`) narrow each of these, e.g. to
+// files whose `path` starts with a folder.
 //   status       server status, metrics history, lattice and storage details
 //   logs         the server log
 //   audit        the audit trail
 //   plugins      the plugin list and delivery state
 //   maintenance  flush and compact storage
 //   admin        everything, including users, roles, settings and shutdown
-// The built-in roles are reader (read), writer (read, write), owner (read,
-// write, manage), operator (status, logs, plugins, maintenance), auditor
+// The built-in roles are reader (read), writer (read, write, upload, delete,
+// restore), owner (writer's and manage), operator (status, logs, plugins, maintenance), auditor
 // (status, audit) and admin (admin). Unknown role names grant nothing.
 
 use crate::{
@@ -95,6 +102,12 @@ pub enum Permission {
     Write,
     /// Delete the tessellation, manage its indexes.
     Manage,
+    /// Add files (files tessellations).
+    Upload,
+    /// Trash and purge files (files tessellations).
+    Delete,
+    /// Restore trashed files and earlier versions (files tessellations).
+    Restore,
 }
 
 impl Permission {
@@ -103,6 +116,9 @@ impl Permission {
             Permission::Read => "read",
             Permission::Write => "write to",
             Permission::Manage => "manage",
+            Permission::Upload => "upload files to",
+            Permission::Delete => "delete files in",
+            Permission::Restore => "restore files in",
         }
     }
 
@@ -111,6 +127,9 @@ impl Permission {
             Permission::Read => Action::Read,
             Permission::Write => Action::Write,
             Permission::Manage => Action::Manage,
+            Permission::Upload => Action::Upload,
+            Permission::Delete => Action::Delete,
+            Permission::Restore => Action::Restore,
         }
     }
 }
@@ -128,13 +147,19 @@ pub enum Action {
     Plugins,
     Maintenance,
     Admin,
+    Upload,
+    Delete,
+    Restore,
 }
 
 impl Action {
-    pub const ALL: [Action; 9] = [
+    pub const ALL: [Action; 12] = [
         Action::Read,
         Action::Write,
         Action::Manage,
+        Action::Upload,
+        Action::Delete,
+        Action::Restore,
         Action::Status,
         Action::Logs,
         Action::Audit,
@@ -154,6 +179,9 @@ impl Action {
             Action::Plugins => "plugins",
             Action::Maintenance => "maintenance",
             Action::Admin => "admin",
+            Action::Upload => "upload",
+            Action::Delete => "delete",
+            Action::Restore => "restore",
         }
     }
 
@@ -163,7 +191,7 @@ impl Action {
 
     /// True for permissions that apply to the granted tessellations only.
     pub fn is_scoped(self) -> bool {
-        matches!(self, Action::Read | Action::Write | Action::Manage)
+        matches!(self, Action::Read | Action::Write | Action::Manage | Action::Upload | Action::Delete | Action::Restore)
     }
 
     pub fn description(self) -> &'static str {
@@ -177,6 +205,9 @@ impl Action {
             Action::Plugins => "View plugins and their delivery state.",
             Action::Maintenance => "Flush, compact and back up storage.",
             Action::Admin => "Everything, including users, roles, settings and shutdown.",
+            Action::Upload => "Upload files and new versions of files, and create files tessellations.",
+            Action::Delete => "Move files to the trash and delete them from it.",
+            Action::Restore => "Restore files from the trash and earlier versions of files.",
         }
     }
 }

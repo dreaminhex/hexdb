@@ -353,7 +353,7 @@ impl HexDBEngine {
         tokio::task::spawn_blocking(move || store.sync()).await.map_err(|e| anyhow!("{}", e))??;
         let content = json!({ "manifest": blobs::chunk_hex(&stored.id), "chunks": manifest.chunks.len(), "compressed": compressed });
 
-        let (read, write) = (self.caller_scope(tess, Action::Read), self.caller_scope(tess, Action::Write));
+        let (read, write) = (self.caller_scope(tess, Action::Read), self.caller_scope(tess, Action::Upload));
         let login = caller_login();
         for _ in 0..MAX_WRITE_RETRIES {
             let now = now_text();
@@ -995,12 +995,12 @@ impl HexDBEngine {
     /// kept as the newest earlier version, so a rollback can be undone.
     pub async fn restore_file_version(&self, tess: &str, id: &str, version: u64) -> Result<Document> {
         self.ensure_writable()?;
-        let write = self.caller_scope(tess, Action::Write);
+        let write = self.caller_scope(tess, Action::Restore);
         let read = self.caller_scope(tess, Action::Read);
         for _ in 0..MAX_WRITE_RETRIES {
             let (doc, seq) = self.visible_file(tess, id).await?;
             if !write.allows(&doc) {
-                return Err(EngineError::Forbidden(format!("Your role may not change this file in '{}'.", tess)).into());
+                return Err(EngineError::Forbidden(format!("Your role may not restore versions of this file in '{}'.", tess)).into());
             }
             let mut map = as_map(&doc);
             let current = map.get("version").and_then(Value::as_u64).unwrap_or(1);
@@ -1056,8 +1056,8 @@ impl HexDBEngine {
             .collect())
     }
 
-    /// A trashed file from `tess`, if the caller can see it.
-    async fn trashed_file(&self, tess: &str, id: &str) -> Result<(Document, u64)> {
+    /// A trashed file from `tess`, if the caller can see it and `action` it.
+    async fn trashed_file(&self, tess: &str, id: &str, action: Action) -> Result<(Document, u64)> {
         self.files_tessellation(tess)?;
         let missing = || not_found(format!("File {} is not in the trash of '{}'.", id, tess));
         let id = Ulid::from_string(id).map_err(|_| missing())?;
@@ -1073,8 +1073,8 @@ impl HexDBEngine {
         if !self.caller_scope(tess, Action::Read).allows(&as_file) {
             return Err(missing());
         }
-        if !self.caller_scope(tess, Action::Write).allows(&as_file) {
-            return Err(EngineError::Forbidden(format!("Your role may not change this file in '{}'.", tess)).into());
+        if !self.caller_scope(tess, action).allows(&as_file) {
+            return Err(EngineError::Forbidden(format!("Your role may not {} this file in '{}'.", action.name(), tess)).into());
         }
         Ok((doc, seq))
     }
@@ -1082,7 +1082,7 @@ impl HexDBEngine {
     /// Put a trashed file back, optionally under another name or folder.
     pub async fn restore_file(&self, tess: &str, id: &str, name: Option<&str>, path: Option<&str>) -> Result<Document> {
         self.ensure_writable()?;
-        let (trashed, seq) = self.trashed_file(tess, id).await?;
+        let (trashed, seq) = self.trashed_file(tess, id, Action::Restore).await?;
         let mut map = as_map(&trashed);
         for key in TRASH_FIELDS {
             map.remove(*key);
@@ -1095,7 +1095,7 @@ impl HexDBEngine {
             map.insert("path".into(), json!(files::normalize_path(path)?));
         }
         let doc = document(tess, trashed.id, map, None);
-        if !self.caller_scope(tess, Action::Write).allows(&doc) {
+        if !self.caller_scope(tess, Action::Restore).allows(&doc) {
             return Err(EngineError::Forbidden(format!("Your role may not store this file in '{}'.", tess)).into());
         }
         let items = vec![
@@ -1117,7 +1117,7 @@ impl HexDBEngine {
     /// Delete a trashed file for good. False if it isn't in the trash.
     pub async fn purge_file(&self, tess: &str, id: &str) -> Result<bool> {
         self.ensure_writable()?;
-        let (trashed, seq) = match self.trashed_file(tess, id).await {
+        let (trashed, seq) = match self.trashed_file(tess, id, Action::Delete).await {
             Ok(found) => found,
             Err(e) if matches!(e.downcast_ref::<EngineError>(), Some(EngineError::NotFound(_))) => return Ok(false),
             Err(e) => return Err(e),
@@ -1192,6 +1192,12 @@ impl HexDBEngine {
                     }
                     let (previous, _) = self.read_latest(&item.key).await?;
                     let Some(previous) = previous else { continue };
+                    // Deleting a file needs `delete` (not only `write`), within the role's restrictions.
+                    if let Some(principal) = crate::access::caller() {
+                        if !principal.can(crate::auth::Permission::Delete, &tess) || !principal.scope(&tess, Action::Delete).allows(&previous) {
+                            return Err(EngineError::Forbidden(format!("Your role may not delete this file in '{}'.", tess)).into());
+                        }
+                    }
                     let mut map = as_map(&previous);
                     map.insert("from".into(), json!(tess));
                     map.insert("trashed_at".into(), json!(now_text()));

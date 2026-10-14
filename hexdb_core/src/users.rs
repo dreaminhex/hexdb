@@ -42,11 +42,15 @@ pub struct BuiltinRole {
 pub const BUILTIN_ROLES: &[BuiltinRole] = &[
     BuiltinRole { name: "admin", description: "Full system access.", permissions: &[Action::Admin] },
     BuiltinRole { name: "reader", description: "Read the granted tessellations.", permissions: &[Action::Read] },
-    BuiltinRole { name: "writer", description: "Read and write the granted tessellations.", permissions: &[Action::Read, Action::Write] },
+    BuiltinRole {
+        name: "writer",
+        description: "Read and write the granted tessellations, and upload, delete and restore files in them.",
+        permissions: &[Action::Read, Action::Write, Action::Upload, Action::Delete, Action::Restore],
+    },
     BuiltinRole {
         name: "owner",
-        description: "Read, write and manage (indexes, schemas, deletion) the granted tessellations.",
-        permissions: &[Action::Read, Action::Write, Action::Manage],
+        description: "Read, write and manage (indexes, schemas, deletion) the granted tessellations, and upload, delete and restore files in them.",
+        permissions: &[Action::Read, Action::Write, Action::Manage, Action::Upload, Action::Delete, Action::Restore],
     },
     BuiltinRole {
         name: "operator",
@@ -923,6 +927,7 @@ async fn bootstrap_inner(engine: &HexDBEngine, security: &SecurityConfig) -> Res
     engine.create_tessellation(USERS_TESSELLATION, "system")?;
     engine.prepare_audit().await?;
     migrate_legacy(engine).await?;
+    grant_file_permissions(engine).await?;
     add_login_keys(engine).await?;
     engine
         .ensure_internal_index(
@@ -1000,6 +1005,45 @@ Sign in and change this password, then delete this file.
         }
     } else if !configured_password.is_empty() {
         warn!("⚠️ security.admin_password is set but users already exist, so it is ignored. Remove it from the configuration.");
+    }
+    Ok(())
+}
+
+/// Records which one-time migrations have run.
+const MIGRATIONS_TESSELLATION: &str = "_migrations";
+/// Marker for `grant_file_permissions`.
+const FILE_PERMISSIONS_MIGRATION: u128 = 0x0106_0002;
+
+/// Before 1.6, `write` allowed uploading, deleting and restoring files. Give
+/// custom roles that have `write` the new `upload`, `delete` and `restore`
+/// permissions once, so they keep what they could do; administrators can then
+/// take them away.
+async fn grant_file_permissions(engine: &HexDBEngine) -> Result<()> {
+    let marker = Ulid::from(FILE_PERMISSIONS_MIGRATION);
+    if engine.get_system_document(MIGRATIONS_TESSELLATION, marker).await?.is_some() {
+        return Ok(());
+    }
+    let mut updated = 0;
+    for role in list_roles(engine).await? {
+        if builtin(&role.name).is_some() || !role.permissions.contains(&Action::Write) {
+            continue;
+        }
+        let mut permissions = role.permissions.clone();
+        for action in [Action::Upload, Action::Delete, Action::Restore] {
+            if !permissions.contains(&action) {
+                permissions.push(action);
+            }
+        }
+        if permissions != role.permissions {
+            let json = role_json(&role.name, &role.description, &permissions, &role.restrictions);
+            engine.replace_document(ROLES_TESSELLATION, &role.id, json, None, None).await?;
+            updated += 1;
+        }
+    }
+    let note = serde_json::json!({ "name": "file-permissions", "time": chrono::Utc::now().timestamp_millis(), "roles_updated": updated });
+    engine.put_system_document(MIGRATIONS_TESSELLATION, marker, note, None).await?;
+    if updated > 0 {
+        info!("✅ Gave {} custom role(s) with 'write' the new 'upload', 'delete' and 'restore' permissions.", updated);
     }
     Ok(())
 }

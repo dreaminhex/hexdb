@@ -49,7 +49,7 @@ const enc = encodeURIComponent
 export const UNAUTHORIZED_EVENT = "hexdb:unauthorized"
 
 /** Something a role allows. read/write/manage apply to the granted tessellations; the rest apply everywhere. */
-export type Action = "read" | "write" | "manage" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin"
+export type Action = "read" | "write" | "manage" | "upload" | "delete" | "restore" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin"
 
 export interface ResolvedGrant {
   role: string

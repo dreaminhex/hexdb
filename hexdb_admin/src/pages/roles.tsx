@@ -128,7 +128,8 @@ function RoleDialog({
             />
             <p className="text-muted-foreground text-xs">
               Per tessellation (or <code>*</code>): <code>filter</code> limits the documents this role can see and write, <code>hide</code> lists fields it
-              can't see or change. <code>{'{"$user": "login"}'}</code> or <code>{'{"$user": "attributes.region"}'}</code> stand for the user's values
+              can't see or change, and <code>folders</code> (files tessellations) limits its files to folders, e.g.{" "}
+              <code>{'{"media": {"folders": ["/inbox/"]}}'}</code>. <code>{'{"$user": "login"}'}</code> or <code>{'{"$user": "attributes.region"}'}</code> stand for the user's values
               (set attributes on the Users page). Restricted grants can't manage tessellations.
             </p>
           </div>
@@ -166,7 +167,7 @@ export function RolesPage() {
           <a className="text-foreground underline-offset-4 hover:underline" href={href("/users")} onClick={linkHandler("/users")}>
             Users
           </a>{" "}
-          page; each grant lists the tessellations its read, write and manage permissions apply to (<code>*</code> for all). The other
+          page; each grant lists the tessellations its read, write, manage, upload, delete and restore permissions apply to (<code>*</code> for all). The other
           permissions apply everywhere. Changes take effect on the next request.
         </p>
         <Button className="ml-auto shrink-0" size="sm" onClick={() => setEditing(null)} disabled={!catalog.data}>

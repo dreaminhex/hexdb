@@ -71,7 +71,7 @@ pub async fn begin_upload(
     Auth(principal): Auth,
     body: Result<Json<NewUpload>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Upload, &tess)?;
     let Json(input) = body?;
     user_tessellation(&engine, &tess)?;
     let options = UploadOptions {
@@ -98,7 +98,7 @@ pub async fn upload_part(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Upload, &tess)?;
     let Query(params) = params?;
     user_tessellation(&engine, &tess)?;
     let offset = params
@@ -111,14 +111,14 @@ pub async fn upload_part(
 
 /// How far an upload got.
 pub async fn upload_status(Path((tess, id)): Path<(String, String)>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Upload, &tess)?;
     user_tessellation(&engine, &tess)?;
     Ok(Json(engine.upload_status(&tess, &id).await?).into_response())
 }
 
 /// Finish an upload.
 pub async fn complete_upload(Path((tess, id)): Path<(String, String)>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Upload, &tess)?;
     user_tessellation(&engine, &tess)?;
     let result = engine.complete_upload(&tess, &id).await?;
     let status = if result.created { StatusCode::CREATED } else { StatusCode::OK };
@@ -132,7 +132,7 @@ pub async fn complete_upload(Path((tess, id)): Path<(String, String)>, State(eng
 
 /// Abandon an upload.
 pub async fn abort_upload(Path((tess, id)): Path<(String, String)>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Upload, &tess)?;
     user_tessellation(&engine, &tess)?;
     engine.abort_upload(&tess, &id).await?;
     Ok(no_content(false))
@@ -181,7 +181,7 @@ pub async fn upload(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Upload, &tess)?;
     let Query(params) = params?;
     user_tessellation(&engine, &tess)?;
     let options = UploadOptions {
@@ -382,7 +382,7 @@ pub async fn versions(Path((tess, id)): Path<(String, String)>, State(engine): E
 
 /// Make an earlier version current again.
 pub async fn restore_version(Path((tess, id, version)): Path<(String, String, u64)>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Restore, &tess)?;
     user_tessellation(&engine, &tess)?;
     let doc = engine.restore_file_version(&tess, &id, version).await?;
     Ok(respond(StatusCode::OK, doc.to_api_json(), false))
@@ -398,7 +398,7 @@ pub async fn trash(Path(tess): Path<String>, State(engine): Engine, Auth(princip
 
 /// Purge every file in the trash.
 pub async fn empty_trash(Path(tess): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Delete, &tess)?;
     user_tessellation(&engine, &tess)?;
     let purged = engine.empty_trash(&tess).await?;
     engine.audit(&principal.login, "files.empty_trash", &tess, json!({ "purged": purged })).await;
@@ -412,7 +412,7 @@ pub async fn restore(
     State(engine): Engine,
     Auth(principal): Auth,
 ) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Restore, &tess)?;
     let Query(params) = params?;
     user_tessellation(&engine, &tess)?;
     let doc = engine.restore_file(&tess, &id, params.name.as_deref(), params.path.as_deref()).await?;
@@ -421,7 +421,7 @@ pub async fn restore(
 
 /// Delete one file from the trash for good.
 pub async fn purge(Path((tess, id)): Path<(String, String)>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    principal.require(Permission::Delete, &tess)?;
     user_tessellation(&engine, &tess)?;
     if !engine.purge_file(&tess, &id).await? {
         return Err(ApiError::not_found(format!("File {} is not in the trash of '{}'.", id, tess)));

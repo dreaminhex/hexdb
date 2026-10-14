@@ -46,7 +46,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return <AuthContext.Provider value={{ me, refresh, signOut }}>{children}</AuthContext.Provider>
 }
 
-export type Permission = "read" | "write" | "manage"
+export type Permission = "read" | "write" | "manage" | "upload" | "delete" | "restore"
 
 /**
  * Whether the user may do something to a tessellation. Mirrors the server's

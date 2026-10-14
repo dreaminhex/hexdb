@@ -10,6 +10,13 @@
 //           values, e.g. {"region": {"$user": "attributes.region"}}. A missing
 //           attribute matches nothing (never everything).
 //   hide    fields the role can't see (dotted paths), e.g. ["salary", "ssn"].
+//   folders for files tessellations: the folders (and their subfolders) the
+//           role's files must be in, e.g. ["/inbox/", "/shared/2026/"]. The
+//           same as a filter on `path`; with a filter too, both must match.
+//
+// Restrictions belong to a role, and a role's permissions share them, so
+// "upload only into /inbox/" is a role with `upload` restricted to that
+// folder, granted beside a role that reads everything.
 //
 // A user may hold several grants that allow an action on a tessellation. If
 // any of them is unrestricted, access is unrestricted. Otherwise the user sees
@@ -83,6 +90,9 @@ pub struct Restriction {
     /// Fields the role can't see or change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hide: Vec<String>,
+    /// Files tessellations: folders (with their subfolders) the role's files must be in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<String>,
 }
 
 impl Restriction {
@@ -99,10 +109,36 @@ impl Restriction {
                 return Err(invalid(format!("restrictions.{}.hide: '{}' isn't a field that can be hidden.", key, path)));
             }
         }
-        if self.filter.is_none() && self.hide.is_empty() {
-            return Err(invalid(format!("restrictions.{}: give a filter, fields to hide, or both.", key)));
+        for folder in &self.folders {
+            crate::files::normalize_path(folder).map_err(|e| invalid(format!("restrictions.{}.folders: '{}': {:#}", key, folder, e)))?;
+        }
+        if self.filter.is_none() && self.hide.is_empty() && self.folders.is_empty() {
+            return Err(invalid(format!("restrictions.{}: give a filter, fields to hide, folders, or a combination.", key)));
         }
         Ok(())
+    }
+
+    /// The row filter with `folders` folded in (none: every document).
+    pub fn effective_filter(&self) -> Option<Value> {
+        let folders: Option<Value> = (!self.folders.is_empty()).then(|| {
+            let mut prefixes: Vec<Value> = self
+                .folders
+                .iter()
+                // A folder that no longer normalizes matches nothing rather than everything.
+                .map(|f| crate::files::normalize_path(f).unwrap_or_else(|_| "\u{0}".into()))
+                .map(|f| serde_json::json!({ "path": { "$startsWith": f } }))
+                .collect();
+            if prefixes.len() == 1 {
+                prefixes.remove(0)
+            } else {
+                serde_json::json!({ "$or": prefixes })
+            }
+        });
+        match (&self.filter, folders) {
+            (Some(filter), Some(folders)) => Some(serde_json::json!({ "$and": [filter, folders] })),
+            (Some(filter), None) => Some(filter.clone()),
+            (None, folders) => folders,
+        }
     }
 }
 
@@ -309,7 +345,7 @@ impl Principal {
             let Some(restriction) = grant.restrictions.get(tessellation).or_else(|| grant.restrictions.get("*")) else {
                 return Scope::full();
             };
-            match &restriction.filter {
+            match &restriction.effective_filter() {
                 None => all_rows = true,
                 Some(filter) => match substitute(filter, self).map(|v| Filter::parse(&v)) {
                     Some(Ok(f)) => filters.push(f),
@@ -419,9 +455,31 @@ mod tests {
 
     #[test]
     fn restrictions_are_validated() {
-        assert!(Restriction { filter: Some(json!({ "owner": { "$user": "login" } })), hide: vec![] }.validate("orders").is_ok());
-        assert!(Restriction { filter: Some(json!({ "n": { "$bogus": 1 } })), hide: vec![] }.validate("orders").is_err());
-        assert!(Restriction { filter: None, hide: vec!["id".into()] }.validate("orders").is_err());
+        assert!(Restriction { filter: Some(json!({ "owner": { "$user": "login" } })), hide: vec![], ..Default::default() }.validate("orders").is_ok());
+        assert!(Restriction { filter: Some(json!({ "n": { "$bogus": 1 } })), hide: vec![], ..Default::default() }.validate("orders").is_err());
+        assert!(Restriction { filter: None, hide: vec!["id".into()], ..Default::default() }.validate("orders").is_err());
         assert!(Restriction::default().validate("orders").is_err());
+        assert!(Restriction { folders: vec!["inbox".into()], ..Default::default() }.validate("media").is_ok());
+        assert!(Restriction { folders: vec!["/a/../b".into()], ..Default::default() }.validate("media").is_err());
+    }
+
+    #[test]
+    fn folders_limit_files_to_a_subtree_per_action() {
+        let p = principal(
+            vec![
+                ("uploader", vec![Action::Upload], json!({ "*": { "folders": ["/inbox", "/shared/2026/"] } })),
+                ("everyone", vec![Action::Read], json!({})),
+            ],
+            json!({}),
+        );
+        let upload = p.scope("orders", Action::Upload);
+        assert!(upload.allows(&doc(json!({ "path": "/inbox/" }))));
+        assert!(upload.allows(&doc(json!({ "path": "/shared/2026/june/" }))));
+        assert!(!upload.allows(&doc(json!({ "path": "/inboxes/" }))), "a folder, not a name prefix");
+        assert!(!upload.allows(&doc(json!({ "path": "/" }))));
+        assert!(p.scope("orders", Action::Read).is_full(), "reads aren't narrowed by the upload role");
+
+        let both = Restriction { filter: Some(json!({ "tags": "public" })), folders: vec!["/pub/".into()], ..Default::default() };
+        assert_eq!(both.effective_filter(), Some(json!({ "$and": [{ "tags": "public" }, { "path": { "$startsWith": "/pub/" } }] })));
     }
 }

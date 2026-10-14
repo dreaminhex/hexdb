@@ -656,6 +656,20 @@ admin_email = "admin@example.com"
         Ok(ApiResponse { status, headers, body })
     }
 
+    /// Send raw bytes as another user (`None`: no credentials).
+    pub fn send_bytes_as(&self, token: Option<&str>, method: Method, path: &str, bytes: Vec<u8>) -> Result<ApiResponse> {
+        let mut builder = self.anon.request(method, self.url(path)).timeout(Duration::from_secs(120)).body(bytes);
+        if let Some(token) = token {
+            builder = builder.bearer_auth(token);
+        }
+        let res = builder.send()?;
+        let status = res.status();
+        let headers = res.headers().clone();
+        let text = res.text()?;
+        let body = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
+        Ok(ApiResponse { status, headers, body })
+    }
+
     /// GET a raw response body (a file download): status, headers and bytes.
     pub fn get_bytes(&self, path: &str, headers: &[(&str, &str)]) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
         let mut builder = self.client.get(self.url(path)).timeout(Duration::from_secs(120));

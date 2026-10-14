@@ -814,6 +814,8 @@ curl -X POST http://localhost:7700/tessellations -H "Content-Type: application/j
 
 It starts with two indexes: `path_name` (unique on folder and name) and `search` (a text index over `name`, `path`, `tags`, `description` and `meta`). The admin UI's Tessellations page creates one with "Holds: Files"; its Files page browses, uploads, previews and searches them.
 
+Permissions: `read` lists, searches and downloads; `write` edits names, folders, tags and descriptions; `upload`, `delete` and `restore` add, trash and restore files. Creating a files tessellation needs `write` and `upload`. A role's `folders` restriction limits any of these to some folders; see [Row filters and field masks](#row-filters-and-field-masks).
+
 ### Uploading
 
 ```bash
@@ -1361,6 +1363,9 @@ A role is a set of permissions:
 | `read` | Get, list, query, count, aggregate, the change feed; consume streams | yes |
 | `write` | Insert, replace, patch, delete; publish to streams | yes |
 | `manage` | Delete tessellations; manage indexes, schemas and advice; configure streams | yes |
+| `upload` | Files tessellations: upload files and new versions (including resumable uploads); create a files tessellation (with `write`) | yes |
+| `delete` | Files tessellations: move files to the trash (from any route, including transactions and GraphQL), delete them from the trash, empty it | yes |
+| `restore` | Files tessellations: restore files from the trash and earlier versions of files | yes |
 | `status` | Server status, metrics, storage and lattice details | no |
 | `logs` | The server log | no |
 | `audit` | The audit trail | no |
@@ -1374,8 +1379,8 @@ Built-in roles:
 | --- | --- |
 | `admin` | `admin` |
 | `reader` | `read` |
-| `writer` | `read`, `write` |
-| `owner` | `read`, `write`, `manage` |
+| `writer` | `read`, `write`, `upload`, `delete`, `restore` |
+| `owner` | `read`, `write`, `manage`, `upload`, `delete`, `restore` |
 | `operator` | `status`, `logs`, `plugins`, `maintenance` (including backups) |
 | `auditor` | `status`, `audit` |
 
@@ -1385,6 +1390,8 @@ Administrators create custom roles from any set of permissions:
 curl -X POST http://localhost:7700/roles -H "Content-Type: application/json" \
   -d '{ "name": "analyst", "description": "Read data and see status", "permissions": ["read", "status"] }'
 ```
+
+On files tessellations, `write` edits a file's name, folder, tags and description; adding, deleting and restoring files need `upload`, `delete` and `restore`. Before 1.6, `write` allowed all of it: on the first start of 1.6, custom roles that have `write` are given the three new permissions once, so they keep working; remove them from roles that shouldn't have them.
 
 `GET /roles` lists the roles and the permissions a role can hold. A role still granted to someone can't be deleted; the error names who holds it. The last unlocked administrator can't be deleted, locked or demoted.
 
@@ -1408,9 +1415,19 @@ curl -X POST http://localhost:7700/roles -H "Content-Type: application/json" -d 
 curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json" -d '{ "attributes": { "region": "EU" } }'
 ```
 
-**The two parts:**
+**The parts:**
 - `filter` (the filter language) limits the documents the role can see and write. `{"$user": "login"}`, `{"$user": "id"}`, `{"$user": "email"}` and `{"$user": "attributes.<name>"}` stand for the caller's values. Users' attributes are set by administrators: a JSON object of up to 50 entries. A missing attribute makes the filter match nothing, never everything.
 - `hide` lists fields (dotted paths) the role can't see or change.
+- `folders` (files tessellations) limits the role to files in these folders and their subfolders, e.g. `["/inbox/", "/shared/2026/"]`: the same as a filter on `path`, and both must match when a role has both.
+
+Restrictions belong to the role, so each of its permissions is narrowed the same way. To let someone upload only into one folder while reading everything, grant two roles:
+
+```bash
+curl -X POST http://localhost:7700/roles -H "Content-Type: application/json" -d '{
+  "name": "inbox-uploader", "permissions": ["upload"], "restrictions": { "media": { "folders": ["/inbox/"] } } }'
+curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json" -d '{
+  "roles": [{ "name": "inbox-uploader", "tessellations": ["media"] }, { "name": "reader", "tessellations": ["media"] }] }'
+```
 
 **Combining grants.** When several of a user's grants allow an action on a tessellation:
 - an unrestricted grant makes access unrestricted;

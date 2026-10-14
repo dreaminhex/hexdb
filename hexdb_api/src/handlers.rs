@@ -865,6 +865,9 @@ pub async fn create_tessellation(
     if kind != "user" && kind != hexdb_core::files::FILES_KIND {
         return Err(ApiError::invalid("A tessellation's kind is \"user\" (documents) or \"files\" (binary files)."));
     }
+    if kind == hexdb_core::files::FILES_KIND {
+        principal.require(Permission::Upload, &input.name)?;
+    }
     user_tessellation(&engine, &input.name)?;
     let created = if kind == "user" { engine.create_tessellation(&input.name, "user")? } else { engine.create_files_tessellation(&input.name).await? };
     if !created {
@@ -1091,7 +1094,9 @@ pub async fn delete_doc(
     uri: Uri,
     headers: HeaderMap,
 ) -> ApiResult {
-    principal.require(Permission::Write, &tess)?;
+    // Deleting a file (a move to the trash) needs `delete`; deleting a document needs `write`.
+    let files = engine.tessellation_info(&tess).is_some_and(|i| i.is_files());
+    principal.require(if files { Permission::Delete } else { Permission::Write }, &tess)?;
     user_tessellation(&engine, &tess)?;
     let idem = idempotency(&principal, &headers, &method, &uri, None)?;
     let outcome = engine.delete_document(&tess, &id, idem).await?;

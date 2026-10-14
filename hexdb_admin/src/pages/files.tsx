@@ -444,14 +444,14 @@ function FileDetails({
   open,
   onOpenChange,
   onChanged,
-  writable,
+  rights,
 }: {
   tess: string
   id: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
   onChanged: () => void
-  writable: boolean
+  rights: FileRights
 }) {
   const [file, setFile] = useState<FileDoc | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -542,7 +542,7 @@ function FileDetails({
                     </a>
                   </Button>
                 )}
-                {writable && (
+                {rights.write && (
                   <>
                     <Button size="sm" variant="outline" onClick={() => setEditing((e) => !e)}>
                       <IconPencil /> Edit
@@ -562,10 +562,12 @@ function FileDetails({
                     >
                       <IconRefresh /> Re-read metadata
                     </Button>
-                    <Button size="sm" variant="outline" className="text-destructive" onClick={() => setDeleting(true)}>
-                      <IconTrash /> Delete
-                    </Button>
                   </>
+                )}
+                {rights.delete && (
+                  <Button size="sm" variant="outline" className="text-destructive" onClick={() => setDeleting(true)}>
+                    <IconTrash /> Delete
+                  </Button>
                 )}
               </div>
 
@@ -673,7 +675,7 @@ function FileDetails({
                               <IconDownload className="size-4" />
                             </a>
                           </Button>
-                          {writable && (
+                          {rights.restore && (
                             <Button
                               size="icon"
                               variant="ghost"
@@ -743,7 +745,15 @@ function FileDetails({
 // Trash
 // ---------------------------------------------------------------------------
 
-function TrashView({ tess, writable, onChanged }: { tess: string; writable: boolean; onChanged: () => void }) {
+/** What the signed-in user may do with files in a tessellation. */
+interface FileRights {
+  write: boolean
+  upload: boolean
+  delete: boolean
+  restore: boolean
+}
+
+function TrashView({ tess, rights, onChanged }: { tess: string; rights: FileRights; onChanged: () => void }) {
   const trash = usePoll(() => api.trash(tess), 0, [tess])
   const [emptying, setEmptying] = useState(false)
   const docs = trash.data?.documents ?? []
@@ -775,7 +785,7 @@ function TrashView({ tess, writable, onChanged }: { tess: string; writable: bool
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <p className="text-muted-foreground text-sm">Deleted files stay here until they expire. Restoring puts a file back in its folder.</p>
-        {writable && docs.length > 0 && (
+        {rights.delete && docs.length > 0 && (
           <Button size="sm" variant="outline" className="text-destructive" onClick={() => setEmptying(true)}>
             <IconTrash /> Empty trash
           </Button>
@@ -811,11 +821,13 @@ function TrashView({ tess, writable, onChanged }: { tess: string; writable: bool
                 </TableCell>
                 <TableCell>{formatTimestamp(file._expires_at)}</TableCell>
                 <TableCell className="text-right whitespace-nowrap">
-                  {writable && (
+                  {rights.restore && (
+                    <Button size="sm" variant="ghost" onClick={() => void restore(file)}>
+                      <IconArrowBackUp /> Restore
+                    </Button>
+                  )}
+                  {rights.delete && (
                     <>
-                      <Button size="sm" variant="ghost" onClick={() => void restore(file)}>
-                        <IconArrowBackUp /> Restore
-                      </Button>
                       <Button
                         size="sm"
                         variant="ghost"
@@ -906,7 +918,12 @@ export function FilesPage() {
   const [dragging, setDragging] = useState(false)
   const [newFolder, setNewFolder] = useState("")
   const input = useRef<HTMLInputElement>(null)
-  const writable = !!tess && can(me, "write", tess)
+  const rights: FileRights = {
+    write: !!tess && can(me, "write", tess),
+    upload: !!tess && can(me, "upload", tess),
+    delete: !!tess && can(me, "delete", tess),
+    restore: !!tess && can(me, "restore", tess),
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => setQuery(searchText.trim()), 300)
@@ -958,7 +975,7 @@ export function FilesPage() {
   }
 
   const startUploads = (files: FileList | File[]) => {
-    if (!tess || !writable) return
+    if (!tess || !rights.upload) return
     const added: UploadItem[] = Array.from(files).map((file) => ({ key: `${Date.now()}-${Math.random()}`, file, folder, sent: 0, state: "waiting" }))
     setUploads((list) => [...list.filter((i) => i.state !== "done"), ...added])
     void (async () => {
@@ -1030,7 +1047,7 @@ export function FilesPage() {
     <div
       className="relative flex flex-1 flex-col gap-4 p-4 lg:p-6"
       onDragOver={(e) => {
-        if (writable && mode === "files" && e.dataTransfer.types.includes("Files")) {
+        if (rights.upload && mode === "files" && e.dataTransfer.types.includes("Files")) {
           e.preventDefault()
           setDragging(true)
         }
@@ -1125,7 +1142,7 @@ export function FilesPage() {
           </ToggleGroup>
         )}
         <div className="ml-auto flex gap-2">
-          {writable && mode === "files" && (
+          {rights.upload && mode === "files" && (
             <>
               <input ref={input} type="file" multiple className="hidden" onChange={(e) => e.target.files && startUploads(e.target.files)} />
               <Button size="sm" onClick={() => input.current?.click()}>
@@ -1137,7 +1154,7 @@ export function FilesPage() {
       </div>
 
       {mode === "trash" ? (
-        <TrashView tess={tess} writable={writable} onChanged={() => void listing.refresh()} />
+        <TrashView tess={tess} rights={rights} onChanged={() => void listing.refresh()} />
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-1 text-sm">
@@ -1171,7 +1188,7 @@ export function FilesPage() {
                     </button>
                   </span>
                 ))}
-                {writable && (
+                {rights.upload && (
                   <form
                     className="ml-3 flex items-center gap-1"
                     onSubmit={(e) => {
@@ -1195,7 +1212,7 @@ export function FilesPage() {
           {empty && (
             <div className="text-muted-foreground flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-12 text-sm">
               <IconUpload className="size-8" stroke={1.2} />
-              {flat ? "Nothing matches." : writable ? "This folder is empty. Drop files here or use Upload." : "This folder is empty."}
+              {flat ? "Nothing matches." : rights.upload ? "This folder is empty. Drop files here or use Upload." : "This folder is empty."}
             </div>
           )}
 
@@ -1263,7 +1280,7 @@ export function FilesPage() {
         </div>
       )}
 
-      <FileDetails tess={tess} id={selected} open={!!selected} onOpenChange={(open) => !open && setSelected(null)} onChanged={() => void listing.refresh()} writable={writable} />
+      <FileDetails tess={tess} id={selected} open={!!selected} onOpenChange={(open) => !open && setSelected(null)} onChanged={() => void listing.refresh()} rights={rights} />
       <UploadPanel items={uploads} onClear={() => setUploads([])} />
     </div>
   )
