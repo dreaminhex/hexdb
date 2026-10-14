@@ -17,6 +17,8 @@ import {
   IconMusic,
   IconPencil,
   IconPhoto,
+  IconPlayerPlayFilled,
+  IconPlayerStopFilled,
   IconRefresh,
   IconSearch,
   IconTrash,
@@ -946,6 +948,8 @@ export function FilesPage() {
   const [searchText, setSearchText] = useState("")
   const [query, setQuery] = useState("")
   const [selected, setSelected] = useState<string | null>(null)
+  // The audio file playing in the player bar.
+  const [playing, setPlaying] = useState<{ id: string; name: string } | null>(null)
   const [uploads, setUploads] = useState<UploadItem[]>([])
   const [dragging, setDragging] = useState(false)
   const [newFolder, setNewFolder] = useState("")
@@ -1035,7 +1039,8 @@ export function FilesPage() {
       const Icon = iconFor(file.content_type)
       const meta = (file.meta ?? {}) as Record<string, unknown>
       return (
-        <button key={file.id} type="button" onClick={() => setSelected(file.id)} className="hover:bg-accent group flex flex-col overflow-hidden rounded-lg border text-left">
+        <div key={file.id} className="relative">
+        <button type="button" onClick={() => setSelected(file.id)} className="hover:bg-accent group flex w-full flex-col overflow-hidden rounded-lg border text-left">
           <div className="bg-muted flex aspect-[4/3] items-center justify-center overflow-hidden">
             {file.thumbnail && tess ? (
               <img src={fileUrl(tess, file.id, "thumbnail")} alt="" loading="lazy" className="h-full w-full object-cover" />
@@ -1056,9 +1061,22 @@ export function FilesPage() {
             </div>
           </div>
         </button>
+        {file.content_type.startsWith("audio/") && (
+          <Button
+            type="button"
+            size="icon"
+            variant="secondary"
+            className="absolute top-2 right-2 size-8 rounded-full shadow"
+            aria-label={playing?.id === file.id ? `Stop ${file.name}` : `Play ${file.name}`}
+            onClick={() => setPlaying((p) => (p?.id === file.id ? null : { id: file.id, name: file.name }))}
+          >
+            {playing?.id === file.id ? <IconPlayerStopFilled className="size-4" /> : <IconPlayerPlayFilled className="size-4" />}
+          </Button>
+        )}
+        </div>
       )
     },
-    [tess, flat],
+    [tess, flat, playing],
   )
 
   if (tessellations.loading && !tessellations.data) {
@@ -1290,7 +1308,24 @@ export function FilesPage() {
                     return (
                       <TableRow key={file.id} className="cursor-pointer" onClick={() => setSelected(file.id)}>
                         <TableCell className="flex items-center gap-2 font-medium">
-                          <Icon className="text-muted-foreground size-4" /> {file.name}
+                          {file.content_type.startsWith("audio/") ? (
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="size-6"
+                              aria-label={playing?.id === file.id ? `Stop ${file.name}` : `Play ${file.name}`}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                setPlaying((p) => (p?.id === file.id ? null : { id: file.id, name: file.name }))
+                              }}
+                            >
+                              {playing?.id === file.id ? <IconPlayerStopFilled className="size-4" /> : <IconPlayerPlayFilled className="size-4" />}
+                            </Button>
+                          ) : (
+                            <Icon className="text-muted-foreground size-4" />
+                          )}{" "}
+                          {file.name}
                         </TableCell>
                         {flat && <TableCell className="text-muted-foreground">{file.path}</TableCell>}
                         <TableCell className="text-muted-foreground">{file.content_type}</TableCell>
@@ -1304,6 +1339,20 @@ export function FilesPage() {
             </Card>
           )}
         </>
+      )}
+
+      {playing && tess && (
+        <div className="bg-background/95 sticky bottom-0 z-10 -mx-4 mt-auto flex items-center gap-3 border-t px-4 py-2 lg:-mx-6 lg:px-6">
+          <IconMusic className="text-muted-foreground size-4 shrink-0" />
+          <span className="max-w-64 truncate text-sm font-medium" title={playing.name}>
+            {playing.name}
+          </span>
+          {/* Streams with Range requests, so large WAV masters start at once and can be seeked. */}
+          <audio key={playing.id} src={fileUrl(tess, playing.id)} controls autoPlay preload="metadata" className="h-9 flex-1" onEnded={() => setPlaying(null)} />
+          <Button type="button" size="icon" variant="ghost" aria-label="Close the player" onClick={() => setPlaying(null)}>
+            <IconX className="size-4" />
+          </Button>
+        </div>
       )}
 
       {dragging && (
