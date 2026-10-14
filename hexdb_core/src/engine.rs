@@ -278,6 +278,8 @@ pub struct HexDBEngine {
     history_id: String,
     /// Settings that can change while running (see `crate::settings`).
     live: std::sync::RwLock<crate::settings::LiveSettings>,
+    /// The lattice configuration in effect (see `crate::lattice_config`).
+    pub(crate) lattice_config: crate::lattice_config::LatticeConfigState,
     /// Bytes the data directory uses (refreshed by the metrics task and after flushes).
     pub(crate) disk_used: AtomicU64,
     /// Set once indexes are loaded at startup; snapshots are saved only after.
@@ -501,6 +503,7 @@ impl HexDBEngine {
             history_id,
             indexes_loaded: std::sync::atomic::AtomicBool::new(false),
             live: std::sync::RwLock::new(live_settings),
+            lattice_config: Default::default(),
             disk_used: AtomicU64::new(0),
             replica_progress: std::sync::Mutex::new(HashMap::new()),
             progress_notify: tokio::sync::Notify::new(),
@@ -512,6 +515,7 @@ impl HexDBEngine {
             engine.flush().await.context("Failed to flush recovered WAL records")?;
         }
         engine.rebuild_indexes().await?;
+        engine.refresh_lattice_config().await;
         engine.load_metrics_history();
         engine.refresh_disk_usage().await;
 

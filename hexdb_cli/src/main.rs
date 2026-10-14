@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod config;
 mod files;
 mod lattice;
 
@@ -144,6 +145,14 @@ enum Commands {
         #[arg(short, long)]
         url: Option<String>,
     },
+    /// Show or change the lattice configuration (storage backend, AI), its history, and roll back (needs an admin's token)
+    Config {
+        #[command(subcommand)]
+        sub: ConfigCommand,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long, global = true)]
+        url: Option<String>,
+    },
     /// List a folder of a files tessellation, or search its names and metadata
     Ls {
         tessellation: String,
@@ -156,6 +165,58 @@ enum Commands {
         /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
         #[arg(short, long)]
         url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Show every setting (or one), the overrides, and which version each hex runs
+    Get {
+        key: Option<String>,
+        /// Print the server's JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change a setting. Secrets are prompted for (or read with --stdin), never taken as arguments
+    Set {
+        /// e.g. ai.provider, file_storage.backend
+        key: String,
+        /// The value: JSON (true, 42, ["metadata","text"]) or plain text. Not for secrets
+        value: Option<String>,
+        /// Read the value from standard input
+        #[arg(long)]
+        stdin: bool,
+        /// Set it for this hex only (file_storage settings only)
+        #[arg(long)]
+        hex: Option<String>,
+        /// Why, for the history
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Go back to the default (or, with --hex, to the lattice's value)
+    Unset {
+        key: String,
+        #[arg(long)]
+        hex: Option<String>,
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// List versions, newest first, with what each changed
+    History {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one version (secrets as fingerprints)
+    Show { version: u64 },
+    /// Show what differs between two versions
+    Diff { from: u64, to: u64 },
+    /// Save an earlier version's settings as a new version
+    Rollback {
+        version: u64,
+        #[arg(short, long)]
+        message: Option<String>,
     },
 }
 
@@ -290,6 +351,24 @@ async fn main() -> Result<()> {
         Commands::Get { tessellation, file, out, version, url } => {
             let (base, config) = base_url(config_path, url)?;
             files::get(&config, &base, token, &tessellation, &file, out, version).await
+        }
+        Commands::Config { sub, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb config` needs credentials: set HEXDB_TOKEN (or pass --token) to an admin's API key.");
+            }
+            let target = config::Target { config: &config, base: &base, token };
+            match sub {
+                ConfigCommand::Get { key, json } => config::get(&target, key.as_deref(), json).await,
+                ConfigCommand::Set { key, value, stdin, hex, message } => {
+                    config::set(&target, &key, value.as_deref(), stdin, hex.as_deref(), message.as_deref()).await
+                }
+                ConfigCommand::Unset { key, hex, message } => config::unset(&target, &key, hex.as_deref(), message.as_deref()).await,
+                ConfigCommand::History { limit, json } => config::history(&target, limit, json).await,
+                ConfigCommand::Show { version } => config::show(&target, version).await,
+                ConfigCommand::Diff { from, to } => config::diff(&target, from, to).await,
+                ConfigCommand::Rollback { version, message } => config::rollback(&target, version, message.as_deref()).await,
+            }
         }
         Commands::Ls { tessellation, folder, search, url } => {
             let (base, config) = base_url(config_path, url)?;

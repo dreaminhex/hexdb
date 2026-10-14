@@ -23,6 +23,7 @@ pub mod users;
 pub mod audit;
 pub mod mfa;
 pub mod settings;
+pub mod lattice_config;
 pub mod process;
 pub mod analysis;
 pub mod advisor;

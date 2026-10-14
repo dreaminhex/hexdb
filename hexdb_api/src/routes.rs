@@ -57,6 +57,10 @@ pub fn app_router(
         .route("/logs", get(logs))
         .route("/audit", get(audit))
         .route("/settings", get(get_settings).put(put_settings))
+        .route("/config", get(crate::config::get_config).put(crate::config::put_config))
+        .route("/config/history", get(crate::config::config_history))
+        .route("/config/versions/{version}", get(crate::config::config_version))
+        .route("/config/rollback", post(crate::config::rollback_config))
         .route("/join", post(join_info))
 
         // Streams (publish/subscribe)

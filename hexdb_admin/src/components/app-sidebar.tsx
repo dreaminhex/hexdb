@@ -12,6 +12,7 @@ import {
   IconPlug,
   IconReport,
   IconSettings,
+  IconAdjustments,
   IconUserCheck,
   IconUserCircle,
   type Icon,
@@ -79,6 +80,7 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
 
 const FOOTER_ITEMS: NavItem[] = [
   { title: "Logs", route: "/logs", icon: IconReport, requires: "logs" },
+  { title: "Configuration", route: "/configuration", icon: IconAdjustments, requires: "admin" },
   { title: "Settings", route: "/settings", icon: IconSettings, requires: "admin" },
 ]
 

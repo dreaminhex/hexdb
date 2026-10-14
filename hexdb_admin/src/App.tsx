@@ -10,6 +10,7 @@ import { AuthProvider, has, useAuth } from "@/lib/auth"
 import { useRoute } from "@/lib/router"
 import { AccountPage } from "@/pages/account"
 import { AuditPage } from "@/pages/audit"
+import { ConfigurationPage } from "@/pages/configuration"
 import { LoginPage } from "@/pages/login"
 import { LogsPage } from "@/pages/logs"
 import { OverviewPage } from "@/pages/overview"
@@ -46,6 +47,7 @@ const PAGES: Record<string, Page> = {
   "/audit": { title: "Audit Trail", element: AuditPage, requires: "audit" },
   "/logs": { title: "Logs", element: LogsPage, requires: "logs" },
   "/plugins": { title: "Plugins", element: PluginsPage, requires: "plugins" },
+  "/configuration": { title: "Configuration", element: ConfigurationPage, requires: "admin" },
   "/settings": { title: "Settings", element: SettingsPage, requires: "admin" },
   "/account": { title: "Account", element: AccountPage },
 }

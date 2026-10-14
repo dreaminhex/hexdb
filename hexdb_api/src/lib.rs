@@ -12,3 +12,4 @@ pub mod functions;
 pub mod triggers;
 pub mod sql;
 pub mod files;
+pub mod config;

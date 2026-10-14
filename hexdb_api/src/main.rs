@@ -157,6 +157,9 @@ async fn main() -> anyhow::Result<()> {
         replication_state: String::new(),
         applied_seq: 0,
         tls: config.tls.enabled(),
+        config_version: 0,
+        config_sha256: String::new(),
+        config_state: String::new(),
     };
     let role = elect(&provisional, &peers);
     match peers.iter().find(|p| p.role == ROLE_OVERSEER) {
@@ -255,6 +258,9 @@ async fn main() -> anyhow::Result<()> {
     hexdb_core::streams::spawn_streams(engine.clone(), shutdown_rx.clone());
     hexdb_core::functions::spawn_scheduler(engine.clone(), shutdown_rx.clone());
     hexdb_core::triggers::spawn_trigger_runner(engine.clone(), shutdown_rx.clone());
+
+    // Apply new lattice configuration versions as they arrive.
+    hexdb_core::lattice_config::spawn_config_task(engine.clone(), shutdown_rx.clone());
 
     // Follow the Overseer whenever this hex isn't one.
     hexdb_core::spawn_replication_task(engine.clone(), shutdown_rx.clone());

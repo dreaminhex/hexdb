@@ -61,6 +61,11 @@ ROUTES = [
     ("get", "/audit", "Server", "The audit trail, newest first (audit permission)", {"parameters": [param(n, "query") for n in ("actor", "action", "target", "outcome", "since", "until", "limit", "offset")], "responses": ok()}),
     ("get", "/settings", "Server", "Runtime settings and the effective configuration (admins)", {"responses": ok()}),
     ("put", "/settings", "Server", "Change settings (admins)", {"requestBody": body(description="{\"limits.max_document_kb\": 2048, ...}; null removes an override"), "responses": ok()}),
+    ("get", "/config", "Configuration", "The lattice configuration: newest version, schema, and each hex's applied version (admins; secrets never returned)", {"responses": ok()}),
+    ("put", "/config", "Configuration", "Change lattice settings; a new version (admins)", {"requestBody": body({"type": "object", "properties": {"changes": {"type": "object", "description": "setting key -> value; null clears"}, "hex": {"type": "string", "description": "override for one hex (file_storage settings only)"}, "comment": {"type": "string"}, "base_version": {"type": "integer"}}, "required": ["changes"]}), "responses": ok()}),
+    ("get", "/config/history", "Configuration", "Configuration versions, newest first, with what each changed (admins)", {"parameters": [param(n, "query") for n in ("limit", "offset")], "responses": ok()}),
+    ("get", "/config/versions/{version}", "Configuration", "One configuration version, secrets as fingerprints (admins)", {"parameters": [param("version", schema={"type": "integer"})], "responses": ok()}),
+    ("post", "/config/rollback", "Configuration", "Save an earlier version's settings as a new version (admins)", {"requestBody": body({"type": "object", "properties": {"version": {"type": "integer"}, "comment": {"type": "string"}}, "required": ["version"]}), "responses": ok()}),
     ("post", "/join", "Server", "What another hex needs to join this lattice (admins, with password)", {"requestBody": body({"type": "object", "properties": {"password": {"type": "string"}}}), "responses": ok()}),
     ("get", "/plugins", "Server", "Plugins and their delivery state (plugins permission)", {"responses": ok()}),
     ("post", "/flush", "Server", "Flush memory to SSTables (maintenance permission)", {"responses": ok()}),
@@ -168,7 +173,7 @@ ROUTES = [
     ("delete", "/roles/{name}", "Users and roles", "Delete an unused custom role", {"parameters": [NAME], "responses": no_content()}),
 ]
 
-TAGS = ["Authentication", "Documents", "Tessellations", "Indexes", "Schemas", "Changes", "Streams", "Functions", "GraphQL", "SQL", "Users and roles", "Server"]
+TAGS = ["Authentication", "Documents", "Tessellations", "Indexes", "Schemas", "Changes", "Streams", "Functions", "GraphQL", "SQL", "Users and roles", "Configuration", "Server"]
 
 
 def build():

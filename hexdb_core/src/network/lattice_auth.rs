@@ -205,6 +205,13 @@ impl LatticeKeys {
         [nonce, sealed].concat()
     }
 
+    /// A keyed fingerprint of a secret (16 hex digits): the same value gives
+    /// the same fingerprint in the lattice, and it reveals nothing about the value.
+    pub fn fingerprint(&self, data: &[u8]) -> String {
+        let key = blake3::derive_key("HexDB 2026 config fingerprint v1", &self.sets[0].transfer);
+        blake3::keyed_hash(&key, data).to_hex()[..16].to_string()
+    }
+
     /// Decrypt data sealed by a hex holding any of these keys.
     pub fn open(&self, sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
         use aes_gcm::aead::{Aead, KeyInit, Payload};

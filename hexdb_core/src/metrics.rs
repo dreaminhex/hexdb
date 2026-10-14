@@ -29,6 +29,8 @@ pub struct HexMeta {
     pub network: NetworkMetrics,
     /// This hex's replication (see `ReplicationStatus`), with its lag.
     pub replication: serde_json::Value,
+    /// The lattice configuration in effect here (see `crate::lattice_config`).
+    pub config: serde_json::Value,
 }
 
 /// Represents the metadata of a vertex in the HexDB engine.
@@ -295,6 +297,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             }
             value
         },
+        config: engine.lattice_config().status_json(),
     }
 }
 

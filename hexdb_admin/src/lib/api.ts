@@ -371,6 +371,64 @@ export interface Setting {
   restart_required: boolean
 }
 
+/** A setting of the lattice configuration (see GET /config). */
+export interface ConfigDef {
+  key: string
+  kind:
+    | { type: "text" | "url" | "secret" | "boolean" }
+    | { type: "integer"; min: number; max: number }
+    | { type: "choice" | "set"; choices: string[] }
+  description: string
+  default: unknown
+  secret: boolean
+  per_hex: boolean
+}
+
+/** What GET /config shows of a secret: never its value. */
+export interface SecretInfo {
+  set: true
+  fingerprint: string
+  updated: number
+  updated_by: string
+}
+
+export interface ConfigHexState {
+  name: string
+  id: string
+  role: string
+  status: string
+  is_self: boolean
+  config: { version: number; sha256: string; state: string; overridden?: string[]; error?: string | null; rejected_version?: number | null }
+}
+
+export interface LatticeConfig {
+  version: number
+  sha256: string
+  valid: boolean
+  problem: string | null
+  time: number
+  author: string
+  comment: string
+  lattice: Record<string, unknown>
+  overrides: Record<string, Record<string, unknown>>
+  schema: ConfigDef[]
+  hexes: ConfigHexState[]
+  changes?: { version: number; changed: string[]; cleared: string[]; secrets_set: string[]; secrets_cleared: string[] }
+}
+
+export interface ConfigVersionSummary {
+  version: number
+  parent?: number
+  time?: number
+  author?: string
+  comment?: string
+  rollback_of?: number | null
+  sha256: string
+  valid: boolean
+  problem?: string | null
+  diff?: { changed: string[]; removed: string[] }
+}
+
 export interface SettingsResponse {
   settings: Setting[]
   restart_required: boolean
@@ -805,6 +863,11 @@ export const api = {
 
   settings: () => request<SettingsResponse>("GET", "/settings"),
   saveSettings: (changes: Record<string, number | boolean | null>) => request<SettingsResponse>("PUT", "/settings", changes),
+  config: () => request<LatticeConfig>("GET", "/config"),
+  saveConfig: (changes: Record<string, unknown>, options: { hex?: string; comment?: string; base_version?: number }) =>
+    request<LatticeConfig>("PUT", "/config", { changes, ...options }),
+  configHistory: (limit = 50) => request<{ versions: ConfigVersionSummary[]; total: number }>("GET", `/config/history?limit=${limit}`),
+  rollbackConfig: (version: number, comment?: string) => request<LatticeConfig>("POST", "/config/rollback", { version, comment }),
   joinInfo: (password: string) => request<JoinInfo>("POST", "/join", { password }),
 
   analyzers: () => request<{ analyzers: Analyzer[] }>("GET", "/analyzers").then((r) => r.analyzers),

@@ -185,6 +185,8 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 
 **Logs** (needs `logs`). The server's recent log, tailed live, with level, module and text filters.
 
+**Configuration** (administrators). The lattice configuration (see [Lattice configuration](#lattice-configuration)): file storage and AI settings in forms, secrets as write-only fields that show only whether they are set and a fingerprint, a scope picker for per-hex storage overrides, an optional comment saved with the version, each hex's applied version and state, and the history with the keys each version changed and a Roll back button.
+
 **Settings** (administrators)
 - Runtime settings grouped by area, each marked "live" (applies at once) or "restart".
 - Saving shows which changes are waiting for a restart. "Use the config file's value" removes an override.
@@ -1773,6 +1775,59 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 | --- | --- |
 | `limits.max_document_kb`, `storage.disk_mb`, `storage.change_history_hours`, `storage.change_history_mb`, `security.session_hours`, `security.audit_retention_days`, `replication.min_acks`, `replication.ack_timeout_ms` | `limits.max_request_mb`, `limits.max_connections`, `limits.max_connections_per_client`, `limits.request_timeout_seconds`, `limits.header_timeout_seconds`, `memory.ram_mb`, `memory.ttl_scan_frequency`, `security.max_failed_logins`, `security.lockout_minutes`, `storage.compaction_frequency`, `storage.wal_flush_check_frequency`, `storage.wal_sync`, `compression.compression_level`, `replication.forward_writes`, `replication.quorum`, `plugins.enabled` |
 
+### Lattice configuration
+
+Settings that belong to the whole lattice rather than one machine are kept in the lattice configuration: where file content is stored (`file_storage.*`) and the AI provider and AI features (`ai.*`). Administrators change them on the Configuration page, with `hexdb config`, or through the API. `hexdb.toml` keeps what belongs to one hex (addresses, data directory, keys), and the runtime settings above stay per hex.
+
+The storage backend and AI settings are stored and distributed now; the features that use them (remote file storage, AI tagging, AI video thumbnails) arrive in later 1.6 builds.
+
+```bash
+curl http://localhost:7700/config                                # newest version, schema, each hex's state
+curl -X PUT http://localhost:7700/config -H "Content-Type: application/json"   -d '{ "changes": { "ai.provider": "anthropic", "ai.api_key": "sk-..." }, "comment": "Use Claude", "base_version": 3 }'
+curl http://localhost:7700/config/history                        # versions with what each changed
+curl http://localhost:7700/config/versions/2                     # one version
+curl -X POST http://localhost:7700/config/rollback -d '{ "version": 2 }'
+```
+
+From the command line (with an administrator's API key in `HEXDB_TOKEN`):
+
+```bash
+hexdb config get                                   # every setting, overrides, and each hex's version
+hexdb config set ai.provider anthropic -m "Use Claude"
+hexdb config set ai.api_key                        # prompts without echoing; secrets are never arguments
+echo "$KEY" | hexdb config set ai.api_key --stdin
+hexdb config set ai.tagging.send '["metadata","text","thumbnail"]'
+hexdb config set file_storage.backend s3 --hex Tosa # a storage override for one hex
+hexdb config unset ai.model
+hexdb config history
+hexdb config diff 3 5                              # secrets compared by fingerprint
+hexdb config rollback 3 -m "bad key"
+```
+
+- **Versions.** Every change writes a new, immutable version with its author, time, comment and a SHA-256 over its canonical form. `null` clears a setting. Saving values that are already in effect writes nothing. With `base_version`, a change made against an older version is refused with 409. A rollback writes a new version with an earlier version's contents, secrets included; history is never rewritten.
+- **Secrets** (`ai.api_key`, `file_storage.s3.secret_access_key`, `file_storage.azure.account_key`, the Google Drive and Dropbox client secrets and refresh tokens) are sealed with the lattice transfer key and bound to their setting name. No route, log or audit event contains them: reads show `{ "set": true, "fingerprint", "updated", "updated_by" }`, where the fingerprint is a keyed hash that tells two values apart and reveals nothing about them. A secret can be replaced or cleared, never read back.
+- **Distribution.** Versions are documents in the `_config` system tessellation, so they replicate like other data: every hex has them, hexes that join later get them in their first sync, and a new Overseer after a failover already holds them. Each hex checks a version's checksum, its settings against the schema and that every secret opens before applying it, within a second of receiving it. A version that fails is rejected on that hex, which keeps the previous one and reports `"state": "rejected"` with the reason. `/status` has `config` (version, checksum, state, overridden settings) and the lattice view shows every hex's version.
+- **Per-hex overrides.** `"hex": "<name>"` changes one hex's overrides instead of the lattice's. Only `file_storage.*` settings can be overridden (e.g. a hex in another region using a nearer bucket); an override replaces that hex's whole storage configuration. Remove an override by clearing its settings.
+- **Audit.** Changes are recorded as `config.update` (with the keys changed, cleared and the secrets set or cleared, never values) and `config.rollback`. Only administrators can read the configuration, its history, or roll back.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `file_storage.backend` | `local` | `local`, `s3` (Amazon S3 or S3-compatible), `azure`, `gdrive`, `dropbox` |
+| `file_storage.prefix` | empty | Folder or key prefix inside the bucket, container or folder |
+| `file_storage.s3.bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key` | empty | S3; `endpoint` for S3-compatible services (R2, B2, Wasabi, MinIO) |
+| `file_storage.azure.account`, `container`, `account_key` | empty | Azure Blob Storage |
+| `file_storage.gdrive.folder_id`, `client_id`, `client_secret`, `refresh_token` | empty | Google Drive |
+| `file_storage.dropbox.folder`, `app_key`, `app_secret`, `refresh_token` | empty | Dropbox |
+| `ai.provider` | `none` | `none`, `anthropic`, `openai`, `github` (GitHub Models), `azure_openai`, `openai_compatible` |
+| `ai.model`, `ai.base_url`, `ai.api_key` | empty | Model, API base URL (required for Azure OpenAI and OpenAI-compatible endpoints), key |
+| `ai.monthly_token_budget` | 1,000,000 | Tokens AI features may use per calendar month (0: no limit) |
+| `ai.max_tokens_per_file` | 4,000 | Tokens one file may use |
+| `ai.tagging.enabled` | false | AI tags and descriptions for uploaded files |
+| `ai.tagging.send` | `["metadata", "text"]` | What tagging sends: any of `metadata`, `text`, `thumbnail`, `image` |
+| `ai.video_thumbnails.enabled`, `frames` | false, 6 | The AI picks a video's thumbnail from this many frames |
+
+AI features only ever use the key entered here, for this lattice.
+
 ### Configuration reference
 
 | Setting | Default | Meaning |
@@ -2011,7 +2066,7 @@ The driver is tested with pyodbc through unixODBC on Linux and through the Windo
 
 **Why did my write return 503 but the data is there?** With `replication.min_acks` set, the write committed on the Overseer, but not enough replicas confirmed within `ack_timeout_ms`. Retry with the same idempotency key to be safe.
 
-**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `sql`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
+**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `sql`, `config`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
 
 **A replica is far behind or keeps re-syncing.**
 1. Check the Logs page on the replica, filtered by `hexdb_core::replication`.

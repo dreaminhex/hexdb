@@ -80,6 +80,14 @@ pub struct PeerHex {
     /// True when the API is served over HTTPS.
     #[serde(default)]
     pub tls: bool,
+    /// The lattice configuration version in effect, its checksum, and
+    /// `applied`, `rejected` or `default` (see `crate::lattice_config`).
+    #[serde(default)]
+    pub config_version: u64,
+    #[serde(default)]
+    pub config_sha256: String,
+    #[serde(default)]
+    pub config_state: String,
 }
 
 fn default_preference() -> String {
@@ -132,6 +140,7 @@ fn advertised(config: &HexConfig, endpoint: &str) -> String {
 /// This hex's current identity.
 pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
     let config = &engine.config;
+    let lattice_config = engine.lattice_config();
     let replication = if engine.is_writable() {
         ("leading".to_string(), engine.changes.published_seq())
     } else {
@@ -153,6 +162,9 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         replication_state: replication.0,
         applied_seq: replication.1,
         tls: config.tls.enabled(),
+        config_version: lattice_config.version,
+        config_sha256: lattice_config.sha256.clone(),
+        config_state: lattice_config.state().to_string(),
     }
 }
 
@@ -478,6 +490,9 @@ mod tests {
             replication_state: String::new(),
             applied_seq: 0,
             tls: false,
+            config_version: 0,
+            config_sha256: String::new(),
+            config_state: String::new(),
         }
     }
 
