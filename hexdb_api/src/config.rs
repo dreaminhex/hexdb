@@ -14,6 +14,8 @@
 //   POST /{tess}/_ai_thumbnails      let the AI choose video thumbnails, the same way (admins)
 //
 // Secret values are accepted by PUT and never returned, logged or audited.
+// With `security.demo_mode`, any signed-in user may view the configuration,
+// its history, AI usage and estimates; everything else stays admin-only.
 // Writes are forwarded to the Overseer like other writes.
 
 use crate::auth::Auth;
@@ -31,8 +33,16 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::info;
 
+/// Viewing: administrators, or anyone signed in when the hex runs in demo mode.
+fn require_view(engine: &hexdb_core::engine::HexDBEngine, principal: &hexdb_core::Principal) -> Result<(), ApiError> {
+    if engine.config.security.demo_mode {
+        return Ok(());
+    }
+    principal.require_admin().map_err(Into::into)
+}
+
 pub async fn get_config(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require_admin()?;
+    require_view(&engine, &principal)?;
     Ok(Json(engine.lattice_config_view().await?).into_response())
 }
 
@@ -62,14 +72,14 @@ pub struct HistoryParams {
 }
 
 pub async fn config_history(params: Result<Query<HistoryParams>, QueryRejection>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require_admin()?;
+    require_view(&engine, &principal)?;
     let Query(params) = params?;
     let (versions, total) = engine.lattice_config_history(params.limit.unwrap_or(50).clamp(1, 500), params.offset.unwrap_or(0)).await?;
     Ok(Json(json!({ "versions": versions, "total": total })).into_response())
 }
 
 pub async fn config_version(Path(version): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require_admin()?;
+    require_view(&engine, &principal)?;
     let version: u64 = version.parse().map_err(|_| ApiError::invalid("The version must be a number."))?;
     Ok(Json(engine.lattice_config_version(version).await?).into_response())
 }
@@ -93,7 +103,7 @@ pub async fn rollback_config(State(engine): Engine, Auth(principal): Auth, body:
 }
 
 pub async fn ai_status(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require_admin()?;
+    require_view(&engine, &principal)?;
     Ok(Json(json!({ "ai": engine.ai_summary(), "usage": engine.ai_usage_view().await? })).into_response())
 }
 
@@ -147,7 +157,7 @@ pub async fn ai_complete(State(engine): Engine, Auth(principal): Auth, body: Res
 }
 
 pub async fn ai_estimate(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require_admin()?;
+    require_view(&engine, &principal)?;
     Ok(Json(engine.ai_estimate().await?).into_response())
 }
 

@@ -226,3 +226,34 @@ fn every_hex_applies_the_config_and_it_survives_failover() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn demo_mode_lets_everyone_look_but_only_admins_change() -> Result<()> {
+    for demo in [false, true] {
+        let server = TestServer::start_with(TestOptions { security_toml: format!("demo_mode = {}", demo), ..Default::default() })?;
+        let res = put_config(&server, json!({ "changes": { "ai.provider": "anthropic", "ai.api_key": SECRET } }))?;
+        assert_eq!(res.status, 200, "{}", res.body);
+        let visitor = server.user_with_roles("visitor", json!([{ "name": "reader", "tessellations": ["*"] }]))?;
+        let me = server.request_as(Some(&visitor), Method::GET, "/auth/me", None, &[])?;
+        assert_eq!(me.body["demo_mode"], demo);
+        // Viewing: only in demo mode, and never a secret.
+        for path in ["/config", "/config/history", "/config/versions/1", "/ai", "/ai/estimate"] {
+            let res = server.request_as(Some(&visitor), Method::GET, path, None, &[])?;
+            assert_eq!(res.status, if demo { 200 } else { 403 }, "{} with demo_mode = {}: {}", path, demo, res.body);
+            assert_no_secret(&res.body.to_string(), path);
+        }
+        // Changing, testing and spending: administrators only, demo mode or not.
+        for (method, path, body) in [
+            (Method::PUT, "/config", Some(json!({ "changes": { "ai.model": "x" } }))),
+            (Method::POST, "/config/rollback", Some(json!({ "version": 1 }))),
+            (Method::POST, "/config/storage-test", None),
+            (Method::POST, "/ai/test", None),
+        ] {
+            let res = server.request_as(Some(&visitor), method, path, body.as_ref(), &[])?;
+            assert_eq!(res.status, 403, "{} with demo_mode = {}: {}", path, demo, res.body);
+        }
+        // Not even signed in: nothing.
+        assert_eq!(server.request_as(None, Method::GET, "/config", None, &[])?.status, 401);
+    }
+    Ok(())
+}

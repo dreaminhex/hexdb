@@ -165,6 +165,11 @@ pub struct SecurityConfig {
     /// Days to keep audit events (0 keeps them forever).
     #[serde(default = "default_audit_retention_days")]
     pub audit_retention_days: u64,
+    /// Demo mode, for public demos: every signed-in user may view the lattice
+    /// configuration, its history, AI usage and estimates (secrets are never
+    /// shown to anyone). Changing anything still needs an administrator.
+    #[serde(default)]
+    pub demo_mode: bool,
 }
 
 fn default_audit_retention_days() -> u64 {
@@ -523,6 +528,7 @@ impl Default for HexConfig {
                 max_failed_logins: default_max_failed_logins(),
                 lockout_minutes: default_lockout_minutes(),
                 audit_retention_days: default_audit_retention_days(),
+                demo_mode: false,
             },
             memory: MemoryConfig {
                 ram_mb: 1024,

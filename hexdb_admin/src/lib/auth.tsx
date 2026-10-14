@@ -61,10 +61,14 @@ export function can(me: Me | null | undefined, permission: Permission, tessellat
   )
 }
 
-/** Whether the user holds a permission that applies everywhere (status, logs, audit, ...). */
+/** A page or menu requirement: a permission, or viewing the configuration (admins, or anyone in demo mode). */
+export type Requirement = Action | "view_config"
+
+/** Whether the user holds a permission that applies everywhere (status, logs, audit, ...), or meets a requirement. */
 // eslint-disable-next-line react-refresh/only-export-components
-export function has(me: Me | null | undefined, action: Action): boolean {
+export function has(me: Me | null | undefined, action: Requirement): boolean {
   if (!me) return false
+  if (action === "view_config") return me.is_admin || !!me.demo_mode
   return me.is_admin || (me.permissions ?? []).includes(action)
 }
 

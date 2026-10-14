@@ -5,8 +5,7 @@ import { SiteHeader } from "@/components/site-header"
 import { NoticeBar } from "@/components/notice-bar"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
-import type { Action } from "@/lib/api"
-import { AuthProvider, has, useAuth } from "@/lib/auth"
+import { AuthProvider, has, useAuth, type Requirement } from "@/lib/auth"
 import { useRoute } from "@/lib/router"
 import { AccountPage } from "@/pages/account"
 import { AuditPage } from "@/pages/audit"
@@ -31,7 +30,7 @@ interface Page {
   title: string
   element: React.ComponentType
   /** Shown only to users with this permission (the server enforces it too). */
-  requires?: Action
+  requires?: Requirement
 }
 
 const PAGES: Record<string, Page> = {
@@ -47,7 +46,7 @@ const PAGES: Record<string, Page> = {
   "/audit": { title: "Audit Trail", element: AuditPage, requires: "audit" },
   "/logs": { title: "Logs", element: LogsPage, requires: "logs" },
   "/plugins": { title: "Plugins", element: PluginsPage, requires: "plugins" },
-  "/configuration": { title: "Configuration", element: ConfigurationPage, requires: "admin" },
+  "/configuration": { title: "Configuration", element: ConfigurationPage, requires: "view_config" },
   "/settings": { title: "Settings", element: SettingsPage, requires: "admin" },
   "/account": { title: "Account", element: AccountPage },
 }

@@ -1863,6 +1863,7 @@ hexdb config connect dropbox                       # sign in and save Dropbox (o
 - **Distribution.** Versions are documents in the `_config` system tessellation, so they replicate like other data: every hex has them, hexes that join later get them in their first sync, and a new Overseer after a failover already holds them. Each hex checks a version's checksum, its settings against the schema and that every secret opens before applying it, within a second of receiving it. A version that fails is rejected on that hex, which keeps the previous one and reports `"state": "rejected"` with the reason. `/status` has `config` (version, checksum, state, overridden settings) and the lattice view shows every hex's version.
 - **Per-hex overrides.** `"hex": "<name>"` changes one hex's overrides instead of the lattice's. Only `file_storage.*` settings can be overridden (e.g. a hex in another region using a nearer bucket); an override replaces that hex's whole storage configuration. Remove an override by clearing its settings.
 - **Audit.** Changes are recorded as `config.update` (with the keys changed, cleared and the secrets set or cleared, never values) and `config.rollback`. Only administrators can read the configuration, its history, or roll back.
+- **Demo mode.** For public demos, `security.demo_mode = true` in a hex's `hexdb.toml` (or `HEXDB_SECURITY__DEMO_MODE=true`) lets every signed-in user view the configuration, its history, AI usage and the token estimates, on the Configuration page (read-only, with a notice) and through the `GET` routes. Secret values are never shown to anyone. Saving, rolling back, the storage and AI tests and tagging existing files stay with administrators. It's off by default and set per hex, so set it on every hex of a demo lattice; `GET /auth/me` reports it.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -1969,6 +1970,7 @@ Estimates are rough: about 450 tokens of instructions and answer per file, plus 
 | `security.session_hours` | 12 | Session lifetime |
 | `security.max_failed_logins`, `lockout_minutes` | 5, 15 | Sign-in throttling |
 | `security.audit_retention_days` | 90 | Audit event lifetime (0: forever) |
+| `security.demo_mode` | false | Every signed-in user can view (not change) the lattice configuration; for public demos |
 | `tls.cert_file`, `key_file` | empty | PEM certificate chain and key; both set means HTTPS |
 | `tls.ca_file` | empty | Extra CAs trusted for other hexes |
 | `limits.*` | see above | Request and connection limits |

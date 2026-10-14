@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
+import { has, useAuth } from "@/lib/auth"
 import { api, errorMessage, type StorageTestResult, type AiTestResult, type ConfigDef, type ConfigVersionSummary, type LatticeConfig, type SecretInfo } from "@/lib/api"
 import { formatBytes, formatNumber, formatTimestamp } from "@/lib/format"
 
@@ -62,11 +63,13 @@ function SettingInput({
   value,
   draft,
   onChange,
+  readOnly,
 }: {
   def: ConfigDef
   value: unknown
   draft: unknown
   onChange: (v: unknown) => void
+  readOnly: boolean
 }) {
   const current = draft !== undefined ? draft : value !== undefined ? value : def.default
   const kind = def.kind
@@ -83,6 +86,7 @@ function SettingInput({
         ) : (
           <Badge variant="outline" className="text-muted-foreground font-normal">not set</Badge>
         )}
+        {!readOnly && (
         <div className="flex gap-1.5">
           <Input
             type="password"
@@ -99,6 +103,7 @@ function SettingInput({
             </Button>
           )}
         </div>
+        )}
       </div>
     )
   }
@@ -170,7 +175,7 @@ function SettingInput({
 }
 
 /** This hex's remote storage: what's uploaded, what's waiting, problems, and a connection test. */
-function StorageCard() {
+function StorageCard({ readOnly }: { readOnly: boolean }) {
   const status = usePoll(api.status, 10000)
   const [testing, setTesting] = useState(false)
   const [result, setResult] = useState<StorageTestResult | null>(null)
@@ -192,12 +197,15 @@ function StorageCard() {
         <div>
           <CardTitle>File storage on this hex</CardTitle>
           <CardDescription>
-            {remote?.backend ? `Packs go to ${remote.backend}; this hex keeps ${formatBytes(remote.local_bytes)} locally.` : "File content is kept on this hex's disks."} Test after saving.
+            {remote?.backend ? `Packs go to ${remote.backend}; this hex keeps ${formatBytes(remote.local_bytes)} locally.` : "File content is kept on this hex's disks."}
+            {readOnly ? "" : " Test after saving."}
           </CardDescription>
         </div>
-        <Button size="sm" variant="outline" disabled={testing} onClick={() => void test()}>
-          {testing ? <IconLoader2 className="animate-spin" /> : <IconPlugConnected />} Test
-        </Button>
+        {!readOnly && (
+          <Button size="sm" variant="outline" disabled={testing} onClick={() => void test()}>
+            {testing ? <IconLoader2 className="animate-spin" /> : <IconPlugConnected />} Test
+          </Button>
+        )}
       </CardHeader>
       <CardContent className="grid gap-1 text-sm">
         {result &&
@@ -224,7 +232,7 @@ function StorageCard() {
 }
 
 /** The AI provider in use, a test call, and this month's token usage. */
-function AiCard({ refreshKey }: { refreshKey: number }) {
+function AiCard({ refreshKey, readOnly }: { refreshKey: number; readOnly: boolean }) {
   const status = usePoll(api.aiStatus, 15000, [refreshKey])
   const [testing, setTesting] = useState(false)
   const [result, setResult] = useState<AiTestResult | null>(null)
@@ -251,9 +259,11 @@ function AiCard({ refreshKey }: { refreshKey: number }) {
             {data?.ai.configured ? `${data.ai.provider} · ${data.ai.model}` : (data?.ai.problem ?? "No AI provider configured.")}
           </CardDescription>
         </div>
-        <Button size="sm" variant="outline" disabled={testing || !data?.ai.configured} onClick={() => void test()}>
-          {testing ? <IconLoader2 className="animate-spin" /> : <IconPlugConnected />} Test
-        </Button>
+        {!readOnly && (
+          <Button size="sm" variant="outline" disabled={testing || !data?.ai.configured} onClick={() => void test()}>
+            {testing ? <IconLoader2 className="animate-spin" /> : <IconPlugConnected />} Test
+          </Button>
+        )}
       </CardHeader>
       <CardContent className="grid gap-2 text-sm">
         {result &&
@@ -291,7 +301,7 @@ function AiCard({ refreshKey }: { refreshKey: number }) {
 }
 
 /** What tagging and video thumbnails would cost in tokens, and buttons to process existing files. */
-function AiEstimateCard({ refreshKey, configured }: { refreshKey: number; configured: boolean }) {
+function AiEstimateCard({ refreshKey, configured, readOnly }: { refreshKey: number; configured: boolean; readOnly: boolean }) {
   const estimate = usePoll(api.aiEstimate, 0, [refreshKey])
   const [confirm, setConfirm] = useState<{ tess: string; kind: "tag" | "thumbnails"; files: number; tokens: number } | null>(null)
   const rows = estimate.data?.tessellations ?? []
@@ -302,7 +312,7 @@ function AiEstimateCard({ refreshKey, configured }: { refreshKey: number; config
         <CardTitle>AI token estimates</CardTitle>
         <CardDescription>
           Rough figures from file sizes, metadata and image dimensions (providers count tokens differently). Turning a feature on only affects files
-          uploaded afterwards; existing files are processed only with the buttons below.
+          uploaded afterwards; existing files are processed only when an administrator asks{readOnly ? "." : ", with the buttons below."}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -320,7 +330,7 @@ function AiEstimateCard({ refreshKey, configured }: { refreshKey: number; config
                 <TableCell className="font-medium">{r.tessellation}</TableCell>
                 <TableCell className="text-xs">
                   about {formatNumber(r.tagging.tokens_per_file)} tokens per file
-                  {r.tagging.untagged > 0 && (
+                  {r.tagging.untagged > 0 && !readOnly && (
                     <div className="mt-1 flex items-center gap-2">
                       {formatNumber(r.tagging.untagged)} untagged: about {formatNumber(r.tagging.tokens_for_untagged)}
                       <Button
@@ -341,7 +351,7 @@ function AiEstimateCard({ refreshKey, configured }: { refreshKey: number; config
                   ) : (
                     <>
                       about {formatNumber(r.video_thumbnails.tokens_per_video)} tokens per video
-                      {r.video_thumbnails.without_ai_thumbnail > 0 && (
+                      {r.video_thumbnails.without_ai_thumbnail > 0 && !readOnly && (
                         <div className="mt-1 flex items-center gap-2">
                           {r.video_thumbnails.without_ai_thumbnail} without: about {formatNumber(r.video_thumbnails.tokens_for_those)}
                           <Button
@@ -437,7 +447,7 @@ function HexesCard({ config }: { config: LatticeConfig }) {
   )
 }
 
-function HistoryCard({ refreshKey, onRolledBack }: { refreshKey: number; onRolledBack: () => void }) {
+function HistoryCard({ refreshKey, onRolledBack, readOnly }: { refreshKey: number; onRolledBack: () => void; readOnly: boolean }) {
   const history = usePoll(() => api.configHistory(50), 0, [refreshKey])
   const [target, setTarget] = useState<ConfigVersionSummary | null>(null)
   const newest = history.data?.versions[0]?.version
@@ -482,7 +492,7 @@ function HistoryCard({ refreshKey, onRolledBack }: { refreshKey: number; onRolle
                     {v.diff?.removed.map((k) => <div key={`r${k}`}>- {k}</div>)}
                   </TableCell>
                   <TableCell>
-                    {v.valid && v.version !== newest && (
+                    {v.valid && v.version !== newest && !readOnly && (
                       <Button variant="outline" size="sm" onClick={() => setTarget(v)}>
                         <IconRestore /> Roll back
                       </Button>
@@ -513,6 +523,9 @@ function HistoryCard({ refreshKey, onRolledBack }: { refreshKey: number; onRolle
 
 /** The lattice configuration: file storage and AI, shared by every hex. */
 export function ConfigurationPage() {
+  const { me } = useAuth()
+  // Demo mode lets non-administrators look; only administrators change anything.
+  const readOnly = !me?.is_admin
   const config = usePoll(api.config, 5000)
   const [scope, setScope] = useState(LATTICE)
   const [draft, setDraft] = useState<Draft>({})
@@ -586,7 +599,7 @@ export function ConfigurationPage() {
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
                   {label(def.key)}
-                  {values[def.key] !== undefined && !def.secret && (
+                  {values[def.key] !== undefined && !def.secret && !readOnly && (
                     <Button variant="link" size="sm" className="text-muted-foreground h-5 px-1 text-xs" onClick={() => void save({ [def.key]: null })} disabled={busy}>
                       reset to default
                     </Button>
@@ -597,7 +610,7 @@ export function ConfigurationPage() {
                 </p>
               </div>
               <div className="sm:justify-self-end">
-                <SettingInput def={def} value={values[def.key]} draft={draft[def.key]} onChange={(v) => setDraft((d) => ({ ...d, [def.key]: v }))} />
+                <SettingInput def={def} value={values[def.key]} draft={draft[def.key]} onChange={(v) => setDraft((d) => ({ ...d, [def.key]: v }))} readOnly={readOnly} />
               </div>
             </div>
           ))}
@@ -632,6 +645,12 @@ export function ConfigurationPage() {
           )}
         </p>
       )}
+      {readOnly && (
+        <div className="border-primary/40 bg-primary/10 flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+          <IconAlertTriangle className="text-primary size-4" /> Demo mode: you can look around, but only an administrator can change the
+          configuration. Secret values are never shown to anyone.
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <Select value={scope} onValueChange={setScope}>
           <SelectTrigger className="w-64" aria-label="Scope">
@@ -647,6 +666,8 @@ export function ConfigurationPage() {
             ))}
           </SelectContent>
         </Select>
+        {!readOnly && (
+          <>
         <Input className="h-9 w-72" placeholder="Why (saved with the version)" value={comment} onChange={(e) => setComment(e.target.value)} maxLength={500} />
         <Button disabled={busy || count === 0} onClick={() => void save(changes)}>
           {busy && <IconLoader2 className="animate-spin" />}
@@ -655,11 +676,13 @@ export function ConfigurationPage() {
         <Button variant="ghost" disabled={Object.keys(draft).length === 0} onClick={() => setDraft({})}>
           Discard
         </Button>
+          </>
+        )}
       </div>
       {scope !== LATTICE && (
         <p className="text-muted-foreground max-w-3xl text-sm">
           A storage override replaces the lattice's whole file storage configuration on hex {scope}; other settings always come from the lattice.
-          {data?.overrides[scope] && (
+          {data?.overrides[scope] && !readOnly && (
             <Button
               variant="link"
               size="sm"
@@ -672,15 +695,16 @@ export function ConfigurationPage() {
           )}
         </p>
       )}
-      <div className="grid gap-4 xl:grid-cols-2">
-        {section("File storage", "Where file content is kept. It is encrypted and split into shards before it leaves the hex, so the provider only sees ciphertext.", "file_storage.")}
+      <fieldset disabled={readOnly} className="grid min-w-0 gap-4 xl:grid-cols-2">
+        {section("File storage", "Where file content is kept. It is encrypted and split into fragments before it leaves the hex, so the provider only sees ciphertext.", "file_storage.")}
         {scope === LATTICE && section("AI", "AI features use this lattice's own provider and key, never anyone else's. Everything is off until you turn it on.", "ai.")}
-      </div>
-      <StorageCard />
-      {scope === LATTICE && <AiCard refreshKey={historyKey} />}
-      {scope === LATTICE && <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} />}
+      </fieldset>
+      {has(me, "status") && <StorageCard readOnly={readOnly} />}
+      {scope === LATTICE && <AiCard refreshKey={historyKey} readOnly={readOnly} />}
+      {scope === LATTICE && <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} readOnly={readOnly} />}
       {data && <HexesCard config={data} />}
       <HistoryCard
+        readOnly={readOnly}
         refreshKey={historyKey}
         onRolledBack={() => {
           void config.refresh()

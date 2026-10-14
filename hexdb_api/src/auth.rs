@@ -314,8 +314,11 @@ pub async fn logout(State(engine): Engine, Auth(principal): Auth, crate::client:
 }
 
 /// The signed-in user.
-pub async fn me(Auth(principal): Auth) -> ApiResult {
-    Ok(Json(me_json(&principal)).into_response())
+pub async fn me(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    let mut me = me_json(&principal);
+    // The admin UI shows demo-mode pages (read-only) to everyone.
+    me["demo_mode"] = json!(engine.config.security.demo_mode);
+    Ok(Json(me).into_response())
 }
 
 #[derive(Deserialize)]

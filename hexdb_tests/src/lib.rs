@@ -127,6 +127,8 @@ pub struct TestOptions {
     pub network_toml: String,
     /// Extra `key = value` lines for the `[storage]` section.
     pub storage_toml: String,
+    /// Extra `key = value` lines for the `[security]` section.
+    pub security_toml: String,
     /// `storage.disk_mb` (default 1024).
     pub disk_mb: Option<u64>,
     /// Don't configure an admin password (HexDB generates one) and don't sign in.
@@ -288,12 +290,14 @@ path = "./no-ui"
 admin_login = "{admin}"
 admin_password = "{password}"
 admin_email = "admin@example.com"
+{security_extra}
 "#,
             key = self.options.encryption_key.as_deref().unwrap_or(TEST_ENCRYPTION_KEY),
             previous = self.options.previous_encryption_keys.iter().map(|k| format!("\"{}\"", k)).collect::<Vec<_>>().join(", "),
             admin = TEST_ADMIN_LOGIN,
             network_extra = self.options.network_toml,
             storage_extra = self.options.storage_toml,
+            security_extra = self.options.security_toml,
             disk_mb = self.options.disk_mb.unwrap_or(1024),
             password = if self.options.no_admin_password { "" } else { TEST_ADMIN_PASSWORD },
         ) + &self.options.extra_toml;

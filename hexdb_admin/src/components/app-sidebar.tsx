@@ -33,7 +33,7 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
 import { usePoll } from "@/hooks/use-poll"
-import type { Action } from "@/lib/api"
+import type { Requirement } from "@/lib/auth"
 import { has, useAuth } from "@/lib/auth"
 import { href, linkHandler } from "@/lib/router"
 import { cn } from "@/lib/utils"
@@ -44,7 +44,7 @@ interface NavItem {
   /** In-app route; items without one aren't built yet and render disabled. */
   route?: string
   /** Shown only to users with this permission. */
-  requires?: Action
+  requires?: Requirement
 }
 
 const SECTIONS: { label?: string; items: NavItem[] }[] = [
@@ -80,7 +80,7 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
 
 const FOOTER_ITEMS: NavItem[] = [
   { title: "Logs", route: "/logs", icon: IconReport, requires: "logs" },
-  { title: "Configuration", route: "/configuration", icon: IconAdjustments, requires: "admin" },
+  { title: "Configuration", route: "/configuration", icon: IconAdjustments, requires: "view_config" },
   { title: "Settings", route: "/settings", icon: IconSettings, requires: "admin" },
 ]
 
