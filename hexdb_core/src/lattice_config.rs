@@ -114,7 +114,7 @@ const fn secret(key: &'static str, description: &'static str) -> ConfigDef {
 
 pub const BACKENDS: &[&str] = &["local", "s3", "azure", "gdrive", "dropbox"];
 pub const AI_PROVIDERS: &[&str] = &["none", "anthropic", "openai", "github", "azure_openai", "openai_compatible"];
-pub const AI_INPUTS: &[&str] = &["metadata", "text", "thumbnail", "image"];
+pub const AI_INPUTS: &[&str] = &["metadata", "text", "thumbnail", "image", "video", "pdf"];
 
 pub const CONFIG: &[ConfigDef] = &[
     def("file_storage.backend", ConfigKind::Choice { choices: BACKENDS }, "\"local\"", "Where file content is stored: this hex's disks (local), Amazon S3 or an S3-compatible service, Azure Blob Storage, Google Drive or Dropbox. Content is encrypted before it leaves the hex."),
@@ -145,7 +145,8 @@ pub const CONFIG: &[ConfigDef] = &[
     def("ai.max_tokens_per_file", ConfigKind::Integer { min: 100, max: 1_000_000 }, "4000", "Most tokens one file may use (input and output)."),
     def("ai.tagging.enabled", ConfigKind::Boolean, "false", "Let the AI add tags and a description to files as they are uploaded."),
     text("ai.tagging.tessellations", "Files tessellations whose new files are tagged, comma-separated (empty: every files tessellation)."),
-    def("ai.tagging.send", ConfigKind::Set { choices: AI_INPUTS }, "[\"metadata\",\"text\"]", "What auto-tagging sends to the AI: extracted metadata, extracted text, the thumbnail, the full image."),
+    def("ai.tagging.send", ConfigKind::Set { choices: AI_INPUTS }, "[\"metadata\",\"text\"]", "What auto-tagging sends to the AI: extracted metadata, extracted text, the thumbnail, the full image, frames from a video, the whole PDF (Anthropic and OpenAI only)."),
+    def("ai.tagging.video_frames", ConfigKind::Integer { min: 1, max: 16 }, "4", "With video in what tagging sends: frames sent from each H.264 video, spread through it."),
     def("ai.video_thumbnails.enabled", ConfigKind::Boolean, "false", "Let the AI pick the most representative frame for video thumbnails."),
     def("ai.video_thumbnails.frames", ConfigKind::Integer { min: 2, max: 16 }, "6", "Candidate frames the AI chooses from."),
 ];
@@ -952,7 +953,7 @@ mod tests {
     fn validation_normalizes_and_never_echoes_values() {
         let set = definition("ai.tagging.send").unwrap();
         assert_eq!(validate(set, &json!(["image", "metadata", "image"])).unwrap(), json!(["metadata", "image"]));
-        assert!(validate(set, &json!(["video"])).is_err());
+        assert!(validate(set, &json!(["audio"])).is_err());
         let url = definition("ai.base_url").unwrap();
         assert_eq!(validate(url, &json!("https://example.com/v1/")).unwrap(), json!("https://example.com/v1"));
         assert!(validate(url, &json!("file:///etc/passwd")).is_err());

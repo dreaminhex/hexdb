@@ -31,6 +31,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarSeparator,
 } from "@/components/ui/sidebar"
 import { usePoll } from "@/hooks/use-poll"
 import type { Requirement } from "@/lib/auth"
@@ -89,14 +90,14 @@ function SignedInUser({ active }: { active: boolean }) {
   const { me, signOut } = useAuth()
   if (!me) return null
   return (
-    <div className="flex items-center gap-2 px-2">
+    <div className="flex items-center gap-1">
       <a
         href={href("/account")}
         onClick={linkHandler("/account")}
-        className={cn("hover:bg-sidebar-accent flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1", active && "bg-sidebar-accent")}
+        className={cn("hover:bg-sidebar-accent flex min-w-0 flex-1 items-center gap-2 rounded-md p-2", active && "bg-sidebar-accent")}
         title="Account: password and API keys"
       >
-        <IconUserCircle className="text-muted-foreground size-5 shrink-0" />
+        <IconUserCircle className="text-muted-foreground size-4 shrink-0" />
         <span className="grid min-w-0 text-left text-sm leading-tight">
           <span className="truncate font-medium">{me.login}</span>
           <span className="text-muted-foreground truncate text-xs">{me.is_admin ? "Administrator" : me.roles.map((r) => r.name).join(", ") || "No roles"}</span>
@@ -171,6 +172,9 @@ export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps
               <img src="hexdb_lg.png" alt="HexDB" className="h-9 w-auto" />
             </a>
           </SidebarMenuItem>
+          <SidebarMenuItem>
+            <HexIdentity />
+          </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
@@ -200,9 +204,9 @@ export function AppSidebar({ activeRoute = "/", ...props }: React.ComponentProps
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+      <SidebarSeparator />
       <SidebarFooter>
         <SignedInUser active={activeRoute === "/account"} />
-        <HexIdentity />
       </SidebarFooter>
     </Sidebar>
   )

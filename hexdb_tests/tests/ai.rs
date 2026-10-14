@@ -326,3 +326,42 @@ fn files_are_tagged_and_videos_get_an_ai_thumbnail() -> Result<()> {
     assert!(audit["events"].as_array().unwrap().iter().any(|e| e["action"] == "ai.tag"), "{}", audit);
     Ok(())
 }
+
+#[test]
+fn tagging_can_send_video_frames_and_whole_pdfs() -> Result<()> {
+    let server = TestServer::start()?;
+    let (port, seen) = mock_provider(Arc::new(Mutex::new(false)))?;
+    let res = server.request(Method::POST, "/tessellations", Some(&json!({ "name": "media", "kind": "files" })), &[])?;
+    assert_eq!(res.status, StatusCode::CREATED, "{}", res.body);
+    set(&server, json!({
+        "ai.provider": "anthropic", "ai.base_url": format!("http://127.0.0.1:{}", port), "ai.api_key": KEY, "ai.model": "claude-test",
+        "ai.tagging.enabled": true, "ai.tagging.send": ["metadata", "thumbnail", "video", "pdf"], "ai.tagging.video_frames": 2,
+    }))?;
+    let tag_call = |name: &str| -> Vec<Value> {
+        let calls = seen.lock().unwrap();
+        let call = calls.iter().rev().find(|c| system_of(c).contains("tag files") && c.2.to_string().contains(name)).expect("a tagging call");
+        call.2["messages"][0]["content"].as_array().unwrap().clone()
+    };
+
+    // A video: frames from through it, instead of the one thumbnail.
+    let video = hexdb_core::extract::video::fixtures::mp4(&[[220, 30, 30], [30, 200, 30], [30, 30, 220]], 64, 48);
+    let vid = upload(&server, "clips/colors.mp4", video)?;
+    wait_for(&server, &vid, "the video's tags", |d| d["ai"]["status"] == "done")?;
+    let parts = tag_call("colors.mp4");
+    assert_eq!(parts.iter().filter(|p| p["type"] == "image").count(), 2, "{:?}", parts);
+    assert!(parts.iter().any(|p| p["text"].as_str().is_some_and(|t| t.contains("frames from the video"))));
+
+    // A PDF: sent whole as a document.
+    let pdf = b"%PDF-1.4\n1 0 obj <</Type /Catalog>> endobj\ntrailer <</Root 1 0 R>>\n%%EOF\n".to_vec();
+    let doc = upload(&server, "docs/report.pdf", pdf)?;
+    wait_for(&server, &doc, "the PDF's tags", |d| d["ai"]["status"] == "done")?;
+    let parts = tag_call("report.pdf");
+    let document = parts.iter().find(|p| p["type"] == "document").expect("the PDF is sent");
+    assert_eq!(document["source"]["media_type"], "application/pdf");
+
+    // The estimate counts frames and pages.
+    let estimate = server.request(Method::GET, "/ai/estimate", None, &[])?.body;
+    let media = estimate["tessellations"].as_array().unwrap().iter().find(|t| t["tessellation"] == "media").unwrap().clone();
+    assert!(media["tagging"]["tokens_per_file"].as_u64().unwrap() > 1000, "{}", estimate);
+    Ok(())
+}

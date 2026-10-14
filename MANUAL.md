@@ -947,7 +947,7 @@ After each upload, new version or version restore, the Overseer reads the file i
 
 **Limits.** Extraction reads at most `files.extract_max_mb` (64) of a file and stops after `files.extract_timeout_seconds` (30). Each extractor runs on its own: one that fails or panics adds a line to `extract.errors` and the others still run. Strings are cut at 4,096 bytes, arrays and objects at 500 items; `meta.text` is at most `files.text_kb` (64) KB. A `meta` larger than 256 KB loses its largest tag families first (listed in `meta.dropped`). Binary data (embedded thumbnails, maker notes, cover art) is left out.
 
-Not read yet: PDF body text, GoPro GPMF telemetry, ICC profile descriptions (other than PNG `iCCP` names), frames of video that isn't H.264.
+Not read yet: PDF body text (the AI can read it; see `pdf` in [AI](#ai)), GoPro GPMF telemetry, ICC profile descriptions (other than PNG `iCCP` names), frames of video that isn't H.264.
 
 ### Thumbnails
 
@@ -1880,7 +1880,8 @@ hexdb config connect dropbox                       # sign in and save Dropbox (o
 | `ai.max_tokens_per_file` | 4,000 | Tokens one file may use |
 | `ai.tagging.enabled` | false | AI tags and descriptions for uploaded files |
 | `ai.tagging.tessellations` | empty (all) | Files tessellations whose new files are tagged, comma-separated |
-| `ai.tagging.send` | `["metadata", "text"]` | What tagging sends: any of `metadata`, `text`, `thumbnail`, `image` |
+| `ai.tagging.send` | `["metadata", "text"]` | What tagging sends: any of `metadata`, `text`, `thumbnail`, `image`, `video`, `pdf` |
+| `ai.tagging.video_frames` | 4 | With `video`: frames sent from each video |
 | `ai.video_thumbnails.enabled`, `frames` | false, 6 | The AI picks a video's thumbnail from this many frames |
 
 AI features only ever use the key entered here, for this lattice.
@@ -1909,7 +1910,7 @@ curl -X POST http://localhost:7700/ai/complete -H "Content-Type: application/jso
   -d '{ "prompt": "Summarize: ...", "system": "Be brief.", "max_tokens": 2000 }'   # the `ai` permission
 ```
 
-**AI tags and descriptions.** With `ai.tagging.enabled`, each file uploaded afterwards is sent to the AI once its metadata has been extracted, and the answer is stored on the file as `ai`: `tags` (up to 15, lowercase), `description`, `model`, `input_tokens`, `output_tokens` and the content's `sha256`, so the same content is never tagged twice (a new version is tagged again). `ai` is in the files text index, so `$text` finds files by their AI tags; it can't be written through the document routes, and the user's own `tags` and `description` are never changed. What is sent is set by `ai.tagging.send`: `metadata` (name, folder, type, size and the extracted metadata), `text` (the extracted text, up to 16,000 characters), `thumbnail`, and `image` (a JPEG, PNG, GIF or WebP up to 4.5 MB is sent whole; otherwise its thumbnail). `ai.tagging.tessellations` limits tagging to some files tessellations. The instructions tell the model that file contents are data, but a file can still try to steer its own tags: treat them as suggestions. A failure is recorded as `ai.status: "failed"` (or `"skipped"` when the budget is used up) with the error.
+**AI tags and descriptions.** With `ai.tagging.enabled`, each file uploaded afterwards is sent to the AI once its metadata has been extracted, and the answer is stored on the file as `ai`: `tags` (up to 15, lowercase), `description`, `model`, `input_tokens`, `output_tokens` and the content's `sha256`, so the same content is never tagged twice (a new version is tagged again). `ai` is in the files text index, so `$text` finds files by their AI tags; it can't be written through the document routes, and the user's own `tags` and `description` are never changed. What is sent is set by `ai.tagging.send`: `metadata` (name, folder, type, size and the extracted metadata), `text` (the extracted text, up to 16,000 characters), `thumbnail`, `image` (a JPEG, PNG, GIF or WebP up to 4.5 MB is sent whole; otherwise its thumbnail), `video` (`ai.tagging.video_frames` frames spread through an H.264 video, sent instead of its thumbnail; other videos fall back to the thumbnail), and `pdf` (a PDF up to 20 MB and 100 pages is sent whole, and the model reads its text and pictures page by page; Anthropic and OpenAI only, other providers get what was extracted). Audio isn't sent: audio files are tagged from their metadata. `ai.tagging.tessellations` limits tagging to some files tessellations. The instructions tell the model that file contents are data, but a file can still try to steer its own tags: treat them as suggestions. A failure is recorded as `ai.status: "failed"` (or `"skipped"` when the budget is used up) with the error.
 
 **AI video thumbnails.** With `ai.video_thumbnails.enabled`, `ai.video_thumbnails.frames` keyframes spread through each new H.264 video are decoded and sent as thumbnail-sized images, and the frame the model picks becomes the thumbnail (`thumbnail.chosen_by: "ai"`, with `frame` and `of`). Re-reading the file's metadata keeps that choice while the content is the same.
 
@@ -1921,7 +1922,7 @@ curl -X POST http://localhost:7700/media/_ai_tag        # tag files not tagged f
 curl -X POST http://localhost:7700/media/_ai_thumbnails # let the AI choose existing videos' thumbnails
 ```
 
-Estimates are rough: about 450 tokens of instructions and answer per file, plus metadata and text at about 4 characters per token, plus image tokens (width x height / 750 after scaling to fit 1568 px, at most 1,600); per video, about 300 tokens plus each frame. Providers count differently. Work runs on the Overseer, one file at a time, through the same budget; the requests are audited as `ai.tag` and `ai.thumbnails`. The CLI has `hexdb config ai-estimate`, `ai-tag <tessellation>` and `ai-thumbnails <tessellation>`; the Configuration page shows the estimates with buttons, and the Files page shows a file's AI tags.
+Estimates are rough: about 450 tokens of instructions and answer per file, plus metadata and text at about 4 characters per token, plus image tokens (width x height / 750 after scaling to fit 1568 px, at most 1,600); for `video`, each frame as an image; for `pdf`, about 2,000 tokens a page; per AI thumbnail pick, about 300 tokens plus each frame. Providers count differently. Work runs on the Overseer, one file at a time, through the same budget; the requests are audited as `ai.tag` and `ai.thumbnails`. The CLI has `hexdb config ai-estimate`, `ai-tag <tessellation>` and `ai-thumbnails <tessellation>`; the Configuration page shows the estimates with buttons, and the Files page shows a file's AI tags.
 
 `POST /ai/complete` lets plugins and scripts use the lattice's provider without a key of their own; it needs the `ai` permission (the built-in `ai` role) and its usage is recorded as `api:<login>`. A plugin gets it with `ai = true` in its manifest's `[access]` section. The Configuration page has a "Test" button and shows the month's usage; the CLI has `hexdb config ai-test` and `hexdb config ai-usage`.
 

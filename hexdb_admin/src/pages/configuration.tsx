@@ -14,6 +14,7 @@ import { usePoll } from "@/hooks/use-poll"
 import { has, useAuth } from "@/lib/auth"
 import { api, errorMessage, type StorageTestResult, type AiTestResult, type ConfigDef, type ConfigVersionSummary, type LatticeConfig, type SecretInfo } from "@/lib/api"
 import { formatBytes, formatNumber, formatTimestamp } from "@/lib/format"
+import { cn } from "@/lib/utils"
 
 const LATTICE = "__lattice__"
 
@@ -32,6 +33,16 @@ const PROVIDER_LABELS: Record<string, string> = {
   github: "GitHub Models",
   azure_openai: "Azure OpenAI",
   openai_compatible: "OpenAI-compatible (Ollama, LM Studio, vLLM...)",
+}
+
+/** What tagging can send, with what each covers. */
+const SEND_LABELS: Record<string, [string, string]> = {
+  metadata: ["Metadata", "Name, folder, type, size and the metadata read from the file"],
+  text: ["Text", "Text read from the file: Word, PowerPoint, Excel, OpenDocument, plain text"],
+  thumbnail: ["Thumbnail", "The file's small preview image"],
+  image: ["Full image", "JPEG, PNG, GIF and WebP images up to 4.5 MB, whole"],
+  video: ["Video frames", "Frames spread through each H.264 video (how many: ai.tagging.video_frames)"],
+  pdf: ["Whole PDF", "PDFs up to 20 MB and 100 pages, read page by page; Anthropic and OpenAI only"],
 }
 
 function when(ms: number | undefined): string {
@@ -137,13 +148,13 @@ function SettingInput({
     return (
       <div className="flex flex-wrap gap-3">
         {kind.choices.map((c) => (
-          <label key={c} className="flex items-center gap-1.5 text-sm">
+          <label key={c} className="flex items-center gap-1.5 text-sm" title={def.key === "ai.tagging.send" ? SEND_LABELS[c]?.[1] : undefined}>
             <Checkbox
               checked={selected.includes(c)}
               onCheckedChange={(v) => onChange(v === true ? kind.choices.filter((x) => x === c || selected.includes(x)) : selected.filter((x) => x !== c))}
               aria-label={`${def.key} ${c}`}
             />
-            {c}
+            {def.key === "ai.tagging.send" ? (SEND_LABELS[c]?.[0] ?? c) : c}
           </label>
         ))}
       </div>
@@ -595,7 +606,7 @@ export function ConfigurationPage() {
         </CardHeader>
         <CardContent className="divide-y">
           {defs.map((def) => (
-            <div key={def.key} className="grid gap-2 py-3 sm:grid-cols-[1fr_auto] sm:items-center">
+            <div key={def.key} className={cn("grid gap-2 py-3", def.kind.type !== "set" && "sm:grid-cols-[1fr_auto] sm:items-center")}>
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
                   {label(def.key)}
@@ -609,7 +620,7 @@ export function ConfigurationPage() {
                   {def.description} <span className="font-mono">{def.key}</span>
                 </p>
               </div>
-              <div className="sm:justify-self-end">
+              <div className={cn(def.kind.type !== "set" && "sm:justify-self-end")}>
                 <SettingInput def={def} value={values[def.key]} draft={draft[def.key]} onChange={(v) => setDraft((d) => ({ ...d, [def.key]: v }))} readOnly={readOnly} />
               </div>
             </div>

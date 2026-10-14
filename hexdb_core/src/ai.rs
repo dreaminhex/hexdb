@@ -45,6 +45,15 @@ pub enum Part {
     Text(String),
     /// An image: its MIME type and bytes.
     Image { media_type: String, data: Vec<u8> },
+    /// A whole PDF, read page by page (text and pictures) by providers that
+    /// take PDFs (see [`reads_pdfs`]).
+    Pdf { data: Vec<u8> },
+}
+
+/// True if a provider's API takes whole PDFs: Anthropic's document blocks and
+/// OpenAI's file parts. Other servers get only what was extracted.
+pub fn reads_pdfs(provider: &str) -> bool {
+    matches!(provider, "anthropic" | "openai")
 }
 
 /// One prompt: instructions and the content to work on.
@@ -300,6 +309,7 @@ async fn call_anthropic(provider: &Provider, request: &AiRequest, max_tokens: u6
         .map(|p| match p {
             Part::Text(text) => json!({ "type": "text", "text": text }),
             Part::Image { media_type, data } => json!({ "type": "image", "source": { "type": "base64", "media_type": media_type, "data": STANDARD.encode(data) } }),
+            Part::Pdf { data } => json!({ "type": "document", "source": { "type": "base64", "media_type": "application/pdf", "data": STANDARD.encode(data) } }),
         })
         .collect();
     let mut body = json!({
@@ -353,6 +363,9 @@ async fn call_chat_completions(provider: &Provider, request: &AiRequest, max_tok
             Part::Text(text) => json!({ "type": "text", "text": text }),
             Part::Image { media_type, data } => {
                 json!({ "type": "image_url", "image_url": { "url": format!("data:{};base64,{}", media_type, STANDARD.encode(data)) } })
+            }
+            Part::Pdf { data } => {
+                json!({ "type": "file", "file": { "filename": "file.pdf", "file_data": format!("data:application/pdf;base64,{}", STANDARD.encode(data)) } })
             }
         })
         .collect();
