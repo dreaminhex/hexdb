@@ -1,5 +1,5 @@
 //! The lattice configuration: versions, write-only secrets, validation,
-//! per-hex storage overrides, history, rollback, the audit trail, and
+//! history, rollback, the audit trail, and
 //! propagation to every hex (including after a failover).
 
 use anyhow::{bail, Result};
@@ -77,7 +77,8 @@ fn versions_secrets_validation_history_and_rollback() -> Result<()> {
         (json!({ "changes": { "ai.nope": 1 } }), "unknown key"),
         (json!({ "changes": { "ai.base_url": "file:///etc/passwd" } }), "not an http URL"),
         (json!({ "changes": { "ai.monthly_token_budget": -5 } }), "below the minimum"),
-        (json!({ "changes": { "ai.provider": "openai" }, "hex": "Elsewhere" }), "not a storage setting"),
+        (json!({ "changes": { "ai.provider": "openai" }, "hex": "Elsewhere" }), "no per-hex overrides"),
+        (json!({ "changes": { "file_storage.backend": "s3" } }), "remote storage settings were removed"),
         (json!({ "changes": {} }), "no changes"),
         (json!({ "changes": { "ai.api_key": "" } }), "empty secret"),
     ] {
@@ -103,14 +104,10 @@ fn versions_secrets_validation_history_and_rollback() -> Result<()> {
     let res = put_config(&server, json!({ "changes": { "ai.provider": "anthropic" } }))?;
     assert_eq!(res.body["version"], 1, "{}", res.body);
 
-    // A storage override for one hex.
-    let res = put_config(&server, json!({ "changes": { "file_storage.backend": "s3", "file_storage.s3.bucket": "far-away", "file_storage.s3.secret_access_key": SECRET_2 }, "hex": "Elsewhere", "base_version": 1 }))?;
+    // Another change, against the version it was made from.
+    let res = put_config(&server, json!({ "changes": { "ai.model": "claude-test", "ai.tagging.enabled": true }, "base_version": 1 }))?;
     assert_eq!(res.status, 200, "{}", res.body);
     assert_eq!(res.body["version"], 2);
-    assert_eq!(res.body["overrides"]["Elsewhere"]["file_storage.backend"], "s3");
-    assert_eq!(res.body["overrides"]["Elsewhere"]["file_storage.s3.secret_access_key"]["set"], true);
-    assert_no_secret(&res.body.to_string(), "the override response");
-    assert_eq!(status_config(&server)?["overridden"], json!([]), "the override is for another hex");
 
     // Replace the key, then look at the history.
     let res = put_config(&server, json!({ "changes": { "ai.api_key": SECRET_2, "ai.provider": "openai" } }))?;
@@ -122,7 +119,7 @@ fn versions_secrets_validation_history_and_rollback() -> Result<()> {
     let versions = history["versions"].as_array().unwrap();
     assert_eq!(versions[0]["version"], 3);
     assert_eq!(versions[0]["diff"]["changed"], json!(["ai.api_key", "ai.provider"]));
-    assert_eq!(versions[1]["diff"]["changed"], json!(["hex:Elsewhere/file_storage.backend", "hex:Elsewhere/file_storage.s3.bucket", "hex:Elsewhere/file_storage.s3.secret_access_key"]));
+    assert_eq!(versions[1]["diff"]["changed"], json!(["ai.model", "ai.tagging.enabled"]));
     assert_eq!(versions[2]["comment"], "Use Claude");
     let one = server.request(Method::GET, "/config/versions/1", None, &[])?;
     assert_eq!(one.body["valid"], true);
@@ -136,7 +133,7 @@ fn versions_secrets_validation_history_and_rollback() -> Result<()> {
     assert_eq!(res.body["version"], 4);
     assert_eq!(res.body["lattice"]["ai.provider"], "anthropic");
     assert_eq!(res.body["lattice"]["ai.api_key"]["fingerprint"], key_info["fingerprint"]);
-    assert_eq!(res.body["overrides"], json!({}));
+    assert!(res.body["lattice"].get("ai.model").is_none(), "version 1 had no model");
     let history = server.request(Method::GET, "/config/history?limit=1", None, &[])?.body;
     assert_eq!(history["versions"][0]["rollback_of"], 1);
 
@@ -191,14 +188,12 @@ fn every_hex_applies_the_config_and_it_survives_failover() -> Result<()> {
     wait_until(Duration::from_secs(30), "the replica to apply version 1", || Ok(status_config(&replica)?["sha256"] == sha))?;
     assert_eq!(status_config(&replica)?["state"], "applied");
 
-    // Its own storage override applies there only; changes sent to the replica go to the Overseer.
-    let replica_name = replica.request(Method::GET, "/status", None, &[])?.body["name"].as_str().unwrap().to_string();
-    let res = put_config(&replica, json!({ "changes": { "file_storage.backend": "azure", "file_storage.azure.account": "near" }, "hex": replica_name }))?;
+    // Changes sent to the replica go to the Overseer, and come back to every hex.
+    let res = put_config(&replica, json!({ "changes": { "ai.tagging.enabled": true } }))?;
     assert_eq!(res.status, 200, "{}", res.body);
     assert_eq!(res.body["version"], 2);
     wait_until(Duration::from_secs(30), "the replica to apply version 2", || Ok(status_config(&replica)?["version"] == 2))?;
-    assert_eq!(status_config(&replica)?["overridden"], json!(["file_storage.azure.account", "file_storage.backend"]));
-    assert_eq!(status_config(&overseer)?["overridden"], json!([]));
+    assert_eq!(status_config(&overseer)?["version"], 2);
 
     // The Overseer sees which version each hex runs.
     wait_until(Duration::from_secs(20), "the lattice view to show the replica on version 2", || {
@@ -246,7 +241,6 @@ fn demo_mode_lets_everyone_look_but_only_admins_change() -> Result<()> {
         for (method, path, body) in [
             (Method::PUT, "/config", Some(json!({ "changes": { "ai.model": "x" } }))),
             (Method::POST, "/config/rollback", Some(json!({ "version": 1 }))),
-            (Method::POST, "/config/storage-test", None),
             (Method::POST, "/ai/test", None),
         ] {
             let res = server.request_as(Some(&visitor), method, path, body.as_ref(), &[])?;

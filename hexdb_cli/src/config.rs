@@ -64,11 +64,6 @@ pub async fn get(target: &Target<'_>, key: Option<&str>, json_out: bool) -> Resu
             println!("  default: {}", def["default"]);
         }
         println!("  {}", def["description"].as_str().unwrap_or_default());
-        for (hex, overrides) in view["overrides"].as_object().into_iter().flatten() {
-            if let Some(v) = overrides.get(key) {
-                println!("  hex {}: {}", hex, shown(Some(v), secret));
-            }
-        }
         return Ok(());
     }
     println!("Lattice configuration version {} {}", view["version"], if view["valid"] == false { "(FAILED VERIFICATION)" } else { "" });
@@ -85,13 +80,6 @@ pub async fn get(target: &Target<'_>, key: Option<&str>, json_out: bool) -> Resu
             other => shown(other, secret),
         };
         println!("{:<40} {}", key, text);
-    }
-    for (hex, overrides) in view["overrides"].as_object().into_iter().flatten() {
-        println!("\nOverrides for hex {}:", hex);
-        for (key, value) in overrides.as_object().into_iter().flatten() {
-            let secret = schema_entry(&view, key).is_some_and(|d| d["secret"] == true);
-            println!("  {:<38} {}", key, shown(Some(value), secret));
-        }
     }
     println!("\nHexes:");
     for hex in view["hexes"].as_array().into_iter().flatten() {
@@ -200,7 +188,7 @@ fn print_changes(result: &Value) {
     }
 }
 
-pub async fn set(target: &Target<'_>, key: &str, value: Option<&str>, from_stdin: bool, hex: Option<&str>, message: Option<&str>) -> Result<()> {
+pub async fn set(target: &Target<'_>, key: &str, value: Option<&str>, from_stdin: bool, message: Option<&str>) -> Result<()> {
     let view = target.get("/config").await?;
     let Some(def) = schema_entry(&view, key) else { bail!("Unknown setting '{}'. `hexdb config get` lists them.", key) };
     let value = if def["secret"] == true {
@@ -217,15 +205,15 @@ pub async fn set(target: &Target<'_>, key: &str, value: Option<&str>, from_stdin
     };
     let mut changes = Map::new();
     changes.insert(key.to_string(), value);
-    let body = json!({ "changes": changes, "hex": hex, "comment": message, "base_version": view["version"] });
+    let body = json!({ "changes": changes, "comment": message, "base_version": view["version"] });
     print_changes(&target.send(reqwest::Method::PUT, "/config", &body).await?);
     Ok(())
 }
 
-pub async fn unset(target: &Target<'_>, key: &str, hex: Option<&str>, message: Option<&str>) -> Result<()> {
+pub async fn unset(target: &Target<'_>, key: &str, message: Option<&str>) -> Result<()> {
     let mut changes = Map::new();
     changes.insert(key.to_string(), Value::Null);
-    let body = json!({ "changes": changes, "hex": hex, "comment": message });
+    let body = json!({ "changes": changes, "comment": message });
     print_changes(&target.send(reqwest::Method::PUT, "/config", &body).await?);
     Ok(())
 }
@@ -368,151 +356,5 @@ pub async fn ai_queue(target: &Target<'_>, tessellation: &str, route: &str, all:
     let path = format!("/{}/{}{}", tessellation, route, if all { "?all=true" } else { "" });
     let result = target.send(reqwest::Method::POST, &path, &json!({})).await?;
     println!("Queued {} file(s); they're processed in the background, one at a time.", result["queued"]);
-    Ok(())
-}
-
-pub async fn storage_test(target: &Target<'_>) -> Result<()> {
-    let result = target.send(reqwest::Method::POST, "/config/storage-test", &json!({})).await?;
-    if result["ok"] == true {
-        println!("OK: {} works for hex {}.", result["backend"].as_str().unwrap_or("?"), result["hex"].as_str().unwrap_or("?"));
-        if let Some(message) = result["message"].as_str() {
-            println!("{}", message);
-        }
-        Ok(())
-    } else {
-        bail!("{} failed: {}", result["backend"].as_str().unwrap_or("?"), result["error"].as_str().unwrap_or("unknown error"))
-    }
-}
-
-fn prompt(label: &str) -> Result<String> {
-    eprint!("{}: ", label);
-    std::io::stderr().flush()?;
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    let line = line.trim().to_string();
-    if line.is_empty() {
-        bail!("No value given for {}.", label);
-    }
-    Ok(line)
-}
-
-/// Exchange an authorization code for tokens at `token_url`.
-async fn exchange(token_url: &str, form: &[(&str, &str)]) -> Result<String> {
-    let response = reqwest::Client::new().post(token_url).form(form).send().await?;
-    let status = response.status();
-    let body: Value = response.json().await.unwrap_or(Value::Null);
-    if !status.is_success() {
-        bail!("the provider refused the code ({}): {}", status, body);
-    }
-    body["refresh_token"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| anyhow::anyhow!("the provider returned no refresh token (for Google, remove HexDB's access at myaccount.google.com/permissions and connect again)"))
-}
-
-/// Wait for the sign-in to come back to http://127.0.0.1:<port>/?code=...&state=...
-/// with our `state`, and return the code. Requests without it are answered and ignored.
-fn wait_for_code(listener: std::net::TcpListener, state: &str) -> Result<String> {
-    use std::io::Read as _;
-    for stream in listener.incoming() {
-        let mut stream = stream?;
-        let mut buf = [0u8; 8192];
-        let n = stream.read(&mut buf)?;
-        let request = String::from_utf8_lossy(&buf[..n]);
-        let target = request.split_whitespace().nth(1).unwrap_or_default().to_string();
-        let query = target.split_once('?').map(|(_, q)| q).unwrap_or_default();
-        let param = |name: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{}=", name))).map(|v| v.replace('+', " "));
-        if param("state").as_deref() != Some(state) {
-            let page = "This doesn't belong to the sign-in HexDB started.";
-            let _ = write!(stream, "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", page.len(), page);
-            continue;
-        }
-        let (status, page) = match (param("code"), param("error")) {
-            (Some(_), _) => ("200 OK", "HexDB received the sign-in. You can close this tab and go back to the terminal."),
-            (None, Some(_)) => ("400 Bad Request", "The sign-in was cancelled or refused. Go back to the terminal."),
-            (None, None) => continue, // e.g. a favicon request
-        };
-        let _ = write!(stream, "HTTP/1.1 {}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", status, page.len(), page);
-        return match param("code") {
-            Some(code) => Ok(percent_decode(&code)),
-            None => bail!("the sign-in was refused: {}", param("error").unwrap_or_default()),
-        };
-    }
-    bail!("no sign-in arrived")
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn encode(s: &str) -> String {
-    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{:02X}", b) }).collect()
-}
-
-/// Sign in to Google Drive or Dropbox with the user's own app, and save the
-/// app's ID and secret and the refresh token in the lattice configuration.
-pub async fn connect(target: &Target<'_>, provider: &str, hex: Option<&str>) -> Result<()> {
-    let mut changes = Map::new();
-    match provider {
-        "gdrive" => {
-            println!("Google Drive: use an OAuth client of type \"Desktop app\" from your Google Cloud project (APIs & Services > Credentials), with the Google Drive API enabled.");
-            let client_id = prompt("Client ID")?;
-            let client_secret = read_secret("Client secret", false)?;
-            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-            let redirect = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
-            // A random state ties the answer to this sign-in.
-            let state = hexdb_core::random_bytes(16).iter().map(|b| format!("{:02x}", b)).collect::<String>();
-            let url = format!(
-                "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}",
-                encode(&client_id),
-                encode(&redirect),
-                encode("https://www.googleapis.com/auth/drive"),
-                state
-            );
-            println!("\nOpen this address in a browser on this computer and allow access:\n\n{}\n", url);
-            let code = tokio::task::spawn_blocking(move || wait_for_code(listener, &state)).await??;
-            let refresh = exchange(
-                "https://oauth2.googleapis.com/token",
-                &[("grant_type", "authorization_code"), ("code", &code), ("client_id", &client_id), ("client_secret", &client_secret), ("redirect_uri", &redirect)],
-            )
-            .await?;
-            changes.insert("file_storage.gdrive.client_id".into(), json!(client_id));
-            changes.insert("file_storage.gdrive.client_secret".into(), json!(client_secret));
-            changes.insert("file_storage.gdrive.refresh_token".into(), json!(refresh));
-        }
-        _ => {
-            println!("Dropbox: use an app from the Dropbox App Console with the files.content.read and files.content.write permissions.");
-            let app_key = prompt("App key")?;
-            let app_secret = read_secret("App secret", false)?;
-            let url = format!("https://www.dropbox.com/oauth2/authorize?client_id={}&response_type=code&token_access_type=offline", encode(&app_key));
-            println!("\nOpen this address in a browser, allow access, and paste the code it shows:\n\n{}\n", url);
-            let code = prompt("Code")?;
-            let refresh = exchange(
-                "https://api.dropboxapi.com/oauth2/token",
-                &[("grant_type", "authorization_code"), ("code", &code), ("client_id", &app_key), ("client_secret", &app_secret)],
-            )
-            .await?;
-            changes.insert("file_storage.dropbox.app_key".into(), json!(app_key));
-            changes.insert("file_storage.dropbox.app_secret".into(), json!(app_secret));
-            changes.insert("file_storage.dropbox.refresh_token".into(), json!(refresh));
-        }
-    }
-    let body = json!({ "changes": changes, "hex": hex, "comment": format!("Connected {}", if provider == "gdrive" { "Google Drive" } else { "Dropbox" }) });
-    print_changes(&target.send(reqwest::Method::PUT, "/config", &body).await?);
-    println!("Set file_storage.backend to {} (and the folder) to start using it, then run `hexdb config storage-test`.", provider);
     Ok(())
 }

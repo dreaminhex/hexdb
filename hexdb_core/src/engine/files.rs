@@ -37,7 +37,6 @@ use tracing::{debug, info, warn};
 use ulid::Ulid;
 
 pub(crate) mod ai_files;
-mod remote_files;
 
 /// What the client says about an upload.
 #[derive(Debug, Clone, Default)]

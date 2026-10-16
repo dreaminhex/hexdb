@@ -179,25 +179,20 @@ enum ConfigCommand {
     },
     /// Change a setting. Secrets are prompted for (or read with --stdin), never taken as arguments
     Set {
-        /// e.g. ai.provider, file_storage.backend
+        /// e.g. ai.provider, ai.tagging.enabled
         key: String,
         /// The value: JSON (true, 42, ["metadata","text"]) or plain text. Not for secrets
         value: Option<String>,
         /// Read the value from standard input
         #[arg(long)]
         stdin: bool,
-        /// Set it for this hex only (file_storage settings only)
-        #[arg(long)]
-        hex: Option<String>,
         /// Why, for the history
         #[arg(short, long)]
         message: Option<String>,
     },
-    /// Go back to the default (or, with --hex, to the lattice's value)
+    /// Go back to the default
     Unset {
         key: String,
-        #[arg(long)]
-        hex: Option<String>,
         #[arg(short, long)]
         message: Option<String>,
     },
@@ -233,17 +228,6 @@ enum ConfigCommand {
         tessellation: String,
         #[arg(long)]
         all: bool,
-    },
-    /// Write, read back and delete a small object on the storage backend the saved configuration chooses
-    StorageTest,
-    /// Sign in to Google Drive or Dropbox and save the app credentials and refresh token
-    Connect {
-        /// gdrive or dropbox
-        #[arg(value_parser = ["gdrive", "dropbox"])]
-        provider: String,
-        /// Save them as this hex's storage override instead of the lattice's
-        #[arg(long)]
-        hex: Option<String>,
     },
     /// Save an earlier version's settings as a new version
     Rollback {
@@ -393,10 +377,8 @@ async fn main() -> Result<()> {
             let target = config::Target { config: &config, base: &base, token };
             match sub {
                 ConfigCommand::Get { key, json } => config::get(&target, key.as_deref(), json).await,
-                ConfigCommand::Set { key, value, stdin, hex, message } => {
-                    config::set(&target, &key, value.as_deref(), stdin, hex.as_deref(), message.as_deref()).await
-                }
-                ConfigCommand::Unset { key, hex, message } => config::unset(&target, &key, hex.as_deref(), message.as_deref()).await,
+                ConfigCommand::Set { key, value, stdin, message } => config::set(&target, &key, value.as_deref(), stdin, message.as_deref()).await,
+                ConfigCommand::Unset { key, message } => config::unset(&target, &key, message.as_deref()).await,
                 ConfigCommand::History { limit, json } => config::history(&target, limit, json).await,
                 ConfigCommand::Show { version } => config::show(&target, version).await,
                 ConfigCommand::Diff { from, to } => config::diff(&target, from, to).await,
@@ -404,8 +386,6 @@ async fn main() -> Result<()> {
                 ConfigCommand::AiEstimate => config::ai_estimate(&target).await,
                 ConfigCommand::AiTag { tessellation, all } => config::ai_queue(&target, &tessellation, "_ai_tag", all).await,
                 ConfigCommand::AiThumbnails { tessellation, all } => config::ai_queue(&target, &tessellation, "_ai_thumbnails", all).await,
-                ConfigCommand::StorageTest => config::storage_test(&target).await,
-                ConfigCommand::Connect { provider, hex } => config::connect(&target, &provider, hex.as_deref()).await,
                 ConfigCommand::AiUsage { json } => config::ai_usage(&target, json).await,
                 ConfigCommand::Rollback { version, message } => config::rollback(&target, version, message.as_deref()).await,
             }

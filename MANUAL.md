@@ -43,7 +43,7 @@ What it provides:
 | Area | Features |
 | --- | --- |
 | Data | Documents with generated, time-sortable IDs; replace, merge-patch, delete; bulk writes; upserts; update-by-filter; per-document TTLs; idempotency keys; optional versioned schemas |
-| Files | Any binary file, deduplicated, compressed when that helps, encrypted and split across the six vertices; metadata (EXIF, IPTC, XMP, ID3, Vorbis, QuickTime, Matroska, Broadcast WAV, PDF, Office, ...) extracted and searchable; thumbnails; versions with rollback; a trash; resumable uploads; ranged downloads; content on local disks or S3, Azure Blob Storage, Google Drive or Dropbox |
+| Files | Any binary file, deduplicated, compressed when that helps, encrypted and split across the six vertices; metadata (EXIF, IPTC, XMP, ID3, Vorbis, QuickTime, Matroska, Broadcast WAV, PDF, Office, ...) extracted and searchable; thumbnails; versions with rollback; a trash; resumable uploads; ranged downloads |
 | AI | Your own provider and key (Claude, OpenAI, GitHub Models, Azure OpenAI, local OpenAI-compatible servers): AI tags and descriptions for files, AI-chosen video thumbnails, a second opinion from the index advisor; token estimates, usage per feature and a monthly budget |
 | Configuration | Lattice-wide settings in the admin UI and `hexdb config`: encrypted, versioned, audited, checked on every hex, with rollback and write-only secrets |
 | Reading | A JSON filter language, sorting, cursor and offset paging, counts, aggregations, full-text search with analyzers, GraphQL, SQL `SELECT` |
@@ -187,7 +187,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 
 **Logs** (needs `logs`). The server's recent log, tailed live, with level, module and text filters.
 
-**Configuration** (administrators). The lattice configuration (see [Lattice configuration](#lattice-configuration)): file storage and AI settings in forms, secrets as write-only fields that show only whether they are set and a fingerprint, a scope picker for per-hex storage overrides, an optional comment saved with the version, each hex's applied version and state, and the history with the keys each version changed and a Roll back button.
+**Configuration** (administrators). The lattice configuration (see [Lattice configuration](#lattice-configuration)): the AI settings in a form, secrets as write-only fields that show only whether they are set and a fingerprint, an optional comment saved with the version, each hex's applied version and state, and the history with the keys each version changed and a Roll back button.
 
 **Settings** (administrators)
 - Runtime settings grouped by area, each marked "live" (applies at once) or "restart".
@@ -231,7 +231,7 @@ Errors have one shape:
 | 502 | `ai_provider_error` | The AI provider returned an error (its message, without the key) |
 | 503 | `replication_timeout` | Committed, but fewer than `replication.min_acks` replicas confirmed in time |
 | 503 | `no_quorum` | The Overseer can't see `replication.quorum` hexes, so it refuses writes |
-| 503 | `content_unavailable` | A file's content can't be read here, from another hex or from the storage backend right now |
+| 503 | `content_unavailable` | A file's content can't be read here or fetched from another hex right now |
 | 507 | `disk_full` | The data directory is over `storage.disk_mb`; deletes still work |
 
 ### Single documents
@@ -1005,29 +1005,6 @@ Dropping a files tessellation drops its trashed files too.
 - Chunks travel sealed with AES-256-GCM under a key derived from the lattice key, bound to their ID, so they stay secret without TLS. `GET /lattice/chunks/{id}` needs a lattice signature and is served by every hex, so hexes repair each other.
 - Uploads and resumable parts sent to a replica are streamed to the Overseer. Metadata extraction runs on the Overseer; replicas receive the results.
 
-### Remote storage
-
-File content can also live on Amazon S3 or an S3-compatible service (Cloudflare R2, Backblaze B2, Wasabi, MinIO, SeaweedFS), Azure Blob Storage, Google Drive or Dropbox, set by `file_storage.backend` in the [lattice configuration](#lattice-configuration). A hex can override its storage settings (for example a nearer bucket); every other setting is the lattice's.
-
-- **What goes there.** Pack files, the six vertices' shard files, once they're sealed: full (256 MB), or with no writes for `files.remote_seal_seconds` (60) when a backend is set. Their content is already encrypted and Reed-Solomon sharded, so the provider only holds ciphertext. Objects are named `<file_storage.prefix>/<hex ID>/vertex-<n>/<number>.hxp`; every hex keeps its own copy, as on local disks.
-- **What stays local.** The pack being written to, and uploaded packs up to `file_storage.local_cache_gb` (20; 0 keeps only what isn't uploaded yet). Beyond that the oldest packs lose their local file. A small `<number>.hxi` file keeps each one's record headers, so the chunk index still rebuilds at startup, and reads fetch only the byte ranges they need. Recently read chunks are also cached in memory (`files.cache_mb`).
-- **Changing backend.** Packs kept only on the old backend are downloaded with the old backend's settings (from the configuration version they were set up with), then uploaded to the new one. Setting `local` brings everything back to this hex's disks (it must have room). Objects on the old backend are left in place; delete them yourself once the move is done.
-- **Status.** `/status` has `storage.files.remote`: the backend, packs uploaded, waiting, kept only remotely and being moved, bytes uploaded and read, and the last error. The Configuration page shows it with a Test button; `POST /config/storage-test` (and `hexdb config storage-test`) writes, reads back and deletes a small object with the saved settings.
-- **Failures.** Calls retry 429s, server errors and dropped connections with backoff (honoring Retry-After). An upload that still fails is tried again 30 seconds later; reads of content that can't be fetched answer `503 content_unavailable`.
-- **Scrubs** verify local shards only; remote copies are the provider's to keep.
-- **Backups** copy local packs and, for packs kept only remotely, their index files and `remote.json`: a restored hex reads those packs from the same backend, so keep its settings.
-
-Credentials:
-
-| Backend | Settings | Notes |
-| --- | --- | --- |
-| `s3` | `bucket`, `region` (default `us-east-1`; R2 uses `auto`), `endpoint` (empty for AWS), `access_key_id`, `secret_access_key` | Signed with AWS Signature Version 4; path-style requests when `endpoint` is set |
-| `azure` | `account`, `container`, `account_key`, `endpoint` (empty for `https://<account>.blob.core.windows.net`) | Shared Key; the container must exist |
-| `gdrive` | `folder_id`, `client_id`, `client_secret`, `refresh_token` | Files go flat into the folder (`/` in names becomes `__`); shared drives are supported |
-| `dropbox` | `folder` (e.g. `/HexDB`), `app_key`, `app_secret`, `refresh_token` | Uploaded in 64 MB pieces |
-
-Google Drive and Dropbox need an app of your own and a refresh token. `hexdb config connect gdrive` (a Google Cloud OAuth client of type Desktop app, with the Drive API enabled) and `hexdb config connect dropbox` (an app from the Dropbox App Console with `files.content.read` and `files.content.write`) ask for the app's ID and secret, open the sign-in, and save the ID, secret and refresh token in the configuration (`--hex <name>` for one hex). Then set `file_storage.backend` and the folder, and test. If the provider revokes the token, `/status` shows the error; connect again.
-
 ### Command line
 
 ```bash
@@ -1570,10 +1547,9 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 - **Secrets** in the [lattice configuration](#lattice-configuration) are sealed with the lattice transfer key, bound to their setting name. They're never returned, logged or written to the audit trail; reads show a keyed fingerprint. Every hex holds them decrypted in memory to use them. A change sent to a replica is forwarded to the Overseer like any write, so without TLS between hexes it crosses the network in the clear (see Transport).
 - **Who can change what.** The configuration, its history and rollback, AI usage and estimates, tagging existing files and the storage test are for administrators. `POST /ai/complete` needs the `ai` permission and draws on the lattice's monthly budget, which caps what a holder can spend.
-- **What leaves the hex.** AI calls send what `ai.tagging.send` allows to the configured provider at the configured URL; an `http://` URL (fine for a local model server) sends the key unencrypted. Remote storage backends only ever receive encrypted, sharded packs. AI base URLs and storage endpoints can't name the well-known cloud metadata services (169.254.169.254, `metadata.google.internal`, ...); a host name that resolves to one isn't caught.
+- **What leaves the hex.** AI calls send what `ai.tagging.send` allows to the configured provider at the configured URL; an `http://` URL (fine for a local model server) sends the key unencrypted. AI base URLs can't name the well-known cloud metadata services (169.254.169.254, `metadata.google.internal`, ...); a host name that resolves to one isn't caught.
 - **Field masks.** Fields any role hides in a files tessellation are left out of what AI tagging sends, so an AI description can't reveal them to that role. Images are sent as they are when `thumbnail` or `image` is allowed.
 - **Prompt injection.** A file's contents can try to steer its own AI tags and description; the instructions tell the model to treat them as data, and the AI only writes the `ai` field of that file. Treat AI tags as suggestions, not trusted labels.
-- **OAuth.** `hexdb config connect` keeps the app secret and refresh token out of the shell history and checks the OAuth `state` on the sign-in it receives.
 
 ## 20. Lattices and replication
 
@@ -1828,9 +1804,7 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 
 ### Lattice configuration
 
-Settings that belong to the whole lattice rather than one machine are kept in the lattice configuration: where file content is stored (`file_storage.*`) and the AI provider and AI features (`ai.*`). Administrators change them on the Configuration page, with `hexdb config`, or through the API. `hexdb.toml` keeps what belongs to one hex (addresses, data directory, keys), and the runtime settings above stay per hex.
-
-The `file_storage.*` settings choose where file content is kept (see [Remote storage](#remote-storage)); the `ai.*` settings are used by the [AI](#ai) features.
+Settings that belong to the whole lattice rather than one machine are kept in the lattice configuration: the AI provider and AI features (`ai.*`). Administrators change them on the Configuration page, with `hexdb config`, or through the API. `hexdb.toml` keeps what belongs to one hex (addresses, data directory, keys), and the runtime settings above stay per hex.
 
 ```bash
 curl http://localhost:7700/config                                # newest version, schema, each hex's state
@@ -1844,36 +1818,26 @@ curl -X POST http://localhost:7700/config/rollback -d '{ "version": 2 }'
 From the command line (with an administrator's API key in `HEXDB_TOKEN`):
 
 ```bash
-hexdb config get                                   # every setting, overrides, and each hex's version
+hexdb config get                                   # every setting and each hex's version
 hexdb config set ai.provider anthropic -m "Use Claude"
 hexdb config set ai.api_key                        # prompts without echoing; secrets are never arguments
 echo "$KEY" | hexdb config set ai.api_key --stdin
 hexdb config set ai.tagging.send '["metadata","text","thumbnail"]'
-hexdb config set file_storage.backend s3 --hex Tosa # a storage override for one hex
 hexdb config unset ai.model
 hexdb config history
 hexdb config diff 3 5                              # secrets compared by fingerprint
 hexdb config rollback 3 -m "bad key"
-hexdb config storage-test                          # check the storage backend
-hexdb config connect dropbox                       # sign in and save Dropbox (or gdrive) credentials
 ```
 
 - **Versions.** Every change writes a new, immutable version with its author, time, comment and a SHA-256 over its canonical form. `null` clears a setting. Saving values that are already in effect writes nothing. With `base_version`, a change made against an older version is refused with 409. A rollback writes a new version with an earlier version's contents, secrets included; history is never rewritten.
-- **Secrets** (`ai.api_key`, `file_storage.s3.secret_access_key`, `file_storage.azure.account_key`, the Google Drive and Dropbox client secrets and refresh tokens) are sealed with the lattice transfer key and bound to their setting name. No route, log or audit event contains them: reads show `{ "set": true, "fingerprint", "updated", "updated_by" }`, where the fingerprint is a keyed hash that tells two values apart and reveals nothing about them. A secret can be replaced or cleared, never read back.
-- **Distribution.** Versions are documents in the `_config` system tessellation, so they replicate like other data: every hex has them, hexes that join later get them in their first sync, and a new Overseer after a failover already holds them. Each hex checks a version's checksum, its settings against the schema and that every secret opens before applying it, within a second of receiving it. A version that fails is rejected on that hex, which keeps the previous one and reports `"state": "rejected"` with the reason. `/status` has `config` (version, checksum, state, overridden settings) and the lattice view shows every hex's version.
-- **Per-hex overrides.** `"hex": "<name>"` changes one hex's overrides instead of the lattice's. Only `file_storage.*` settings can be overridden (e.g. a hex in another region using a nearer bucket); an override replaces that hex's whole storage configuration. Remove an override by clearing its settings.
+- **Secrets** (`ai.api_key`) are sealed with the lattice transfer key and bound to their setting name. No route, log or audit event contains them: reads show `{ "set": true, "fingerprint", "updated", "updated_by" }`, where the fingerprint is a keyed hash that tells two values apart and reveals nothing about them. A secret can be replaced or cleared, never read back.
+- **Distribution.** Versions are documents in the `_config` system tessellation, so they replicate like other data: every hex has them, hexes that join later get them in their first sync, and a new Overseer after a failover already holds them. Each hex checks a version's checksum, its settings against the schema and that every secret opens before applying it, within a second of receiving it. A version that fails is rejected on that hex, which keeps the previous one and reports `"state": "rejected"` with the reason. `/status` has `config` (version, checksum, state) and the lattice view shows every hex's version.
+- **Every setting is lattice-wide.** Versions saved by 1.6 preview builds may hold remote file storage settings (`file_storage.*`) and per-hex overrides; those features were removed before release, so such settings are ignored and left out of the next version saved.
 - **Audit.** Changes are recorded as `config.update` (with the keys changed, cleared and the secrets set or cleared, never values) and `config.rollback`. Only administrators can read the configuration, its history, or roll back.
-- **Demo mode.** For public demos, `security.demo_mode = true` in a hex's `hexdb.toml` (or `HEXDB_SECURITY__DEMO_MODE=true`) lets every signed-in user view the configuration, its history, AI usage and the token estimates, on the Configuration page (read-only, with a notice) and through the `GET` routes. Secret values are never shown to anyone. Saving, rolling back, the storage and AI tests and tagging existing files stay with administrators. It's off by default and set per hex, so set it on every hex of a demo lattice; `GET /auth/me` reports it.
+- **Demo mode.** For public demos, `security.demo_mode = true` in a hex's `hexdb.toml` (or `HEXDB_SECURITY__DEMO_MODE=true`) lets every signed-in user view the configuration, its history, AI usage and the token estimates, on the Configuration page (read-only, with a notice) and through the `GET` routes. Secret values are never shown to anyone. Saving, rolling back, the AI test and tagging existing files stay with administrators. It's off by default and set per hex, so set it on every hex of a demo lattice; `GET /auth/me` reports it.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `file_storage.backend` | `local` | `local`, `s3` (Amazon S3 or S3-compatible), `azure`, `gdrive`, `dropbox` |
-| `file_storage.prefix` | empty | Folder or key prefix inside the bucket, container or folder |
-| `file_storage.s3.bucket`, `region`, `endpoint`, `access_key_id`, `secret_access_key` | empty | S3; `endpoint` for S3-compatible services (R2, B2, Wasabi, MinIO) |
-| `file_storage.azure.account`, `container`, `account_key`, `endpoint` | empty | Azure Blob Storage (`endpoint` for an emulator or a custom domain) |
-| `file_storage.local_cache_gb` | 20 | With a remote backend: file content each hex keeps locally (0: only what isn't uploaded yet) |
-| `file_storage.gdrive.folder_id`, `client_id`, `client_secret`, `refresh_token` | empty | Google Drive |
-| `file_storage.dropbox.folder`, `app_key`, `app_secret`, `refresh_token` | empty | Dropbox |
 | `ai.provider` | `none` | `none`, `anthropic`, `openai`, `github` (GitHub Models), `azure_openai`, `openai_compatible` |
 | `ai.model`, `ai.base_url`, `ai.api_key` | empty | Model, API base URL (required for Azure OpenAI and OpenAI-compatible endpoints), key |
 | `ai.monthly_token_budget` | 1,000,000 | Tokens AI features may use per calendar month (0: no limit) |
@@ -1957,7 +1921,6 @@ Estimates are rough: about 450 tokens of instructions and answer per file, plus 
 | `files.vertex_paths` | `[]` | Six directories for the vertices' shards (default `blobs/vertex-0` ... `vertex-5` in the data directory) |
 | `files.cache_mb` | 64 | Memory for recently read chunks |
 | `files.scrub_hours` | 24 | Hours between scrubs of every shard (0: never) |
-| `files.remote_seal_seconds` | 60 | With a remote backend: seal a pack with no writes for this long, so it's uploaded |
 | `files.extract` | `true` | Read metadata from uploaded files |
 | `files.extract_max_mb`, `extract_timeout_seconds` | 64, 30 | What extraction may read and how long it may take, per file |
 | `files.text_kb` | 64 | Text kept per file for full-text search |

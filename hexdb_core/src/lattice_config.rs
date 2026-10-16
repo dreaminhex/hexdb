@@ -1,8 +1,7 @@
 // HexDB Core Lattice Configuration
 //
-// Settings that belong to the whole lattice rather than one machine: where
-// file content is stored, which AI provider to use and what AI features may
-// do. Admins change them through `PUT /config` (the admin UI and `hexdb
+// Settings that belong to the whole lattice rather than one machine: which
+// AI provider to use and what AI features may do. Admins change them through `PUT /config` (the admin UI and `hexdb
 // config` use it); `hexdb.toml` keeps what belongs to one hex (addresses,
 // data directory, keys).
 //
@@ -14,7 +13,7 @@
 // writes a new version with an earlier version's contents; history is never
 // rewritten.
 //
-// Secrets (API keys, storage credentials) are sealed with the lattice transfer
+// Secrets (API keys) are sealed with the lattice transfer
 // key, bound to their setting name, and are never returned by any route, logged
 // or written to the audit trail: reads show only whether a secret is set, when,
 // by whom, and a keyed fingerprint to tell two values apart. An admin can
@@ -25,9 +24,10 @@
 // that fails is rejected on that hex (the previous one stays in effect) and
 // reported in `/status` and the lattice view, never half-applied.
 //
-// Settings under `file_storage.` can also be overridden for one hex (e.g. a
-// hex in another region using a nearer bucket). Every other setting is
-// lattice-wide.
+// Every setting is lattice-wide. Versions written by 1.6 previews may hold
+// remote file storage settings (`file_storage.*`) and per-hex overrides of
+// them; both were removed, so they're ignored when applied and dropped from
+// the next version written.
 
 use crate::engine::{DocumentQuery, EngineError, HexDBEngine};
 use crate::filter::{Filter, SortKey};
@@ -47,12 +47,11 @@ use ulid::Ulid;
 pub const CONFIG_TESSELLATION: &str = "_config";
 /// Format of a version's body (bumped if its meaning changes).
 const FORMAT: u32 = 1;
-/// Settings that may be overridden for one hex.
-pub const PER_HEX_PREFIX: &str = "file_storage.";
+/// Settings from 1.6 previews that no longer exist (remote file storage).
+const RETIRED_PREFIX: &str = "file_storage.";
 const MAX_TEXT: usize = 2048;
 const MAX_SECRET: usize = 16 * 1024;
 const MAX_COMMENT: usize = 500;
-const MAX_HEX_NAME: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -93,11 +92,6 @@ impl ConfigDef {
     pub fn is_secret(&self) -> bool {
         self.kind == ConfigKind::Secret
     }
-
-    /// May be overridden for one hex.
-    pub fn per_hex(&self) -> bool {
-        self.key.starts_with(PER_HEX_PREFIX)
-    }
 }
 
 const fn def(key: &'static str, kind: ConfigKind, default: &'static str, description: &'static str) -> ConfigDef {
@@ -112,31 +106,10 @@ const fn secret(key: &'static str, description: &'static str) -> ConfigDef {
     def(key, ConfigKind::Secret, "null", description)
 }
 
-pub const BACKENDS: &[&str] = &["local", "s3", "azure", "gdrive", "dropbox"];
 pub const AI_PROVIDERS: &[&str] = &["none", "anthropic", "openai", "github", "azure_openai", "openai_compatible"];
 pub const AI_INPUTS: &[&str] = &["metadata", "text", "thumbnail", "image", "video", "pdf"];
 
 pub const CONFIG: &[ConfigDef] = &[
-    def("file_storage.backend", ConfigKind::Choice { choices: BACKENDS }, "\"local\"", "Where file content is stored: this hex's disks (local), Amazon S3 or an S3-compatible service, Azure Blob Storage, Google Drive or Dropbox. Content is encrypted before it leaves the hex."),
-    text("file_storage.prefix", "Folder or key prefix inside the bucket, container or drive folder."),
-    def("file_storage.local_cache_gb", ConfigKind::Integer { min: 0, max: 1_000_000 }, "20", "With a remote backend: how much file content (GB) each hex keeps on its own disks. Beyond it, the oldest content uploaded is read from the backend (0: keep only what isn't uploaded yet)."),
-    text("file_storage.s3.bucket", "S3 bucket name."),
-    text("file_storage.s3.region", "S3 region, e.g. us-east-1 (some S3-compatible services use auto)."),
-    def("file_storage.s3.endpoint", ConfigKind::Url, "\"\"", "Endpoint of an S3-compatible service (Cloudflare R2, Backblaze B2, Wasabi, MinIO); empty for Amazon S3."),
-    text("file_storage.s3.access_key_id", "S3 access key ID."),
-    secret("file_storage.s3.secret_access_key", "S3 secret access key."),
-    def("file_storage.azure.endpoint", ConfigKind::Url, "\"\"", "Blob endpoint of the account (empty: https://<account>.blob.core.windows.net); for the Azurite emulator, e.g. http://127.0.0.1:10000/devstoreaccount1."),
-    text("file_storage.azure.account", "Azure storage account name."),
-    text("file_storage.azure.container", "Azure Blob container name."),
-    secret("file_storage.azure.account_key", "Azure storage account key."),
-    text("file_storage.gdrive.folder_id", "ID of the Google Drive folder that holds HexDB's files."),
-    text("file_storage.gdrive.client_id", "OAuth client ID of your Google Cloud app."),
-    secret("file_storage.gdrive.client_secret", "OAuth client secret of your Google Cloud app."),
-    secret("file_storage.gdrive.refresh_token", "OAuth refresh token for the Google account."),
-    text("file_storage.dropbox.folder", "Dropbox folder that holds HexDB's files, e.g. /HexDB."),
-    text("file_storage.dropbox.app_key", "Dropbox app key."),
-    secret("file_storage.dropbox.app_secret", "Dropbox app secret."),
-    secret("file_storage.dropbox.refresh_token", "OAuth refresh token for the Dropbox account."),
     def("ai.provider", ConfigKind::Choice { choices: AI_PROVIDERS }, "\"none\"", "AI provider for AI features: Anthropic (Claude), OpenAI, GitHub Models, Azure OpenAI, or any OpenAI-compatible endpoint (e.g. Ollama). Calls use this lattice's own key."),
     text("ai.model", "Model name, e.g. the provider's model ID (empty: the provider's default)."),
     def("ai.base_url", ConfigKind::Url, "\"\"", "API base URL (empty: the provider's public API). Required for Azure OpenAI and OpenAI-compatible endpoints."),
@@ -233,12 +206,6 @@ fn is_metadata_host(url: &str) -> bool {
     matches!(host.as_str(), "169.254.169.254" | "169.254.170.2" | "fd00:ec2::254" | "metadata.google.internal" | "metadata.goog" | "metadata" | "100.100.100.200")
 }
 
-fn validate_hex_name(name: &str) -> Result<()> {
-    if name.trim().is_empty() || name.len() > MAX_HEX_NAME || name.chars().any(char::is_control) {
-        return Err(invalid(format!("Hex names are 1-{} characters.", MAX_HEX_NAME)));
-    }
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Versions
@@ -255,19 +222,13 @@ pub struct SealedSecret {
     pub updated_by: String,
 }
 
-/// Settings for one scope (the lattice, or one hex's overrides).
+/// Settings for one scope (the lattice; in 1.6 previews also one hex's overrides).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConfigScope {
     #[serde(default)]
     pub settings: BTreeMap<String, Value>,
     #[serde(default)]
     pub secrets: BTreeMap<String, SealedSecret>,
-}
-
-impl ConfigScope {
-    fn is_empty(&self) -> bool {
-        self.settings.is_empty() && self.secrets.is_empty()
-    }
 }
 
 /// One configuration version, as hashed and stored.
@@ -285,7 +246,8 @@ pub struct ConfigVersion {
     #[serde(default)]
     pub rollback_of: Option<u64>,
     pub lattice: ConfigScope,
-    /// Per-hex overrides (storage settings only), by hex name.
+    /// Per-hex overrides from 1.6 previews, by hex name: ignored, and empty in
+    /// versions written since (kept so older versions keep their checksums).
     #[serde(default)]
     pub hexes: BTreeMap<String, ConfigScope>,
 }
@@ -388,8 +350,6 @@ pub struct AppliedConfig {
     /// Every setting's effective value on this hex (defaults filled in; secrets excluded).
     pub values: BTreeMap<String, Value>,
     pub secrets: BTreeMap<String, Secret>,
-    /// Settings this hex overrides.
-    pub overridden: Vec<String>,
     /// A newer version this hex refused, and why.
     pub rejected: Option<(u64, String)>,
 }
@@ -415,7 +375,6 @@ impl AppliedConfig {
             "version": self.version,
             "sha256": self.sha256,
             "state": self.state(),
-            "overridden": self.overridden,
             "rejected_version": self.rejected.as_ref().map(|r| r.0),
             "error": self.rejected.as_ref().map(|r| r.1.clone()),
         })
@@ -437,76 +396,41 @@ impl Default for LatticeConfigState {
     }
 }
 
-/// Check a version and work out what it means for the hex named `hex`.
-fn resolve(engine: &HexDBEngine, body: &ConfigVersion, hex: &str) -> Result<AppliedConfig> {
+/// Check a version and work out what it means for this hex.
+fn resolve(engine: &HexDBEngine, body: &ConfigVersion) -> Result<AppliedConfig> {
     if body.format > FORMAT {
         bail!("written by a newer HexDB (format {})", body.format);
     }
-    let check_scope = |scope: &ConfigScope, per_hex: bool| -> Result<()> {
-        for (key, value) in &scope.settings {
-            let def = definition(key).ok_or_else(|| anyhow!("unknown setting {} (written by a newer HexDB?)", key))?;
-            if def.is_secret() || (per_hex && !def.per_hex()) {
-                bail!("{} isn't allowed here", key);
-            }
-            validate(def, value).map_err(|e| anyhow!("{}", e))?;
+    let retired = |key: &str| key.starts_with(RETIRED_PREFIX);
+    for (key, value) in body.lattice.settings.iter().filter(|(k, _)| !retired(k)) {
+        let def = definition(key).ok_or_else(|| anyhow!("unknown setting {} (written by a newer HexDB?)", key))?;
+        if def.is_secret() {
+            bail!("{} isn't allowed here", key);
         }
-        for key in scope.secrets.keys() {
-            let def = definition(key).ok_or_else(|| anyhow!("unknown secret {} (written by a newer HexDB?)", key))?;
-            if !def.is_secret() || (per_hex && !def.per_hex()) {
-                bail!("{} isn't allowed here", key);
-            }
-        }
-        Ok(())
-    };
-    check_scope(&body.lattice, false)?;
-    for (name, scope) in &body.hexes {
-        check_scope(scope, true).map_err(|e| anyhow!("hex {}: {}", name, e))?;
+        validate(def, value).map_err(|e| anyhow!("{}", e))?;
     }
     let mut applied = AppliedConfig::defaults();
-    // Every secret must open, not only this hex's, so a bad version is caught everywhere.
-    let mut lattice_secrets = BTreeMap::new();
-    for (key, secret) in &body.lattice.secrets {
-        lattice_secrets.insert(key.clone(), open(engine, key, secret)?);
-    }
-    let mut hex_secrets = BTreeMap::new();
-    for (name, scope) in &body.hexes {
-        for (key, secret) in &scope.secrets {
-            let value = open(engine, key, secret).map_err(|e| anyhow!("hex {}: {}", name, e))?;
-            if name == hex {
-                hex_secrets.insert(key.clone(), value);
-            }
+    for key in body.lattice.secrets.keys().filter(|k| !retired(k)) {
+        let def = definition(key).ok_or_else(|| anyhow!("unknown secret {} (written by a newer HexDB?)", key))?;
+        if !def.is_secret() {
+            bail!("{} isn't allowed here", key);
         }
+        applied.secrets.insert(key.clone(), open(engine, key, &body.lattice.secrets[key])?);
     }
-    for (key, value) in &body.lattice.settings {
+    for (key, value) in body.lattice.settings.iter().filter(|(k, _)| !retired(k)) {
         applied.values.insert(key.clone(), value.clone());
-    }
-    applied.secrets = lattice_secrets;
-    if let Some(scope) = body.hexes.get(hex) {
-        // An override replaces the whole storage configuration, so a hex never
-        // mixes its own backend with the lattice's credentials.
-        let overrides_storage = !scope.is_empty();
-        if overrides_storage {
-            for def in CONFIG.iter().filter(|d| d.per_hex()) {
-                if def.is_secret() {
-                    applied.secrets.remove(def.key);
-                } else {
-                    applied.values.insert(def.key.to_string(), def.default_value());
-                }
-            }
-        }
-        for (key, value) in &scope.settings {
-            applied.values.insert(key.clone(), value.clone());
-            applied.overridden.push(key.clone());
-        }
-        for (key, value) in hex_secrets {
-            applied.overridden.push(key.clone());
-            applied.secrets.insert(key, value);
-        }
-        applied.overridden.sort();
     }
     applied.version = body.version;
     applied.sha256 = body.canonical().1;
     Ok(applied)
+}
+
+/// A version's contents without what 1.6 previews could hold and this build
+/// doesn't: remote storage settings and per-hex overrides.
+fn without_retired(mut scope: ConfigScope) -> ConfigScope {
+    scope.settings.retain(|k, _| !k.starts_with(RETIRED_PREFIX));
+    scope.secrets.retain(|k, _| !k.starts_with(RETIRED_PREFIX));
+    scope
 }
 
 // ---------------------------------------------------------------------------
@@ -518,9 +442,6 @@ fn resolve(engine: &HexDBEngine, body: &ConfigVersion, hex: &str) -> Result<Appl
 #[serde(deny_unknown_fields)]
 pub struct ConfigChange {
     pub changes: Map<String, Value>,
-    /// Change this hex's overrides instead of the lattice's (storage settings only).
-    #[serde(default)]
-    pub hex: Option<String>,
     #[serde(default)]
     pub comment: Option<String>,
     /// Refuse with a conflict unless this is still the newest version.
@@ -536,8 +457,6 @@ pub struct ChangeSummary {
     pub cleared: Vec<String>,
     pub secrets_set: Vec<String>,
     pub secrets_cleared: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hex: Option<String>,
 }
 
 fn comment_of(comment: Option<String>) -> Result<String> {
@@ -634,13 +553,6 @@ impl HexDBEngine {
         self.lattice_config.applied.read().unwrap().secrets.get(key).cloned()
     }
 
-    /// What an earlier version means for this hex (to reach a storage backend
-    /// its settings chose). `None` if it's missing or doesn't check out.
-    pub async fn resolved_config_at(&self, version: u64) -> Option<AppliedConfig> {
-        let stored = self.stored_version(version).await.ok()??;
-        resolve(self, stored.body.as_ref()?, &self.name).ok()
-    }
-
     /// Stored versions, newest first.
     async fn stored_versions(&self, limit: usize) -> Result<Vec<StoredVersion>> {
         if !self.tessellation_exists(CONFIG_TESSELLATION) {
@@ -701,7 +613,7 @@ impl HexDBEngine {
             return;
         }
         let outcome = match &stored.body {
-            Some(body) => resolve(self, body, &self.name),
+            Some(body) => resolve(self, body),
             None => Err(anyhow!("{}", stored.problem.clone().unwrap_or_default())),
         };
         let mut applied = self.lattice_config.applied.write().unwrap();
@@ -724,7 +636,7 @@ impl HexDBEngine {
         let (text, sha) = body.canonical();
         let doc = json!({ "version": body.version, "time": body.time, "author": body.author, "sha256": sha, "body": text });
         // Check it as every hex will before anyone sees it.
-        resolve(self, &body, &self.name).map_err(|e| invalid(format!("{:#}", e)))?;
+        resolve(self, &body).map_err(|e| invalid(format!("{:#}", e)))?;
         self.put_system_document(CONFIG_TESSELLATION, doc_id(body.version), doc, None).await?;
         self.refresh_lattice_config().await;
         Ok(())
@@ -749,24 +661,13 @@ impl HexDBEngine {
             return Err(invalid("No changes given."));
         }
         let comment = comment_of(request.comment)?;
-        let hex = match request.hex.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
-            Some(name) => {
-                validate_hex_name(name)?;
-                Some(name.to_string())
-            }
-            None => None,
-        };
         let mut next = head.clone();
-        let scope = match &hex {
-            Some(name) => next.hexes.entry(name.clone()).or_default(),
-            None => &mut next.lattice,
-        };
-        let mut summary = ChangeSummary { hex: hex.clone(), ..Default::default() };
+        next.lattice = without_retired(next.lattice);
+        next.hexes.clear();
+        let scope = &mut next.lattice;
+        let mut summary = ChangeSummary::default();
         for (key, value) in &request.changes {
             let def = definition(key).ok_or_else(|| invalid(format!("Unknown setting '{}'.", key)))?;
-            if hex.is_some() && !def.per_hex() {
-                return Err(invalid(format!("Only {}* settings can be set for one hex; '{}' applies to the whole lattice.", PER_HEX_PREFIX, key)));
-            }
             if value.is_null() {
                 let removed = if def.is_secret() { scope.secrets.remove(key).is_some() } else { scope.settings.remove(key).is_some() };
                 if removed {
@@ -782,11 +683,6 @@ impl HexDBEngine {
             } else if scope.settings.get(key) != Some(&value) {
                 scope.settings.insert(key.clone(), value);
                 summary.changed.push(key.clone());
-            }
-        }
-        if let Some(name) = &hex {
-            if next.hexes.get(name).is_some_and(ConfigScope::is_empty) {
-                next.hexes.remove(name);
             }
         }
         if summary.changed.is_empty() && summary.cleared.is_empty() && summary.secrets_set.is_empty() && summary.secrets_cleared.is_empty() {
@@ -827,8 +723,8 @@ impl HexDBEngine {
             author: actor.to_string(),
             comment,
             rollback_of: Some(version),
-            lattice: target.lattice,
-            hexes: target.hexes,
+            lattice: without_retired(target.lattice),
+            hexes: BTreeMap::new(),
         };
         self.commit_config(next.clone()).await?;
         Ok(next)
@@ -888,7 +784,6 @@ impl HexDBEngine {
                     "description": d.description,
                     "default": d.default_value(),
                     "secret": d.is_secret(),
-                    "per_hex": d.per_hex(),
                 })
             })
             .collect();
@@ -913,8 +808,7 @@ impl HexDBEngine {
             "time": body.time,
             "author": body.author,
             "comment": body.comment,
-            "lattice": scope_view(&body.lattice),
-            "overrides": body.hexes.iter().map(|(name, scope)| (name.clone(), scope_view(scope))).collect::<Map<String, Value>>(),
+            "lattice": scope_view(&without_retired(body.lattice.clone())),
             "schema": schema,
             "hexes": hexes,
         }))
@@ -945,8 +839,7 @@ mod tests {
         for d in CONFIG.iter().filter(|d| !d.is_secret()) {
             assert_eq!(validate(d, &d.default_value()).unwrap(), d.default_value(), "{}", d.key);
         }
-        assert!(definition("file_storage.backend").unwrap().per_hex());
-        assert!(!definition("ai.provider").unwrap().per_hex());
+        assert!(definition("file_storage.backend").is_none(), "remote storage settings were removed");
     }
 
     #[test]
@@ -967,7 +860,6 @@ mod tests {
         let err = validate(key, &json!("x".repeat(MAX_SECRET + 1))).unwrap_err().to_string();
         assert!(!err.contains("xxxx"));
         assert!(validate(key, &json!("")).is_err());
-        assert!(validate(definition("file_storage.backend").unwrap(), &json!("ftp")).is_err());
     }
 
     #[test]
@@ -993,7 +885,7 @@ mod tests {
         new.lattice.settings.remove("ai.model");
         new.hexes.entry("Tosa".into()).or_default().settings.insert("file_storage.backend".into(), json!("s3"));
         let diff = version_diff(&old, &new);
-        assert_eq!(diff["changed"], json!(["ai.provider", "hex:Tosa/file_storage.backend"]));
+        assert_eq!(diff["changed"], json!(["ai.provider", "hex:Tosa/file_storage.backend"]), "older versions' overrides still show in history");
         assert_eq!(diff["removed"], json!(["ai.model"]));
     }
 
@@ -1045,6 +937,32 @@ mod tests {
         let now = engine.lattice_config();
         assert_eq!((now.version, now.state()), (4, "applied"));
         assert_eq!(engine.config_secret("ai.api_key").unwrap().expose(), "sk-1");
+        engine.shutdown().await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn versions_with_retired_storage_settings_still_apply() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        // A 1.6 preview version: remote storage settings, a storage secret and a per-hex override.
+        let mut old = ConfigVersion { format: FORMAT, version: 1, author: "admin".into(), ..Default::default() };
+        old.lattice.settings.insert("ai.provider".into(), json!("anthropic"));
+        old.lattice.settings.insert("file_storage.backend".into(), json!("s3"));
+        old.lattice.secrets.insert("file_storage.s3.secret_access_key".into(), seal(&engine, "file_storage.s3.secret_access_key", "abc", "admin"));
+        old.hexes.entry("Tosa".into()).or_default().settings.insert("file_storage.backend".into(), json!("azure"));
+        let (body, sha) = old.canonical();
+        store_raw(&engine, 1, &body, &sha).await;
+        engine.refresh_lattice_config().await;
+        let now = engine.lattice_config();
+        assert_eq!((now.version, now.state()), (1, "applied"), "{:?}", now.rejected);
+        assert_eq!(engine.config_value("ai.provider"), json!("anthropic"));
+        assert!(engine.config_value("file_storage.backend").is_null());
+        // The next version drops them.
+        let change = ConfigChange { changes: json!({ "ai.model": "m" }).as_object().unwrap().clone(), ..Default::default() };
+        let (next, _) = engine.update_lattice_config("admin", change).await.unwrap();
+        assert!(next.hexes.is_empty());
+        assert!(next.lattice.settings.keys().chain(next.lattice.secrets.keys()).all(|k| !k.starts_with("file_storage.")), "{:?}", next.lattice);
+        assert_eq!(next.lattice.settings["ai.provider"], json!("anthropic"));
         engine.shutdown().await.unwrap();
         std::fs::remove_dir_all(&dir).ok();
     }

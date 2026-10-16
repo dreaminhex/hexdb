@@ -98,7 +98,7 @@ pub enum EngineError {
     /// The password was right, but the account also needs a one-time code (401).
     MfaRequired(String),
     /// Stored content can't be read right now (503): its shards are unreadable
-    /// here and no other hex or storage backend could supply it.
+    /// here and no other hex could supply it.
     Unavailable(String),
 }
 
@@ -537,11 +537,6 @@ impl HexDBEngine {
         }
         engine.rebuild_indexes().await?;
         engine.refresh_lattice_config().await;
-        // File content on a remote backend must be readable from the first request.
-        if let Err(e) = engine.refresh_tiers().await {
-            warn!("⚠️ Remote file storage isn't usable yet: {:#}", e);
-            engine.blobs.note_remote_problem(&e);
-        }
         engine.load_metrics_history();
         engine.refresh_disk_usage().await;
 

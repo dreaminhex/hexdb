@@ -197,7 +197,6 @@ export interface Status {
     disk_bytes: number
     sstable_files: number
     next_sequence: number
-    files?: { remote?: RemoteStorageStatus }
   }
   operations: { reads_total: number; writes_total: number; queries_total: number }
   network: {
@@ -206,30 +205,6 @@ export interface Status {
     lattice: { name: string; hexes: LatticeHex[] }
   }
   replication: ReplicationStatus
-}
-
-/** The chunk store's remote backend on one hex (`/status` storage.files.remote). */
-export interface RemoteStorageStatus {
-  backend: string | null
-  backend_id: string | null
-  uploaded_packs: number
-  pending_packs: number
-  remote_only_packs: number
-  moving_packs: number
-  local_bytes: number
-  bytes_uploaded: number
-  bytes_downloaded: number
-  last_upload_at: string | null
-  last_error: string | null
-  last_error_at: string | null
-}
-
-export interface StorageTestResult {
-  ok: boolean
-  backend: string
-  hex?: string
-  message?: string
-  error?: string
 }
 
 export interface LogRecord {
@@ -408,7 +383,6 @@ export interface ConfigDef {
   description: string
   default: unknown
   secret: boolean
-  per_hex: boolean
 }
 
 /** What GET /config shows of a secret: never its value. */
@@ -425,7 +399,7 @@ export interface ConfigHexState {
   role: string
   status: string
   is_self: boolean
-  config: { version: number; sha256: string; state: string; overridden?: string[]; error?: string | null; rejected_version?: number | null }
+  config: { version: number; sha256: string; state: string; error?: string | null; rejected_version?: number | null }
 }
 
 export interface LatticeConfig {
@@ -437,7 +411,6 @@ export interface LatticeConfig {
   author: string
   comment: string
   lattice: Record<string, unknown>
-  overrides: Record<string, Record<string, unknown>>
   schema: ConfigDef[]
   hexes: ConfigHexState[]
   changes?: { version: number; changed: string[]; cleared: string[]; secrets_set: string[]; secrets_cleared: string[] }
@@ -932,11 +905,10 @@ export const api = {
   settings: () => request<SettingsResponse>("GET", "/settings"),
   saveSettings: (changes: Record<string, number | boolean | null>) => request<SettingsResponse>("PUT", "/settings", changes),
   config: () => request<LatticeConfig>("GET", "/config"),
-  saveConfig: (changes: Record<string, unknown>, options: { hex?: string; comment?: string; base_version?: number }) =>
+  saveConfig: (changes: Record<string, unknown>, options: { comment?: string; base_version?: number }) =>
     request<LatticeConfig>("PUT", "/config", { changes, ...options }),
   configHistory: (limit = 50) => request<{ versions: ConfigVersionSummary[]; total: number }>("GET", `/config/history?limit=${limit}`),
   aiStatus: () => request<AiStatus>("GET", "/ai"),
-  storageTest: () => request<StorageTestResult>("POST", "/config/storage-test", {}),
   aiTest: () => request<AiTestResult>("POST", "/ai/test", {}),
   aiEstimate: () => request<AiEstimate>("GET", "/ai/estimate"),
   aiTagFiles: (tess: string) => request<{ queued: number }>("POST", `/${enc(tess)}/_ai_tag`),

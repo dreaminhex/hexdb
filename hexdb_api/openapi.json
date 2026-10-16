@@ -1021,10 +1021,6 @@
                     "type": "object",
                     "description": "setting key -> value; null clears"
                   },
-                  "hex": {
-                    "type": "string",
-                    "description": "override for one hex (file_storage settings only)"
-                  },
                   "comment": {
                     "type": "string"
                   },
@@ -1188,38 +1184,6 @@
             }
           }
         },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An error: {\"error\": {\"code\", \"message\"}}",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/config/storage-test": {
-      "post": {
-        "tags": [
-          "Configuration"
-        ],
-        "summary": "Write, read back and delete a small object on this hex's storage backend (admins)",
-        "operationId": "post_config_storage-test",
         "responses": {
           "200": {
             "description": "OK",

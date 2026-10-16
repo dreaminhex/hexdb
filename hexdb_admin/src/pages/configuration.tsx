@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useMemo, useState } from "react"
 import { IconAlertTriangle, IconCircleCheck, IconHistory, IconKey, IconLoader2, IconPlugConnected, IconRestore } from "@tabler/icons-react"
 import { toast } from "sonner"
 
@@ -11,20 +11,10 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { usePoll } from "@/hooks/use-poll"
-import { has, useAuth } from "@/lib/auth"
-import { api, errorMessage, type StorageTestResult, type AiTestResult, type ConfigDef, type ConfigVersionSummary, type LatticeConfig, type SecretInfo } from "@/lib/api"
-import { formatBytes, formatNumber, formatTimestamp } from "@/lib/format"
+import { useAuth } from "@/lib/auth"
+import { api, errorMessage, type AiTestResult, type ConfigDef, type ConfigVersionSummary, type LatticeConfig, type SecretInfo } from "@/lib/api"
+import { formatNumber } from "@/lib/format"
 import { cn } from "@/lib/utils"
-
-const LATTICE = "__lattice__"
-
-const BACKEND_LABELS: Record<string, string> = {
-  local: "This hex's disks",
-  s3: "Amazon S3 or S3-compatible",
-  azure: "Azure Blob Storage",
-  gdrive: "Google Drive",
-  dropbox: "Dropbox",
-}
 
 const PROVIDER_LABELS: Record<string, string> = {
   none: "None (AI features off)",
@@ -59,12 +49,6 @@ function label(key: string): string {
 
 function isSecretInfo(v: unknown): v is SecretInfo {
   return typeof v === "object" && v !== null && (v as SecretInfo).set === true
-}
-
-/** Settings shown for the chosen storage backend: the common ones plus that backend's. */
-function storageVisible(key: string, backend: string): boolean {
-  const parts = key.split(".")
-  return parts.length === 2 || parts[1] === backend
 }
 
 type Draft = Record<string, unknown>
@@ -127,7 +111,7 @@ function SettingInput({
     )
   }
   if (kind.type === "choice") {
-    const labels = def.key === "file_storage.backend" ? BACKEND_LABELS : def.key === "ai.provider" ? PROVIDER_LABELS : {}
+    const labels: Record<string, string> = def.key === "ai.provider" ? PROVIDER_LABELS : {}
     return (
       <Select value={String(current)} onValueChange={onChange}>
         <SelectTrigger className="h-8 w-64" aria-label={def.key}>
@@ -182,63 +166,6 @@ function SettingInput({
       onChange={(e) => onChange(e.target.value)}
       aria-label={def.key}
     />
-  )
-}
-
-/** This hex's remote storage: what's uploaded, what's waiting, problems, and a connection test. */
-function StorageCard({ readOnly }: { readOnly: boolean }) {
-  const status = usePoll(api.status, 10000)
-  const [testing, setTesting] = useState(false)
-  const [result, setResult] = useState<StorageTestResult | null>(null)
-  const remote = status.data?.storage.files?.remote
-  const test = async () => {
-    setTesting(true)
-    setResult(null)
-    try {
-      setResult(await api.storageTest())
-    } catch (e) {
-      setResult({ ok: false, backend: "?", error: errorMessage(e) })
-    } finally {
-      setTesting(false)
-    }
-  }
-  return (
-    <Card className="gap-2">
-      <CardHeader className="flex flex-row items-start justify-between gap-2">
-        <div>
-          <CardTitle>File storage on this hex</CardTitle>
-          <CardDescription>
-            {remote?.backend ? `Packs go to ${remote.backend}; this hex keeps ${formatBytes(remote.local_bytes)} locally.` : "File content is kept on this hex's disks."}
-            {readOnly ? "" : " Test after saving."}
-          </CardDescription>
-        </div>
-        {!readOnly && (
-          <Button size="sm" variant="outline" disabled={testing} onClick={() => void test()}>
-            {testing ? <IconLoader2 className="animate-spin" /> : <IconPlugConnected />} Test
-          </Button>
-        )}
-      </CardHeader>
-      <CardContent className="grid gap-1 text-sm">
-        {result &&
-          (result.ok ? (
-            <p className="text-status-good">{result.message ?? `Works: wrote, read back and deleted a test object on ${result.backend}.`}</p>
-          ) : (
-            <p className="text-destructive">Failed: {result.error}</p>
-          ))}
-        {remote && (remote.backend || remote.moving_packs > 0) && (
-          <p className="text-muted-foreground text-xs">
-            {remote.uploaded_packs} pack(s) uploaded, {remote.pending_packs} waiting, {remote.remote_only_packs} kept only remotely
-            {remote.moving_packs > 0 ? `, ${remote.moving_packs} being moved from the previous backend` : ""}. {formatBytes(remote.bytes_uploaded)} uploaded and{" "}
-            {formatBytes(remote.bytes_downloaded)} read since the hex started.
-          </p>
-        )}
-        {remote?.last_error && (
-          <p className="text-destructive text-xs">
-            Last problem ({formatTimestamp(remote.last_error_at)}): {remote.last_error}
-          </p>
-        )}
-      </CardContent>
-    </Card>
   )
 }
 
@@ -444,9 +371,6 @@ function HexesCard({ config }: { config: LatticeConfig }) {
                     ) : (
                       <Badge variant="secondary">behind</Badge>
                     )}
-                    {h.config.overridden && h.config.overridden.length > 0 && (
-                      <span className="text-muted-foreground ml-2 text-xs">storage overridden</span>
-                    )}
                   </TableCell>
                 </TableRow>
               )
@@ -532,29 +456,19 @@ function HistoryCard({ refreshKey, onRolledBack, readOnly }: { refreshKey: numbe
   )
 }
 
-/** The lattice configuration: file storage and AI, shared by every hex. */
+/** The lattice configuration: AI settings shared by every hex. */
 export function ConfigurationPage() {
   const { me } = useAuth()
   // Demo mode lets non-administrators look; only administrators change anything.
   const readOnly = !me?.is_admin
   const config = usePoll(api.config, 5000)
-  const [scope, setScope] = useState(LATTICE)
   const [draft, setDraft] = useState<Draft>({})
   const [comment, setComment] = useState("")
   const [busy, setBusy] = useState(false)
   const [historyKey, setHistoryKey] = useState(0)
 
-  useEffect(() => setDraft({}), [scope])
-
   const data = config.data
-  const values: Record<string, unknown> = useMemo(
-    () => (scope === LATTICE ? (data?.lattice ?? {}) : (data?.overrides[scope] ?? {})),
-    [data, scope],
-  )
-  const hexNames = useMemo(() => {
-    const names = new Set<string>([...(data?.hexes.map((h) => h.name) ?? []), ...Object.keys(data?.overrides ?? {})])
-    return [...names].sort()
-  }, [data])
+  const values: Record<string, unknown> = useMemo(() => data?.lattice ?? {}, [data])
 
   const changes = useMemo(() => {
     const out: Record<string, unknown> = {}
@@ -573,7 +487,6 @@ export function ConfigurationPage() {
     setBusy(true)
     try {
       const result = await api.saveConfig(payload, {
-        hex: scope === LATTICE ? undefined : scope,
         comment: comment.trim() || undefined,
         base_version: data.version,
       })
@@ -589,14 +502,8 @@ export function ConfigurationPage() {
     }
   }
 
-  const effective = (key: string, def: ConfigDef) => (draft[key] !== undefined ? draft[key] : values[key] !== undefined ? values[key] : def.default)
-  const backendDef = data?.schema.find((d) => d.key === "file_storage.backend")
-  const backend = backendDef ? String(effective("file_storage.backend", backendDef)) : "local"
-
   const section = (title: string, description: string, prefix: string) => {
-    const defs = (data?.schema ?? []).filter(
-      (d) => d.key.startsWith(prefix) && (scope === LATTICE || d.per_hex) && (prefix !== "file_storage." || storageVisible(d.key, backend)),
-    )
+    const defs = (data?.schema ?? []).filter((d) => d.key.startsWith(prefix))
     if (defs.length === 0) return null
     return (
       <Card className="gap-2">
@@ -663,20 +570,6 @@ export function ConfigurationPage() {
         </div>
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={scope} onValueChange={setScope}>
-          <SelectTrigger className="w-64" aria-label="Scope">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={LATTICE}>Whole lattice</SelectItem>
-            {hexNames.map((n) => (
-              <SelectItem key={n} value={n}>
-                Storage override: {n}
-                {data?.overrides[n] ? " (set)" : ""}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
         {!readOnly && (
           <>
         <Input className="h-9 w-72" placeholder="Why (saved with the version)" value={comment} onChange={(e) => setComment(e.target.value)} maxLength={500} />
@@ -690,29 +583,11 @@ export function ConfigurationPage() {
           </>
         )}
       </div>
-      {scope !== LATTICE && (
-        <p className="text-muted-foreground max-w-3xl text-sm">
-          A storage override replaces the lattice's whole file storage configuration on hex {scope}; other settings always come from the lattice.
-          {data?.overrides[scope] && !readOnly && (
-            <Button
-              variant="link"
-              size="sm"
-              className="h-5 px-1"
-              disabled={busy}
-              onClick={() => void save(Object.fromEntries(Object.keys(data.overrides[scope]).map((k) => [k, null])))}
-            >
-              Remove this override
-            </Button>
-          )}
-        </p>
-      )}
-      <fieldset disabled={readOnly} className="grid min-w-0 gap-4 xl:grid-cols-2">
-        {section("File storage", "Where file content is kept. It is encrypted and split into fragments before it leaves the hex, so the provider only sees ciphertext.", "file_storage.")}
-        {scope === LATTICE && section("AI", "AI features use this lattice's own provider and key, never anyone else's. Everything is off until you turn it on.", "ai.")}
+      <fieldset disabled={readOnly} className="grid min-w-0 gap-4">
+        {section("AI", "AI features use this lattice's own provider and key, never anyone else's. Everything is off until you turn it on.", "ai.")}
       </fieldset>
-      {has(me, "status") && <StorageCard readOnly={readOnly} />}
-      {scope === LATTICE && <AiCard refreshKey={historyKey} readOnly={readOnly} />}
-      {scope === LATTICE && <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} readOnly={readOnly} />}
+      <AiCard refreshKey={historyKey} readOnly={readOnly} />
+      <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} readOnly={readOnly} />
       {data && <HexesCard config={data} />}
       <HistoryCard
         readOnly={readOnly}

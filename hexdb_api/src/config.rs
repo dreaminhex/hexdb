@@ -1,11 +1,10 @@
 // HexDB API: the lattice configuration (admins only; see `hexdb_core::lattice_config`)
 //
 //   GET  /config                     the newest version, the schema, and every hex's state
-//   PUT  /config                     change settings: {"changes": {key: value | null}, "hex"?, "comment"?, "base_version"?}
+//   PUT  /config                     change settings: {"changes": {key: value | null}, "comment"?, "base_version"?}
 //   GET  /config/history             versions, newest first, with what each changed (?limit=&offset=)
 //   GET  /config/versions/{version}  one version
 //   POST /config/rollback            {"version": n, "comment"?}: a new version with version n's contents
-//   POST /config/storage-test        write, read back and delete a small object on this hex's storage backend (admins)
 //   GET  /ai                         the AI provider in use and this month's token usage (admins)
 //   POST /ai/test                    a tiny call that shows whether the provider, model and key work (admins)
 //   POST /ai/complete                {"prompt", "system"?, "max_tokens"?}: run a prompt (the `ai` permission)
@@ -51,8 +50,7 @@ pub async fn put_config(State(engine): Engine, Auth(principal): Auth, body: Resu
     let Json(request) = body?;
     let (version, summary) = engine.update_lattice_config(&principal.login, request).await?;
     if !is_noop(&summary) {
-        let target = summary.hex.clone().unwrap_or_else(|| "lattice".into());
-        engine.audit(&principal.login, "config.update", &target, json!(summary)).await;
+        engine.audit(&principal.login, "config.update", "lattice", json!(summary)).await;
         info!("⚙️ '{}' saved lattice configuration version {}.", principal.login, version.version);
     }
     let mut view = engine.lattice_config_view().await?;
@@ -194,10 +192,4 @@ pub async fn ai_thumbnails(Path(tess): Path<String>, params: Result<Query<AiFile
     principal.require_admin()?;
     let Query(params) = params?;
     queue_ai(&engine, &principal.login, &tess, hexdb_core::engine::AiTask::Thumbnail, params).await
-}
-
-/// Check the storage backend the saved configuration chooses for this hex.
-pub async fn storage_test(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    principal.require_admin()?;
-    Ok(Json(engine.test_file_storage().await).into_response())
 }

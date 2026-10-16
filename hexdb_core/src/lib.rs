@@ -25,7 +25,6 @@ pub mod mfa;
 pub mod settings;
 pub mod lattice_config;
 pub mod ai;
-pub mod remote;
 pub mod process;
 pub mod analysis;
 pub mod advisor;
