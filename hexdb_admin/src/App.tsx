@@ -25,6 +25,7 @@ import { UsersPage } from "@/pages/users"
 // Pages with the CodeMirror/GraphQL editor load on first visit.
 const QueriesPage = lazy(() => import("@/pages/queries").then((m) => ({ default: m.QueriesPage })))
 const DocumentsPage = lazy(() => import("@/pages/documents").then((m) => ({ default: m.DocumentsPage })))
+const QueuesPage = lazy(() => import("@/pages/queues").then((m) => ({ default: m.QueuesPage })))
 const StreamsPage = lazy(() => import("@/pages/streams").then((m) => ({ default: m.StreamsPage })))
 const FunctionsPage = lazy(() => import("@/pages/functions").then((m) => ({ default: m.FunctionsPage })))
 const FilesPage = lazy(() => import("@/pages/files").then((m) => ({ default: m.FilesPage })))
@@ -45,6 +46,7 @@ const PAGES: Record<string, Page> = {
   "/files": { title: "Files", element: FilesPage },
   "/shares": { title: "Shared links", element: SharesPage, requires: "share" },
   "/streams": { title: "Streams", element: StreamsPage },
+  "/queues": { title: "Queues", element: QueuesPage },
   "/functions": { title: "Functions", element: FunctionsPage },
   "/users": { title: "Users", element: UsersPage, requires: "admin" },
   "/roles": { title: "Roles", element: RolesPage, requires: "admin" },

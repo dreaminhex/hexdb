@@ -800,6 +800,29 @@ Creating a stream needs `manage` on its name. A grant on `*` covers every tessel
 
 **Storage.** Messages are documents in the system tessellation `_stream_<name>`, so they're encrypted, replicated, and expire by TTL. Configurations live in `_streams` and offsets in `_stream_offsets`. Sources and destinations run on the Overseer.
 
+### Queues
+
+A stream gives every consumer group every message. A queue gives each message to one consumer at a time, for work that should be done once: a consumer receives messages, each leased to it for the queue's visibility timeout, and acknowledges each when it's done. A message that isn't acknowledged in time comes back for another consumer; after `max_receives` tries it moves to the queue's dead-letter queue (or is dropped and logged without one).
+
+```bash
+curl -X POST http://localhost:7700/queues -d '{ "name": "dead" }'
+curl -X POST http://localhost:7700/queues -d '{ "name": "thumbnails", "visibility_seconds": 60, "max_receives": 5, "dead_letter": "dead", "retention_hours": 96 }'
+curl -X POST http://localhost:7700/queues/thumbnails/messages -d '{ "messages": [{ "body": { "file": "a.jpg" } }, { "body": "later", "delay_seconds": 300 }, { "body": "once", "dedupe_key": "job-42" }] }'
+curl -X POST http://localhost:7700/queues/thumbnails/receive -d '{ "max": 10, "wait_seconds": 20 }'
+# -> { "messages": [{ "id", "receipt", "body", "receives", "sent_at" }] }
+curl -X POST http://localhost:7700/queues/thumbnails/ack -d '{ "receipts": ["01J...abc"] }'                  # done: deleted
+curl -X POST http://localhost:7700/queues/thumbnails/nack -d '{ "receipts": ["..."], "delay_seconds": 30 }'  # give it back
+curl -X POST http://localhost:7700/queues/thumbnails/extend -d '{ "receipts": ["..."], "visibility_seconds": 120 }'
+curl http://localhost:7700/queues/thumbnails      # configuration and counts: ready, in_flight, delayed
+```
+
+- **Receiving** leases up to `max` (100) ready messages; `visibility_seconds` overrides the queue's timeout for this call, and `wait_seconds` (up to 20) waits for messages to arrive (long polling).
+- **Receipts** are new for every lease. Acknowledging, releasing or extending with a receipt whose lease ran out (the message went to another consumer) does nothing and counts as `stale`.
+- **Sending** takes up to 100 messages, each a JSON `body` of at most 256 KB, optionally delayed (`delay_seconds`, up to 15 minutes) or de-duplicated (a `dedupe_key` sent again within 5 minutes is skipped; its ID comes back `null`).
+- **Delivery** is at least once: a consumer that dies before acknowledging leaves the message to come back, so make handlers idempotent. Order is roughly first in, first out, not strict.
+- **Permissions** use `queue:<name>` in role grants: `write` to send, `read` to receive, acknowledge, release and extend, `manage` to create, change and delete. Changes are audited (`queue.create`, `queue.update`, `queue.delete`).
+- **Storage.** Messages are documents in `_queue_<name>` (encrypted, replicated, kept for `retention_hours`). Every queue call but the `GET`s changes messages, so it runs on the Overseer (replicas forward them); the Overseer keeps an index of when each message is next ready in memory and rebuilds it from the documents after a failover. The admin UI's Queues page shows each queue's counts and sends test messages.
+
 ## 16. Files
 
 A files tessellation stores files of any kind: photos, audio, video, Photoshop and Illustrator files, office documents, archives. Each file is a document describing it, so everything that works on documents works on files: filters, full-text search, aggregations, SQL, GraphQL, roles, row filters, field masks, the change feed and replication. The bytes live in a separate chunk store, compressed when that helps, encrypted, split across the six vertices, and copied to every hex in the lattice.

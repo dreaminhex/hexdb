@@ -280,6 +280,8 @@ pub struct HexDBEngine {
     pub(crate) ai_queue: files::ai_files::AiQueue,
     /// Upload quota usage per user (see `files::quotas`).
     pub(crate) quota_cache: files::quotas::QuotaCache,
+    /// Queue state on the Overseer (see `crate::queues`).
+    pub(crate) queues: crate::queues::Queues,
     /// Copying file content from other hexes.
     pub(crate) file_sync: files::FileSync,
     /// The last TOTP step each user signed in with on this hex (replay protection
@@ -322,6 +324,9 @@ pub(crate) async fn test_engine() -> (HexDBEngine, PathBuf) {
 const METRICS_FILE: &str = "metrics-history.hxe";
 /// The query advisor's saved statistics.
 const QUERY_STATS_FILE: &str = "query-stats.hxe";
+
+/// API routes added in 2.0 that a new tessellation can't be named (see `create_tessellation`).
+const NEW_ROUTE_NAMES: &[&str] = &["queues", "shares", "mcp"];
 
 impl HexDBEngine {
     /// Open (or create) the storage directory, recover from SSTables and the
@@ -525,6 +530,7 @@ impl HexDBEngine {
             extract_queue: Default::default(),
             ai_queue: Default::default(),
             quota_cache: Default::default(),
+            queues: Default::default(),
             file_sync: Default::default(),
             role_cache: std::sync::Mutex::new(None),
             history_id,
@@ -590,7 +596,11 @@ impl HexDBEngine {
 
     /// Change this hex's lattice role (after an election).
     pub fn set_role(&self, role: &str) {
-        *self.role.write().unwrap() = role.to_string();
+        let previous = std::mem::replace(&mut *self.role.write().unwrap(), role.to_string());
+        // A hex that (re)gains leadership reloads queue state another Overseer may have changed.
+        if previous != role {
+            self.queues.reset();
+        }
     }
 
     /// Picks a random name for the Hex from the provided list of names.
@@ -777,6 +787,12 @@ impl HexDBEngine {
     pub fn create_tessellation(&self, name: &str, kind: &str) -> Result<bool> {
         if kind == "user" || kind == crate::files::FILES_KIND {
             self.ensure_writable()?;
+            // Names that became API routes in 2.0. Unlike the older reserved
+            // names they're refused only for new tessellations, so data an
+            // earlier version stored under them stays writable.
+            if NEW_ROUTE_NAMES.iter().any(|r| r.eq_ignore_ascii_case(name)) && !self.tessellation_exists(name) {
+                return Err(EngineError::Invalid(format!("'{}' is reserved and can't be used as a new tessellation name.", name)).into());
+            }
         }
         self.create_tessellation_unchecked(name, kind)
     }

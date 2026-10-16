@@ -78,6 +78,13 @@ pub fn app_router(
         .route("/join", post(join_info))
 
         // Streams (publish/subscribe)
+        .route("/queues", get(crate::queues::list).post(crate::queues::create))
+        .route("/queues/{name}", get(crate::queues::get).put(crate::queues::update).delete(crate::queues::delete))
+        .route("/queues/{name}/messages", post(crate::queues::send).layer(DefaultBodyLimit::max(body_limit)))
+        .route("/queues/{name}/receive", post(crate::queues::receive))
+        .route("/queues/{name}/ack", post(crate::queues::ack))
+        .route("/queues/{name}/nack", post(crate::queues::nack))
+        .route("/queues/{name}/extend", post(crate::queues::extend))
         .route("/streams", get(crate::streams::list).post(crate::streams::create))
         .route("/streams/{name}", get(crate::streams::get).put(crate::streams::update).delete(crate::streams::delete))
         .route(

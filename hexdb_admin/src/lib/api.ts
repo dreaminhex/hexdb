@@ -525,6 +525,25 @@ export interface JoinInfo {
   notes: string[]
 }
 
+export interface QueueConfig {
+  name: string
+  description?: string
+  visibility_seconds: number
+  max_receives: number
+  dead_letter?: string | null
+  retention_hours: number
+  created?: number
+  created_by?: string
+}
+
+export interface QueueStats {
+  queue: QueueConfig
+  ready: number
+  in_flight: number
+  delayed: number
+  oldest_sent_at: number | null
+}
+
 export interface StreamSource {
   tessellation: string
   filter?: Record<string, unknown>
@@ -993,6 +1012,11 @@ export const api = {
   updateTrigger: (name: string, trigger: Trigger) => request<Trigger>("PUT", `/triggers/${enc(name)}`, trigger),
   deleteTrigger: (name: string) => request<void>("DELETE", `/triggers/${enc(name)}`),
 
+  queues: () => request<{ queues: QueueConfig[] }>("GET", "/queues").then((r) => r.queues),
+  queue: (name: string) => request<QueueStats>("GET", `/queues/${enc(name)}`),
+  createQueue: (config: Omit<QueueConfig, "created" | "created_by">) => request<QueueConfig>("POST", "/queues", config),
+  deleteQueue: (name: string) => request<void>("DELETE", `/queues/${enc(name)}`),
+  sendToQueue: (name: string, messages: { body: unknown; delay_seconds?: number }[]) => request<{ ids: (string | null)[] }>("POST", `/queues/${enc(name)}/messages`, { messages }),
   streams: () => request<{ streams: StreamConfig[] }>("GET", "/streams").then((r) => r.streams),
   stream: (name: string) => request<StreamDetail>("GET", `/streams/${enc(name)}`),
   createStream: (config: StreamConfig) => request<StreamConfig>("POST", "/streams", config),
