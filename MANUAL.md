@@ -1050,7 +1050,7 @@ curl -X POST http://localhost:7700/functions/orders_by_status/run -H "Content-Ty
 
 The body references a parameter as `{"$param": "name"}`, anywhere in the JSON. HexDB checks the types, fills in defaults, and substitutes the values. Values are never interpolated into text, so there's nothing to inject.
 
-**Permissions.** A function always runs with the permissions of whoever runs it: a query needs read access to its tessellation, a transaction whatever its operations need. Anyone signed in can run a function. Only administrators create, change or delete functions, because scripts run code on the server.
+**Permissions.** A function always runs with the permissions of whoever runs it: a query needs read access to its tessellation, a transaction whatever its operations need. Anyone signed in can run a function and see its name, description and parameters; only administrators see its query, operations or script code, and only they create, change or delete functions, because scripts run code on the server.
 
 ### Scripts
 
@@ -1322,7 +1322,7 @@ Requests without credentials get 401, including requests to paths that don't exi
 - The user record is read on every request, so role changes apply immediately. Live SSE streams re-check every 30 seconds.
 
 **Brute force.**
-- After `security.max_failed_logins` (5) failures for one login, or from one address, within `lockout_minutes` (15), sign-in is refused with 429. The count is shared across the lattice.
+- After `security.max_failed_logins` (5) failures for one login, or from one address, within `lockout_minutes` (15), sign-in is refused with 429. The count is shared across the lattice. Wrong answers to the password (and code) a signed-in user must give again (changing the password, setting up or turning off MFA, new backup codes, "Add a hex") count the same way, so a stolen session or API key can't be used to guess the password.
 - Unknown logins take as long as wrong passwords and return the same message, so logins can't be enumerated.
 
 ### Multi-factor authentication
@@ -1496,7 +1496,7 @@ Set `[tls] cert_file` and `key_file` (PEM) to serve HTTPS (HTTP/1.1 and HTTP/2 v
 
 Without TLS, HexDB warns when it listens on a non-loopback address.
 
-Behind a reverse proxy, list the proxy in `network.trusted_proxies` (IPs or CIDR ranges). The client address is then taken from `X-Forwarded-For`: the right-most address that isn't a trusted proxy. Otherwise the TCP peer is the client. The client address is what sign-in throttling, connection limits and the audit trail use.
+Behind a reverse proxy, list the proxy in `network.trusted_proxies` (IPs or CIDR ranges). The client address is then taken from `X-Forwarded-For`: the right-most address that isn't a trusted proxy. Otherwise the TCP peer is the client. The client address is what sign-in throttling, connection limits and the audit trail use. When a trusted proxy terminates TLS and sends `X-Forwarded-Proto: https`, HexDB marks the session cookie `Secure` and sends HSTS, as it does with its own TLS.
 
 ### Encryption at rest
 
@@ -1834,7 +1834,7 @@ hexdb config rollback 3 -m "bad key"
 - **Distribution.** Versions are documents in the `_config` system tessellation, so they replicate like other data: every hex has them, hexes that join later get them in their first sync, and a new Overseer after a failover already holds them. Each hex checks a version's checksum, its settings against the schema and that every secret opens before applying it, within a second of receiving it. A version that fails is rejected on that hex, which keeps the previous one and reports `"state": "rejected"` with the reason. `/status` has `config` (version, checksum, state) and the lattice view shows every hex's version.
 - **Every setting is lattice-wide.** Versions saved by 1.6 preview builds may hold remote file storage settings (`file_storage.*`) and per-hex overrides; those features were removed before release, so such settings are ignored and left out of the next version saved.
 - **Audit.** Changes are recorded as `config.update` (with the keys changed, cleared and the secrets set or cleared, never values) and `config.rollback`. Only administrators can read the configuration, its history, or roll back.
-- **Demo mode.** For public demos, `security.demo_mode = true` in a hex's `hexdb.toml` (or `HEXDB_SECURITY__DEMO_MODE=true`) lets every signed-in user view the configuration, its history, AI usage and the token estimates, on the Configuration page (read-only, with a notice) and through the `GET` routes. Secret values are never shown to anyone. Saving, rolling back, the AI test and tagging existing files stay with administrators. It's off by default and set per hex, so set it on every hex of a demo lattice; `GET /auth/me` reports it.
+- **Demo mode.** For public demos, `security.demo_mode = true` in a hex's `hexdb.toml` (or `HEXDB_SECURITY__DEMO_MODE=true`) lets every signed-in user view the configuration, its history, AI usage and the token estimates, on the Configuration page (read-only, with a notice) and through the `GET` routes. Secret values are never shown to anyone. Saving, rolling back, the AI test and tagging existing files stay with administrators. Viewers see token estimates only for files tessellations they can read, and in the logs (with the `logs` permission) client addresses are masked (`66.177.x.x`), so visitors don't see each other's. It's off by default and set per hex, so set it on every hex of a demo lattice; `GET /auth/me` reports it.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

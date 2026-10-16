@@ -321,7 +321,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cd hexdb_admin && npm run dev               # UI dev server; proxies the API at 127.0.0.1:7700
 ```
 
-The end-to-end tests in `hexdb_tests` start real servers on free ports in temporary directories. Some of them run several hexes and exercise failover. Set `HEXDB_TEST_KEEP=1` to keep each test's directory and server log. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the tests, clippy, `cargo audit`, `npm audit`, the UI build and the driver tests.
+The end-to-end tests in `hexdb_tests` start real servers on free ports in temporary directories. Some of them run several hexes and exercise failover. Set `HEXDB_TEST_KEEP=1` to keep each test's directory and server log. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the tests, clippy, `cargo audit`, `npm audit`, the UI build and the driver tests. `Cargo.lock` and the npm lockfiles are tracked and every build uses them (`--locked`, `npm ci`), so a release contains only reviewed dependency versions; Dependabot proposes updates as pull requests.
 
 ## Limitations
 
