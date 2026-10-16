@@ -1,0 +1,7 @@
+{
+  "name": "hexdb-plugin-gdrive-files",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Copies files from Google Drive into a HexDB files tessellation. No dependencies."
+}

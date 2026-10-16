@@ -1,0 +1,31 @@
+# Imports files from a Google Drive folder (and its subfolders) into a files
+# tessellation, keeping the folder structure. Each file is imported once per
+# content checksum (a changed file comes in as a new version); Google Docs,
+# Sheets and Slides aren't files and are skipped. Progress is kept in
+# gdrive-import-state.json here.
+#
+# Setup (no npm install needed):
+#   1. In Google Cloud, create an OAuth client of type "Desktop app" and enable
+#      the Google Drive API.
+#   2. Run `node connect.mjs` here: it asks for the client's ID and secret,
+#      opens Google's sign-in (read-only access to Drive), and prints a refresh
+#      token.
+#   3. Set GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET and GDRIVE_REFRESH_TOKEN for
+#      the HexDB process (pass_env below); they never go in this file.
+id = "@sources/gdrive-files"
+name = "Google Drive file import"
+type = "source"
+version = "1.0.0"
+description = "Copies files from a Google Drive folder into a files tessellation, keeping folders."
+command = ["node", "index.mjs"]
+pass_env = ["GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET", "GDRIVE_REFRESH_TOKEN"]
+
+[access]
+role = "writer"
+tessellations = ["media"]
+
+[env]
+GDRIVE_FOLDER_ID = "the-folder-id"        # from the folder's URL: drive.google.com/drive/folders/<id>
+TARGET = "media"
+TARGET_FOLDER = "/imported/drive/"
+POLL_SECONDS = "600"                      # 0: import once

@@ -1,0 +1,10 @@
+{
+  "name": "hexdb-plugin-azure-files",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Copies files from Azure Blob Storage into a HexDB files tessellation.",
+  "dependencies": {
+    "@azure/storage-blob": "^12.26.0"
+  }
+}

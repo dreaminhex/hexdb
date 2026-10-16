@@ -1,0 +1,27 @@
+# Imports files from an Azure Blob Storage container into a files
+# tessellation, keeping their folders (blob names with "/"). Each blob is
+# imported once per ETag; progress is kept in azure-import-state.json here.
+#
+# Setup: `npm install` in this folder. The credentials come from the server's
+# environment (pass_env below), never from this file: set
+# AZURE_STORAGE_CONNECTION_STRING for the HexDB process (or AZURE_STORAGE_ACCOUNT
+# and AZURE_STORAGE_KEY). The plugin runs as its own user with the role below.
+id = "@sources/azure-files"
+name = "Azure Blob file import"
+type = "source"
+version = "1.0.0"
+description = "Copies files from an Azure Blob Storage container into a files tessellation, keeping folders."
+command = ["node", "index.mjs"]
+pass_env = ["AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_ACCOUNT", "AZURE_STORAGE_KEY"]
+
+[access]
+role = "writer"
+tessellations = ["media"]
+
+[env]
+AZURE_CONTAINER = "my-container"
+AZURE_PREFIX = ""                         # only blobs under this prefix
+# AZURE_ENDPOINT = "http://127.0.0.1:10000/devstoreaccount1"   # Azurite or a custom endpoint
+TARGET = "media"
+TARGET_FOLDER = "/imported/azure/"
+POLL_SECONDS = "300"                      # 0: import once

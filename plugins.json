@@ -8,5 +8,9 @@
   "@sources/postgres": { "path": "./plugins/sources/postgres", "type": "source", "enabled": false },
   "@sources/mssql": { "path": "./plugins/sources/mssql", "type": "source", "enabled": false },
   "@sources/s3": { "path": "./plugins/sources/s3", "type": "source", "enabled": false },
+  "@sources/s3-files": { "path": "./plugins/sources/s3-files", "type": "source", "enabled": false },
+  "@sources/azure-files": { "path": "./plugins/sources/azure-files", "type": "source", "enabled": false },
+  "@sources/gdrive-files": { "path": "./plugins/sources/gdrive-files", "type": "source", "enabled": false },
+  "@sources/dropbox-files": { "path": "./plugins/sources/dropbox-files", "type": "source", "enabled": false },
   "@enrichers/ai-keywords": { "path": "./plugins/enrichers/ai-keywords", "type": "stream", "enabled": false }
 }

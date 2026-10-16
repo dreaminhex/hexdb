@@ -1,0 +1,31 @@
+# Imports files from an S3 bucket (or any S3-compatible store: Cloudflare R2,
+# Backblaze B2, Wasabi, MinIO) into a files tessellation, keeping their
+# folders: s3://BUCKET/PREFIX/photos/a.jpg becomes TARGET/TARGET_FOLDER/photos/a.jpg.
+# Each object is imported once per ETag (a changed object comes in as a new
+# version); progress is kept in s3-import-state.json in this folder.
+#
+# Setup: `npm install` in this folder. Credentials come from the server's
+# environment (pass_env below), never from this file: set AWS_ACCESS_KEY_ID
+# and AWS_SECRET_ACCESS_KEY for the HexDB process (or use an instance role).
+# The plugin runs as its own user with the role below: grant it the target
+# tessellation, and an upload quota if you want one.
+id = "@sources/s3-files"
+name = "S3 file import"
+type = "source"
+version = "1.0.0"
+description = "Copies files from an S3 bucket (or S3-compatible store) into a files tessellation, keeping folders."
+command = ["node", "index.mjs"]
+pass_env = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"]
+
+[access]
+role = "writer"
+tessellations = ["media"]
+
+[env]
+S3_BUCKET = "my-bucket"
+S3_PREFIX = ""                            # only keys under this prefix
+AWS_REGION = "us-east-1"                  # "auto" for Cloudflare R2
+# S3_ENDPOINT = "https://<account>.r2.cloudflarestorage.com"   # S3-compatible stores
+TARGET = "media"
+TARGET_FOLDER = "/imported/s3/"
+POLL_SECONDS = "300"                      # 0: import once

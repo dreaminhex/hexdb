@@ -1,0 +1,29 @@
+# Imports files from a Dropbox folder (and its subfolders) into a files
+# tessellation, keeping the folder structure. Each file is imported once per
+# revision (a changed file comes in as a new version); progress is kept in
+# dropbox-import-state.json here.
+#
+# Setup (no npm install needed):
+#   1. In the Dropbox App Console, create an app with the files.metadata.read
+#      and files.content.read permissions.
+#   2. Run `node connect.mjs` here: it asks for the app key and secret, shows
+#      a sign-in address, and prints a refresh token from the code you paste.
+#   3. Set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN for
+#      the HexDB process (pass_env below); they never go in this file.
+id = "@sources/dropbox-files"
+name = "Dropbox file import"
+type = "source"
+version = "1.0.0"
+description = "Copies files from a Dropbox folder into a files tessellation, keeping folders."
+command = ["node", "index.mjs"]
+pass_env = ["DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN"]
+
+[access]
+role = "writer"
+tessellations = ["media"]
+
+[env]
+DROPBOX_FOLDER = "/Photos"                # "" for the whole Dropbox (or app folder)
+TARGET = "media"
+TARGET_FOLDER = "/imported/dropbox/"
+POLL_SECONDS = "600"                      # 0: import once
