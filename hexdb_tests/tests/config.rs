@@ -195,6 +195,16 @@ fn every_hex_applies_the_config_and_it_survives_failover() -> Result<()> {
     wait_until(Duration::from_secs(30), "the replica to apply version 2", || Ok(status_config(&replica)?["version"] == 2))?;
     assert_eq!(status_config(&overseer)?["version"], 2);
 
+    // Runtime settings belong to the hex they're sent to, even a replica.
+    let res = replica.request(Method::PUT, "/settings", Some(&json!({ "security.audit_retention_days": 30 })), &[])?;
+    assert_eq!(res.status, 200, "{}", res.body);
+    let saved = |server: &TestServer| -> Result<Value> {
+        let body = server.request(Method::GET, "/settings", None, &[])?.body;
+        Ok(body["settings"].as_array().unwrap().iter().find(|d| d["key"] == "security.audit_retention_days").unwrap()["value"].clone())
+    };
+    assert_eq!(saved(&replica)?, 30, "applied on the replica");
+    assert_ne!(saved(&overseer)?, 30, "not forwarded to the Overseer");
+
     // The Overseer sees which version each hex runs.
     wait_until(Duration::from_secs(20), "the lattice view to show the replica on version 2", || {
         let view = get_config(&overseer)?;

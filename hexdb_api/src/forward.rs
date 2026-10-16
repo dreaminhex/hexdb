@@ -9,8 +9,9 @@
 // The Overseer believes the forwarded client address only with a valid
 // lattice signature over the method, path and address, so a client can't
 // claim another address by sending the header itself. Reads, sign-in and
-// sign-out, maintenance (flush, compact, shutdown) and hex-to-hex endpoints
-// are always handled locally. GraphQL requests are forwarded only when they
+// sign-out, this hex's own maintenance and settings (flush, compact, scrub,
+// backup, shutdown, `PUT /settings`), analyzer previews and hex-to-hex
+// endpoints are always handled locally. GraphQL requests are forwarded only when they
 // contain a mutation.
 //
 // File uploads (`/_files/`, and parts of resumable uploads) are streamed to the Overseer as they arrive, with
@@ -51,7 +52,7 @@ fn handled_locally(method: &Method, path: &str) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
         || path.starts_with("/lattice/")
         || path.starts_with("/ui")
-        || matches!(path, "/auth/login" | "/auth/logout" | "/shutdown" | "/flush" | "/compact")
+        || matches!(path, "/auth/login" | "/auth/logout" | "/shutdown" | "/flush" | "/compact" | "/scrub" | "/backup" | "/settings" | "/analyzers/_analyze")
         || path.ends_with("/_query")
         || path.ends_with("/_aggregate")
         || path == "/sql"
@@ -215,4 +216,20 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     }
     out.headers_mut().remove(header::CONTENT_LENGTH);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_hex_requests_stay_on_this_hex() {
+        for path in ["/settings", "/backup", "/scrub", "/flush", "/compact", "/shutdown", "/analyzers/_analyze", "/orders/_query"] {
+            assert!(handled_locally(&Method::POST, path) || handled_locally(&Method::PUT, path), "{}", path);
+        }
+        assert!(handled_locally(&Method::PUT, "/settings"), "runtime settings belong to the hex they're sent to");
+        for (method, path) in [(Method::POST, "/orders"), (Method::PUT, "/config"), (Method::DELETE, "/orders/01J0"), (Method::POST, "/transactions")] {
+            assert!(!handled_locally(&method, path), "{} {}", method, path);
+        }
+    }
 }

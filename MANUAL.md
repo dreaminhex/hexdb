@@ -1584,7 +1584,7 @@ Every hex keeps a full copy. A replica:
 
 **Progress.** Each poll for changes after N acknowledges N, which gives the Overseer each replica's exact position. `/status` shows the lag per replica, and the dashboard's lattice card shows it too.
 
-**Reads and writes.** Replicas serve reads. A write sent to a replica is forwarded to the Overseer (`replication.forward_writes`, default true), signed with the lattice key, and the response carries `X-HexDB-Forwarded-To`. With forwarding off, the write fails with 421 `read_only_replica`, naming the Overseer.
+**Reads and writes.** Replicas serve reads. A write sent to a replica is forwarded to the Overseer (`replication.forward_writes`, default true), signed with the lattice key, and the response carries `X-HexDB-Forwarded-To`. With forwarding off, the write fails with 421 `read_only_replica`, naming the Overseer. Requests about the hex itself stay on the hex they're sent to: `PUT /settings` (its runtime settings), `POST /backup`, `/scrub`, `/flush`, `/compact` and `/shutdown`.
 
 ### Durability options
 
