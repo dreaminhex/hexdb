@@ -24,3 +24,11 @@ hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 # A WebSocket client for the live-feed tests.
 tungstenite = "0.29"
+# A gRPC client for the gRPC tests, generated from hexdb_api/proto.
+tonic = { version = "0.14.6", default-features = false, features = ["codegen", "transport"] }
+tonic-prost = "0.14.6"
+prost = "0.14.4"
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14.6", default-features = false, features = ["transport"] }
+protox = "0.10.0"

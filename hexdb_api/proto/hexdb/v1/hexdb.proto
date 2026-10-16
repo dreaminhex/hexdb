@@ -1,0 +1,110 @@
+// HexDB gRPC API.
+//
+// Served on the same port as the REST API (HTTP/2, over TLS when [tls] is
+// configured). Every call runs as the matching REST request, with the same
+// permissions, row filters, field masks, quotas and audit; a write sent to a
+// replica goes to the Overseer like a REST write.
+//
+// Authenticate with an API key or session token in the `authorization`
+// metadata: "Bearer <key>". Cookies are ignored.
+//
+// Documents, filters and replies are JSON text (the REST bodies), so integers
+// keep their full precision and new REST options need no change here. A
+// non-2xx REST status becomes a gRPC status (404 NOT_FOUND, 403
+// PERMISSION_DENIED, ...) with the REST error message; the REST error code is
+// in the `hexdb-error` trailer.
+
+syntax = "proto3";
+
+package hexdb.v1;
+
+service HexDB {
+  // GET /{tessellation}/{id}
+  rpc Get(DocumentRef) returns (Reply);
+  // POST /{tessellation}: the reply is {"id": ...}.
+  rpc Insert(Write) returns (Reply);
+  // PUT /{tessellation}/{id}
+  rpc Replace(Write) returns (Reply);
+  // PATCH /{tessellation}/{id}
+  rpc Patch(Write) returns (Reply);
+  // DELETE /{tessellation}/{id}
+  rpc Delete(DocumentRef) returns (Reply);
+  // POST /{tessellation}/_query with a REST query body: {"filter": ..., "sort": ..., "limit": ...}
+  rpc Query(Body) returns (Reply);
+  // POST /{tessellation}/_aggregate with a pipeline body.
+  rpc Aggregate(Body) returns (Reply);
+  // POST /sql: {"sql": "SELECT ...", "params": [...]}
+  rpc Sql(Body) returns (Reply);
+  // POST /streams/{name}/messages: {"payload": ...} or a list of messages.
+  rpc Publish(Body) returns (Reply);
+  // Any other REST call with a JSON body (or none).
+  rpc Call(CallRequest) returns (Reply);
+  // GET /changes/stream: committed changes, from `after` then live.
+  rpc Changes(ChangesRequest) returns (stream Event);
+  // GET /streams/{name}/subscribe: a stream's messages, from `after` or the group's offset, then live.
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
+
+message DocumentRef {
+  string tessellation = 1;
+  string id = 2;
+  // Optional query string without the "?", e.g. "fields=name,email".
+  string query = 3;
+}
+
+message Write {
+  string tessellation = 1;
+  // Empty for Insert.
+  string id = 2;
+  // The document (or patch) as JSON.
+  string json = 3;
+  // Optional query string without the "?", e.g. "ttl=60".
+  string query = 4;
+}
+
+message Body {
+  // The tessellation (Query, Aggregate) or stream (Publish); empty for Sql.
+  string name = 1;
+  string json = 2;
+}
+
+message CallRequest {
+  // GET, POST, PUT, PATCH or DELETE.
+  string method = 1;
+  // The REST path with its query string, e.g. "/users" or "/notes?limit=10".
+  string path = 2;
+  // The JSON body, or empty for none.
+  string json = 3;
+}
+
+message Reply {
+  // The REST status (2xx; other statuses are returned as gRPC errors).
+  uint32 status = 1;
+  // The REST response body when it's JSON.
+  string json = 2;
+  // Any other response body, with its content type.
+  bytes body = 3;
+  string content_type = 4;
+}
+
+message ChangesRequest {
+  // Resume after this sequence number; unset starts from now.
+  optional uint64 after = 1;
+  // Only this tessellation's changes.
+  string tessellation = 2;
+}
+
+message SubscribeRequest {
+  string stream = 1;
+  // Resume after this offset; empty starts from the group's offset, or now.
+  string after = 2;
+  string group = 3;
+}
+
+message Event {
+  // "change" or "message"; "lagged" and "unauthorized" end the stream.
+  string event = 1;
+  // The sequence number or offset to resume after.
+  string id = 2;
+  string json = 3;
+}

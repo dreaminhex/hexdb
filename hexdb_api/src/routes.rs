@@ -228,7 +228,7 @@ pub fn app_router(
     // Validated at startup (see main).
     let proxies = Arc::new(crate::client::TrustedProxies::parse(&engine.config.network.trusted_proxies).unwrap_or_default());
     let timeout = std::time::Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1));
-    router
+    let rest = router
         .layer(middleware::from_fn_with_state(engine.clone(), crate::forward::forward_writes))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::authenticate))
         .layer(middleware::from_fn_with_state(timeout, crate::server::request_timeout))
@@ -237,7 +237,9 @@ pub fn app_router(
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::security_headers))
         .layer(Extension(shutdown_handle))
         .layer(Extension(schema))
-        .with_state(engine)
+        .with_state(engine);
+    // gRPC calls (content-type application/grpc) run as REST requests through all of the above.
+    crate::grpc::with_grpc(rest, body_limit)
 }
 
 /// Who made a request, recorded by the authentication middleware for the request log.

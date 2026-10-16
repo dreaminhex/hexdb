@@ -13,7 +13,7 @@ Examples use `curl` against `http://localhost:7700` and leave out credentials. A
 5. [Documents](#5-documents)
 6. [Querying](#6-querying)
 7. [Full-text search and analyzers](#7-full-text-search-and-analyzers)
-8. [GraphQL](#8-graphql)
+8. [GraphQL and gRPC](#8-graphql-and-grpc)
 9. [Aggregations](#9-aggregations)
 10. [SQL](#10-sql)
 11. [Transactions](#11-transactions)
@@ -402,7 +402,7 @@ curl -X POST http://localhost:7700/analyzers/_analyze -H "Content-Type: applicat
 
 The text index is an inverted index: each token maps to the set of document IDs that contain it. The index fingerprints its analyzer's definition, so changing a custom analyzer rebuilds the index at the next start instead of mixing old and new tokens.
 
-## 8. GraphQL
+## 8. GraphQL and gRPC
 
 `POST /graphql` takes standard requests (`{"query", "variables", "operationName"}`) with the same credentials and permissions as REST. The admin UI's Queries page is the console.
 
@@ -433,6 +433,34 @@ query Recent($filter: JSON) {
 - `total` is counted only when the query selects it, so leave it out to make sorted and filtered pages cheaper.
 - Requests are limited to depth 16 and complexity 10,000.
 - Streams, functions, schemas and settings are REST-only.
+
+### gRPC
+
+The gRPC service `hexdb.v1.HexDB` is served on the API port, next to REST: requests with `content-type: application/grpc` go to it. It uses HTTP/2, over TLS when `[tls]` is configured (ALPN `h2`) and in clear text otherwise. Generate a client in any language from [hexdb_api/proto/hexdb/v1/hexdb.proto](hexdb_api/proto/hexdb/v1/hexdb.proto).
+
+| RPC | Runs as |
+| --- | --- |
+| `Get`, `Delete` (`DocumentRef`) | `GET` / `DELETE /{tessellation}/{id}` |
+| `Insert`, `Replace`, `Patch` (`Write`) | `POST /{tessellation}`, `PUT` / `PATCH /{tessellation}/{id}` |
+| `Query`, `Aggregate` (`Body`) | `POST /{tessellation}/_query`, `/_aggregate` |
+| `Sql` (`Body`) | `POST /sql` |
+| `Publish` (`Body`) | `POST /streams/{name}/messages` |
+| `Call` (`CallRequest`) | any REST call with a JSON body: `{ method, path, json }` |
+| `Changes` (server streaming) | `GET /changes/stream` |
+| `Subscribe` (server streaming) | `GET /streams/{name}/subscribe` |
+
+```bash
+grpcurl -plaintext -import-path hexdb_api/proto -proto hexdb/v1/hexdb.proto \
+  -H "authorization: Bearer $KEY" \
+  -d '{ "name": "articles", "json": "{\"filter\": {\"published\": true}, \"limit\": 10}" }' \
+  localhost:7700 hexdb.v1.HexDB/Query
+```
+
+- **Every call is the REST request.** It runs through the same middleware as REST: authentication and its throttling, permissions, row filters and field masks, quotas and limits, the audit log and the request log. On a replica, writes go to the Overseer. The REST documentation applies to every option and reply.
+- **JSON in, JSON out.** Documents, query bodies and replies are JSON text (`json` fields), so 64-bit integers keep their precision and new REST options work without a new proto. `Reply.status` is the REST status; a reply that isn't JSON (a file from `Call`) comes back in `body` with `content_type`, up to 64 MB (use REST for larger downloads).
+- **Errors** become gRPC statuses with the REST message: 400 `INVALID_ARGUMENT`, 401 `UNAUTHENTICATED`, 403 `PERMISSION_DENIED`, 404 `NOT_FOUND`, 409 `ALREADY_EXISTS`, 410 `OUT_OF_RANGE`, 412 `FAILED_PRECONDITION`, 413, 429 and 507 `RESOURCE_EXHAUSTED`, 503 `UNAVAILABLE`, 504 `DEADLINE_EXCEEDED`. The REST error code (`not_found`, `quota_exceeded`, ...) is in the `hexdb-error` trailer, and `retry-after` is passed on.
+- **Credentials** come only from the `authorization` metadata (`Bearer <API key or session token>`). Cookies are ignored, so a web page can't make calls with a visitor's session.
+- **Feeds** send `Event { event, id, json }`: `change` events with the sequence number, or `message` events with the offset. Resume from the last `id` with `after`. `lagged` and `unauthorized` end the stream.
 
 ## 9. Aggregations
 

@@ -17,4 +17,5 @@ pub mod agent;
 pub mod mcp;
 pub mod shares;
 pub mod queues;
+pub mod grpc;
 pub mod live;
