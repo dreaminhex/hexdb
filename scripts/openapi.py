@@ -158,6 +158,7 @@ ROUTES = [
     # Changes
     ("get", "/changes", "Changes", "Committed changes after a sequence number (long poll with wait)", {"parameters": [param(n, "query") for n in ("after", "tessellation", "limit", "wait")], "responses": ok()}),
     ("get", "/changes/stream", "Changes", "Committed changes as Server-Sent Events", {"parameters": [param(n, "query") for n in ("after", "tessellation")], "responses": {"200": {"description": "text/event-stream"}}}),
+    ("get", "/changes/ws", "Changes", "Committed changes over a WebSocket (JSON text frames)", {"parameters": [param(n, "query") for n in ("after", "tessellation")], "responses": {"101": {"description": "Switching to the WebSocket protocol"}}}),
     # Streams
     ("get", "/streams", "Streams", "Streams you can read", {"responses": ok()}),
     ("post", "/streams", "Streams", "Create a stream", {"requestBody": body(description="{\"name\", \"description\", \"retention_hours\", \"sources\": [...], \"destinations\": [...]}"), "responses": ok("Created", status="201")}),
@@ -168,6 +169,7 @@ ROUTES = [
     ("get", "/streams/{name}/messages", "Streams", "Read in order (long poll with wait)", {"parameters": [NAME] + [param(n, "query") for n in ("after", "group", "limit", "wait")], "responses": ok()}),
     ("post", "/streams/{name}/groups/{group}/commit", "Streams", "Commit a consumer group's offset", {"parameters": [NAME, param("group")], "requestBody": body({"type": "object", "properties": {"offset": {"type": "string"}}}), "responses": no_content()}),
     ("get", "/streams/{name}/subscribe", "Streams", "Messages as Server-Sent Events", {"parameters": [NAME] + [param(n, "query") for n in ("after", "group")], "responses": {"200": {"description": "text/event-stream"}}}),
+    ("get", "/streams/{name}/ws", "Streams", "Messages over a WebSocket (JSON text frames)", {"parameters": [NAME] + [param(n, "query") for n in ("after", "group")], "responses": {"101": {"description": "Switching to the WebSocket protocol"}}}),
     # Functions
     ("get", "/functions", "Functions", "Saved functions", {"responses": ok()}),
     ("post", "/functions", "Functions", "Create a function (admins)", {"requestBody": body(description="{\"name\", \"kind\": \"query|aggregate|transaction|script\", \"params\", \"tessellation\", \"body\", \"runtime\", \"code\"}"), "responses": ok("Created", status="201")}),

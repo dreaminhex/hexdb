@@ -126,7 +126,7 @@ pub fn request_credential(headers: &HeaderMap) -> Option<String> {
 }
 
 /// True if a browser request came from this server's own pages.
-fn same_origin(headers: &HeaderMap) -> bool {
+pub(crate) fn same_origin(headers: &HeaderMap) -> bool {
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
         let origin_host = origin.split_once("://").map(|(_, rest)| rest).unwrap_or(origin);

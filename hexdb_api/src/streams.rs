@@ -15,10 +15,7 @@ use crate::handlers::{ApiError, ApiResult, Engine};
 use axum::{
     extract::{rejection::{JsonRejection, QueryRejection}, Path, Query},
     http::{HeaderMap, StatusCode},
-    response::{
-        sse::{Event, KeepAlive, Sse},
-        IntoResponse,
-    },
+    response::IntoResponse,
     Json,
 };
 use futures::stream::{self, Stream};
@@ -28,7 +25,7 @@ use hexdb_core::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{convert::Infallible, time::Duration};
+use std::time::Duration;
 use ulid::Ulid;
 
 const MAX_WAIT_SECONDS: u64 = 60;
@@ -188,7 +185,33 @@ pub async fn subscribe(
     headers: HeaderMap,
     axum::extract::State(engine): Engine,
     Auth(principal): Auth,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
+    let events = subscription(name, params, &headers, engine, principal).await?;
+    Ok(crate::live::sse(events).into_response())
+}
+
+/// Messages over a WebSocket (`{"event": "message", "id": <offset>, "data"}` frames).
+pub async fn subscribe_socket(
+    upgrade: axum::extract::ws::WebSocketUpgrade,
+    Path(name): Path<String>,
+    params: Result<Query<ReadParams>, QueryRejection>,
+    headers: HeaderMap,
+    axum::extract::State(engine): Engine,
+    Auth(principal): Auth,
+) -> Result<axum::response::Response, ApiError> {
+    crate::live::check_origin(&headers)?;
+    let events = subscription(name, params, &headers, engine, principal).await?;
+    Ok(crate::live::websocket(upgrade, events))
+}
+
+/// A stream's messages from a starting point, then live: the same events for SSE and WebSocket.
+async fn subscription(
+    name: String,
+    params: Result<Query<ReadParams>, QueryRejection>,
+    headers: &HeaderMap,
+    engine: std::sync::Arc<hexdb_core::HexDBEngine>,
+    principal: Principal,
+) -> Result<impl Stream<Item = crate::live::LiveEvent> + Send + 'static, ApiError> {
     require(&principal, Permission::Read, &name)?;
     let Query(params) = params?;
     let resume = headers.get("last-event-id").and_then(|v| v.to_str().ok()).and_then(|v| Ulid::from_string(v.trim()).ok());
@@ -209,7 +232,7 @@ pub async fn subscribe(
         None => start_offset(&engine, &name, &params).await?,
     };
     engine.read_stream(&name, None, 1).await?;
-    let credential = crate::auth::request_credential(&headers).unwrap_or_default();
+    let credential = crate::auth::request_credential(headers).unwrap_or_default();
     struct State {
         engine: std::sync::Arc<hexdb_core::HexDBEngine>,
         name: String,
@@ -227,14 +250,14 @@ pub async fn subscribe(
         loop {
             if let Some(message) = s.queue.pop_front() {
                 let id = message["offset"].as_str().unwrap_or_default().to_string();
-                return Some((Ok(Event::default().event("message").id(id).data(message.to_string())), s));
+                return Some((crate::live::LiveEvent::new("message", Some(id), message), s));
             }
             // Re-check the credentials now and then: a long stream outlives a revocation otherwise.
             if s.checked.elapsed() >= Duration::from_secs(30) {
                 let ok = matches!(hexdb_core::auth::authenticate(&s.engine, &s.credential).await, Ok(Some(p)) if p.can(Permission::Read, &streams::resource(&s.name)));
                 if !ok {
                     s.done = true;
-                    return Some((Ok(Event::default().event("unauthorized").data("{\"message\":\"The credentials are no longer valid.\"}")), s));
+                    return Some((crate::live::LiveEvent::new("unauthorized", None, json!({ "message": "The credentials are no longer valid." })), s));
                 }
                 s.checked = std::time::Instant::now();
             }
@@ -248,5 +271,5 @@ pub async fn subscribe(
             }
         }
     });
-    Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+    Ok(events)
 }

@@ -732,9 +732,10 @@ curl "http://localhost:7700/changes"                                 # current p
 curl "http://localhost:7700/changes?after=830&wait=30"               # long poll (up to 60 s); pass last_seq back as after
 curl "http://localhost:7700/changes?after=830&tessellation=orders&limit=100"
 curl -N "http://localhost:7700/changes/stream?after=830"             # Server-Sent Events: event: change, id: <seq>
+websocat "ws://localhost:7700/changes/ws?after=830" -H "Authorization: Bearer $KEY"   # the same over a WebSocket
 ```
 
-SSE clients resume after a reconnect from the `Last-Event-ID` header. A user sees only changes to tessellations they can read; system tessellations are left out. GraphQL: `changes(after, tessellation, limit) { changes lastSeq }`.
+SSE clients resume after a reconnect from the `Last-Event-ID` header. WebSocket clients pass the last `id` they saw as `after`. Each WebSocket text frame is one event, `{"event": "change", "id": "831", "data": { ...the change... }}`; the server pings every 15 seconds and ignores anything the client sends but a close. The `lagged` and `unauthorized` events end the feed in both forms. A WebSocket signed in with the session cookie must come from the server's own pages (its `Origin` must match), so another site can't open one with a visitor's cookie; API keys and bearer tokens have no such check. A user sees only changes to tessellations they can read; system tessellations are left out. GraphQL: `changes(after, tessellation, limit) { changes lastSeq }`.
 
 ### Change history
 
@@ -781,8 +782,9 @@ curl "http://localhost:7700/streams/order-events/messages?after=01J...&limit=100
 curl "http://localhost:7700/streams/order-events/messages?group=billing&limit=100"
 curl -X POST http://localhost:7700/streams/order-events/groups/billing/commit -H "Content-Type: application/json" -d '{ "offset": "01J..." }'
 
-# Live, as Server-Sent Events
+# Live, as Server-Sent Events, or over a WebSocket ({"event": "message", "id": <offset>, "data"} frames)
 curl -N "http://localhost:7700/streams/order-events/subscribe?group=billing"
+websocat "ws://localhost:7700/streams/order-events/ws?group=billing" -H "Authorization: Bearer $KEY"
 ```
 
 **Sources** turn a tessellation's committed changes into messages, optionally filtered and limited to some operations. They start at the stream's creation and keep their position across restarts.

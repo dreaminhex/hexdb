@@ -23,10 +23,7 @@ use hexdb_core::{Permission, Principal};
 use axum::{
     extract::{rejection::QueryRejection, Query},
     http::{HeaderMap, StatusCode},
-    response::{
-        sse::{Event, KeepAlive, Sse},
-        IntoResponse,
-    },
+    response::IntoResponse,
     Json,
 };
 use futures::stream::{self, Stream, StreamExt};
@@ -34,7 +31,6 @@ use hexdb_core::{engine::HexDBEngine, Change, ChangeKind, HistoryExpired};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    convert::Infallible,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -180,7 +176,31 @@ pub async fn change_stream(
     headers: HeaderMap,
     axum::extract::State(engine): Engine,
     Auth(principal): Auth,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
+    let events = change_events(params, &headers, engine, principal).await?;
+    Ok(crate::live::sse(events).into_response())
+}
+
+/// Live changes over a WebSocket (`{"event": "change", "id", "data"}` frames).
+pub async fn change_socket(
+    upgrade: axum::extract::ws::WebSocketUpgrade,
+    params: Result<Query<ChangeParams>, QueryRejection>,
+    headers: HeaderMap,
+    axum::extract::State(engine): Engine,
+    Auth(principal): Auth,
+) -> Result<axum::response::Response, ApiError> {
+    crate::live::check_origin(&headers)?;
+    let events = change_events(params, &headers, engine, principal).await?;
+    Ok(crate::live::websocket(upgrade, events))
+}
+
+/// The change feed from a cursor, then live: the same events for SSE and WebSocket.
+async fn change_events(
+    params: Result<Query<ChangeParams>, QueryRejection>,
+    headers: &HeaderMap,
+    engine: Arc<HexDBEngine>,
+    principal: Principal,
+) -> Result<impl Stream<Item = crate::live::LiveEvent> + Send + 'static, ApiError> {
     let Query(params) = params?;
     if let Some(t) = params.tessellation.as_deref().filter(|t| !t.is_empty()) {
         principal.require(Permission::Read, t)?;
@@ -207,7 +227,7 @@ pub async fn change_stream(
     let backlog: Vec<Arc<Change>> = disk_backlog.into_iter().chain(memory_backlog).collect();
     let tessellation = params.tessellation.filter(|t| !t.is_empty());
 
-    let event = |change: &Change, json: Value| Event::default().event("change").id(change.seq.to_string()).data(json.to_string());
+    let event = |change: &Change, json: Value| crate::live::LiveEvent::new("change", Some(change.seq.to_string()), json);
 
     let filter_engine = engine.clone();
     let filter_tess = tessellation.clone();
@@ -215,7 +235,7 @@ pub async fn change_stream(
     let backlog = stream::iter(
         backlog
             .into_iter()
-            .filter_map(move |c| render(&filter_engine, &filter_principal, &c, filter_tess.as_deref()).map(|json| Ok(event(&c, json))))
+            .filter_map(move |c| render(&filter_engine, &filter_principal, &c, filter_tess.as_deref()).map(|json| event(&c, json)))
             .collect::<Vec<_>>(),
     );
 
@@ -230,7 +250,7 @@ pub async fn change_stream(
     }
     // The stream outlives the request, so the credential is re-checked
     // periodically: a locked user, a revoked session, or removed roles end it.
-    let credential = crate::auth::request_credential(&headers).unwrap_or_default();
+    let credential = crate::auth::request_credential(headers).unwrap_or_default();
     let start = Live { engine, principal, credential, checked: Instant::now(), receiver, tessellation, done: false };
     let live = stream::unfold(start, move |mut s| async move {
         if s.done {
@@ -245,8 +265,8 @@ pub async fn change_stream(
                     }
                     _ => {
                         s.done = true;
-                        let notice = Event::default().event("unauthorized").data("{\"message\":\"The credentials are no longer valid.\"}");
-                        return Some((Ok(notice), s));
+                        let notice = crate::live::LiveEvent::new("unauthorized", None, json!({ "message": "The credentials are no longer valid." }));
+                        return Some((notice, s));
                     }
                 }
             }
@@ -257,19 +277,19 @@ pub async fn change_stream(
             match next {
                 Ok(change) => {
                     if let Some(json) = render(&s.engine, &s.principal, &change, s.tessellation.as_deref()) {
-                        return Some((Ok(event(&change, json)), s));
+                        return Some((event(&change, json), s));
                     }
                 }
                 Err(RecvError::Lagged(_)) => {
                     // The client fell too far behind; tell it and close so it resumes from its last ID.
                     s.done = true;
-                    let notice = Event::default().event("lagged").data("{\"message\":\"Fell behind the change feed; reconnect to resume.\"}");
-                    return Some((Ok(notice), s));
+                    let notice = crate::live::LiveEvent::new("lagged", None, json!({ "message": "Fell behind the change feed; reconnect to resume." }));
+                    return Some((notice, s));
                 }
                 Err(RecvError::Closed) => return None,
             }
         }
     });
 
-    Ok(Sse::new(backlog.chain(live)).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+    Ok(backlog.chain(live))
 }

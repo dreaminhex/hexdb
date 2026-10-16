@@ -5977,6 +5977,50 @@
         }
       }
     },
+    "/changes/ws": {
+      "get": {
+        "tags": [
+          "Changes"
+        ],
+        "summary": "Committed changes over a WebSocket (JSON text frames)",
+        "operationId": "get_changes_ws",
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tessellation",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching to the WebSocket protocol"
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/streams": {
       "get": {
         "tags": [
@@ -6411,6 +6455,59 @@
         "responses": {
           "200": {
             "description": "text/event-stream"
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/streams/{name}/ws": {
+      "get": {
+        "tags": [
+          "Streams"
+        ],
+        "summary": "Messages over a WebSocket (JSON text frames)",
+        "operationId": "get_streams_name_ws",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "Switching to the WebSocket protocol"
           },
           "default": {
             "description": "An error: {\"error\": {\"code\", \"message\"}}",

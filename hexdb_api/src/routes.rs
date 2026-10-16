@@ -93,6 +93,7 @@ pub fn app_router(
         )
         .route("/streams/{name}/groups/{group}/commit", post(crate::streams::commit))
         .route("/streams/{name}/subscribe", get(crate::streams::subscribe))
+        .route("/streams/{name}/ws", get(crate::streams::subscribe_socket))
 
         // Functions and schedules
         .route("/functions", get(crate::functions::list).post(crate::functions::create))
@@ -111,6 +112,7 @@ pub fn app_router(
         .route("/plugins", get(plugins))
         .route("/changes", get(crate::changes::changes))
         .route("/changes/stream", get(crate::changes::change_stream))
+        .route("/changes/ws", get(crate::changes::change_socket))
 
         // Lattice replication (hex to hex, token-protected)
         .route("/lattice/snapshot", get(crate::lattice::snapshot))
