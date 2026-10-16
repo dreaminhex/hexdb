@@ -401,9 +401,14 @@ pub struct MfaSetup {
 }
 
 /// Start enrolling an authenticator app: returns the secret and an `otpauth://` URI.
-pub async fn mfa_setup(State(engine): Engine, Auth(principal): Auth, body: Result<Json<MfaSetup>, axum::extract::rejection::JsonRejection>) -> ApiResult {
+pub async fn mfa_setup(
+    State(engine): Engine,
+    Auth(principal): Auth,
+    crate::client::ClientIp(client): crate::client::ClientIp,
+    body: Result<Json<MfaSetup>, axum::extract::rejection::JsonRejection>,
+) -> ApiResult {
     let Json(input) = body?;
-    let (secret, uri) = users::mfa_setup(&engine, &principal.user_id, &input.password).await?;
+    let (secret, uri) = reauth(&engine, &principal, &client, "auth.mfa_setup", users::mfa_setup(&engine, &principal.user_id, &input.password)).await?;
     Ok(Json(json!({ "secret": secret, "otpauth_uri": uri })).into_response())
 }
 

@@ -1340,10 +1340,18 @@ fn port_part(endpoint: &str) -> &str {
 
 /// What another hex needs to join this lattice: the lattice name, seed
 /// addresses, and the shared secret, as config snippets (admins, with password).
-pub async fn join_info(State(engine): Engine, Auth(principal): Auth, body: Result<Json<JoinRequest>, JsonRejection>) -> ApiResult {
+pub async fn join_info(
+    State(engine): Engine,
+    Auth(principal): Auth,
+    crate::client::ClientIp(client): crate::client::ClientIp,
+    body: Result<Json<JoinRequest>, JsonRejection>,
+) -> ApiResult {
     principal.require_admin()?;
     let Json(input) = body?;
+    // It hands out the lattice secret: the password re-check is under the sign-in lockout.
+    hexdb_core::auth::check_reauth(&engine, &principal.login, &client).await?;
     if !users::verify_password(&engine, &principal.user_id, &input.password).await? {
+        hexdb_core::auth::reauth_failed(&engine, &principal.login, &client, "lattice.join_info").await;
         return Err(ApiError::forbidden("The password is wrong."));
     }
     let config = &engine.config;
