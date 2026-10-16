@@ -340,6 +340,26 @@ pub struct PasswordChange {
     pub new_password: String,
 }
 
+/// Run something that re-checks the caller's password or code, under the
+/// sign-in lockout: refused while locked out, and a wrong answer (403) counts
+/// as a failed attempt.
+async fn reauth<T>(
+    engine: &HexDBEngine,
+    principal: &Principal,
+    client: &str,
+    action: &str,
+    check: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Result<T, ApiError> {
+    core_auth::check_reauth(engine, &principal.login, client).await?;
+    match check.await {
+        Err(e) if matches!(e.downcast_ref::<hexdb_core::EngineError>(), Some(hexdb_core::EngineError::Forbidden(_))) => {
+            core_auth::reauth_failed(engine, &principal.login, client, action).await;
+            Err(e.into())
+        }
+        other => other.map_err(ApiError::from),
+    }
+}
+
 /// Change your own password. Signs out every session, then starts a new one
 /// for this request's client.
 pub async fn change_password(
@@ -349,7 +369,7 @@ pub async fn change_password(
     body: Result<Json<PasswordChange>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
     let Json(input) = body?;
-    users::change_own_password(&engine, &principal.user_id, &input.current_password, &input.new_password).await?;
+    reauth(&engine, &principal, &client, "auth.password_change", users::change_own_password(&engine, &principal.user_id, &input.current_password, &input.new_password)).await?;
     // Every older session is now invalid; issue a fresh one if this was a session.
     let mut response = StatusCode::NO_CONTENT.into_response();
     if matches!(principal.credential, core_auth::Credential::Session { .. }) {
@@ -425,7 +445,7 @@ pub async fn mfa_disable(
 ) -> ApiResult {
     let Json(input) = body?;
     let password = input.password.ok_or_else(|| ApiError::invalid("password is required."))?;
-    users::mfa_disable(&engine, &principal.user_id, &password, &input.code).await?;
+    reauth(&engine, &principal, &client, "auth.mfa_disable", users::mfa_disable(&engine, &principal.user_id, &password, &input.code)).await?;
     engine.record_audit(AuditEvent::new(&principal.login, "auth.mfa_disable", &principal.login).client(&client)).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -439,7 +459,7 @@ pub async fn mfa_backup_codes(
 ) -> ApiResult {
     let Json(input) = body?;
     let password = input.password.ok_or_else(|| ApiError::invalid("password is required."))?;
-    let codes = users::mfa_new_backup_codes(&engine, &principal.user_id, &password, &input.code).await?;
+    let codes = reauth(&engine, &principal, &client, "auth.mfa_backup_codes", users::mfa_new_backup_codes(&engine, &principal.user_id, &password, &input.code)).await?;
     engine.record_audit(AuditEvent::new(&principal.login, "auth.mfa_backup_codes", &principal.login).client(&client)).await;
     Ok(Json(json!({ "backup_codes": codes })).into_response())
 }

@@ -25,7 +25,7 @@ const RESERVED_NAMES: &[&str] = &[
     "health", "status", "flush", "shutdown", "tessellation", "tessellations", "ui", "wal", "graphql",
     "logs", "changes", "indexes", "auth", "transactions", "plugins", "lattice", "replication", "compact",
     "audit", "settings", "join", "streams", "functions", "schedules", "analyzers", "schemas", "openapi", "backup", "backups", "triggers",
-    "sql", "scrub", "config", "ai", "users", "roles",
+    "sql", "scrub", "config", "ai",
 ];
 const MAX_NAME_LEN: usize = 64;
 

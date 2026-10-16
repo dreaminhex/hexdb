@@ -472,3 +472,20 @@ fn storage_keys_rotate_without_downtime() -> Result<()> {
     assert_eq!(server.get_doc("notes", &id2)?.unwrap()["v"], "after rotation");
     Ok(())
 }
+
+#[test]
+fn re_checking_a_password_is_throttled_like_sign_in() -> Result<()> {
+    // A stolen session or API key can't be used to guess the account's password.
+    let server = TestServer::start()?;
+    let change = |current: &str| -> Result<StatusCode> {
+        let body = json!({ "current_password": current, "new_password": "A different passphrase 2026" });
+        Ok(server.request(Method::POST, "/auth/password", Some(&body), &[])?.status)
+    };
+    for _ in 0..5 {
+        assert_eq!(change("not the password")?, StatusCode::FORBIDDEN);
+    }
+    assert_eq!(change(TEST_ADMIN_PASSWORD)?, StatusCode::TOO_MANY_REQUESTS, "locked out, even with the right password");
+    let audit = server.request(Method::GET, "/audit?action=auth.password_change", None, &[])?.body;
+    assert!(audit["events"].as_array().unwrap().iter().any(|e| e["outcome"] == "failed"), "{}", audit);
+    Ok(())
+}

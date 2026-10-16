@@ -350,7 +350,10 @@ admin_email = "admin@example.com"
                     self.log_tail(30)
                 );
             }
-            if self.health_ok() {
+            // Tests run in parallel, so another test's server can answer on
+            // this port while ours is still failing to bind it: only a server
+            // whose runtime file names our process and port is ours.
+            if self.health_ok() && self.runtime_is_ours(api) {
                 self.last_startup = spawned.elapsed();
                 if !self.options.no_admin_password {
                     self.sign_in()?;
@@ -363,6 +366,15 @@ admin_email = "admin@example.com"
             }
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// True if this test's server wrote its runtime file for this port.
+    fn runtime_is_ours(&self, api: u16) -> bool {
+        let Some(pid) = self.child.as_ref().map(Child::id) else { return false };
+        RuntimeInfo::read(&self.data_dir())
+            .ok()
+            .flatten()
+            .is_some_and(|info| info.pid == pid && info.api_endpoint.ends_with(&format!(":{}", api)))
     }
 
     /// A client builder that trusts this server's test certificate, if any.

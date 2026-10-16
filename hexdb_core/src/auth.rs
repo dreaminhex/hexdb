@@ -745,6 +745,39 @@ fn throttle_id(key: &str) -> Ulid {
 }
 
 /// How long until any of these keys may try again, by the lattice-wide record.
+/// Before re-checking a signed-in user's password or one-time code (changing
+/// the password, turning MFA off, new backup codes): refuse while that login
+/// or client is locked out, as sign-in does, so a stolen session or API key
+/// can't be used to guess the password or code.
+pub async fn check_reauth(engine: &HexDBEngine, login: &str, client: &str) -> Result<()> {
+    let login_key = format!("login:{}", login.trim().to_ascii_lowercase());
+    let client_key = format!("client:{}", client);
+    let blocked = match engine.login_throttle.blocked(&[&login_key, &client_key]) {
+        Some(wait) => Some(wait),
+        None => lattice_blocked(engine, &[&login_key, &client_key]).await,
+    };
+    match blocked {
+        Some(wait) => Err(EngineError::RateLimited(
+            format!("Too many wrong passwords or codes. Try again in {} minute(s).", wait.as_secs().div_ceil(60).max(1)),
+            wait.as_secs().max(1),
+        )
+        .into()),
+        None => Ok(()),
+    }
+}
+
+/// Count a wrong password or code given to a signed-in user's re-check.
+pub async fn reauth_failed(engine: &HexDBEngine, login: &str, client: &str, action: &str) {
+    let login_key = format!("login:{}", login.trim().to_ascii_lowercase());
+    let client_key = format!("client:{}", client);
+    engine.login_throttle.fail(&[&login_key, &client_key]);
+    share_throttle(engine, &[&login_key, &client_key], &[]).await;
+    warn!(%client, "🚫 Wrong password or code for '{}' ({}) from {}.", login, action, client);
+    engine
+        .record_audit(AuditEvent::new(login, action, login).outcome("failed").client(client).details(serde_json::json!({ "reason": "bad_credentials" })))
+        .await;
+}
+
 async fn lattice_blocked(engine: &HexDBEngine, keys: &[&str]) -> Option<Duration> {
     if !engine.tessellation_exists(THROTTLE_TESSELLATION) {
         return None;

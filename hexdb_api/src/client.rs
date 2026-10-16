@@ -7,6 +7,11 @@
 // believed: walking the header from the right (the hop nearest to us), the
 // first address that isn't a trusted proxy is the client. Requests from
 // anywhere else keep their TCP peer address, so clients can't spoof it.
+//
+// A trusted proxy that terminates TLS (Fly, a load balancer, nginx) says so
+// with `X-Forwarded-Proto: https`. HexDB then marks the session cookie
+// `Secure` and sends HSTS, as it does when it serves TLS itself, so a browser
+// never sends the cookie over plain HTTP.
 
 use axum::{
     extract::{ConnectInfo, FromRequestParts, Request, State},
@@ -92,6 +97,18 @@ impl TrustedProxies {
         self.0.iter().any(|c| c.contains(ip))
     }
 
+    /// True if a trusted proxy says the client connected over HTTPS.
+    pub fn says_https(&self, peer: IpAddr, headers: &HeaderMap) -> bool {
+        self.trusts(peer)
+            && headers
+                .get_all("x-forwarded-proto")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|v| v.split(','))
+                .next_back()
+                .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"))
+    }
+
     /// The client address for a request from `peer` with these headers.
     pub fn resolve(&self, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
         if !self.trusts(peer) {
@@ -131,6 +148,7 @@ pub async fn resolve_client(
         Some(peer) => proxies.resolve(peer, request.headers()).to_string(),
         None => "unknown".into(),
     };
+    let https = peer(request.extensions()).is_some_and(|peer| proxies.says_https(peer, request.headers()));
     let forwarded_for = request.headers().get(FORWARDED_FOR_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
     let signature = request.headers().get(FORWARD_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
     if let (Some(client), Some(signature)) = (forwarded_for, signature) {
@@ -146,12 +164,56 @@ pub async fn resolve_client(
     request.headers_mut().remove(FORWARDED_FOR_HEADER);
     request.headers_mut().remove(FORWARD_SIGNATURE_HEADER);
     request.extensions_mut().insert(ClientIp(address));
-    next.run(request).await
+    let mut response = next.run(request).await;
+    if https && !engine.config.tls.enabled() {
+        secure_behind_proxy(response.headers_mut());
+    }
+    response
+}
+
+/// Mark session cookies `Secure` and add HSTS, for a request a trusted proxy
+/// received over HTTPS.
+fn secure_behind_proxy(headers: &mut HeaderMap) {
+    use axum::http::{header, HeaderValue};
+    let cookies: Vec<HeaderValue> = headers.get_all(header::SET_COOKIE).iter().cloned().collect();
+    if !cookies.is_empty() {
+        headers.remove(header::SET_COOKIE);
+        for cookie in cookies {
+            let text = cookie.to_str().unwrap_or_default();
+            let secured = if text.starts_with(hexdb_core::SESSION_COOKIE) && !text.to_ascii_lowercase().contains("; secure") {
+                HeaderValue::from_str(&format!("{}; Secure", text)).unwrap_or(cookie)
+            } else {
+                cookie
+            };
+            headers.append(header::SET_COOKIE, secured);
+        }
+    }
+    headers.entry(header::STRICT_TRANSPORT_SECURITY).or_insert(HeaderValue::from_static("max-age=31536000"));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn https_is_believed_only_from_trusted_proxies() {
+        let proxies = TrustedProxies::parse(&["10.0.0.0/8".into()]).unwrap();
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(proxies.says_https("10.1.2.3".parse().unwrap(), &h));
+        assert!(!proxies.says_https("203.0.113.9".parse().unwrap(), &h), "a client can't claim HTTPS");
+        h.insert("x-forwarded-proto", "https, http".parse().unwrap());
+        assert!(!proxies.says_https("10.1.2.3".parse().unwrap(), &h), "the nearest hop decides");
+
+        let mut response = HeaderMap::new();
+        response.append(axum::http::header::SET_COOKIE, format!("{}=abc; Path=/; HttpOnly", hexdb_core::SESSION_COOKIE).parse().unwrap());
+        response.append(axum::http::header::SET_COOKIE, "other=1".parse().unwrap());
+        secure_behind_proxy(&mut response);
+        let cookies: Vec<_> = response.get_all(axum::http::header::SET_COOKIE).iter().map(|v| v.to_str().unwrap().to_string()).collect();
+        assert!(cookies[0].ends_with("; Secure"), "{:?}", cookies);
+        assert_eq!(cookies[1], "other=1");
+        assert!(response.contains_key(axum::http::header::STRICT_TRANSPORT_SECURITY));
+    }
 
     fn headers(xff: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
