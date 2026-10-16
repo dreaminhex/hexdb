@@ -1633,9 +1633,55 @@ pub async fn plugins(State(engine): Engine, Auth(principal): Auth) -> ApiResult 
     .into_response())
 }
 
+/// IP addresses in `text` with their host part hidden: `66.177.x.x`,
+/// `2a09:8280:…`. Anything that doesn't parse as an address (times, versions,
+/// IDs) is left alone.
+fn mask_addresses(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        // A sentence can end right after an address: "from 66.177.89.188."
+        let (body, tail) = match run.parse::<std::net::IpAddr>() {
+            Ok(_) => (run.as_str(), ""),
+            Err(_) => {
+                let trimmed = run.trim_end_matches(['.', ':']);
+                (trimmed, &run[trimmed.len()..])
+            }
+        };
+        let tail = tail.to_string();
+        match body.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(ip)) => {
+                let [a, b, ..] = ip.octets();
+                out.push_str(&format!("{}.{}.x.x", a, b));
+            }
+            Ok(std::net::IpAddr::V6(ip)) => {
+                let s = ip.segments();
+                out.push_str(&format!("{:x}:{:x}:…", s[0], s[1]));
+            }
+            Err(_) => {
+                out.push_str(run);
+                run.clear();
+                return;
+            }
+        }
+        out.push_str(&tail);
+        run.clear();
+    };
+    for c in text.chars() {
+        if c.is_ascii_hexdigit() || c == '.' || c == ':' {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
 /// Recent server log records: `{"records": [...], "last_seq", "capacity"}`.
 /// Records are oldest first. Poll with `after=<last seq seen>` to tail.
-pub async fn logs(params: Result<Query<LogParams>, QueryRejection>, Auth(principal): Auth) -> ApiResult {
+pub async fn logs(params: Result<Query<LogParams>, QueryRejection>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     principal.require_action(Action::Logs)?;
     let Query(params) = params?;
     let level = match params.level.as_deref().filter(|l| !l.is_empty()) {
@@ -1646,7 +1692,7 @@ pub async fn logs(params: Result<Query<LogParams>, QueryRejection>, Auth(princip
         None => None,
     };
     let buffer = hexdb_core::log_buffer();
-    let records = buffer.query(&hexdb_core::LogQuery {
+    let mut records = buffer.query(&hexdb_core::LogQuery {
         level,
         after: params.after,
         before: params.before,
@@ -1654,6 +1700,15 @@ pub async fn logs(params: Result<Query<LogParams>, QueryRejection>, Auth(princip
         target: params.target.filter(|t| !t.is_empty()),
         limit: params.limit.unwrap_or(200).clamp(1, 1000),
     });
+    // On a public demo, visitors who can read the logs don't see each other's addresses.
+    if engine.config.security.demo_mode && !principal.is_admin() {
+        for record in &mut records {
+            record.message = mask_addresses(&record.message);
+            for value in record.fields.values_mut() {
+                *value = mask_addresses(value);
+            }
+        }
+    }
     Ok(Json(json!({
         "records": records,
         "last_seq": buffer.last_seq(),
@@ -1707,4 +1762,16 @@ pub async fn transaction(
     let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?;
     let outcome = engine.transaction(&ops, idem).await?;
     Ok(respond(StatusCode::OK, serde_json::to_value(&outcome.value).unwrap_or(Value::Null), outcome.replayed))
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::mask_addresses;
+
+    #[test]
+    fn addresses_are_masked_and_nothing_else() {
+        assert_eq!(mask_addresses("'playground' signed in from 66.177.89.188."), "'playground' signed in from 66.177.x.x.");
+        assert_eq!(mask_addresses("client 2a09:8280:1::4f:2"), "client 2a09:8280:…");
+        assert_eq!(mask_addresses("at 19:08:44 on 1.6.0, chunk ab12cd, 6 entries"), "at 19:08:44 on 1.6.0, chunk ab12cd, 6 entries");
+    }
 }

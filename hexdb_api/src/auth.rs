@@ -73,7 +73,19 @@ fn is_public(method: &Method, path: &str) -> bool {
         || (path == "/openapi.json" && method == Method::GET)
         || (path == "/auth/login" && method == Method::POST)
         || (path == "/shutdown" && method == Method::POST)
-        || path.starts_with("/lattice/")
+        || is_lattice_route(method, path)
+}
+
+/// The hex-to-hex routes, which check their own lattice signatures. Listed
+/// exactly, so no other handler is ever reached without credentials.
+fn is_lattice_route(method: &Method, path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/lattice/") else { return false };
+    let one_segment = |prefix: &str| rest.strip_prefix(prefix).is_some_and(|s| !s.is_empty() && !s.contains('/'));
+    match *method {
+        Method::GET => matches!(rest, "snapshot" | "catalog" | "changes") || one_segment("snapshot/") || one_segment("chunks/"),
+        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "throttle"),
+        _ => false,
+    }
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
@@ -477,4 +489,36 @@ pub async fn revoke_key(State(engine): Engine, Auth(principal): Auth, Path(id): 
         return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "No such API key."));
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_listed_routes_are_public() {
+        for (method, path) in [
+            (Method::GET, "/lattice/snapshot"),
+            (Method::GET, "/lattice/snapshot/orders"),
+            (Method::GET, "/lattice/chunks/ab12"),
+            (Method::POST, "/lattice/revoke"),
+            (Method::POST, "/lattice/ai-usage"),
+            (Method::POST, "/auth/login"),
+            (Method::GET, "/health"),
+        ] {
+            assert!(is_public(&method, path), "{} {}", method, path);
+        }
+        for (method, path) in [
+            (Method::GET, "/lattice/count"),
+            (Method::GET, "/lattice/_files/a.jpg"),
+            (Method::GET, "/lattice/snapshot/orders/extra"),
+            (Method::DELETE, "/lattice/chunks/ab12"),
+            (Method::POST, "/lattice/snapshot"),
+            (Method::GET, "/lattice/"),
+            (Method::GET, "/users"),
+            (Method::POST, "/health"),
+        ] {
+            assert!(!is_public(&method, path), "{} {}", method, path);
+        }
+    }
 }

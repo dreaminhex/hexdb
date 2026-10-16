@@ -1,6 +1,6 @@
 // HexDB API: functions and schedules (see hexdb_core::functions)
 //
-//   GET    /functions                  every function (signed-in users)
+//   GET    /functions                  every function (signed-in users; only admins see bodies and code)
 //   POST   /functions                  create (admins)
 //   GET    /functions/{name}           one function
 //   PUT    /functions/{name}           replace (admins)
@@ -30,13 +30,26 @@ fn not_found(what: &str, name: &str) -> ApiError {
     ApiError::from(anyhow::Error::from(EngineError::NotFound(format!("{} '{}' not found.", what, name))))
 }
 
-pub async fn list(axum::extract::State(engine): Engine, Auth(_principal): Auth) -> ApiResult {
-    Ok(Json(json!({ "functions": engine.list_functions().await? })).into_response())
+/// What a caller may see of a function: everyone can see what it's called,
+/// what it does and its parameters (enough to run it); only administrators
+/// see how it works (its query, aggregation or operations, and script code,
+/// which may hold credentials).
+fn shown(mut def: FunctionDef, principal: &hexdb_core::Principal) -> FunctionDef {
+    if !principal.is_admin() {
+        def.body = None;
+        def.code = None;
+    }
+    def
 }
 
-pub async fn get(Path(name): Path<String>, axum::extract::State(engine): Engine, Auth(_principal): Auth) -> ApiResult {
+pub async fn list(axum::extract::State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    let functions: Vec<FunctionDef> = engine.list_functions().await?.into_iter().map(|d| shown(d, &principal)).collect();
+    Ok(Json(json!({ "functions": functions })).into_response())
+}
+
+pub async fn get(Path(name): Path<String>, axum::extract::State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     let def = engine.get_function(&name).await?.ok_or_else(|| not_found("Function", &name))?;
-    Ok(Json(json!(def)).into_response())
+    Ok(Json(json!(shown(def, &principal))).into_response())
 }
 
 pub async fn create(axum::extract::State(engine): Engine, Auth(principal): Auth, body: Result<Json<FunctionDef>, JsonRejection>) -> ApiResult {
