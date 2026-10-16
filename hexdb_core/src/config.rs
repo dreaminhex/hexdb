@@ -284,6 +284,17 @@ pub struct FilesConfig {
     /// The longest side of a thumbnail, in pixels.
     #[serde(default = "default_thumbnail_px")]
     pub thumbnail_px: u32,
+    /// Parse files (metadata, thumbnails, video frames) in a separate,
+    /// restricted worker process (see `crate::extract::sandbox`).
+    #[serde(default = "default_true")]
+    pub sandbox: bool,
+    /// Memory a parser worker may use, in MB.
+    #[serde(default = "default_sandbox_memory_mb")]
+    pub sandbox_memory_mb: u64,
+}
+
+fn default_sandbox_memory_mb() -> u64 {
+    1024
 }
 
 fn default_thumbnail_px() -> u32 {
@@ -334,6 +345,8 @@ impl Default for FilesConfig {
             text_kb: default_text_kb(),
             thumbnails: true,
             thumbnail_px: default_thumbnail_px(),
+            sandbox: true,
+            sandbox_memory_mb: default_sandbox_memory_mb(),
         }
     }
 }

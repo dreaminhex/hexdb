@@ -27,6 +27,7 @@
 mod docs;
 mod image;
 mod media;
+pub mod sandbox;
 pub mod thumbnail;
 pub mod video;
 mod xml;
@@ -103,6 +104,15 @@ impl Source {
 
     pub fn len(&self) -> u64 {
         self.inner.len()
+    }
+
+    /// Start over with a fresh budget and deadline (to read the file again
+    /// for its thumbnail, keeping what the underlying source cached).
+    pub fn restart(&mut self, limits: &Limits) {
+        self.pos = 0;
+        self.read = 0;
+        self.budget = limits.max_read_bytes;
+        self.deadline = Instant::now() + limits.timeout;
     }
 
     pub fn is_empty(&self) -> bool {

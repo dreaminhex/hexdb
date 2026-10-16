@@ -20,8 +20,16 @@ use tracing::{error, info, warn};
 /// Names a hex can be given. Embedded so the server doesn't depend on its working directory.
 const HEX_NAMES: &str = include_str!("../data/names.txt");
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // A parser sandbox worker: decided before anything else starts (no
+    // runtime, no threads, no logging), so its restrictions cover all it does.
+    if std::env::args().nth(1).as_deref() == Some(hexdb_core::extract::sandbox::WORKER_ARG) {
+        hexdb_core::extract::sandbox::worker_main();
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(server())
+}
+
+async fn server() -> anyhow::Result<()> {
     let started_at = chrono::Utc::now().timestamp_millis();
     // Several TLS crypto providers are compiled in; choose one explicitly.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -177,6 +185,14 @@ async fn main() -> anyhow::Result<()> {
         name: name.clone(),
         hex_type: role.clone(),
     };
+    if config.files.sandbox {
+        match std::env::current_exe() {
+            Ok(exe) => hexdb_core::extract::sandbox::set_worker(exe, config.files.sandbox_memory_mb),
+            Err(e) => warn!("⚠️ Files are parsed in-process: the parser sandbox can't find this executable ({}).", e),
+        }
+    } else {
+        warn!("⚠️ files.sandbox is off: files are parsed in the server process.");
+    }
     let engine = match HexDBEngine::open(config.clone(), identity, keys.clone()).await {
         Ok(engine) => Arc::new(engine),
         Err(e) => {

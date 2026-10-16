@@ -280,6 +280,8 @@ pub struct BlobStats {
     pub fetched_from_peers: u64,
     /// Chunks that couldn't be copied from any hex since startup.
     pub fetch_failures: u64,
+    /// The parser sandbox (see `crate::extract::sandbox`).
+    pub parser_sandbox: crate::extract::sandbox::SandboxStats,
     pub vertices: Vec<BlobVertexStats>,
 }
 

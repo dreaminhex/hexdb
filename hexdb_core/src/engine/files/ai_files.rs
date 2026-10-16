@@ -304,11 +304,7 @@ impl HexDBEngine {
             timeout: Duration::from_secs(self.config.files.extract_timeout_seconds.max(1) * 2),
             max_text_bytes: 0,
         };
-        tokio::task::spawn_blocking(move || {
-            let mut source = crate::extract::Source::new(Box::new(BlobSource::new(store, &manifest)), &limits);
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::extract::thumbnail::video_frames(&mut source, count, px)))
-                .unwrap_or_else(|_| Err(anyhow!("the video decoder failed on this file")))
-        })
+        tokio::task::spawn_blocking(move || crate::extract::sandbox::video_frames(Box::new(BlobSource::new(store, &manifest)), count, px, &limits))
         .await
         .map_err(|e| anyhow!("{}", e))?
     }

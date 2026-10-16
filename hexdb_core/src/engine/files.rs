@@ -998,6 +998,7 @@ impl HexDBEngine {
         let mut stats = self.blobs.stats();
         stats.fetched_from_peers = self.file_sync.fetched.load(Ordering::Relaxed);
         stats.fetch_failures = self.file_sync.failed.load(Ordering::Relaxed);
+        stats.parser_sandbox = crate::extract::sandbox::stats();
         stats
     }
 
@@ -1367,18 +1368,13 @@ impl HexDBEngine {
         let thumbnail_px = (kept_thumbnail.is_none() && self.config.files.thumbnails && crate::extract::thumbnail::supported(&content_type))
             .then_some(self.config.files.thumbnail_px.clamp(32, 2048));
         let file_type = content_type.clone();
+        // Parsed in the sandbox worker when it's on (see crate::extract::sandbox).
         let work = tokio::task::spawn_blocking(move || {
-            let mut source = crate::extract::Source::new(Box::new(BlobSource::new(store.clone(), &manifest)), &limits);
-            let extracted = crate::extract::extract(&mut source, &name, &content_type, &limits);
-            let thumbnail = thumbnail_px.map(|px| {
-                let mut source = crate::extract::Source::new(Box::new(BlobSource::new(store, &manifest)), &limits);
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::extract::thumbnail::make(&mut source, &content_type, px)))
-                    .unwrap_or_else(|_| Err(anyhow!("the image decoder failed on this file")))
-            });
-            (extracted, thumbnail)
+            crate::extract::sandbox::extract(Box::new(BlobSource::new(store, &manifest)), &name, &content_type, &limits, thumbnail_px)
         });
-        // The source stops reading at its deadline; this is a backstop for a parser stuck in a loop.
-        let (mut extracted, thumbnail) = match tokio::time::timeout(limits.timeout * 2 + Duration::from_secs(5), work).await {
+        // The source stops reading at its deadline and the sandbox kills a stuck
+        // worker; this is the last backstop (a stuck in-process parser).
+        let (mut extracted, thumbnail) = match tokio::time::timeout(limits.timeout * 4 + Duration::from_secs(10), work).await {
             Ok(Ok(done)) => done,
             Ok(Err(e)) => (crate::extract::Extracted { errors: vec![format!("extraction failed: {}", e)], ..Default::default() }, None),
             Err(_) => (crate::extract::Extracted { errors: vec!["extraction took too long".into()], ..Default::default() }, None),

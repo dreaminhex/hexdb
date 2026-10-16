@@ -608,3 +608,16 @@ fn images_get_thumbnails() -> Result<()> {
     assert_eq!(server.get_bytes(&format!("/media/{}/thumbnail", text), &[])?.0, StatusCode::NOT_FOUND);
     Ok(())
 }
+
+#[test]
+fn files_are_parsed_in_the_sandbox() -> Result<()> {
+    let server = files_server()?;
+    let doc = upload(&server, "music/sandboxed.wav", &tagged_wav("Sandboxed", "The Workers"))?;
+    let doc = extracted(&server, doc["id"].as_str().unwrap())?;
+    assert_eq!(doc["meta"]["title"], "Sandboxed", "{}", doc["meta"]);
+    let sandbox = server.request(Method::GET, "/status", None, &[])?.body["storage"]["files"]["parser_sandbox"].clone();
+    assert_eq!(sandbox["enabled"], true, "{}", sandbox);
+    assert!(sandbox["runs"].as_u64().unwrap() >= 1, "{}", sandbox);
+    assert_eq!(sandbox["failed"], 0, "{}", sandbox);
+    Ok(())
+}

@@ -947,6 +947,8 @@ After each upload, new version or version restore, the Overseer reads the file i
 
 **Limits.** Extraction reads at most `files.extract_max_mb` (64) of a file and stops after `files.extract_timeout_seconds` (30). Each extractor runs on its own: one that fails or panics adds a line to `extract.errors` and the others still run. Strings are cut at 4,096 bytes, arrays and objects at 500 items; `meta.text` is at most `files.text_kb` (64) KB. A `meta` larger than 256 KB loses its largest tag families first (listed in `meta.dropped`). Binary data (embedded thumbnails, maker notes, cover art) is left out.
 
+**The parser sandbox.** Files come from users, and file parsers are where a hostile file does harm, so extraction, thumbnails and video frames are made in a separate worker process (`files.sandbox`, on by default): the server's own executable, started for one file at a time. The worker never sees the store, the keys or the network. It asks the hex for byte ranges of the file over a pipe, and the hex reads them from the encrypted store, enforcing the read budget and deadline itself. The worker gets an empty environment and no handles but its pipes, and is killed at the deadline or if the hex exits. On Linux it also runs under resource limits (`files.sandbox_memory_mb`, 1024, of memory, CPU seconds, no file writes, few descriptors) and a seccomp filter that allows only memory, thread, clock and pipe system calls: opening files, sockets and starting programs fail. On macOS the resource limits apply (macOS doesn't enforce the memory one). On Windows the worker runs in its own job object with a memory limit, a CPU-time limit, no child processes and UI restrictions. `/status` shows `storage.files.parser_sandbox` (runs, failures, workers stopped at the deadline). Turning the sandbox off parses files in the server process, as before 2.0.
+
 Not read yet: PDF body text (the AI can read it; see `pdf` in [AI](#ai)), GoPro GPMF telemetry, ICC profile descriptions (other than PNG `iCCP` names), frames of video that isn't H.264.
 
 ### Thumbnails
@@ -1542,6 +1544,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 - `hexdb.pid` (the shutdown token) and `initial-admin-password.txt` are readable by the owner only: mode 0600 on Unix, and on Windows inherited permissions are removed, leaving the current user and SYSTEM.
 - Secrets belong in `hexdb.local.toml` or environment variables, never in a committed `hexdb.toml`.
 - `GET /settings` hides secrets in the effective configuration.
+- Uploaded files are parsed in a sandboxed worker process that has no keys, no store and (on Linux) no file or network access; see [the parser sandbox](#metadata-extraction).
 
 ### Configuration, AI and storage
 
@@ -1923,6 +1926,7 @@ Estimates are rough: about 450 tokens of instructions and answer per file, plus 
 | `files.scrub_hours` | 24 | Hours between scrubs of every shard (0: never) |
 | `files.extract` | `true` | Read metadata from uploaded files |
 | `files.extract_max_mb`, `extract_timeout_seconds` | 64, 30 | What extraction may read and how long it may take, per file |
+| `files.sandbox`, `sandbox_memory_mb` | true, 1024 | Parse files in a restricted worker process, and its memory limit (see [the parser sandbox](#metadata-extraction)) |
 | `files.text_kb` | 64 | Text kept per file for full-text search |
 | `files.thumbnails`, `thumbnail_px` | `true`, 320 | Image thumbnails and their size (32-2048) |
 | `memory.ram_mb` | 1024 | Memory budget for documents |

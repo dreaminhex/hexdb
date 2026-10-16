@@ -51,6 +51,13 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 # keyframe is ever decoded. Optional so a build can leave H.264 out (--no-default-features).
 openh264 = { version = "0.9.8", optional = true }
 
+# The parser sandbox (crate::extract::sandbox): rlimits on Unix, a seccomp filter on Linux.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.4"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
