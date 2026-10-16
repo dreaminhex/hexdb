@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import {
   IconArrowBackUp,
   IconDownload,
+  IconLink,
   IconFile,
   IconFileText,
   IconFileTypePdf,
@@ -28,6 +29,7 @@ import {
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
+import { ShareDialog } from "@/components/share-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
@@ -39,7 +41,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { usePoll } from "@/hooks/use-poll"
 import { api, ApiError, errorMessage, type FileDoc, filePathUrl, fileUrl, uploadFile } from "@/lib/api"
-import { can, useAuth } from "@/lib/auth"
+import { can, has, useAuth } from "@/lib/auth"
 import { formatBytes, formatTimestamp } from "@/lib/format"
 import { setQueryParam, useQueryParam } from "@/lib/router"
 import { cn } from "@/lib/utils"
@@ -464,6 +466,7 @@ function FileDetails({
   const [description, setDescription] = useState("")
   const [busy, setBusy] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [sharing, setSharing] = useState(false)
 
   const load = async () => {
     if (!id) return
@@ -537,6 +540,11 @@ function FileDetails({
                     <IconDownload /> Download
                   </a>
                 </Button>
+                {rights.share && (
+                  <Button size="sm" variant="outline" onClick={() => setSharing(true)}>
+                    <IconLink /> Share
+                  </Button>
+                )}
                 {file.content_type === "application/pdf" && (
                   <Button asChild size="sm" variant="outline">
                     <a href={fileUrl(tess, file.id)} target="_blank" rel="noreferrer">
@@ -752,6 +760,7 @@ function FileDetails({
           )}
         </SheetContent>
       </Sheet>
+      {file && <ShareDialog open={sharing} onOpenChange={setSharing} tess={tess} fileId={file.id} name={file.name} />}
       {file && (
         <ConfirmDialog
           open={deleting}
@@ -785,6 +794,7 @@ interface FileRights {
   upload: boolean
   delete: boolean
   restore: boolean
+  share: boolean
 }
 
 function TrashView({ tess, rights, onChanged }: { tess: string; rights: FileRights; onChanged: () => void }) {
@@ -953,12 +963,14 @@ export function FilesPage() {
   const [uploads, setUploads] = useState<UploadItem[]>([])
   const [dragging, setDragging] = useState(false)
   const [newFolder, setNewFolder] = useState("")
+  const [sharingFolder, setSharingFolder] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   const rights: FileRights = {
     write: !!tess && can(me, "write", tess),
     upload: !!tess && can(me, "upload", tess),
     delete: !!tess && can(me, "delete", tess),
     restore: !!tess && can(me, "restore", tess),
+    share: !!tess && has(me, "share") && can(me, "read", tess),
   }
 
   useEffect(() => {
@@ -1238,6 +1250,11 @@ export function FilesPage() {
                     </button>
                   </span>
                 ))}
+                {rights.share && (
+                  <Button variant="ghost" size="sm" className="ml-2 h-7 text-xs" onClick={() => setSharingFolder(true)}>
+                    <IconLink className="size-3.5" /> Share folder
+                  </Button>
+                )}
                 {rights.upload && (
                   <form
                     className="ml-3 flex items-center gap-1"
@@ -1361,6 +1378,9 @@ export function FilesPage() {
         </div>
       )}
 
+      {tess && (
+        <ShareDialog open={sharingFolder} onOpenChange={setSharingFolder} tess={tess} folder={folder} name={folder === "/" ? `all of ${tess}` : folder} />
+      )}
       <FileDetails tess={tess} id={selected} open={!!selected} onOpenChange={(open) => !open && setSelected(null)} onChanged={() => void listing.refresh()} rights={rights} />
       <UploadPanel items={uploads} onClear={() => setUploads([])} />
     </div>

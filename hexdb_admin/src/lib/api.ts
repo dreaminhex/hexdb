@@ -49,7 +49,30 @@ const enc = encodeURIComponent
 export const UNAUTHORIZED_EVENT = "hexdb:unauthorized"
 
 /** Something a role allows. read/write/manage apply to the granted tessellations; the rest apply everywhere. */
-export type Action = "read" | "write" | "manage" | "upload" | "delete" | "restore" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin" | "ai" | "chat"
+export type Action = "read" | "write" | "manage" | "upload" | "delete" | "restore" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin" | "ai" | "chat" | "share"
+
+/** A sharing link, as its maker sees it. */
+export interface ShareLink {
+  code: string
+  path: string
+  tessellation: string
+  file_id: string | null
+  folder: string | null
+  name: string
+  created_by: string
+  created_at: number
+  expires_at: number | null
+  password: boolean
+  max_downloads: number | null
+  downloads: number
+  note: string
+  expired: boolean
+}
+
+/** The public address of a sharing link. */
+export function shareAddress(link: ShareLink): string {
+  return `${window.location.origin}${link.path}`
+}
 
 /** `GET /ai/chat`: whether the chat is on for this user, and what's left today. */
 export interface ChatStatus {
@@ -844,6 +867,10 @@ export interface SqlResult {
 export const api = {
   me: () => request<Me>("GET", "/auth/me"),
   chatStatus: () => request<ChatStatus>("GET", "/ai/chat"),
+  shares: (all = false) => request<{ shares: ShareLink[] }>("GET", `/shares${all ? "?all=true" : ""}`),
+  createShare: (body: { tessellation: string; file_id?: string; folder?: string; expires_in_days?: number; password?: string; max_downloads?: number; note?: string }) =>
+    request<ShareLink>("POST", "/shares", body),
+  deleteShare: (code: string) => request<void>("DELETE", `/shares/${encodeURIComponent(code)}`),
   chat: (question: string, history: { role: "user" | "assistant"; content: string }[]) => request<ChatAnswer>("POST", "/ai/chat", { question, history }),
   login: (login: string, password: string, code?: string) =>
     request<{ user: Me; expires_at: number }>("POST", "/auth/login", code ? { login, password, code } : { login, password }),

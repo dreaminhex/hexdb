@@ -9,6 +9,8 @@ import { AuthProvider, has, useAuth, type Requirement } from "@/lib/auth"
 import { useRoute } from "@/lib/router"
 import { AccountPage } from "@/pages/account"
 import { AskPage } from "@/pages/ask"
+import { SharesPage } from "@/pages/shares"
+import { ShareView } from "@/pages/share-view"
 import { AuditPage } from "@/pages/audit"
 import { ConfigurationPage } from "@/pages/configuration"
 import { LoginPage } from "@/pages/login"
@@ -41,6 +43,7 @@ const PAGES: Record<string, Page> = {
   "/tessellations": { title: "Tessellations", element: TessellationsPage },
   "/documents": { title: "Documents", element: DocumentsPage },
   "/files": { title: "Files", element: FilesPage },
+  "/shares": { title: "Shared links", element: SharesPage, requires: "share" },
   "/streams": { title: "Streams", element: StreamsPage },
   "/functions": { title: "Functions", element: FunctionsPage },
   "/users": { title: "Users", element: UsersPage, requires: "admin" },
@@ -87,6 +90,11 @@ function Shell() {
 }
 
 function App() {
+  const route = useRoute()
+  // A sharing link's page is for people without an account: no sign-in, no app chrome.
+  if (route.startsWith("/s/")) {
+    return <ShareView code={route.slice(3).split("/")[0]} />
+  }
   return (
     <AuthProvider>
       <Shell />

@@ -982,6 +982,29 @@ Deleting a file's document (`DELETE /media/{id}`, or a delete in a transaction o
 
 Dropping a files tessellation drops its trashed files too.
 
+### Sharing links
+
+A sharing link gives people without an account one file, or the files under one folder: `https://<hex>/_s/<code>`. A browser opening it gets a page with a preview and a Download button (and the folder's files, for a folder link); scripts get JSON. Users with the `share` permission make links on the Files page (Share, or Share folder) or with the API, and see them under Shared links, with their downloads, where they can copy or delete them. Administrators can see everyone's.
+
+```bash
+curl -X POST http://localhost:7700/shares -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{ "tessellation": "media", "file_id": "01J...", "expires_in_days": 7, "password": "a long passphrase", "max_downloads": 10, "note": "for the press" }'
+# -> { "code": "PVETfyjH", "path": "/_s/PVETfyjH", ... }   ("folder": "/art/" instead of file_id for a folder)
+curl http://localhost:7700/_s/PVETfyjH                      # what the link is (no account needed)
+curl -X POST http://localhost:7700/_s/PVETfyjH/unlock -d '{ "password": "..." }'   # -> { "token" }, valid for an hour
+curl -o cover.png "http://localhost:7700/_s/PVETfyjH/content?download=true"         # &t=<token>; &file=<id> in a folder link
+curl http://localhost:7700/_s/<code>/files                  # a folder link's files
+curl -X DELETE http://localhost:7700/shares/PVETfyjH -H "Authorization: Bearer $KEY"
+```
+
+**Codes: MAR-62.** Link codes are made with MAR-62, an algorithm by HexDB's author first used for the gotoit.us link shortener: an HMAC-SHA256 over the time (in nanoseconds), a random nonce and what is linked (the tessellation and the file or folder), whose first 47 bits are written in Base62 (0-9, A-Z, a-z) and padded to 8 characters. The HMAC key is derived from the lattice key, so codes can't be predicted without it, and every hex resolves every link. A code is also its link's document ID in the `_shares` system tessellation (the 47-bit value), so a lookup is one read; a code already in use is drawn again with a new nonce.
+
+**What a link can reach.** Only what it names: one file, or the files under one folder, as its maker sees them. A link acts as its maker, resolved on every request, so their read grant, row filters and folder limits apply, and the link stops working when they lose the `share` permission or access to the tessellation, or their account is locked or removed.
+
+**Limits.** Links expire: `sharing.default_days` (7) unless the maker says otherwise, at most `sharing.max_days` (30; 0 lets links never expire). A link can need a password (stored as an Argon2 hash; `sharing.require_password` makes it mandatory), and allow a number of downloads (a download is a `GET` of the content from its start; a thumbnail isn't one). `sharing.enabled` turns links off everywhere.
+
+**Guessing and leaking.** Unknown, expired, used-up and deleted codes all answer the same 404, and they and wrong passwords count toward a lockout per client address (the sign-in limits), so codes can't be found by trying them. Responses carry `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer` (the code never leaves in a `Referer`), `nosniff` and the download CSP; HTML and SVG are always downloads. Each link's creation, downloads (with the client address), wrong passwords and deletion are audited (`share.create`, `share.download`, `share.unlock`, `share.delete`). Anyone who has a link can pass it on, so prefer passwords and short expiries for anything sensitive.
+
 ### How file content is stored
 
 1. **Chunks.** A file is cut into content-defined chunks (FastCDC: 512 KB to 8 MB, 2 MB on average), so an edit changes only the chunks around it. A chunk's ID is a keyed BLAKE3 hash of its content, keyed with a random content key kept in the catalog, so identical content is stored once across all files, versions and tessellations, while the ID doesn't reveal a known file's plain hash.
@@ -1375,6 +1398,7 @@ A role is a set of permissions:
 | `maintenance` | Flush, compact and back up | no |
 | `ai` | Run prompts through the lattice's AI provider (`POST /ai/complete`), within its token budget | no |
 | `chat` | Ask the AI chat about the data you can read (`POST /ai/chat`, the Ask page), within the chat limits | no |
+| `share` | Make sharing links to files and folders you can read, for people without an account (see [Sharing links](#sharing-links)); not in any built-in role but `admin` | no |
 | `admin` | Everything: users, roles, settings, functions, schedules, joining hexes, shutdown | no |
 
 Built-in roles:
@@ -1955,6 +1979,7 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `files.scrub_hours` | 24 | Hours between scrubs of every shard (0: never) |
 | `files.extract` | `true` | Read metadata from uploaded files |
 | `files.extract_max_mb`, `extract_timeout_seconds` | 64, 30 | What extraction may read and how long it may take, per file |
+| `sharing.enabled`, `default_days`, `max_days`, `require_password` | true, 7, 30, false | Sharing links (lattice configuration; see [Sharing links](#sharing-links)) |
 | `files.sandbox`, `sandbox_memory_mb` | true, 1024 | Parse files in a restricted worker process, and its memory limit (see [the parser sandbox](#metadata-extraction)) |
 | `files.text_kb` | 64 | Text kept per file for full-text search |
 | `files.thumbnails`, `thumbnail_px` | `true`, 320 | Image thumbnails and their size (32-2048) |

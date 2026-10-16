@@ -585,6 +585,7 @@ export function ConfigurationPage() {
       </div>
       <fieldset disabled={readOnly} className="grid min-w-0 gap-4">
         {section("AI", "AI features use this lattice's own provider and key, never anyone else's. Everything is off until you turn it on.", "ai.")}
+        {section("Sharing", "Links that give people without an account a file or a folder (users with the share permission make them on the Files page).", "sharing.")}
       </fieldset>
       <AiCard refreshKey={historyKey} readOnly={readOnly} />
       <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} readOnly={readOnly} />
