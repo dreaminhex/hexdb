@@ -618,6 +618,11 @@ impl HexDBEngine {
     }
 
     /// Catalog details for one tessellation.
+    /// The fields a tessellation's full-text index covers, if it has one.
+    pub fn text_index_fields(&self, tess: &str) -> Option<Vec<String>> {
+        self.indexes.read().unwrap().text_index(tess).map(|(fields, _)| fields)
+    }
+
     pub fn tessellation_info(&self, name: &str) -> Option<TessellationInfo> {
         self.catalog.lock().unwrap().tessellations.get(name).cloned()
     }

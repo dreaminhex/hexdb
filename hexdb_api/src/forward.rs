@@ -56,6 +56,8 @@ fn handled_locally(method: &Method, path: &str) -> bool {
         || path.ends_with("/_query")
         || path.ends_with("/_aggregate")
         || path == "/sql"
+        // MCP only reads; any hex answers.
+        || path == "/mcp"
 }
 
 /// True if a GraphQL request body contains a mutation.

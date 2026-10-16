@@ -13,3 +13,5 @@ pub mod triggers;
 pub mod sql;
 pub mod files;
 pub mod config;
+pub mod agent;
+pub mod mcp;

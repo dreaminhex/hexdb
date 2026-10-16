@@ -122,6 +122,15 @@ pub const CONFIG: &[ConfigDef] = &[
     def("ai.tagging.video_frames", ConfigKind::Integer { min: 1, max: 16 }, "4", "With video in what tagging sends: frames sent from each H.264 video, spread through it."),
     def("ai.video_thumbnails.enabled", ConfigKind::Boolean, "false", "Let the AI pick the most representative frame for video thumbnails."),
     def("ai.video_thumbnails.frames", ConfigKind::Integer { min: 2, max: 16 }, "6", "Candidate frames the AI chooses from."),
+    def("ai.chat.enabled", ConfigKind::Boolean, "false", "Let users with the chat permission ask the AI about the data they can read (the admin UI's Ask page and POST /ai/chat)."),
+    text("ai.chat.model", "Model for the chat (empty: ai.model). A smaller, cheaper model is usually enough, e.g. claude-haiku-5-5."),
+    def("ai.chat.max_tokens_per_answer", ConfigKind::Integer { min: 64, max: 16_000 }, "1024", "Most tokens one chat answer may use."),
+    def("ai.chat.max_tool_calls", ConfigKind::Integer { min: 0, max: 20 }, "6", "Most lookups (queries, searches) the AI may make to answer one question."),
+    def("ai.chat.max_question_chars", ConfigKind::Integer { min: 50, max: 20_000 }, "2000", "Longest question, in characters."),
+    def("ai.chat.max_history", ConfigKind::Integer { min: 0, max: 50 }, "10", "Earlier questions and answers sent along with a question (0: none)."),
+    def("ai.chat.user_daily_tokens", ConfigKind::Integer { min: 0, max: 1_000_000_000 }, "100000", "Most chat tokens one user may use per day (0: no limit beyond the monthly budget)."),
+    def("ai.chat.client_daily_tokens", ConfigKind::Integer { min: 0, max: 1_000_000_000 }, "50000", "Most chat tokens one client address may use per day (0: no limit). Separates visitors who share a login, as on a public demo."),
+    def("ai.chat.client_questions_per_minute", ConfigKind::Integer { min: 0, max: 1000 }, "6", "Most questions one client address may ask per minute (0: no limit)."),
 ];
 
 pub fn definition(key: &str) -> Option<&'static ConfigDef> {

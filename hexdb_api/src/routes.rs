@@ -65,6 +65,8 @@ pub fn app_router(
         .route("/ai/test", post(crate::config::ai_test))
         .route("/ai/complete", post(crate::config::ai_complete))
         .route("/ai/estimate", get(crate::config::ai_estimate))
+        .route("/ai/chat", get(crate::agent::chat_status).post(crate::agent::chat))
+        .route("/mcp", post(crate::mcp::post).get(crate::mcp::not_offered).delete(crate::mcp::not_offered))
         .route("/join", post(join_info))
 
         // Streams (publish/subscribe)

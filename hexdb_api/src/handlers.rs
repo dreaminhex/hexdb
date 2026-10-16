@@ -62,6 +62,17 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// The message, for callers that pass errors on as text (the AI tools).
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Ask the client to retry after this many seconds.
+    pub(crate) fn retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds);
+        self
+    }
+
     pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         ApiError { status, code, message: message.into(), retry_after: None }
     }
@@ -249,7 +260,7 @@ fn parse_filter_param(filter: Option<&str>) -> Result<Value, ApiError> {
 }
 
 /// Parse `"-views,title"` into sort keys.
-fn parse_sort_text(text: &str) -> Result<Vec<SortKey>, ApiError> {
+pub(crate) fn parse_sort_text(text: &str) -> Result<Vec<SortKey>, ApiError> {
     text.split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())

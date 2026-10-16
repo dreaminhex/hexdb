@@ -153,10 +153,11 @@ pub enum Action {
     Delete,
     Restore,
     Ai,
+    Chat,
 }
 
 impl Action {
-    pub const ALL: [Action; 13] = [
+    pub const ALL: [Action; 14] = [
         Action::Read,
         Action::Write,
         Action::Manage,
@@ -170,6 +171,7 @@ impl Action {
         Action::Maintenance,
         Action::Admin,
         Action::Ai,
+        Action::Chat,
     ];
 
     pub fn name(self) -> &'static str {
@@ -187,6 +189,7 @@ impl Action {
             Action::Delete => "delete",
             Action::Restore => "restore",
             Action::Ai => "ai",
+            Action::Chat => "chat",
         }
     }
 
@@ -214,6 +217,7 @@ impl Action {
             Action::Delete => "Move files to the trash and delete them from it.",
             Action::Restore => "Restore files from the trash and earlier versions of files.",
             Action::Ai => "Run prompts through the lattice's AI provider, within its token budget.",
+            Action::Chat => "Ask the AI chat about the data you can read, within the chat limits (it never sees more than you can).",
         }
     }
 }

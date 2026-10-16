@@ -58,7 +58,7 @@ pub const BUILTIN_ROLES: &[BuiltinRole] = &[
         permissions: &[Action::Status, Action::Logs, Action::Plugins, Action::Maintenance],
     },
     BuiltinRole { name: "auditor", description: "Review the audit trail and server status. No document access.", permissions: &[Action::Status, Action::Audit] },
-    BuiltinRole { name: "ai", description: "Run prompts through the lattice's AI provider (POST /ai/complete), within its token budget.", permissions: &[Action::Ai] },
+    BuiltinRole { name: "ai", description: "Run prompts through the lattice's AI provider (POST /ai/complete) and use the AI chat, within the token budget.", permissions: &[Action::Ai, Action::Chat] },
 ];
 
 fn builtin(name: &str) -> Option<&'static BuiltinRole> {

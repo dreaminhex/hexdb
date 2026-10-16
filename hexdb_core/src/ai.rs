@@ -78,6 +78,64 @@ pub struct AiReply {
     pub millis: u64,
 }
 
+/// A tool the model may call in a conversation (`ai_chat`).
+#[derive(Debug, Clone, Serialize)]
+pub struct AiTool {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema of the tool's input.
+    pub input_schema: Value,
+}
+
+/// A call the model made to a tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: Value,
+}
+
+/// What a tool returned, sent back to the model.
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolResult {
+    pub id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+/// One step of a conversation.
+#[derive(Debug, Clone)]
+pub enum Turn {
+    User(String),
+    Assistant { text: String, calls: Vec<ToolCall> },
+    Results(Vec<ToolResult>),
+}
+
+/// A conversation with tools.
+#[derive(Debug, Clone)]
+pub struct ChatRequest {
+    /// Which feature asks (usage is kept per feature).
+    pub feature: String,
+    pub system: String,
+    pub turns: Vec<Turn>,
+    pub tools: Vec<AiTool>,
+    pub max_tokens: u64,
+    /// A model to use instead of `ai.model` (e.g. a smaller one for chat).
+    pub model: Option<String>,
+}
+
+/// The model's next step: text, tool calls, or both.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatReply {
+    pub text: String,
+    pub calls: Vec<ToolCall>,
+    pub model: String,
+    pub provider: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub millis: u64,
+}
+
 /// Where calls go, from the lattice configuration.
 #[derive(Clone)]
 struct Provider {
@@ -166,6 +224,33 @@ impl HexDBEngine {
             Ok((text, input_tokens, output_tokens)) => {
                 self.record_ai_usage(&request.feature, input_tokens, output_tokens, true).await;
                 Ok(AiReply { text, model: provider.model, provider: provider.kind, input_tokens, output_tokens, millis })
+            }
+            Err(e) => {
+                self.record_ai_usage(&request.feature, 0, 0, false).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// One step of a conversation with tools, within the budget; the tokens
+    /// it used are recorded under `request.feature`.
+    pub async fn ai_chat(&self, request: ChatRequest) -> Result<ChatReply> {
+        let mut provider = self.ai_provider(&request.feature)?;
+        if let Some(model) = request.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            provider.model = model.to_string();
+        }
+        self.check_ai_budget().await?;
+        let max_tokens = request.max_tokens.clamp(16, 16_000);
+        let started = Instant::now();
+        let result = match provider.kind.as_str() {
+            "anthropic" => chat_anthropic(&provider, &request, max_tokens).await,
+            _ => chat_completions_with_tools(&provider, &request, max_tokens).await,
+        };
+        let millis = started.elapsed().as_millis() as u64;
+        match result {
+            Ok((text, calls, input_tokens, output_tokens)) => {
+                self.record_ai_usage(&request.feature, input_tokens, output_tokens, true).await;
+                Ok(ChatReply { text, calls, model: provider.model, provider: provider.kind, input_tokens, output_tokens, millis })
             }
             Err(e) => {
                 self.record_ai_usage(&request.feature, 0, 0, false).await;
@@ -301,23 +386,8 @@ fn provider_error(provider: &str, status: reqwest::StatusCode, body: &str, key: 
     }
 }
 
-async fn call_anthropic(provider: &Provider, request: &AiRequest, max_tokens: u64) -> Result<(String, u64, u64)> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let content: Vec<Value> = request
-        .parts
-        .iter()
-        .map(|p| match p {
-            Part::Text(text) => json!({ "type": "text", "text": text }),
-            Part::Image { media_type, data } => json!({ "type": "image", "source": { "type": "base64", "media_type": media_type, "data": STANDARD.encode(data) } }),
-            Part::Pdf { data } => json!({ "type": "document", "source": { "type": "base64", "media_type": "application/pdf", "data": STANDARD.encode(data) } }),
-        })
-        .collect();
-    let mut body = json!({
-        "model": provider.model,
-        "max_tokens": max_tokens,
-        "system": request.system,
-        "messages": [{ "role": "user", "content": content }],
-    });
+/// POST a Messages API body to Claude; the parsed answer and its token counts.
+async fn post_anthropic(provider: &Provider, mut body: Value) -> Result<(Value, u64, u64)> {
     let official = provider.base_url == ANTHROPIC_API;
     let fallbacks = official && FALLBACK_MODELS.contains(&provider.model.as_str());
     if fallbacks {
@@ -325,11 +395,7 @@ async fn call_anthropic(provider: &Provider, request: &AiRequest, max_tokens: u6
         body["fallbacks"] = json!("default");
     }
     let key = provider.key.as_ref().map(|k| k.expose().to_string()).unwrap_or_default();
-    let mut call = client()?
-        .post(format!("{}/v1/messages", provider.base_url))
-        .header("x-api-key", &key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body);
+    let mut call = client()?.post(format!("{}/v1/messages", provider.base_url)).header("x-api-key", &key).header("anthropic-version", "2023-06-01").json(&body);
     if fallbacks {
         call = call.header("anthropic-beta", "server-side-fallback-2026-07-01");
     }
@@ -345,6 +411,69 @@ async fn call_anthropic(provider: &Provider, request: &AiRequest, max_tokens: u6
         + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0)
         + usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
     let output = usage["output_tokens"].as_u64().unwrap_or(0);
+    Ok((reply, input, output))
+}
+
+/// A conversation with tools through the Messages API.
+async fn chat_anthropic(provider: &Provider, request: &ChatRequest, max_tokens: u64) -> Result<(String, Vec<ToolCall>, u64, u64)> {
+    let messages: Vec<Value> = request
+        .turns
+        .iter()
+        .map(|turn| match turn {
+            Turn::User(text) => json!({ "role": "user", "content": [{ "type": "text", "text": text }] }),
+            Turn::Assistant { text, calls } => {
+                let mut content: Vec<Value> = Vec::new();
+                if !text.is_empty() {
+                    content.push(json!({ "type": "text", "text": text }));
+                }
+                content.extend(calls.iter().map(|c| json!({ "type": "tool_use", "id": c.id, "name": c.name, "input": c.input })));
+                json!({ "role": "assistant", "content": content })
+            }
+            Turn::Results(results) => json!({
+                "role": "user",
+                "content": results.iter().map(|r| json!({ "type": "tool_result", "tool_use_id": r.id, "content": r.content, "is_error": r.is_error })).collect::<Vec<_>>(),
+            }),
+        })
+        .collect();
+    let tools: Vec<Value> = request.tools.iter().map(|t| json!({ "name": t.name, "description": t.description, "input_schema": t.input_schema })).collect();
+    let mut body = json!({ "model": provider.model, "max_tokens": max_tokens, "system": request.system, "messages": messages });
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
+    let (reply, input, output) = post_anthropic(provider, body).await?;
+    match reply["stop_reason"].as_str() {
+        Some("refusal") => bail!("The model declined the request ({}).", reply["stop_details"]["category"].as_str().unwrap_or("no category")),
+        Some("max_tokens") => bail!("The answer didn't fit in {} tokens.", max_tokens),
+        _ => {}
+    }
+    let blocks = reply["content"].as_array().cloned().unwrap_or_default();
+    let text: String = blocks.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("");
+    let calls = blocks
+        .iter()
+        .filter(|c| c["type"] == "tool_use")
+        .map(|c| ToolCall { id: c["id"].as_str().unwrap_or_default().to_string(), name: c["name"].as_str().unwrap_or_default().to_string(), input: c["input"].clone() })
+        .collect();
+    Ok((text, calls, input, output))
+}
+
+async fn call_anthropic(provider: &Provider, request: &AiRequest, max_tokens: u64) -> Result<(String, u64, u64)> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let content: Vec<Value> = request
+        .parts
+        .iter()
+        .map(|p| match p {
+            Part::Text(text) => json!({ "type": "text", "text": text }),
+            Part::Image { media_type, data } => json!({ "type": "image", "source": { "type": "base64", "media_type": media_type, "data": STANDARD.encode(data) } }),
+            Part::Pdf { data } => json!({ "type": "document", "source": { "type": "base64", "media_type": "application/pdf", "data": STANDARD.encode(data) } }),
+        })
+        .collect();
+    let body = json!({
+        "model": provider.model,
+        "max_tokens": max_tokens,
+        "system": request.system,
+        "messages": [{ "role": "user", "content": content }],
+    });
+    let (reply, input, output) = post_anthropic(provider, body).await?;
     match reply["stop_reason"].as_str() {
         Some("refusal") => bail!("The model declined the request ({}).", reply["stop_details"]["category"].as_str().unwrap_or("no category")),
         Some("max_tokens") => bail!("The answer didn't fit in {} tokens; raise ai.max_tokens_per_file.", max_tokens),
@@ -352,6 +481,96 @@ async fn call_anthropic(provider: &Provider, request: &AiRequest, max_tokens: u6
     }
     let answer: Vec<&str> = reply["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect();
     Ok((answer.join(""), input, output))
+}
+
+fn provider_name(kind: &str) -> &'static str {
+    match kind {
+        "openai" => "OpenAI",
+        "github" => "GitHub Models",
+        "azure_openai" => "Azure OpenAI",
+        _ => "AI",
+    }
+}
+
+/// POST a chat completions body; the parsed answer and its token counts.
+async fn post_chat_completions(provider: &Provider, mut body: Map<String, Value>, max_tokens: u64) -> Result<(Value, u64, u64)> {
+    // OpenAI's own APIs take max_completion_tokens; other servers still take max_tokens.
+    let limit_name = if matches!(provider.kind.as_str(), "openai" | "azure_openai") { "max_completion_tokens" } else { "max_tokens" };
+    body.insert(limit_name.into(), json!(max_tokens));
+    let key = provider.key.as_ref().map(|k| k.expose().to_string()).unwrap_or_default();
+    let mut call = client()?.post(format!("{}/chat/completions", provider.base_url)).json(&Value::Object(body));
+    if !key.is_empty() {
+        call = if provider.kind == "azure_openai" { call.header("api-key", &key) } else { call.bearer_auth(&key) };
+    }
+    let name = provider_name(&provider.kind);
+    let response = call.send().await.with_context(|| format!("calling the {} API", name))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(provider_error(name, status, &text, Some(&key)));
+    }
+    let reply: Value = serde_json::from_str(&text).with_context(|| format!("the {} API's answer wasn't JSON", name))?;
+    let input = reply["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+    let output = reply["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+    Ok((reply, input, output))
+}
+
+/// A conversation with tools through chat completions (function calling).
+async fn chat_completions_with_tools(provider: &Provider, request: &ChatRequest, max_tokens: u64) -> Result<(String, Vec<ToolCall>, u64, u64)> {
+    let mut messages = vec![json!({ "role": "system", "content": request.system })];
+    for turn in &request.turns {
+        match turn {
+            Turn::User(text) => messages.push(json!({ "role": "user", "content": text })),
+            Turn::Assistant { text, calls } => {
+                let mut message = json!({ "role": "assistant", "content": if text.is_empty() { Value::Null } else { json!(text) } });
+                if !calls.is_empty() {
+                    message["tool_calls"] = json!(calls
+                        .iter()
+                        .map(|c| json!({ "id": c.id, "type": "function", "function": { "name": c.name, "arguments": c.input.to_string() } }))
+                        .collect::<Vec<_>>());
+                }
+                messages.push(message);
+            }
+            Turn::Results(results) => {
+                for r in results {
+                    let content = if r.is_error { format!("Error: {}", r.content) } else { r.content.clone() };
+                    messages.push(json!({ "role": "tool", "tool_call_id": r.id, "content": content }));
+                }
+            }
+        }
+    }
+    let mut body = Map::new();
+    body.insert("model".into(), json!(provider.model));
+    body.insert("messages".into(), json!(messages));
+    if !request.tools.is_empty() {
+        let tools: Vec<Value> = request.tools.iter().map(|t| json!({ "type": "function", "function": { "name": t.name, "description": t.description, "parameters": t.input_schema } })).collect();
+        body.insert("tools".into(), json!(tools));
+    }
+    let (reply, input, output) = post_chat_completions(provider, body, max_tokens).await?;
+    let choice = &reply["choices"][0];
+    match choice["finish_reason"].as_str() {
+        Some("content_filter") => bail!("The provider's content filter declined the request."),
+        Some("length") => bail!("The answer didn't fit in {} tokens.", max_tokens),
+        _ => {}
+    }
+    let message = &choice["message"];
+    let text = match &message["content"] {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(""),
+        _ => String::new(),
+    };
+    let calls = message["tool_calls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| ToolCall {
+            id: c["id"].as_str().unwrap_or_default().to_string(),
+            name: c["function"]["name"].as_str().unwrap_or_default().to_string(),
+            // Arguments arrive as a JSON string; a malformed one becomes an empty input the tool rejects.
+            input: c["function"]["arguments"].as_str().and_then(|a| serde_json::from_str(a).ok()).unwrap_or_else(|| json!({})),
+        })
+        .collect();
+    Ok((text, calls, input, output))
 }
 
 async fn call_chat_completions(provider: &Provider, request: &AiRequest, max_tokens: u64) -> Result<(String, u64, u64)> {
@@ -372,29 +591,7 @@ async fn call_chat_completions(provider: &Provider, request: &AiRequest, max_tok
     let mut body = Map::new();
     body.insert("model".into(), json!(provider.model));
     body.insert("messages".into(), json!([{ "role": "system", "content": request.system }, { "role": "user", "content": content }]));
-    // OpenAI's own APIs take max_completion_tokens; other servers still take max_tokens.
-    let limit_name = if matches!(provider.kind.as_str(), "openai" | "azure_openai") { "max_completion_tokens" } else { "max_tokens" };
-    body.insert(limit_name.into(), json!(max_tokens));
-    let key = provider.key.as_ref().map(|k| k.expose().to_string()).unwrap_or_default();
-    let mut call = client()?.post(format!("{}/chat/completions", provider.base_url)).json(&Value::Object(body));
-    if !key.is_empty() {
-        call = if provider.kind == "azure_openai" { call.header("api-key", &key) } else { call.bearer_auth(&key) };
-    }
-    let name = match provider.kind.as_str() {
-        "openai" => "OpenAI",
-        "github" => "GitHub Models",
-        "azure_openai" => "Azure OpenAI",
-        _ => "AI",
-    };
-    let response = call.send().await.with_context(|| format!("calling the {} API", name))?;
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(provider_error(name, status, &text, Some(&key)));
-    }
-    let reply: Value = serde_json::from_str(&text).with_context(|| format!("the {} API's answer wasn't JSON", name))?;
-    let input = reply["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-    let output = reply["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+    let (reply, input, output) = post_chat_completions(provider, body, max_tokens).await?;
     let choice = &reply["choices"][0];
     match choice["finish_reason"].as_str() {
         Some("content_filter") => bail!("The provider's content filter declined the request."),
