@@ -117,6 +117,8 @@ function UserDialog({
   const [locked, setLocked] = useState(false)
   const [resetMfa, setResetMfa] = useState(false)
   const [attributes, setAttributes] = useState("")
+  const [quotaMb, setQuotaMb] = useState("")
+  const [quotaFiles, setQuotaFiles] = useState("")
   const [draft, setDraft] = useState<GrantDraft>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -129,6 +131,8 @@ function UserDialog({
     setLocked(user?.is_locked ?? false)
     setResetMfa(false)
     setAttributes(user?.attributes && Object.keys(user.attributes).length ? JSON.stringify(user.attributes, null, 2) : "")
+    setQuotaMb(user?.quota_mb != null ? String(user.quota_mb) : "")
+    setQuotaFiles(user?.quota_files != null ? String(user.quota_files) : "")
     setDraft(draftFrom(roles, user?.roles ?? []))
     setError(null)
   }, [open, user, roles])
@@ -146,8 +150,15 @@ function UserDialog({
           throw new Error(`Attributes aren't valid JSON: ${e instanceof Error ? e.message : String(e)}`)
         }
       }
+      // Empty: the lattice's default; a number (0: no limit).
+      const quota = (text: string) => (text.trim() === "" ? null : Number(text))
+      if ([quotaMb, quotaFiles].some((q) => q.trim() !== "" && !(Number(q) >= 0 && Number.isInteger(Number(q))))) {
+        throw new Error("Quotas are whole numbers (0: no limit), or empty for the lattice's default.")
+      }
       if (user) {
         const changes: UserChanges = {}
+        if (quota(quotaMb) !== (user.quota_mb ?? null)) changes.quota_mb = quota(quotaMb)
+        if (quota(quotaFiles) !== (user.quota_files ?? null)) changes.quota_files = quota(quotaFiles)
         if (JSON.stringify(attrs) !== JSON.stringify(user.attributes ?? {})) changes.attributes = attrs
         if (login !== user.login) changes.login = login
         if (email !== user.email_address) changes.email_address = email
@@ -161,7 +172,7 @@ function UserDialog({
           toast.success(`Updated ${login}.`)
         }
       } else {
-        await api.createUser({ login, email_address: email, password, roles: grantsFrom(draft), attributes: attrs })
+        await api.createUser({ login, email_address: email, password, roles: grantsFrom(draft), attributes: attrs, quota_mb: quota(quotaMb), quota_files: quota(quotaFiles) })
         toast.success(`Created ${login}.`)
       }
       onSaved()
@@ -218,6 +229,17 @@ function UserDialog({
             </div>
           )}
           <RoleGrantsEditor roles={roles} draft={draft} onChange={setDraft} />
+          <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-2">
+              <Label htmlFor="user-quota-mb">Upload quota, MB</Label>
+              <Input id="user-quota-mb" inputMode="numeric" value={quotaMb} onChange={(e) => setQuotaMb(e.target.value)} placeholder="Lattice default" />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="user-quota-files">Upload quota, files</Label>
+              <Input id="user-quota-files" inputMode="numeric" value={quotaFiles} onChange={(e) => setQuotaFiles(e.target.value)} placeholder="Lattice default" />
+            </div>
+            <p className="text-muted-foreground col-span-2 -mt-1 text-xs">Empty: the lattice's default (quotas.* on the Configuration page). 0: no limit.</p>
+          </div>
           <div className="grid gap-2">
             <Label htmlFor="user-attributes">Attributes (optional)</Label>
             <Textarea

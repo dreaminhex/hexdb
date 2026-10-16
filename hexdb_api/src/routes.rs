@@ -47,6 +47,7 @@ pub fn app_router(
         .route("/auth/mfa/disable", post(crate::auth::mfa_disable))
         .route("/auth/mfa/backup-codes", post(crate::auth::mfa_backup_codes))
         .route("/auth/keys", get(crate::auth::list_keys).post(crate::auth::create_key))
+        .route("/auth/quota", get(crate::auth::quota))
         .route("/auth/keys/{id}", axum::routing::delete(crate::auth::revoke_key))
 
         // Utility, Health, Status

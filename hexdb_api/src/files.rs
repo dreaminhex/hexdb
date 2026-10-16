@@ -184,6 +184,10 @@ pub async fn upload(
     principal.require(Permission::Upload, &tess)?;
     let Query(params) = params?;
     user_tessellation(&engine, &tess)?;
+    // Refuse early when the size is known and over the quota (the commit checks again).
+    if let Some(size) = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()) {
+        engine.check_quota(&principal.login, size, false).await?;
+    }
     let options = UploadOptions {
         content_type: headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(String::from),
         modified_at: params.modified.as_deref().map(|t| parse_time(t, "modified")).transpose()?,

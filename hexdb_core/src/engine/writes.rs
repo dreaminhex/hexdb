@@ -337,7 +337,7 @@ impl HexDBEngine {
         Ok(page)
     }
 
-    async fn query_documents_inner(&self, tess: &str, query: &DocumentQuery) -> Result<QueryPage> {
+    pub(crate) async fn query_documents_inner(&self, tess: &str, query: &DocumentQuery) -> Result<QueryPage> {
         self.queries_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if query.after.is_some() && !query.sort.is_empty() {
             return Err(invalid("after can't be combined with sort; use offset to page sorted results."));

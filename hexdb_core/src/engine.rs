@@ -100,6 +100,8 @@ pub enum EngineError {
     /// Stored content can't be read right now (503): its shards are unreadable
     /// here and no other hex could supply it.
     Unavailable(String),
+    /// An upload would take a user past their quota (507).
+    QuotaExceeded(String),
 }
 
 impl fmt::Display for EngineError {
@@ -120,6 +122,7 @@ impl fmt::Display for EngineError {
             | EngineError::DiskFull(m)
             | EngineError::NoQuorum(m)
             | EngineError::Unavailable(m)
+            | EngineError::QuotaExceeded(m)
             | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }
@@ -275,6 +278,8 @@ pub struct HexDBEngine {
     pub(crate) extract_queue: files::ExtractQueue,
     /// Files waiting for AI tagging or thumbnails.
     pub(crate) ai_queue: files::ai_files::AiQueue,
+    /// Upload quota usage per user (see `files::quotas`).
+    pub(crate) quota_cache: files::quotas::QuotaCache,
     /// Copying file content from other hexes.
     pub(crate) file_sync: files::FileSync,
     /// The last TOTP step each user signed in with on this hex (replay protection
@@ -519,6 +524,7 @@ impl HexDBEngine {
             blobs,
             extract_queue: Default::default(),
             ai_queue: Default::default(),
+            quota_cache: Default::default(),
             file_sync: Default::default(),
             role_cache: std::sync::Mutex::new(None),
             history_id,

@@ -37,6 +37,7 @@ use tracing::{debug, info, warn};
 use ulid::Ulid;
 
 pub(crate) mod ai_files;
+pub(crate) mod quotas;
 
 /// What the client says about an upload.
 #[derive(Debug, Clone, Default)]
@@ -364,6 +365,9 @@ impl HexDBEngine {
 
         let (read, write) = (self.caller_scope(tess, Action::Read), self.caller_scope(tess, Action::Upload));
         let login = caller_login();
+        // Quotas (a new version counts its size; a new file counts one file too).
+        let existing = self.find_file(tess, path, name).await?.is_some();
+        self.check_quota(&login, size, !existing).await?;
         for _ in 0..MAX_WRITE_RETRIES {
             let now = now_text();
             let modified = options.modified_at.map(time_text).unwrap_or_else(|| now.clone());
@@ -423,7 +427,8 @@ impl HexDBEngine {
                 Ok(true) => {
                     drop(pins);
                     self.queue_extraction(tess, stored_doc.id, false);
-                    return Ok(UploadResult { document: read.mask(stored_doc), created, unchanged: false });
+                    self.quota_add(&login, size, created);
+                return Ok(UploadResult { document: read.mask(stored_doc), created, unchanged: false });
                 }
                 Ok(false) => continue,
                 // Another upload created the same path first: become a new version of it.
@@ -477,6 +482,9 @@ impl HexDBEngine {
             return Err(EngineError::TooLarge(format!("The file is {} MB; the limit is {} MB (files.max_file_mb).", size / (1024 * 1024), self.config.files.max_file_mb)).into());
         }
         self.check_file_space(size.unwrap_or(0))?;
+        if let Some(size) = size {
+            self.check_quota(&caller_login(), size, self.find_file(tess, &path, &name).await?.is_none()).await?;
+        }
         self.disk_used.fetch_sub(size.unwrap_or(0), Ordering::Relaxed);
         let id = Ulid::new();
         let map = json!({
@@ -1128,6 +1136,7 @@ impl HexDBEngine {
 
     /// Delete a trashed file for good. False if it isn't in the trash.
     pub async fn purge_file(&self, tess: &str, id: &str) -> Result<bool> {
+        self.quota_forget();
         self.ensure_writable()?;
         let (trashed, seq) = match self.trashed_file(tess, id, Action::Delete).await {
             Ok(found) => found,
@@ -1141,6 +1150,7 @@ impl HexDBEngine {
 
     /// Purge every file in `tess`'s trash that the caller may change. Returns how many.
     pub async fn empty_trash(&self, tess: &str) -> Result<usize> {
+        self.quota_forget();
         let mut purged = 0;
         for doc in self.list_trash(tess).await? {
             if self.purge_file(tess, &doc.id.to_string()).await.unwrap_or(false) {

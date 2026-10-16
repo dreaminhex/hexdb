@@ -771,6 +771,17 @@ export interface User {
   password_expiration: number
   /** Values role filters can refer to: {"$user": "attributes.region"}. */
   attributes?: Record<string, unknown>
+  /** Upload quotas (null: the lattice's defaults; 0: no limit). */
+  quota_mb?: number | null
+  quota_files?: number | null
+}
+
+/** `GET /auth/quota`: your upload quota and what you use of it. */
+export interface QuotaView {
+  limit_bytes: number | null
+  limit_files: number | null
+  used_bytes: number
+  used_files: number
 }
 
 /** A role's row filter and hidden fields on one tessellation ("*" for all). */
@@ -809,6 +820,8 @@ export interface NewUser {
   email_address: string
   roles: RoleGrant[]
   attributes?: Record<string, unknown>
+  quota_mb?: number | null
+  quota_files?: number | null
 }
 
 export type UserChanges = Partial<{
@@ -819,6 +832,8 @@ export type UserChanges = Partial<{
   is_locked: boolean
   use_mfa: boolean
   attributes: Record<string, unknown>
+  quota_mb: number | null
+  quota_files: number | null
 }>
 
 export interface Trigger {
@@ -867,6 +882,7 @@ export interface SqlResult {
 export const api = {
   me: () => request<Me>("GET", "/auth/me"),
   chatStatus: () => request<ChatStatus>("GET", "/ai/chat"),
+  quota: () => request<QuotaView>("GET", "/auth/quota"),
   shares: (all = false) => request<{ shares: ShareLink[] }>("GET", `/shares${all ? "?all=true" : ""}`),
   createShare: (body: { tessellation: string; file_id?: string; folder?: string; expires_in_days?: number; password?: string; max_downloads?: number; note?: string }) =>
     request<ShareLink>("POST", "/shares", body),

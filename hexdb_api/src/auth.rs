@@ -355,6 +355,11 @@ pub struct PasswordChange {
     pub new_password: String,
 }
 
+/// `GET /auth/quota`: your upload quota and what you use of it.
+pub async fn quota(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    Ok(Json(engine.quota_view(&principal.login).await?).into_response())
+}
+
 /// Run something that re-checks the caller's password or code, under the
 /// sign-in lockout: refused while locked out, and a wrong answer (403) counts
 /// as a failed attempt.

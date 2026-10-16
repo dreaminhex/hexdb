@@ -40,7 +40,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { usePoll } from "@/hooks/use-poll"
-import { api, ApiError, errorMessage, type FileDoc, filePathUrl, fileUrl, uploadFile } from "@/lib/api"
+import { api, ApiError, errorMessage, type FileDoc, filePathUrl, fileUrl, type QuotaView, uploadFile } from "@/lib/api"
 import { can, has, useAuth } from "@/lib/auth"
 import { formatBytes, formatTimestamp } from "@/lib/format"
 import { setQueryParam, useQueryParam } from "@/lib/router"
@@ -789,6 +789,22 @@ function FileDetails({
 // ---------------------------------------------------------------------------
 
 /** What the signed-in user may do with files in a tessellation. */
+/** Your upload quota: what you use of it, as a thin bar. */
+function QuotaBar({ quota }: { quota: QuotaView }) {
+  const parts: { used: number; limit: number; label: string }[] = []
+  if (quota.limit_bytes !== null) parts.push({ used: quota.used_bytes, limit: quota.limit_bytes, label: `${formatBytes(quota.used_bytes)} of ${formatBytes(quota.limit_bytes)}` })
+  if (quota.limit_files !== null) parts.push({ used: quota.used_files, limit: quota.limit_files, label: `${quota.used_files} of ${quota.limit_files} files` })
+  const fullest = Math.max(...parts.map((p) => (p.limit > 0 ? p.used / p.limit : 0)))
+  return (
+    <div className="text-muted-foreground flex items-center gap-3 text-xs">
+      <div className="bg-muted h-1.5 w-40 overflow-hidden rounded-full" aria-hidden>
+        <div className={cn("h-full rounded-full", fullest >= 0.9 ? "bg-destructive" : "bg-primary")} style={{ width: `${Math.min(100, fullest * 100)}%` }} />
+      </div>
+      Your upload quota: {parts.map((p) => p.label).join(", ")}
+    </div>
+  )
+}
+
 interface FileRights {
   write: boolean
   upload: boolean
@@ -978,6 +994,7 @@ export function FilesPage() {
     return () => window.clearTimeout(timer)
   }, [searchText])
 
+  const quota = usePoll(api.quota, 30_000)
   const listing = usePoll(
     async () => {
       if (!tess) return undefined
@@ -1276,6 +1293,9 @@ export function FilesPage() {
             {listing.error && <span className="text-destructive ml-3">{listing.error.message}</span>}
           </div>
 
+          {quota.data && (quota.data.limit_bytes !== null || quota.data.limit_files !== null) && (
+            <QuotaBar quota={quota.data} />
+          )}
           {empty && (
             <div className="text-muted-foreground flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed p-12 text-sm">
               <IconUpload className="size-8" stroke={1.2} />

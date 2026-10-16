@@ -128,6 +128,12 @@ pub struct StoredUser {
     /// Values role filters can refer to: `{"$user": "attributes.region"}`.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub attributes: serde_json::Map<String, Value>,
+    /// Upload quota in MB (0: none); none: `quotas.default_mb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_mb: Option<u64>,
+    /// Upload quota in files (0: none); none: `quotas.default_files`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_files: Option<u64>,
 }
 
 /// Name of the internal index on `users.login_key`.
@@ -163,6 +169,11 @@ pub struct UserView {
     /// Values role filters can refer to.
     #[serde(default)]
     pub attributes: serde_json::Map<String, Value>,
+    /// Upload quotas (none: the lattice's defaults; 0: no limit).
+    #[serde(default)]
+    pub quota_mb: Option<u64>,
+    #[serde(default)]
+    pub quota_files: Option<u64>,
 }
 
 impl UserView {
@@ -179,6 +190,8 @@ impl UserView {
             last_password_change: user.last_password_change,
             password_expiration: user.password_expiration,
             attributes: user.attributes.clone(),
+            quota_mb: user.quota_mb,
+            quota_files: user.quota_files,
         }
     }
 }
@@ -196,6 +209,11 @@ pub struct NewUser {
     /// Values role filters can refer to.
     #[serde(default)]
     pub attributes: serde_json::Map<String, Value>,
+    /// Upload quotas (none: the lattice's defaults; 0: no limit).
+    #[serde(default)]
+    pub quota_mb: Option<u64>,
+    #[serde(default)]
+    pub quota_files: Option<u64>,
 }
 
 /// Input for changing a user. For a full replace (PUT), `email_address` and
@@ -213,6 +231,17 @@ pub struct UserChanges {
     pub password_expiration: Option<i64>,
     /// Replaces the user's attributes.
     pub attributes: Option<serde_json::Map<String, Value>>,
+    /// Upload quota in MB (0: none; null: the lattice's default).
+    #[serde(default, deserialize_with = "nullable")]
+    pub quota_mb: Option<Option<u64>>,
+    /// Upload quota in files (0: none; null: the lattice's default).
+    #[serde(default, deserialize_with = "nullable")]
+    pub quota_files: Option<Option<u64>>,
+}
+
+/// A field that may be left out (`None`), set to null (`Some(None)`) or given (`Some(Some(v))`).
+fn nullable<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<Option<u64>>, D::Error> {
+    Ok(Some(Option::<u64>::deserialize(deserializer)?))
 }
 
 /// A role as returned by the API.
@@ -495,7 +524,7 @@ pub async fn ensure_service_user(engine: &HexDBEngine, login: &str, roles: Vec<R
     let password = URL_SAFE_NO_PAD.encode(crate::crypt::random_bytes(24));
     let created = create_user(
         engine,
-        NewUser { login: login.to_string(), password, email_address: format!("{}@service.hexdb.local", login), roles, attributes: Default::default() },
+        NewUser { login: login.to_string(), password, email_address: format!("{}@service.hexdb.local", login), roles, attributes: Default::default(), quota_mb: None, quota_files: None },
         None,
     )
     .await?;
@@ -609,6 +638,8 @@ pub async fn create_user(engine: &HexDBEngine, input: NewUser, idem: Option<Idem
         sessions_valid_after: 0,
         login_key: String::new(),
         attributes: validate_attributes(input.attributes)?,
+        quota_mb: input.quota_mb,
+        quota_files: input.quota_files,
     };
 
     let outcome = engine.insert_documents(USERS_TESSELLATION, vec![to_json(&user)?], None, idem).await?;
@@ -681,6 +712,12 @@ pub async fn update_user(
     }
     if let Some(expiration) = changes.password_expiration {
         user.password_expiration = expiration;
+    }
+    if let Some(quota) = changes.quota_mb {
+        user.quota_mb = quota;
+    }
+    if let Some(quota) = changes.quota_files {
+        user.quota_files = quota;
     }
     if let Some(attributes) = changes.attributes {
         user.attributes = validate_attributes(attributes)?;
@@ -975,6 +1012,8 @@ async fn bootstrap_inner(engine: &HexDBEngine, security: &SecurityConfig) -> Res
             email_address: email.to_string(),
             roles: vec![RoleGrant { name: ADMIN_ROLE.into(), tessellations: vec!["*".into()] }],
             attributes: Default::default(),
+            quota_mb: None,
+            quota_files: None,
         };
         create_user(engine, admin, None).await?;
         if generated {

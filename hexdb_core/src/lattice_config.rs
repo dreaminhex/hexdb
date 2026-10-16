@@ -122,6 +122,8 @@ pub const CONFIG: &[ConfigDef] = &[
     def("ai.tagging.video_frames", ConfigKind::Integer { min: 1, max: 16 }, "4", "With video in what tagging sends: frames sent from each H.264 video, spread through it."),
     def("ai.video_thumbnails.enabled", ConfigKind::Boolean, "false", "Let the AI pick the most representative frame for video thumbnails."),
     def("ai.video_thumbnails.frames", ConfigKind::Integer { min: 2, max: 16 }, "6", "Candidate frames the AI chooses from."),
+    def("quotas.default_mb", ConfigKind::Integer { min: 0, max: 1_000_000_000 }, "0", "Upload quota per user in MB, for users without their own (0: none). Administrators get only a quota of their own."),
+    def("quotas.default_files", ConfigKind::Integer { min: 0, max: 1_000_000_000 }, "0", "Upload quota per user in files, for users without their own (0: none)."),
     def("sharing.enabled", ConfigKind::Boolean, "true", "Let users with the share permission make sharing links to files and folders for people without an account."),
     def("sharing.default_days", ConfigKind::Integer { min: 0, max: 3650 }, "7", "Days a new link lasts when its maker doesn't say (0: no expiry, if sharing.max_days allows it)."),
     def("sharing.max_days", ConfigKind::Integer { min: 0, max: 3650 }, "30", "Longest a link may last, in days (0: links may never expire)."),

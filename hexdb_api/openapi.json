@@ -1429,6 +1429,38 @@
         }
       }
     },
+    "/auth/quota": {
+      "get": {
+        "tags": [
+          "Authentication"
+        ],
+        "summary": "Your upload quota and what you use of it",
+        "operationId": "get_auth_quota",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/shares": {
       "get": {
         "tags": [

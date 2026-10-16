@@ -231,6 +231,7 @@ Errors have one shape:
 | 502 | `ai_provider_error` | The AI provider returned an error (its message, without the key) |
 | 503 | `replication_timeout` | Committed, but fewer than `replication.min_acks` replicas confirmed in time |
 | 503 | `no_quorum` | The Overseer can't see `replication.quorum` hexes, so it refuses writes |
+| 507 | `quota_exceeded` | An upload would take its user past their quota |
 | 503 | `content_unavailable` | A file's content can't be read here or fetched from another hex right now |
 | 507 | `disk_full` | The data directory is over `storage.disk_mb`; deletes still work |
 
@@ -982,6 +983,10 @@ Deleting a file's document (`DELETE /media/{id}`, or a delete in a transaction o
 
 Dropping a files tessellation drops its trashed files too.
 
+### Upload quotas
+
+Administrators can limit how much each user keeps in files: `quotas.default_mb` and `quotas.default_files` in the lattice configuration apply to every user without their own limit (0: no limit; administrators get only a limit of their own), and a user's `quota_mb` and `quota_files` (the Users page, or `PATCH /users/<login>`; `null` returns them to the default, 0 means no limit) override it. A user's usage is what their uploads keep stored: every file whose current version they uploaded, in any files tessellation and in the trash, with its earlier versions. An upload that would go past a limit is refused with 507 `quota_exceeded`: before it starts when its size is known (a resumable upload's `size`, a PUT's `Content-Length`), and again when it's committed. A new version counts its bytes but isn't a new file. Moving files to the trash doesn't free room; purging them does. `GET /auth/quota` shows your limits and usage, and the Files page shows a bar when a limit applies.
+
 ### Sharing links
 
 A sharing link gives people without an account one file, or the files under one folder: `https://<hex>/_s/<code>`. A browser opening it gets a page with a preview and a Download button (and the folder's files, for a folder link); scripts get JSON. Users with the `share` permission make links on the Files page (Share, or Share folder) or with the API, and see them under Shared links, with their downloads, where they can copy or delete them. Administrators can see everyone's.
@@ -1298,7 +1303,22 @@ All of these are listed, disabled, in [plugins.json](plugins.json).
 | [sources/postgres](plugins/sources/postgres) | source | Copies a PostgreSQL table and keeps it in sync by an updated-at column |
 | [sources/mssql](plugins/sources/mssql) | source | The same for SQL Server |
 | [sources/s3](plugins/sources/s3) | source | Imports JSON and JSON-lines objects from an S3 bucket |
+| [sources/s3-files](plugins/sources/s3-files) | source | Copies files from S3 or an S3-compatible store (R2, B2, Wasabi, MinIO) into a files tessellation |
+| [sources/azure-files](plugins/sources/azure-files) | source | The same from an Azure Blob Storage container |
+| [sources/gdrive-files](plugins/sources/gdrive-files) | source | The same from a Google Drive folder (read-only access) |
+| [sources/dropbox-files](plugins/sources/dropbox-files) | source | The same from a Dropbox folder (read-only access) |
 | [enrichers/ai-keywords](plugins/enrichers/ai-keywords) | stream | Adds keywords to new documents with the lattice's AI provider |
+
+### Importing files
+
+The four `*-files` source plugins copy files you already have elsewhere into a files tessellation, where they're read, thumbnailed, tagged and searchable like any upload. Folders are kept: an object `photos/2024/a.jpg` under the source's prefix or folder becomes `TARGET/TARGET_FOLDER/photos/2024/a.jpg`. Each file is copied once per version at the source (an S3 or Azure ETag, a Drive checksum, a Dropbox revision); a file that changes there comes in as a new version. What's been copied is remembered in a state file in the plugin's folder, so restarts don't copy again. `POLL_SECONDS` sets how often each looks for new files (0: once).
+
+Setting one up:
+
+1. `npm install` in the plugin's folder (S3 and Azure; Drive and Dropbox need nothing).
+2. Credentials go in the HexDB process's environment, never in `plugin.toml`; each manifest's `pass_env` names the variables it passes on (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `AZURE_STORAGE_CONNECTION_STRING`, `GDRIVE_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN`, `DROPBOX_APP_KEY`/`_SECRET`/`_REFRESH_TOKEN`). For Drive and Dropbox, `node connect.mjs` in the plugin's folder signs in with your own app (read-only access) and prints the refresh token.
+3. Set the source (bucket, container, folder ID or Dropbox folder), `TARGET` and `TARGET_FOLDER` in the manifest's `[env]`, and grant the plugin's `[access]` role the target tessellation (`writer` includes `upload`).
+4. Enable it in the registry. It runs as its own user (`plugin-sources-s3-files`, ...), so its role decides where it may write, and an upload quota on that user caps how much it copies.
 
 ### Plugin FAQ
 
@@ -1979,6 +1999,7 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `files.scrub_hours` | 24 | Hours between scrubs of every shard (0: never) |
 | `files.extract` | `true` | Read metadata from uploaded files |
 | `files.extract_max_mb`, `extract_timeout_seconds` | 64, 30 | What extraction may read and how long it may take, per file |
+| `quotas.default_mb`, `default_files` | 0, 0 | Upload quota per user (lattice configuration; 0: none; see [Upload quotas](#upload-quotas)) |
 | `sharing.enabled`, `default_days`, `max_days`, `require_password` | true, 7, 30, false | Sharing links (lattice configuration; see [Sharing links](#sharing-links)) |
 | `files.sandbox`, `sandbox_memory_mb` | true, 1024 | Parse files in a restricted worker process, and its memory limit (see [the parser sandbox](#metadata-extraction)) |
 | `files.text_kb` | 64 | Text kept per file for full-text search |
