@@ -231,6 +231,15 @@ pub async fn ai_usage(method: Method, uri: Uri, headers: HeaderMap, axum::extrac
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Count a sharing link download made on a replica.
+pub async fn share_download(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let body: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let code = body["code"].as_str().ok_or_else(|| ApiError::invalid("code is required."))?;
+    engine.store_share_download(code).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 /// Ask the Overseer to record a sign-out made on this replica.
 pub async fn forward_revocation(engine: &HexDBEngine, session_id: &str, expires_at: i64) -> Result<(), ApiError> {
     let body = serde_json::json!({ "session_id": session_id, "expires_at": expires_at });

@@ -686,7 +686,7 @@ impl HexDBEngine {
     }
 
     /// A file's document, if the caller can see it.
-    async fn visible_file(&self, tess: &str, id: &str) -> Result<(Document, u64)> {
+    pub(crate) async fn visible_file(&self, tess: &str, id: &str) -> Result<(Document, u64)> {
         self.files_tessellation(tess)?;
         let missing = || not_found(format!("File {} not found in '{}'.", id, tess));
         let id = Ulid::from_string(id).map_err(|_| missing())?;

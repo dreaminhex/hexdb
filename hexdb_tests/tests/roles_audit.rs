@@ -52,7 +52,7 @@ fn custom_roles_grant_exactly_their_permission_sets() -> Result<()> {
     for name in ["admin", "reader", "writer", "owner", "operator", "auditor", "appender"] {
         assert!(names.contains(&name), "{} in {:?}", name, names);
     }
-    assert_eq!(roles.body["permissions"].as_array().unwrap().len(), 14);
+    assert_eq!(roles.body["permissions"].as_array().unwrap().len(), 15);
     Ok(())
 }
 

@@ -697,6 +697,21 @@ admin_email = "admin@example.com"
         let headers = res.headers().clone();
         Ok((status, headers, res.bytes()?.to_vec()))
     }
+
+    /// Like [`TestServer::get_bytes`], with an API key or session token, or none (anonymous).
+    pub fn get_bytes_as(&self, token: Option<&str>, path: &str, headers: &[(&str, &str)]) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
+        let mut builder = self.anon.get(self.url(path)).timeout(Duration::from_secs(120));
+        if let Some(token) = token {
+            builder = builder.bearer_auth(token);
+        }
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let res = builder.send()?;
+        let status = res.status();
+        let headers = res.headers().clone();
+        Ok((status, headers, res.bytes()?.to_vec()))
+    }
 }
 
 impl Drop for TestServer {

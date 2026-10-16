@@ -74,6 +74,21 @@ fn is_public(method: &Method, path: &str) -> bool {
         || (path == "/auth/login" && method == Method::POST)
         || (path == "/shutdown" && method == Method::POST)
         || is_lattice_route(method, path)
+        || is_share_route(method, path)
+}
+
+/// Sharing links (`/_s/<code>...`; tessellation names can't start with `_`, so these never clash), for people without an account; they check the link themselves.
+fn is_share_route(method: &Method, path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/_s/") else { return false };
+    let (code, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    if code.is_empty() || code.len() > 16 {
+        return false;
+    }
+    match *method {
+        Method::GET | Method::HEAD => matches!(tail, "" | "content" | "thumbnail" | "files"),
+        Method::POST => tail == "unlock",
+        _ => false,
+    }
 }
 
 /// The hex-to-hex routes, which check their own lattice signatures. Listed
@@ -83,7 +98,7 @@ fn is_lattice_route(method: &Method, path: &str) -> bool {
     let one_segment = |prefix: &str| rest.strip_prefix(prefix).is_some_and(|s| !s.is_empty() && !s.contains('/'));
     match *method {
         Method::GET => matches!(rest, "snapshot" | "catalog" | "changes") || one_segment("snapshot/") || one_segment("chunks/"),
-        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "throttle"),
+        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "throttle" | "share-download"),
         _ => false,
     }
 }
@@ -530,6 +545,9 @@ mod tests {
             (Method::POST, "/lattice/ai-usage"),
             (Method::POST, "/auth/login"),
             (Method::GET, "/health"),
+            (Method::GET, "/_s/Ab3dE7fG"),
+            (Method::GET, "/_s/Ab3dE7fG/content"),
+            (Method::POST, "/_s/Ab3dE7fG/unlock"),
         ] {
             assert!(is_public(&method, path), "{} {}", method, path);
         }
@@ -542,6 +560,10 @@ mod tests {
             (Method::GET, "/lattice/"),
             (Method::GET, "/users"),
             (Method::POST, "/health"),
+            (Method::DELETE, "/_s/Ab3dE7fG"),
+            (Method::POST, "/_s/Ab3dE7fG/content"),
+            (Method::GET, "/_s/Ab3dE7fG/other"),
+            (Method::GET, "/shares"),
         ] {
             assert!(!is_public(&method, path), "{} {}", method, path);
         }

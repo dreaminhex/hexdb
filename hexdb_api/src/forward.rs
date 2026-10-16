@@ -58,6 +58,8 @@ fn handled_locally(method: &Method, path: &str) -> bool {
         || path == "/sql"
         // MCP only reads; any hex answers.
         || path == "/mcp"
+        // Sharing links only read (download counts go to the Overseer themselves).
+        || path.starts_with("/_s/")
 }
 
 /// True if a GraphQL request body contains a mutation.

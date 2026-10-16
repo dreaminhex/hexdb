@@ -154,10 +154,11 @@ pub enum Action {
     Restore,
     Ai,
     Chat,
+    Share,
 }
 
 impl Action {
-    pub const ALL: [Action; 14] = [
+    pub const ALL: [Action; 15] = [
         Action::Read,
         Action::Write,
         Action::Manage,
@@ -172,6 +173,7 @@ impl Action {
         Action::Admin,
         Action::Ai,
         Action::Chat,
+        Action::Share,
     ];
 
     pub fn name(self) -> &'static str {
@@ -190,6 +192,7 @@ impl Action {
             Action::Restore => "restore",
             Action::Ai => "ai",
             Action::Chat => "chat",
+            Action::Share => "share",
         }
     }
 
@@ -218,6 +221,7 @@ impl Action {
             Action::Restore => "Restore files from the trash and earlier versions of files.",
             Action::Ai => "Run prompts through the lattice's AI provider, within its token budget.",
             Action::Chat => "Ask the AI chat about the data you can read, within the chat limits (it never sees more than you can).",
+            Action::Share => "Make sharing links to files and folders you can read, for people without an account.",
         }
     }
 }
@@ -782,7 +786,7 @@ pub async fn reauth_failed(engine: &HexDBEngine, login: &str, client: &str, acti
         .await;
 }
 
-async fn lattice_blocked(engine: &HexDBEngine, keys: &[&str]) -> Option<Duration> {
+pub(crate) async fn lattice_blocked(engine: &HexDBEngine, keys: &[&str]) -> Option<Duration> {
     if !engine.tessellation_exists(THROTTLE_TESSELLATION) {
         return None;
     }
@@ -806,7 +810,7 @@ async fn lattice_blocked(engine: &HexDBEngine, keys: &[&str]) -> Option<Duration
 
 /// Record failures (and clear keys after a success) lattice-wide. Runs on the
 /// Overseer; replicas forward to it. Never fails the sign-in.
-async fn share_throttle(engine: &HexDBEngine, fail: &[&str], clear: &[&str]) {
+pub(crate) async fn share_throttle(engine: &HexDBEngine, fail: &[&str], clear: &[&str]) {
     let result = if engine.is_writable() {
         record_throttle(engine, fail, clear).await
     } else {
@@ -966,7 +970,7 @@ mod tests {
         let auditor = principal(&[("auditor", &[])]);
         assert!(auditor.has(Action::Audit) && !auditor.has(Action::Logs));
         let admin = principal(&[("admin", &[])]);
-        assert_eq!(admin.global_permissions().len(), 8);
+        assert_eq!(admin.global_permissions().len(), 9);
     }
 
     #[test]

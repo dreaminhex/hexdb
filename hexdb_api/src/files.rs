@@ -277,7 +277,7 @@ fn parse_range(header: Option<&HeaderValue>, size: u64) -> Result<Option<(u64, u
     Ok(Some(range))
 }
 
-async fn serve(engine: Arc<HexDBEngine>, tess: &str, id: &str, params: ContentParams, method: &Method, headers: &HeaderMap) -> ApiResult {
+pub(crate) async fn serve(engine: Arc<HexDBEngine>, tess: &str, id: &str, params: ContentParams, method: &Method, headers: &HeaderMap) -> ApiResult {
     let content = engine.file_content(tess, id, params.version).await?;
     let etag = format!("\"{}\"", content.sha256);
     let mut response_headers = HeaderMap::new();
