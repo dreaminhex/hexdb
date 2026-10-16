@@ -7,6 +7,7 @@ import {
   IconHexagon3d,
   IconListCheck,
   IconMathFunction,
+  IconMessageChatbot,
   IconArrowsSplit,
   IconLogout,
   IconPlug,
@@ -53,6 +54,7 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
     items: [
       { title: "Dashboard", route: "/", icon: IconDashboard, requires: "status" },
       { title: "Queries", route: "/queries", icon: IconBrandGoogleBigQuery },
+      { title: "Ask", route: "/ask", icon: IconMessageChatbot, requires: "chat" },
     ],
   },
   {

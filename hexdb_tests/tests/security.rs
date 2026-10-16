@@ -286,7 +286,9 @@ fn api_keys_are_shown_once_and_revocable() -> Result<()> {
 
     // Keys are stored hashed: the secret appears nowhere in the data directory.
     server.flush()?;
-    let secret = key.rsplit('_').next().unwrap();
+    // hxk_<id>_<secret>: the secret is URL-safe base64 and can contain '_' itself.
+    let secret = key.splitn(3, '_').nth(2).unwrap();
+    assert!(secret.len() >= 40, "the whole secret: {}", secret.len());
     for entry in walk(&server.data_dir()) {
         let bytes = std::fs::read(&entry)?;
         assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_bytes()), "{} contains the key", entry.display());

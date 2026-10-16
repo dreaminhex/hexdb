@@ -16,6 +16,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 - **Change data.** An ordered change feed (polling, long polling, Server-Sent Events) backed by an on-disk history, so consumers can resume after a restart.
 - **Streams.** Named publish/subscribe logs with consumer groups and retention. They can be fed from tessellation changes and delivered to webhooks.
 - **Functions and triggers.** Saved queries, aggregations, transactions and scripts (Python, TypeScript, JavaScript), run by name with typed parameters. Schedules run them on an interval or a cron expression. Triggers run them when documents change: before a write, to check, change or refuse it, or after it commits.
+- **AI chat and MCP.** An Ask page and `POST /ai/chat` answer questions about your data with the AI provider you configure, looking things up as the asking user (their permissions, row filters and field masks), within per-user and per-address daily limits. `POST /mcp` lets external agents such as Claude Desktop and Claude Code read the lattice through the Model Context Protocol, with an API key, read-only.
 - **Plugins.** Change data capture (Kafka, Kinesis), ingest sources (PostgreSQL, SQL Server, S3), log and metrics sinks (OpenTelemetry, files, HTTP) and enrichers. A plugin can be a process, a webhook or built in.
 - **Replication.** Automatic discovery and Overseer election, snapshot plus change-stream replication, and failover. Optional synchronous acknowledgements, a write quorum, and write forwarding from replicas.
 - **Security.**

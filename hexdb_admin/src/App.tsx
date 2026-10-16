@@ -8,6 +8,7 @@ import { Toaster } from "@/components/ui/sonner"
 import { AuthProvider, has, useAuth, type Requirement } from "@/lib/auth"
 import { useRoute } from "@/lib/router"
 import { AccountPage } from "@/pages/account"
+import { AskPage } from "@/pages/ask"
 import { AuditPage } from "@/pages/audit"
 import { ConfigurationPage } from "@/pages/configuration"
 import { LoginPage } from "@/pages/login"
@@ -36,6 +37,7 @@ interface Page {
 const PAGES: Record<string, Page> = {
   "/": { title: "Overview", element: OverviewPage, requires: "status" },
   "/queries": { title: "Query Console", element: QueriesPage },
+  "/ask": { title: "Ask", element: AskPage, requires: "chat" },
   "/tessellations": { title: "Tessellations", element: TessellationsPage },
   "/documents": { title: "Documents", element: DocumentsPage },
   "/files": { title: "Files", element: FilesPage },

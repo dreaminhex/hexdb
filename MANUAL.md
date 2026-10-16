@@ -1374,6 +1374,7 @@ A role is a set of permissions:
 | `plugins` | Plugins and their delivery state | no |
 | `maintenance` | Flush, compact and back up | no |
 | `ai` | Run prompts through the lattice's AI provider (`POST /ai/complete`), within its token budget | no |
+| `chat` | Ask the AI chat about the data you can read (`POST /ai/chat`, the Ask page), within the chat limits | no |
 | `admin` | Everything: users, roles, settings, functions, schedules, joining hexes, shutdown | no |
 
 Built-in roles:
@@ -1386,7 +1387,7 @@ Built-in roles:
 | `owner` | `read`, `write`, `manage`, `upload`, `delete`, `restore` |
 | `operator` | `status`, `logs`, `plugins`, `maintenance` (including backups) |
 | `auditor` | `status`, `audit` |
-| `ai` | `ai` (for plugins and scripts that use the lattice's AI provider) |
+| `ai` | `ai`, `chat` (for plugins and scripts that use the lattice's AI provider, and the AI chat) |
 
 Administrators create custom roles from any set of permissions:
 
@@ -1549,7 +1550,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 ### Configuration, AI and storage
 
 - **Secrets** in the [lattice configuration](#lattice-configuration) are sealed with the lattice transfer key, bound to their setting name. They're never returned, logged or written to the audit trail; reads show a keyed fingerprint. Every hex holds them decrypted in memory to use them. A change sent to a replica is forwarded to the Overseer like any write, so without TLS between hexes it crosses the network in the clear (see Transport).
-- **Who can change what.** The configuration, its history and rollback, AI usage and estimates, tagging existing files and the storage test are for administrators. `POST /ai/complete` needs the `ai` permission and draws on the lattice's monthly budget, which caps what a holder can spend.
+- **Who can change what.** The configuration, its history and rollback, AI usage and estimates, tagging existing files and the storage test are for administrators. `POST /ai/complete` needs the `ai` permission and draws on the lattice's monthly budget, which caps what a holder can spend. The chat needs the `chat` permission and stays within its own limits per user and per client address (see [The AI chat](#the-ai-chat)); its lookups run as the asking user. The MCP server and the chat only read: there is no tool that writes.
 - **What leaves the hex.** AI calls send what `ai.tagging.send` allows to the configured provider at the configured URL; an `http://` URL (fine for a local model server) sends the key unencrypted. AI base URLs can't name the well-known cloud metadata services (169.254.169.254, `metadata.google.internal`, ...); a host name that resolves to one isn't caught.
 - **Field masks.** Fields any role hides in a files tessellation are left out of what AI tagging sends, so an AI description can't reveal them to that role. Images are sent as they are when `thumbnail` or `image` is allowed.
 - **Prompt injection.** A file's contents can try to steer its own AI tags and description; the instructions tell the model to treat them as data, and the AI only writes the `ai` field of that file. Treat AI tags as suggestions, not trusted labels.
@@ -1890,6 +1891,34 @@ curl -X POST http://localhost:7700/media/_ai_thumbnails # let the AI choose exis
 ```
 
 Estimates are rough: about 450 tokens of instructions and answer per file, plus metadata and text at about 4 characters per token, plus image tokens (width x height / 750 after scaling to fit 1568 px, at most 1,600); for `video`, each frame as an image; for `pdf`, about 2,000 tokens a page; per AI thumbnail pick, about 300 tokens plus each frame. Providers count differently. Work runs on the Overseer, one file at a time, through the same budget; the requests are audited as `ai.tag` and `ai.thumbnails`. The CLI has `hexdb config ai-estimate`, `ai-tag <tessellation>` and `ai-thumbnails <tessellation>`; the Configuration page shows the estimates with buttons, and the Files page shows a file's AI tags.
+
+### The AI chat
+
+With `ai.chat.enabled`, users with the `chat` permission can ask questions about the lattice's data on the admin UI's Ask page or with `POST /ai/chat` (`{"question", "history"?: [{"role": "user"|"assistant", "content"}]}`). The configured provider answers by looking things up with the lattice tools below, as the user who asked: only the tessellations they can read, through their row filters, without the fields their roles hide. It answers only questions about this data, and it treats everything it reads as data, not instructions. The answer comes back with the lookups it made (`steps`), the tokens used and what's left of today's allowance. Each question is audited as `ai.chat` (tokens and lookups, not the text), and usage counts as the `chat` feature.
+
+Limits, so a public deployment's users can't spend its owner's tokens:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `ai.chat.model` | empty (`ai.model`) | A smaller model is usually enough, e.g. `claude-haiku-5-5` |
+| `ai.chat.max_tokens_per_answer` | 1024 | Tokens per model call |
+| `ai.chat.max_tool_calls` | 6 | Lookups per question; then the model must answer with what it has |
+| `ai.chat.max_question_chars`, `max_history` | 2000, 10 | Question length, and earlier messages sent along |
+| `ai.chat.user_daily_tokens` | 100,000 | Per user per day (UTC); 0: no limit |
+| `ai.chat.client_daily_tokens` | 50,000 | Per client address per day; separates visitors who share a login |
+| `ai.chat.client_questions_per_minute` | 6 | Per client address; 429 with `Retry-After` |
+
+All of it is also bounded by `ai.monthly_token_budget`. Chat requests sent to a replica run on the Overseer, which keeps the counters in memory (they restart with it; the monthly budget doesn't).
+
+### MCP server
+
+`POST /mcp` serves the Model Context Protocol (Streamable HTTP, JSON responses), so external agents can read the lattice: Claude Desktop and Claude Code, or any MCP client. Connect with an API key of a user whose roles allow what the agent should see:
+
+```bash
+claude mcp add --transport http hexdb https://hexdb.example.com/mcp --header "Authorization: Bearer hxk_..."
+```
+
+The tools are the same as the chat's, and all read-only: `list_tessellations`, `describe_tessellation` (schema, indexes, text-search fields, sample field names), `query` (filter, sort, fields), `get_document`, `search` (full text), `count`, `aggregate`, and `sql` (a `SELECT` on one tessellation). They run with the key's permissions, row filters and field masks, return at most 25 documents and about 24 KB, and shorten long strings. The MCP server doesn't call an AI provider (the client brings its own model) and costs no tokens here. Any hex answers; `GET /mcp` (an event stream) returns 405.
 
 `POST /ai/complete` lets plugins and scripts use the lattice's provider without a key of their own; it needs the `ai` permission (the built-in `ai` role) and its usage is recorded as `api:<login>`. A plugin gets it with `ai = true` in its manifest's `[access]` section. The Configuration page has a "Test" button and shows the month's usage; the CLI has `hexdb config ai-test` and `hexdb config ai-usage`.
 

@@ -49,7 +49,23 @@ const enc = encodeURIComponent
 export const UNAUTHORIZED_EVENT = "hexdb:unauthorized"
 
 /** Something a role allows. read/write/manage apply to the granted tessellations; the rest apply everywhere. */
-export type Action = "read" | "write" | "manage" | "upload" | "delete" | "restore" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin"
+export type Action = "read" | "write" | "manage" | "upload" | "delete" | "restore" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin" | "ai" | "chat"
+
+/** `GET /ai/chat`: whether the chat is on for this user, and what's left today. */
+export interface ChatStatus {
+  enabled: boolean
+  max_question_chars: number
+  left: { user_today: number | null; client_today: number | null }
+}
+
+/** `POST /ai/chat`. */
+export interface ChatAnswer {
+  answer: string
+  steps: { tool: string; input: unknown; ok: boolean }[]
+  model: string
+  tokens: { input: number; output: number }
+  left: ChatStatus["left"]
+}
 
 export interface ResolvedGrant {
   role: string
@@ -827,6 +843,8 @@ export interface SqlResult {
 
 export const api = {
   me: () => request<Me>("GET", "/auth/me"),
+  chatStatus: () => request<ChatStatus>("GET", "/ai/chat"),
+  chat: (question: string, history: { role: "user" | "assistant"; content: string }[]) => request<ChatAnswer>("POST", "/ai/chat", { question, history }),
   login: (login: string, password: string, code?: string) =>
     request<{ user: Me; expires_at: number }>("POST", "/auth/login", code ? { login, password, code } : { login, password }),
   mfa: () => request<MfaStatus>("GET", "/auth/mfa"),

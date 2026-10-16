@@ -966,7 +966,7 @@ mod tests {
         let auditor = principal(&[("auditor", &[])]);
         assert!(auditor.has(Action::Audit) && !auditor.has(Action::Logs));
         let admin = principal(&[("admin", &[])]);
-        assert_eq!(admin.global_permissions().len(), 7);
+        assert_eq!(admin.global_permissions().len(), 8);
     }
 
     #[test]
