@@ -38,6 +38,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 // ---------------------------------------------------------------------------
 
 static SERVER_BIN: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
+static CLI_BIN: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
 
 /// Path to an up-to-date `hexdb_api` binary, building it on first use.
 pub fn server_bin() -> Result<PathBuf> {
@@ -47,10 +48,19 @@ pub fn server_bin() -> Result<PathBuf> {
         .map_err(|e| anyhow!(e))
 }
 
+/// Path to the `hexdb` CLI, built on first use.
+pub fn cli_bin() -> Result<PathBuf> {
+    CLI_BIN.get_or_init(|| build_bin("hexdb_cli", "hexdb").map_err(|e| format!("{:#}", e))).clone().map_err(|e| anyhow!(e))
+}
+
 fn build_server() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("HEXDB_SERVER_BIN").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(path));
     }
+    build_bin("hexdb_api", "hexdb_api")
+}
+
+fn build_bin(package: &str, name: &str) -> Result<PathBuf> {
 
     // Test binaries live in <target>/<profile>/deps; the server goes in <target>/<profile>.
     let exe = std::env::current_exe()?;
@@ -66,16 +76,16 @@ fn build_server() -> Result<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
 
     let mut cmd = Command::new(cargo);
-    cmd.args(["build", "--quiet", "-p", "hexdb_api"]).current_dir(workspace);
+    cmd.args(["build", "--quiet", "-p", package]).current_dir(workspace);
     if release {
         cmd.arg("--release");
     }
-    let status = cmd.status().context("Failed to run `cargo build -p hexdb_api`")?;
+    let status = cmd.status().with_context(|| format!("Failed to run `cargo build -p {}`", package))?;
     if !status.success() {
-        bail!("`cargo build -p hexdb_api` failed ({})", status);
+        bail!("`cargo build -p {}` failed ({})", package, status);
     }
 
-    let bin = profile_dir.join(format!("hexdb_api{}", std::env::consts::EXE_SUFFIX));
+    let bin = profile_dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX));
     if !bin.is_file() {
         bail!("Server binary not found at {}", bin.display());
     }

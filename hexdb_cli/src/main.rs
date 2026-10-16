@@ -15,6 +15,7 @@ use std::{
 mod config;
 mod files;
 mod lattice;
+mod supervise;
 
 #[derive(Parser)]
 #[command(name = "hexdb", about = " ⌬  HexDB CLI", version)]
@@ -52,6 +53,18 @@ enum Commands {
         /// Path to the hexdb_api server binary. Defaults to the one next to this CLI, then PATH.
         #[arg(long, env = "HEXDB_SERVER_BIN")]
         server_bin: Option<PathBuf>,
+
+        /// In the background, don't restart the server if it crashes.
+        #[arg(long)]
+        no_restart: bool,
+    },
+    /// Run the server and restart it if it crashes (used by `start --silent`)
+    #[command(hide = true)]
+    Supervise {
+        #[arg(long)]
+        server: PathBuf,
+        #[arg(long)]
+        log: PathBuf,
     },
     /// Stop a running HexDB server gracefully
     Stop {
@@ -297,7 +310,11 @@ async fn main() -> Result<()> {
             print_init(&target, &created);
             Ok(())
         }
-        Commands::Start { silent, server_bin } => start(config_path, silent, server_bin).await,
+        Commands::Start { silent, server_bin, no_restart } => start(config_path, silent, server_bin, !no_restart).await,
+        Commands::Supervise { server, log } => {
+            let config = load(config_path)?;
+            supervise::supervise(&server, config.source.as_deref(), &config.storage_dir(), &log).await
+        }
         Commands::Stop { timeout, force } => stop(config_path, Duration::from_secs(timeout), force).await,
         Commands::Health { url } => {
             let (base, config) = base_url(config_path, url)?;
@@ -420,7 +437,7 @@ async fn main() -> Result<()> {
 // Server lifecycle
 // ---------------------------------------------------------------------------
 
-async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<PathBuf>) -> Result<()> {
+async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<PathBuf>, restart: bool) -> Result<()> {
     let mut config = load(config_path)?;
     // First run of an installed HexDB: no config anywhere and no key in the
     // environment. Create the user's own configuration rather than fail.
@@ -477,6 +494,15 @@ async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<Path
         .append(true)
         .open(&log_path)
         .with_context(|| format!("Failed to open {}", log_path.display()))?;
+    // Run the server under `hexdb supervise`, which restarts it if it crashes.
+    if restart {
+        let cli = std::env::current_exe().context("Can't find this executable to run the supervisor")?;
+        cmd = Command::new(cli);
+        if let Some(source) = &config.source {
+            cmd.arg("--config").arg(source);
+        }
+        cmd.arg("supervise").arg("--server").arg(&server).arg("--log").arg(&log_path);
+    }
     cmd.stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
     platform::detach(&mut cmd);
 
@@ -489,7 +515,9 @@ async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<Path
             bail!("HexDB exited during startup ({}). See {}.", status, log_path.display());
         }
         if is_healthy(&config, &base).await {
-            println!("⌬  HexDB started in the background (PID {}) at {}.", pid, base);
+            let pid = RuntimeInfo::read(&storage_dir).ok().flatten().map(|info| info.pid).unwrap_or(pid);
+            let restarts = if restart { ", restarted if it crashes" } else { "" };
+            println!("⌬  HexDB started in the background (PID {}{}) at {}.", pid, restarts, base);
             println!("   Admin UI: {}/ui/", base);
             println!("   Logs: {}", log_path.display());
             let first_password = storage_dir.join("initial-admin-password.txt");
@@ -516,6 +544,8 @@ async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<Path
 async fn stop(config_path: Option<&Path>, timeout: Duration, force: bool) -> Result<()> {
     let config = load(config_path)?;
     let storage_dir = config.storage_dir();
+    // Tell `hexdb supervise` (if it runs this server) not to restart it.
+    supervise::request_stop(&storage_dir);
 
     let Some(info) = RuntimeInfo::read(&storage_dir)? else {
         bail!(

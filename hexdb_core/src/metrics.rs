@@ -31,6 +31,8 @@ pub struct HexMeta {
     pub replication: serde_json::Value,
     /// The lattice configuration in effect here (see `crate::lattice_config`).
     pub config: serde_json::Value,
+    /// Unclean shutdowns this hex recovered from, and panics since it started (see `crate::crashes`).
+    pub restarts: serde_json::Value,
 }
 
 /// Represents the metadata of a vertex in the HexDB engine.
@@ -298,6 +300,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             value
         },
         config: engine.lattice_config().status_json(),
+        restarts: crate::crashes::status(&engine.config.storage_dir()),
     }
 }
 

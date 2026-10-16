@@ -659,12 +659,23 @@ export function OverviewPage() {
   }
 
   const samples = history.data?.samples ?? []
+  // This process started by recovering from a crash.
+  const crash = status.data.restarts?.last
+  const recovered = crash && crash.detected_at >= Date.parse(status.data.start_datetime) ? crash : null
   return (
     <div className="@container/main flex flex-1 flex-col gap-4 py-4 md:gap-6 md:py-6">
       <div className="flex items-center justify-end gap-2 px-4 lg:px-6">
         {status.error && (
           <span className="text-destructive mr-auto flex items-center gap-1.5 text-sm">
             <IconAlertTriangle className="size-4" /> Connection lost; showing the last update.
+          </span>
+        )}
+        {recovered && (
+          <span className="text-status-warning mr-auto flex items-center gap-1.5 text-sm" title="See restarts in /status and server.recovered in the audit trail.">
+            <IconAlertTriangle className="size-4" />
+            Recovered from an unclean shutdown{" "}
+            {recovered.panic ? `(panic: ${recovered.panic.message})` : recovered.exit ? `(${recovered.exit})` : "(killed or the machine stopped)"}; storage opened in{" "}
+            {formatNumber(recovered.recovery_ms)} ms.
           </span>
         )}
         <Button variant="outline" size="sm" onClick={() => void status.refresh()}>

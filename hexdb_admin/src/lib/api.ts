@@ -206,7 +206,19 @@ export interface ReplicationStatus {
   lag?: number
 }
 
+export interface CrashReport {
+  detected_at: number
+  previous_started_at: number
+  previous_pid: number
+  previous_version: string
+  panic: { at: number; message: string; location: string; thread: string } | null
+  exit: string | null
+  supervisor_restarts: number | null
+  recovery_ms: number
+}
+
 export interface Status {
+  restarts?: { unclean_shutdowns: number; last: CrashReport | null; recent: CrashReport[]; panics_since_start: number; supervised: boolean }
   id: string
   name: string
   start_datetime: string

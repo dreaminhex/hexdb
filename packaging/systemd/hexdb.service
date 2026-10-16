@@ -3,6 +3,9 @@ Description=HexDB document database
 Documentation=https://github.com/dreaminhex/hexdb
 After=network-online.target
 Wants=network-online.target
+# A crash restarts the server (below); five crashes in ten minutes is a crash loop: stop trying.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple

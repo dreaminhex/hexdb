@@ -19,6 +19,7 @@ pub mod crypt;
 pub mod vertex;
 pub mod tasks;
 pub mod runtime;
+pub mod crashes;
 pub mod users;
 pub mod audit;
 pub mod mfa;

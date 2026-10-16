@@ -167,7 +167,7 @@ The server runs in this terminal; Ctrl+C stops it gracefully. On the first start
 
 Open http://localhost:7700/ui/ and sign in. Then change the password on the Account page and delete that file.
 
-To run the server in the background instead, use `hexdb start -s` (output goes to `hexdb_api/.hexdb/hexdb.log`), and stop it with `hexdb stop` from the same folder. Data lives in `hexdb_api/.hexdb`. Delete that folder to start over; the key in `hexdb.local.toml` can stay.
+To run the server in the background instead, use `hexdb start -s` (it's restarted if it crashes; output goes to `hexdb_api/.hexdb/hexdb.log`), and stop it with `hexdb stop` from the same folder. Data lives in `hexdb_api/.hexdb`. Delete that folder to start over; the key in `hexdb.local.toml` can stay.
 
 ### First requests
 

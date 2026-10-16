@@ -35,6 +35,9 @@ pub struct RuntimeInfo {
     /// True when the API is served over HTTPS.
     #[serde(default)]
     pub tls: bool,
+    /// The server's version, for crash reports.
+    #[serde(default)]
+    pub version: String,
 }
 
 impl RuntimeInfo {
@@ -51,6 +54,7 @@ impl RuntimeInfo {
             exe: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
             started_at,
             tls,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
 

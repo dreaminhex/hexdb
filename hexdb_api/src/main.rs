@@ -111,6 +111,9 @@ async fn server() -> anyhow::Result<()> {
     }
 
     let storage_dir = config.storage_dir();
+    // Keep the last panic for the crash report if this process dies.
+    let _ = std::fs::create_dir_all(&storage_dir);
+    hexdb_core::crashes::install_panic_hook(&storage_dir);
 
     // Decide who we are before building the engine: take the configured or
     // saved name (or pick one), discover other hexes in our lattice, make sure
@@ -193,6 +196,7 @@ async fn server() -> anyhow::Result<()> {
     } else {
         warn!("⚠️ files.sandbox is off: files are parsed in the server process.");
     }
+    let opening = std::time::Instant::now();
     let engine = match HexDBEngine::open(config.clone(), identity, keys.clone()).await {
         Ok(engine) => Arc::new(engine),
         Err(e) => {
@@ -201,6 +205,19 @@ async fn server() -> anyhow::Result<()> {
         }
     };
     info!("✅ Hex '{}' (id: {}) initializing as {}...", engine.name, engine.id, engine.role());
+    // The previous process's runtime file is still here if it didn't shut down cleanly.
+    if let Some(report) = hexdb_core::crashes::detect(&storage_dir, opening.elapsed().as_millis() as u64) {
+        let cause = match (&report.panic, &report.exit) {
+            (Some(panic), _) => format!("it panicked: {} at {}", panic.message, panic.location),
+            (None, Some(exit)) => format!("it exited with {}", exit),
+            (None, None) => "it was killed or the machine stopped".into(),
+        };
+        warn!("♻️  Recovered from an unclean shutdown of PID {} ({}); storage opened in {} ms.", report.previous_pid, cause, report.recovery_ms);
+        if let Err(e) = hexdb_core::crashes::save(&storage_dir, &report) {
+            warn!("⚠️ Couldn't save the crash report: {:#}", e);
+        }
+        engine.audit("system", "server.recovered", &engine.name, serde_json::to_value(&report).unwrap_or_default()).await;
+    }
 
     // Remember the peers found at startup.
     {
@@ -358,9 +375,6 @@ async fn server() -> anyhow::Result<()> {
 }
 
 fn write_runtime(runtime: &RuntimeInfo, storage_dir: &std::path::Path) -> anyhow::Result<()> {
-    if RuntimeInfo::path(storage_dir).exists() {
-        warn!("⚠️ Replacing an existing runtime file. A previous HexDB process may not have shut down cleanly.");
-    }
     let runtime_path = runtime.write(storage_dir)?;
     info!("📝 Runtime file written to {}.", runtime_path.display());
     Ok(())

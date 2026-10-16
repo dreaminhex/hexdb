@@ -116,7 +116,7 @@ lattice_secret = "base64:..."   # optional; see section 19
 ```bash
 hexdb init             # create a configuration with a new key (hexdb start does this when there's none)
 hexdb start            # in the foreground
-hexdb start -s         # in the background; output goes to hexdb.log in the data directory
+hexdb start -s         # in the background, restarted if it crashes; output goes to hexdb.log in the data directory
 hexdb stop             # graceful: drains the WAL and flushes to SSTables
 hexdb stop --force     # kill a server that won't stop (unflushed writes come back from the WAL)
 hexdb health
@@ -2109,6 +2109,12 @@ Restoring: stop the hex (or start a new one), point `storage.path` at the backup
 Hard-linked backups share disk blocks with the live data, so they don't protect against losing the disk: copy backup folders to other storage. Back up `storage.encryption_key` separately too; the data is useless without it. A Replicant is another option: a live copy you can back up while it's stopped.
 
 **Upgrades.** Stop the hex, replace the binaries and the UI, and start it. Data in older formats is read and rewritten by compaction. In a lattice, upgrade replicas first, then the Overseer. A failover moves the Overseer role while it's down.
+
+**Crashes and restarts.** Every write is in the write-ahead log before it's acknowledged, so a crash (a kill, a power cut, a panic that ends the process) loses nothing acknowledged: the next start replays the log. Something has to start it again:
+- `hexdb start -s` runs the server under a small supervisor (`hexdb supervise`, in the same log) that restarts it after a crash: at once, then waiting longer (up to 60 s) while it keeps crashing soon after starting, and not at all after five crashes in ten minutes. It doesn't restart a server that `hexdb stop` stopped (even with `--force`), that exited cleanly, or whose first start failed (a bad configuration or a taken port: `hexdb start` reports it). `hexdb start -s --no-restart` runs the server alone.
+- The systemd unit restarts on failure, with the same crash-loop limit (`StartLimitBurst=5` in 10 minutes). `docker-compose.yml` uses `restart: unless-stopped`, and Fly.io restarts crashed machines.
+
+A hex that didn't shut down cleanly leaves its runtime file behind, and the next start reports the crash: a warning in the log, a `server.recovered` audit event, and `restarts` in `/status`: `unclean_shutdowns`, and for the last ones when the crashed process started, its PID and version, its last panic (message, source location and thread, from `last-panic.json`), how it exited if the supervisor saw it, the supervisor's restart count, and how long storage took to open. The last 20 reports are kept in `crashes.json` in the data directory. `panics_since_start` counts panics the process survived: a request that panics fails, and a background task that panics stops (the log says which), so a nonzero count is worth a look, and `supervised` says whether `hexdb supervise` runs it.
 
 **Monitoring.** Use the `@sinks/otlp` plugin for metrics, a logs plugin for logs, and the audit trail for security events. `/status` is suitable for health checks that need more than `/health`.
 
