@@ -26,16 +26,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Cargo.lock isn't tracked yet; resolve the same way a fresh checkout would.
-      - name: Lockfile
-        shell: bash
-        run: test -f Cargo.lock || cargo generate-lockfile
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
       - name: Test
-        run: cargo test --workspace --no-fail-fast
+        run: cargo test --locked --workspace --no-fail-fast
 
   audit:
     name: Dependency audit
@@ -43,8 +39,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Lockfile
-        run: test -f Cargo.lock || cargo generate-lockfile
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: cargo audit
@@ -76,8 +70,7 @@ jobs:
           dotnet-version: "8.0.x"
       - name: Build the server
         run: |
-          test -f Cargo.lock || cargo generate-lockfile
-          cargo build -p hexdb_api
+          cargo build --locked -p hexdb_api
       - name: Node.js
         working-directory: drivers/node
         run: npm install && npm test
@@ -89,7 +82,7 @@ jobs:
         run: |
           sudo apt-get install -y unixodbc
           pip install pyodbc
-          cargo build -p hexdb_odbc
+          cargo build --locked -p hexdb_odbc
           node drivers/testing/server.mjs python drivers/odbc/tests/pyodbc_smoke.py
 
   odbc-windows:
@@ -108,8 +101,7 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          test -f Cargo.lock || cargo generate-lockfile
-          cargo build -p hexdb_api -p hexdb_odbc
+          cargo build --locked -p hexdb_api -p hexdb_odbc
       # Hosted runners are elevated, so the driver can be registered.
       - name: Install the driver
         shell: pwsh

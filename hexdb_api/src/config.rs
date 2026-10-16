@@ -156,7 +156,12 @@ pub async fn ai_complete(State(engine): Engine, Auth(principal): Auth, body: Res
 
 pub async fn ai_estimate(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     require_view(&engine, &principal)?;
-    Ok(Json(engine.ai_estimate().await?).into_response())
+    let mut estimate = engine.ai_estimate().await?;
+    // Demo-mode viewers see only the files tessellations they can read.
+    if let Some(list) = estimate.get_mut("tessellations").and_then(serde_json::Value::as_array_mut) {
+        list.retain(|t| t["tessellation"].as_str().is_some_and(|name| principal.can(hexdb_core::Permission::Read, name)));
+    }
+    Ok(Json(estimate).into_response())
 }
 
 #[derive(Debug, Default, Deserialize)]

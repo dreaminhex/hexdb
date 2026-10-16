@@ -18,7 +18,7 @@ RUN npm run build
 
 FROM rust:1-bookworm AS build
 WORKDIR /src
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY hexdb_core hexdb_core
 COPY hexdb_api hexdb_api
 COPY hexdb_cli hexdb_cli
@@ -30,7 +30,7 @@ COPY drivers/odbc drivers/odbc
 COPY bench bench
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p hexdb_api -p hexdb_cli \
+    cargo build --locked --release -p hexdb_api -p hexdb_cli \
  && cp target/release/hexdb_api target/release/hexdb /usr/local/bin/
 
 FROM debian:bookworm-slim

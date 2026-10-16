@@ -1,0 +1,27 @@
+# Dependency updates as reviewable pull requests. Cargo.lock and the
+# package-lock files are tracked, so nothing changes in a build until one of
+# these is merged; CI runs cargo audit and npm audit on each.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      rust: { patterns: ["*"], update-types: [minor, patch] }
+  - package-ecosystem: npm
+    directory: /hexdb_admin
+    schedule: { interval: weekly }
+    groups:
+      admin-ui: { patterns: ["*"], update-types: [minor, patch] }
+  - package-ecosystem: npm
+    directory: /drivers/node
+    schedule: { interval: weekly }
+  - package-ecosystem: pip
+    directory: /drivers/python
+    schedule: { interval: weekly }
+  - package-ecosystem: nuget
+    directory: /drivers/dotnet
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }

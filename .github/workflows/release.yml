@@ -77,12 +77,11 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          test -f Cargo.lock || cargo generate-lockfile
           if [[ "$TARGET" == *linux* ]]; then
             pip install cargo-zigbuild ziglang
-            cargo zigbuild --release --target "$TARGET.2.28" -p hexdb_api -p hexdb_cli -p hexdb_odbc
+            cargo zigbuild --locked --release --target "$TARGET.2.28" -p hexdb_api -p hexdb_cli -p hexdb_odbc
           else
-            cargo build --release --target "$TARGET" -p hexdb_api -p hexdb_cli -p hexdb_odbc
+            cargo build --locked --release --target "$TARGET" -p hexdb_api -p hexdb_cli -p hexdb_odbc
           fi
       - name: Package
         shell: bash
@@ -201,9 +200,8 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          test -f Cargo.lock || cargo generate-lockfile
           pip install cargo-zigbuild ziglang
-          cargo zigbuild --release --target "$TARGET.2.28" -p hexdb_api -p hexdb_cli -p hexdb_odbc
+          cargo zigbuild --locked --release --target "$TARGET.2.28" -p hexdb_api -p hexdb_cli -p hexdb_odbc
           cargo deb -p hexdb_api --no-build --target "$TARGET"
       - uses: actions/upload-artifact@v4
         with:
