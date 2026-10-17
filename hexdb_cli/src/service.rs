@@ -11,6 +11,7 @@
 // `brew services`.
 
 use anyhow::{bail, Result};
+#[cfg(any(windows, test))]
 use std::path::Path;
 
 #[cfg(windows)]
@@ -21,11 +22,13 @@ pub fn unsupported() -> Result<()> {
     bail!("`hexdb service` is for Windows. On Linux, use the systemd unit (packaging/systemd/hexdb.service, installed by the Debian package); on macOS, `brew services start hexdb`.")
 }
 
+#[cfg(any(windows, test))]
 /// The account a service named `name` runs as.
 pub fn virtual_account(name: &str) -> String {
     format!("NT SERVICE\\{}", name)
 }
 
+#[cfg(any(windows, test))]
 /// Service names: letters, digits, '-' and '_' (they're also part of the account name).
 pub fn check_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 64 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
@@ -34,6 +37,7 @@ pub fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 /// The folders the service account needs: the configuration's (read) and the data directory (modify).
 pub fn grants(config_file: &Path, storage_dir: &Path) -> Vec<(std::path::PathBuf, &'static str)> {
     let mut grants = Vec::new();

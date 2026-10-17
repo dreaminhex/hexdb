@@ -156,6 +156,25 @@ hexdb service uninstall                               # data and configuration s
 
 The service runs `hexdb_api --service --config <hexdb.toml>` under its own virtual account, `NT SERVICE\HexDB`, not LocalSystem. Install gives that account read access to the configuration's folder and modify access to the data directory (both are private to their owner otherwise); with `--account` you grant access yourself. Its recovery actions restart it 5, 10 and 30 seconds after a crash (or any nonzero exit), resetting after a day. Output goes to `hexdb.log` in the data directory. The CLI's `hexdb stop` can't stop the service (the runtime file is private to the service's account); use `hexdb service stop`. Without a service, `hexdb start -s` runs it in the background, restarted if it crashes, until you sign out. Every way to install HexDB is listed in the README's Installing section, and [packaging/RELEASING.md](packaging/RELEASING.md) explains how each is built.
 
+### On a Raspberry Pi
+
+A Raspberry Pi 3, 4, 5 or Zero 2 W running a 64-bit OS (64-bit Raspberry Pi OS, Ubuntu, Debian) is an ordinary Linux arm64 machine: use the Linux arm64 release archive, the arm64 Debian package or the `linux/arm64` Docker image. CI runs the whole test suite on 64-bit ARM.
+
+On a 32-bit OS (ARMv7), build from source with `cargo build --release --target armv7-unknown-linux-gnueabihf`; there are no 32-bit release builds. It works the same, except that the parser sandbox has its resource limits but no seccomp filter (no 32-bit ARM support in the filter library; `/status` shows `storage.files.parser_sandbox.seccomp: false`).
+
+The defaults assume a few GB of memory. On a board with 1 or 2 GB:
+
+```toml
+[memory]
+ram_mb = 256              # documents held in memory (default 1024)
+
+[files]
+cache_mb = 16             # recently read file content (default 64)
+sandbox_memory_mb = 256   # per file being parsed (default 1024); larger images may then get no thumbnail
+```
+
+Keep the data directory on an SSD (USB 3) rather than the SD card: the write-ahead log and compaction write steadily, and SD cards are slow and wear out. Thumbnails and AI tagging are the heaviest background work; turn thumbnails off with `files.thumbnails = false` if uploads are slow. Hexes find each other through `network.peers` and by scanning ports on their own machine, not by broadcasting, so on a LAN of Pis list each one's discovery address (`<ip>:7702`) in the others' `network.peers`.
+
 ## 4. The admin UI
 
 The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [hexdb_admin](hexdb_admin) into `hexdb_admin/dist`, which `ui.path` points at. Everything it does goes through the same API as any client, with the signed-in user's permissions. Pages and buttons a user can't use are hidden, and the server refuses them anyway.

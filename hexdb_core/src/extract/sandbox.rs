@@ -74,6 +74,8 @@ pub struct SandboxStats {
     pub failed: u64,
     /// Workers stopped at the deadline.
     pub stopped: u64,
+    /// Workers run under a seccomp system-call filter (Linux on x86_64, aarch64 and riscv64).
+    pub seccomp: bool,
 }
 
 pub fn stats() -> SandboxStats {
@@ -83,6 +85,7 @@ pub fn stats() -> SandboxStats {
         runs: RUNS.load(Ordering::Relaxed),
         failed: FAILED.load(Ordering::Relaxed),
         stopped: STOPPED.load(Ordering::Relaxed),
+        seccomp: cfg!(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))),
     }
 }
 
@@ -478,12 +481,15 @@ mod restrict {
             if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
                 anyhow::bail!("PR_SET_NO_NEW_PRIVS failed");
             }
+            // seccompiler supports 64-bit x86, ARM and RISC-V; on others
+            // (32-bit ARM) the worker has the resource limits only.
+            #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
             seccomp::apply()?;
         }
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
     mod seccomp {
         use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
         use std::collections::BTreeMap;
@@ -641,7 +647,7 @@ mod tests {
     /// The filter really blocks files, the network and programs. The test
     /// binary runs itself again as a child that applies the filter (it can't
     /// be lifted, so it mustn't touch the test runner's own process).
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
     #[test]
     fn the_linux_sandbox_blocks_files_network_and_programs() {
         if std::env::var_os("HEXDB_SANDBOX_PROBE").is_some() {
