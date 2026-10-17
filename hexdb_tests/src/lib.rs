@@ -354,9 +354,20 @@ admin_email = "admin@example.com"
         loop {
             if let Some(status) = self.child.as_mut().unwrap().try_wait()? {
                 self.child = None;
+                // The error comes before any backtrace (CI sets RUST_BACKTRACE),
+                // so name it from this launch's whole log, not just its tail:
+                // `launch` retries "Failed to bind" (another test took the port).
+                let this_launch = self.launch_log();
+                let error = this_launch
+                    .lines()
+                    .find(|l| l.starts_with("Error:"))
+                    .or_else(|| this_launch.lines().find(|l| l.contains("ERROR")))
+                    .unwrap_or("(no error line)")
+                    .to_string();
                 bail!(
-                    "Server exited during startup ({}). Log tail:\n{}",
+                    "Server exited during startup ({}): {}. Log tail:\n{}",
                     status,
+                    error.trim(),
                     self.log_tail(30)
                 );
             }
@@ -545,6 +556,16 @@ admin_email = "admin@example.com"
     }
 
     /// The last `lines` lines of the server log.
+    /// The server log since the latest launch.
+    fn launch_log(&self) -> String {
+        let text = fs::read_to_string(self.log_path()).unwrap_or_default();
+        let marker = format!("===== launch {} =====", self.launches);
+        match text.rfind(&marker) {
+            Some(at) => text[at..].to_string(),
+            None => text,
+        }
+    }
+
     pub fn log_tail(&self, lines: usize) -> String {
         let text = fs::read_to_string(self.log_path()).unwrap_or_default();
         let all: Vec<&str> = text.lines().collect();

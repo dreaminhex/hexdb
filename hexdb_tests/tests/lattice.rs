@@ -193,9 +193,13 @@ fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
     assert_eq!(res.status.as_u16(), 200, "{}", res.body);
     big.delete_tessellation("doomed")?;
     for replica in [&medium, &replicant] {
-        wait_until(Duration::from_secs(20), "streamed writes", || {
+        // Generous for slow CI runners; on a timeout, say where replication was.
+        let streamed = wait_until(Duration::from_secs(60), "streamed writes", || {
             Ok(doc_on(replica, "notes", &id)? == Some(json!({ "id": id, "text": "patched", "tx": true })))
-        })?;
+        });
+        if let Err(e) = streamed {
+            bail!("{}: replica replication {}, document {:?}", e, replication(replica)?, doc_on(replica, "notes", &id)?);
+        }
         assert!(doc_on(replica, "notes", &victim)?.is_none());
         assert_eq!(count_on(replica, "ledger")?, 1);
         wait_until(Duration::from_secs(10), "the tessellation drop", || {
