@@ -140,3 +140,32 @@ fn the_lattice_secret_rotates_one_hex_at_a_time() -> Result<()> {
     assert_eq!(stranger.request(Method::GET, "/status", None, &[])?.body["hex_type"], "Overseer", "it found no lattice to join");
     Ok(())
 }
+
+/// Lattice answers are signed for the request they answer: a replica can tell
+/// a snapshot or change batch changed in transit (on a link without TLS).
+#[test]
+fn lattice_answers_are_signed_for_their_request() -> Result<()> {
+    let server = TestServer::start()?;
+    server.insert("notes", &json!({ "n": 1 }))?;
+    let config = hexdb_core::load_config_from(Some(&server.dir().join("hexdb.toml")))?;
+    let keys = hexdb_core::network::lattice_auth::LatticeKeys::with_previous(&config.lattice_keys()?);
+    let client = reqwest::blocking::Client::new();
+    for path in ["/lattice/snapshot", "/lattice/changes?after=0&limit=10"] {
+        let signature = keys.sign_request("GET", path, b"");
+        let res = client.get(server.url(path)).header(hexdb_core::LATTICE_SIGNATURE_HEADER, &signature).send()?;
+        let status = res.status().as_u16();
+        assert_eq!(status, 200, "{}", path);
+        let tag = res.headers().get(hexdb_core::replication::LATTICE_RESPONSE_HEADER).expect("signed").to_str()?.to_string();
+        let body = res.bytes()?.to_vec();
+        assert!(keys.verify_response(&signature, status, &body, &tag), "{}", path);
+        let mut changed = body.clone();
+        changed[body.len() / 2] ^= 1;
+        assert!(!keys.verify_response(&signature, status, &changed, &tag), "a changed byte is caught");
+        assert!(!keys.verify_response(&keys.sign_request("GET", path, b""), status, &body, &tag), "not valid for another request");
+    }
+    // Unsigned requests get no signed answer to reuse.
+    let res = client.get(server.url("/lattice/snapshot")).send()?;
+    assert_eq!(res.status().as_u16(), 401);
+    assert!(res.headers().get(hexdb_core::replication::LATTICE_RESPONSE_HEADER).is_none());
+    Ok(())
+}

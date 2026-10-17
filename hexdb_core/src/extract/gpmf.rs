@@ -86,7 +86,7 @@ fn gps_time(s: &str) -> Option<String> {
 }
 
 #[derive(Default)]
-struct Telemetry {
+pub(crate) struct Telemetry {
     device: Option<String>,
     sensors: Vec<String>,
     /// lat, lon, alt (m), 2D speed (m/s), and the fix's time when known.
@@ -117,7 +117,7 @@ const SENSORS: &[(&[u8; 4], &str)] = &[
 ];
 
 /// Read one telemetry sample (a DEVC tree).
-fn read_sample(data: &[u8], depth: usize, t: &mut Telemetry) {
+pub(crate) fn read_sample(data: &[u8], depth: usize, t: &mut Telemetry) {
     if depth > MAX_DEPTH {
         return;
     }

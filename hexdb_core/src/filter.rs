@@ -484,6 +484,66 @@ mod tests {
     use serde_json::json;
     use ulid::Ulid;
 
+    /// A random value or filter, up to `depth` levels, from the filter vocabulary.
+    fn step(x: &mut u64) -> u64 {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
+    }
+
+    fn random_filter(x: &mut u64, depth: usize) -> Value {
+        const OPS: &[&str] = &["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists", "$contains", "$startsWith", "$endsWith", "$not", "_gt", "$bogus"];
+        const TOP: &[&str] = &["$and", "$or", "$not", "$text", "_or", "a", "a.b", "tags", "n", "", "$"];
+        let leaf = |r: u64| match r % 9 {
+            0 => json!(null),
+            1 => json!(r % 100),
+            2 => json!(-1.5),
+            3 => json!("x"),
+            4 => json!(true),
+            5 => json!([1, "x", null]),
+            6 => json!({}),
+            7 => json!(f64::MAX),
+            _ => json!("a.b.c"),
+        };
+        if depth == 0 {
+            return leaf(step(x));
+        }
+        let mut map = serde_json::Map::new();
+        for _ in 0..(step(x) % 4) {
+            let key = TOP[(step(x) % TOP.len() as u64) as usize];
+            let value = match step(x) % 4 {
+                0 => leaf(step(x)),
+                1 => Value::Array((0..step(x) % 3).map(|_| random_filter(x, depth - 1)).collect()),
+                2 => {
+                    let op = OPS[(step(x) % OPS.len() as u64) as usize];
+                    json!({ op: random_filter(x, depth - 1) })
+                }
+                _ => random_filter(x, depth - 1),
+            };
+            map.insert(key.to_string(), value);
+        }
+        Value::Object(map)
+    }
+
+    #[test]
+    fn fuzz_filters() {
+        let docs = [doc(json!({ "a": { "b": 1 }, "n": 5, "tags": ["x", "y"] })), doc(json!({})), doc(json!({ "a": [1, { "b": "x" }], "n": null }))];
+        let mut x = 0xF11_7E5u64;
+        let mut parsed = 0;
+        for _ in 0..20_000 {
+            let value = random_filter(&mut x, 5);
+            if let Ok(filter) = Filter::parse(&value) {
+                parsed += 1;
+                for d in &docs {
+                    let _ = filter.matches(d);
+                }
+                let _ = (filter.shape(), filter.referenced_paths(), filter.has_text(), filter.is_empty());
+            }
+        }
+        assert!(parsed > 2_000, "the generator makes valid filters too: {}", parsed);
+    }
+
     fn doc(json: Value) -> Document {
         Document { id: Ulid::new(), tessellation: "t".into(), data: infer_fields_from_json(&json), ttl: None }
     }

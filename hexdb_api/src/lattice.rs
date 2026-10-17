@@ -29,6 +29,34 @@ use serde::Deserialize;
 use std::time::Duration;
 use ulid::Ulid;
 
+/// The largest lattice answer signed (snapshot pages, change batches and chunks are far smaller).
+const MAX_SIGNED_RESPONSE: usize = 256 * 1024 * 1024;
+
+/// Sign `/lattice/*` answers to signed requests, so a replica can tell they
+/// came from a hex holding the lattice key (see `LATTICE_RESPONSE_HEADER`).
+pub async fn sign_responses(
+    axum::extract::State(engine): axum::extract::State<std::sync::Arc<HexDBEngine>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let signature = if request.uri().path().starts_with("/lattice/") {
+        request.headers().get(LATTICE_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).map(String::from)
+    } else {
+        None
+    };
+    let response = next.run(request).await;
+    let Some(signature) = signature else { return response };
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_SIGNED_RESPONSE).await else {
+        return ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "too_large", "The lattice response is too large to sign.").into_response();
+    };
+    let tag = engine.lattice_keys.sign_response(&signature, parts.status.as_u16(), &bytes);
+    if let Ok(value) = axum::http::HeaderValue::from_str(&tag) {
+        parts.headers.insert(hexdb_core::replication::LATTICE_RESPONSE_HEADER, value);
+    }
+    axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
+}
+
 fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &Uri, body: &[u8]) -> Result<(), ApiError> {
     let presented = headers.get(LATTICE_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
     let target = uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path());

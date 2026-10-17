@@ -50,7 +50,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 use ulid::Ulid;
 
-pub use crate::network::lattice_auth::LATTICE_SIGNATURE_HEADER;
+pub use crate::network::lattice_auth::{LATTICE_RESPONSE_HEADER, LATTICE_SIGNATURE_HEADER};
 /// Documents per snapshot page and per applied batch.
 const PAGE: usize = 500;
 /// How long a replica long-polls the Overseer for changes.
@@ -87,6 +87,27 @@ fn path_and_query(url: &str) -> String {
     }
 }
 
+/// A lattice answer's body, once its signature checks out. A hex that
+/// announces `signs_responses` (2.0 and later) must sign; an unsigned answer
+/// is accepted only from a hex known not to (an older one, mid-upgrade).
+pub(crate) async fn verified_body(engine: &HexDBEngine, url: &str, request_signature: &str, response: reqwest::Response) -> Result<Vec<u8>> {
+    let status = response.status().as_u16();
+    let tag = response.headers().get(LATTICE_RESPONSE_HEADER).and_then(|v| v.to_str().ok()).map(String::from);
+    let body = response.bytes().await.with_context(|| format!("reading {}", url))?;
+    match tag {
+        Some(tag) if engine.lattice_keys.verify_response(request_signature, status, &body, &tag) => Ok(body.to_vec()),
+        Some(_) => bail!("{}: the answer's lattice signature doesn't match (changed in transit?)", url),
+        None if !peer_signs(engine, url).await => Ok(body.to_vec()),
+        None => bail!("{}: the answer isn't signed with the lattice key (changed in transit, or not a hex of this lattice?)", url),
+    }
+}
+
+/// Whether the hex at `url` signs its answers (true when it isn't known).
+async fn peer_signs(engine: &HexDBEngine, url: &str) -> bool {
+    let peers = engine.peers.lock().await;
+    peers.iter().find(|p| url.starts_with(&peer_base_url(&p.hex))).is_none_or(|p| p.hex.signs_responses)
+}
+
 /// POST a JSON body to the Overseer's lattice API (e.g. to forward a sign-out from a replica).
 pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_json::Value) -> Result<()> {
     let overseer = {
@@ -102,7 +123,7 @@ pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_jso
         let signature = engine.lattice_keys.sign_request_with(index, "POST", path, &bytes);
         let response = client
             .post(&url)
-            .header(LATTICE_SIGNATURE_HEADER, signature)
+            .header(LATTICE_SIGNATURE_HEADER, &signature)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(bytes.clone())
             .send()
@@ -115,6 +136,7 @@ pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_jso
         if !status.is_success() {
             bail!("POST {} returned {}", url, status);
         }
+        verified_body(engine, &url, &signature, response).await?;
         return Ok(());
     }
     Ok(())
@@ -373,10 +395,11 @@ impl Follower {
         let mut index = self.key_index.load(std::sync::atomic::Ordering::Relaxed).min(keys.len() - 1);
         let mut tried = 0;
         loop {
+            let signature = keys.sign_request_with(index, "GET", &path_and_query(url), b"");
             let response = self
                 .client
                 .get(url)
-                .header(LATTICE_SIGNATURE_HEADER, keys.sign_request_with(index, "GET", &path_and_query(url), b""))
+                .header(LATTICE_SIGNATURE_HEADER, &signature)
                 .send()
                 .await
                 .with_context(|| format!("GET {}", url))?;
@@ -392,7 +415,8 @@ impl Follower {
                 return Ok(Err(status));
             }
             self.key_index.store(index, std::sync::atomic::Ordering::Relaxed);
-            return Ok(Ok(response.json().await.with_context(|| format!("GET {}: unreadable response", url))?));
+            let body = verified_body(&self.engine, url, &signature, response).await?;
+            return Ok(Ok(serde_json::from_slice(&body).with_context(|| format!("GET {}: unreadable response", url))?));
         }
     }
 

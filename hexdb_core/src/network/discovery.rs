@@ -88,6 +88,10 @@ pub struct PeerHex {
     pub config_sha256: String,
     #[serde(default)]
     pub config_state: String,
+    /// Signs its lattice API responses (HexDB 2.0 and later): other hexes
+    /// then refuse unsigned answers from it.
+    #[serde(default)]
+    pub signs_responses: bool,
 }
 
 fn default_preference() -> String {
@@ -165,8 +169,12 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         config_version: lattice_config.version,
         config_sha256: lattice_config.sha256.clone(),
         config_state: lattice_config.state().to_string(),
+        signs_responses: true,
     }
 }
+
+/// Discovery handshakes served at once.
+const MAX_HANDSHAKES: usize = 64;
 
 /// Answer discovery handshakes with this hex's current identity.
 pub async fn start_discovery_listener(engine: Arc<HexDBEngine>) {
@@ -180,11 +188,18 @@ pub async fn start_discovery_listener(engine: Arc<HexDBEngine>) {
     };
     info!(%addr, "📡 Discovery listener active.");
 
+    // Handshakes are short; strangers holding connections open can't use more than this many.
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES));
     loop {
         match listener.accept().await {
             Ok((mut socket, _)) => {
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    debug!("📡 Dropped a discovery connection: too many handshakes at once.");
+                    continue;
+                };
                 let engine = engine.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     let mut reader = BufReader::new(&mut socket);
                     let mut line = String::new();
                     // Hellos are one short line; don't buffer more from strangers.
@@ -496,6 +511,7 @@ mod tests {
             config_version: 0,
             config_sha256: String::new(),
             config_state: String::new(),
+            signs_responses: false,
         }
     }
 

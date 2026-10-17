@@ -229,6 +229,7 @@ pub fn app_router(
     let proxies = Arc::new(crate::client::TrustedProxies::parse(&engine.config.network.trusted_proxies).unwrap_or_default());
     let timeout = std::time::Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1));
     let rest = router
+        .layer(middleware::from_fn_with_state(engine.clone(), crate::lattice::sign_responses))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::forward::forward_writes))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::authenticate))
         .layer(middleware::from_fn_with_state(timeout, crate::server::request_timeout))

@@ -903,9 +903,10 @@ impl HexDBEngine {
     async fn signed_get(&self, client: &reqwest::Client, url: &str, path: &str) -> Result<Option<(bool, Vec<u8>)>> {
         let keys = &self.lattice_keys;
         for index in 0..keys.len() {
+            let signature = keys.sign_request_with(index, "GET", path, b"");
             let response = client
                 .get(url)
-                .header(crate::replication::LATTICE_SIGNATURE_HEADER, keys.sign_request_with(index, "GET", path, b""))
+                .header(crate::replication::LATTICE_SIGNATURE_HEADER, &signature)
                 .send()
                 .await
                 .map_err(|e| anyhow!("GET {}: {}", url, e))?;
@@ -920,8 +921,8 @@ impl HexDBEngine {
                 return Err(anyhow!("GET {} returned {}", url, status));
             }
             let compressed = response.headers().get("x-hexdb-compress").is_some_and(|v| v == "1");
-            let body = response.bytes().await.map_err(|e| anyhow!("GET {}: {}", url, e))?;
-            return Ok(Some((compressed, body.to_vec())));
+            let body = crate::replication::verified_body(self, url, &signature, response).await?;
+            return Ok(Some((compressed, body)));
         }
         Ok(None)
     }

@@ -1267,6 +1267,36 @@ mod tests {
     }
 
     #[test]
+    fn damaged_pack_indexes_are_refused_not_trusted() {
+        let root = temp_root("hxi-fuzz");
+        let records: Vec<PackRecord> = (0..20)
+            .map(|i| PackRecord { id: [i as u8; 32], index: 0, flags: 0, key_id: 1, plain_len: 1000, cipher_len: 1028, offset: PACK_HEADER_LEN + i * 1000 })
+            .collect();
+        let path = root.join("00000001.hxi");
+        let pack_len = 1_000_000;
+        write_pack_index(&path, pack_len, &records).unwrap();
+        let good = fs::read(&path).unwrap();
+        assert_eq!(read_pack_index(&path, pack_len).unwrap().1, records);
+        let mut x = 0xB10Bu64;
+        for _ in 0..1000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let mut bad = good.clone();
+            let at = (x % bad.len() as u64) as usize;
+            if x.is_multiple_of(3) {
+                bad.truncate(at);
+            } else {
+                bad[at] ^= 1 << (x % 8);
+            }
+            fs::write(&path, &bad).unwrap();
+            // A changed byte fails the checksum; a cut index is too short. Either way: scan the pack.
+            assert!(read_pack_index(&path, pack_len).is_none() || bad == good);
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn any_two_vertices_can_be_lost() {
         let root = temp_root("vertices");
         let keys = Arc::new(KeyRing::new(&[1u8; 32], &[]));

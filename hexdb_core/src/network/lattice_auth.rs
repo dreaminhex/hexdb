@@ -33,6 +33,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub const LATTICE_SIGNATURE_HEADER: &str = "x-hexdb-lattice-signature";
+/// A lattice route's answer to a signed request: `mac("response", the request's
+/// signature header, status, body hash)`, so a replica knows the data came from
+/// a hex holding the lattice key, for that request (it can't be replayed onto another).
+pub const LATTICE_RESPONSE_HEADER: &str = "x-hexdb-lattice-response";
 const MAX_SKEW_SECONDS: i64 = 60;
 
 fn mac(key: &[u8; 32], parts: &[&[u8]]) -> blake3::Hash {
@@ -193,6 +197,21 @@ impl LatticeKeys {
         format!("{}.{}.{}", ts, nonce, tag.to_hex())
     }
 
+    /// The response signature for a signed request's answer (with the current key).
+    pub fn sign_response(&self, request_signature: &str, status: u16, body: &[u8]) -> String {
+        let body_hash = blake3::hash(body);
+        mac(&self.sets[0].requests, &[b"response", request_signature.as_bytes(), status.to_string().as_bytes(), body_hash.as_bytes()]).to_hex().to_string()
+    }
+
+    /// Check a response signature made with any held key.
+    pub fn verify_response(&self, request_signature: &str, status: u16, body: &[u8], tag: &str) -> bool {
+        let Some(tag) = parse_mac(tag) else { return false };
+        let body_hash = blake3::hash(body);
+        self.sets
+            .iter()
+            .any(|s| mac(&s.requests, &[b"response", request_signature.as_bytes(), status.to_string().as_bytes(), body_hash.as_bytes()]) == tag)
+    }
+
     // --- sealed data ------------------------------------------------------------
 
     /// Encrypt data for another hex with the current transfer key:
@@ -250,6 +269,22 @@ impl LatticeKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn responses_are_bound_to_their_request() {
+        let keys = LatticeKeys::new(&[1u8; 32]);
+        let stranger = LatticeKeys::new(&[2u8; 32]);
+        let request = keys.sign_request("GET", "/lattice/changes?after=1", b"");
+        let other = keys.sign_request("GET", "/lattice/changes?after=1", b"");
+        let tag = keys.sign_response(&request, 200, b"{\"changes\":[]}");
+        assert!(keys.verify_response(&request, 200, b"{\"changes\":[]}", &tag));
+        assert!(!keys.verify_response(&request, 200, b"{\"changes\":[1]}", &tag), "a changed body");
+        assert!(!keys.verify_response(&request, 404, b"{\"changes\":[]}", &tag), "a changed status");
+        assert!(!keys.verify_response(&other, 200, b"{\"changes\":[]}", &tag), "replayed onto another request");
+        assert!(!stranger.verify_response(&request, 200, b"{\"changes\":[]}", &tag), "another lattice's key");
+        let rotated = LatticeKeys::with_previous(&[[3u8; 32], [1u8; 32]]);
+        assert!(rotated.verify_response(&request, 200, b"{\"changes\":[]}", &tag), "a previous key still verifies");
+    }
 
     #[test]
     fn discovery_handshake_is_mutual_and_single_use() {

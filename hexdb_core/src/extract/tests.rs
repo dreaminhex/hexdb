@@ -576,7 +576,13 @@ fn gopro_telemetry() {
     );
     let hdlr = full(b"hdlr", &[0u32.to_be_bytes().to_vec(), b"meta".to_vec(), vec![0u8; 12], b"GoPro MET\0".to_vec()].concat());
     let moov = mp4_box(b"moov", &mp4_box(b"trak", &mp4_box(b"mdia", &[hdlr, mp4_box(b"minf", &stbl)].concat())));
-    let out = run([ftyp, mdat, moov].concat(), "GX010001.MP4", "video/mp4");
+    let file = [ftyp, mdat, moov].concat();
+    let mut fuzz = Mutator(0x60_9C0);
+    for _ in 0..1500 {
+        let out = extract_bytes(fuzz.mutate(&file), "GX010001.MP4", "video/mp4");
+        assert!(!out.errors.iter().any(|e| e.starts_with("gpmf:") && e.contains("the parser failed")), "{:?}", out.errors);
+    }
+    let out = run(file, "GX010001.MP4", "video/mp4");
     let m = &out.meta;
     assert_eq!(get(m, "gpmf.device"), "HERO9 Black");
     assert_eq!(get(m, "camera.model"), "HERO9 Black");
@@ -785,4 +791,86 @@ fn mp3_id3v2() {
     assert_eq!(get(m, "id3v2.TPE1"), "John Coltrane");
     assert_eq!(get(m, "sample_rate"), 44100);
     assert!(get(m, "duration_ms").as_u64().unwrap() > 900, "{}", get(m, "duration_ms"));
+}
+
+/// Deterministic mutations for fuzzing: bit flips, extreme bytes, overwritten
+/// length fields, cuts and duplicated slices.
+struct Mutator(u64);
+
+impl Mutator {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+
+    fn mutate(&mut self, seed: &[u8]) -> Vec<u8> {
+        let mut b = seed.to_vec();
+        for _ in 0..1 + self.below(4) {
+            if b.is_empty() {
+                break;
+            }
+            let at = self.below(b.len());
+            match self.below(6) {
+                0 => b[at] ^= 1 << self.below(8),
+                1 => b[at] = [0x00, 0xFF, 0x7F, 0x80][self.below(4)],
+                2 => {
+                    let v = [0u32, 1, 0xFFFF_FFFF, 0x7FFF_FFFF, 8, 12][self.below(6)].to_be_bytes();
+                    for (i, byte) in v.iter().enumerate() {
+                        if let Some(slot) = b.get_mut(at + i) {
+                            *slot = *byte;
+                        }
+                    }
+                }
+                3 => b.truncate(at),
+                4 => {
+                    let end = (at + 1 + self.below(64)).min(b.len());
+                    let copy = b[at..end].to_vec();
+                    let to = self.below(b.len());
+                    b.splice(to..to, copy);
+                }
+                _ => {
+                    b.remove(at);
+                }
+            }
+        }
+        b
+    }
+}
+
+#[test]
+fn fuzz_icc_and_gpmf_parsers() {
+    let mut m = Mutator(0x1CC_6E3F);
+    let profile = super::icc::tests::profile("Display P3");
+    let sample = super::gpmf::tests::sample(47.6, -122.3, "240315093000.000");
+    let mut parsed = 0;
+    for _ in 0..20_000 {
+        parsed += super::icc::parse(&m.mutate(&profile)).is_some() as usize;
+        let mut t = super::gpmf::Telemetry::default();
+        super::gpmf::read_sample(&m.mutate(&sample), 0, &mut t);
+    }
+    assert!(parsed > 2_000, "most mutations still reach the tag parsing: {}", parsed);
+}
+
+#[test]
+fn fuzz_whole_files_through_the_new_extractors() {
+    let mut m = Mutator(0x5EED);
+    // A PNG with an iCCP chunk and a WebP with an ICCP chunk.
+    let profile = super::icc::tests::profile("sRGB");
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut z, &profile).unwrap();
+    let data = [b"sRGB\0\0".to_vec(), z.finish().unwrap()].concat();
+    let png = [b"\x89PNG\r\n\x1a\n".to_vec(), (data.len() as u32).to_be_bytes().to_vec(), b"iCCP".to_vec(), data, vec![0; 4]].concat();
+    let webp = [b"RIFF".to_vec(), ((profile.len() + 12) as u32).to_le_bytes().to_vec(), b"WEBPICCP".to_vec(), (profile.len() as u32).to_le_bytes().to_vec(), profile.clone()].concat();
+    for (seed, name, kind) in [(png, "x.png", "image/png"), (webp, "x.webp", "image/webp")] {
+        for _ in 0..1500 {
+            let out = extract_bytes(m.mutate(&seed), name, kind);
+            assert!(!out.errors.iter().any(|e| e.starts_with("icc:") && e.contains("the parser failed")), "{:?}", out.errors);
+        }
+    }
 }

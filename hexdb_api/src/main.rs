@@ -182,6 +182,7 @@ async fn server() -> anyhow::Result<()> {
         config_version: 0,
         config_sha256: String::new(),
         config_state: String::new(),
+        signs_responses: true,
     };
     let role = elect(&provisional, &peers);
     match peers.iter().find(|p| p.role == ROLE_OVERSEER) {

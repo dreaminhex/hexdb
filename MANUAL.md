@@ -1670,7 +1670,8 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 - **Discovery** is a mutual challenge-response. The prober sends a hello with a timestamp, a nonce and a MAC. The responder answers only a fresh (within 60 seconds), never-seen, valid hello, with an identity MAC bound to the prober's nonce. Strangers learn nothing, and a replayed or forged reply can't impersonate an Overseer.
 - **Replication and other `/lattice/*` requests** carry `X-HexDB-Lattice-Signature`: a timestamp, a nonce, and a MAC over the method, path, query and body hash. Each is valid for 60 seconds and once. User sessions and API keys are never accepted there.
-- File chunks and the content key are sent sealed with AES-256-GCM under a transfer key derived from the lattice key, so they stay secret without TLS.
+- **Their answers** carry `X-HexDB-Lattice-Response`: a MAC over the request's signature, the status and the body hash. A replica checks it before using a snapshot page, a change batch or a chunk, so data changed in transit (on a link without TLS) is refused, and an answer can't be replayed onto another request. Hexes from 2.0 announce this in their (authenticated) discovery identity and must sign; unsigned answers are accepted only from an older hex during an upgrade.
+- File chunks and the content key are sent sealed with AES-256-GCM under a transfer key derived from the lattice key, so they stay secret without TLS. Documents in snapshots and change batches are authenticated but not encrypted: use TLS between hexes on networks you don't control. The Overseer's answers to writes a replica forwards for a client are relayed as they are, not signed.
 - MACs are keyed BLAKE3 with keys derived from the lattice key, compared in constant time.
 - Session tokens are signed with a key derived from the lattice key, which is why a session works on every hex.
 
