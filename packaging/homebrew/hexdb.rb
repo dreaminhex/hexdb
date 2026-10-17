@@ -52,8 +52,8 @@ class Hexdb < Formula
     unless local.exist?
       key = Utils.safe_popen_read(bin/"hexdb", "secret").strip
       odie "hexdb secret printed no key" unless key.start_with?("base64:")
-      local.write "[storage]\nencryption_key = \"#{key}\"\n"
-      local.chmod 0600
+      # Created private (0600), so the key is never readable by others.
+      File.open(local, File::WRONLY | File::CREAT | File::EXCL, 0600) { |f| f.write "[storage]\nencryption_key = \"#{key}\"\n" }
     end
   end
 

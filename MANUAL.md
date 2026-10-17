@@ -127,6 +127,8 @@ HEXDB_TOKEN=hxk_... hexdb sql "SELECT COUNT(*) FROM orders"   # see section 10; 
 
 `hexdb start` runs the `hexdb_api` binary found next to the CLI (or on `PATH`, or `--server-bin`). The server writes `hexdb.pid` to its data directory: its PID, endpoint, executable, start time and a one-time shutdown token. The file is readable by its owner only. `hexdb stop` posts the token to `POST /shutdown`. `--force` kills the process only if its executable and start time match the file, so a stale file can't kill an unrelated process that reused the PID.
 
+The CLI sends `--token` (or `HEXDB_TOKEN`) only over HTTPS or to this machine (`localhost`, `127.0.0.1`, `::1`): to another host over plain HTTP it refuses, since anyone on the network could read the token. Set `HEXDB_ALLOW_PLAINTEXT=1` for a network you trust.
+
 ### The first administrator
 
 With no users, the first start creates the administrator named by `security.admin_login` (default `hexdbadmin`). If `security.admin_password` is empty (recommended), HexDB generates a password, prints it once on the console, and writes it to `initial-admin-password.txt` in the data directory, readable by the owner only. It's never written to the log. Sign in, change the password on the Account page, and delete the file.
@@ -140,7 +142,14 @@ docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
   -e HEXDB_STORAGE__ENCRYPTION_KEY="base64:..." hexdb
 ```
 
-[docker-compose.yml](docker-compose.yml) runs a three-hex lattice (two Harvester candidates and a Replicant) on ports 7700, 7710 and 7720.
+The server writes only its volume, so it also runs with a read-only root file system, no Linux capabilities and no privilege escalation; the parser sandbox (with its seccomp filter) works under Docker's default seccomp profile:
+
+```bash
+docker run --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+  -p 7700:7700 -v hexdb-data:/var/lib/hexdb -e HEXDB_STORAGE__ENCRYPTION_KEY="base64:..." hexdb
+```
+
+[docker-compose.yml](docker-compose.yml) runs a three-hex lattice (two Harvester candidates and a Replicant) on ports 7700, 7710 and 7720, with those settings.
 
 ### As a service
 

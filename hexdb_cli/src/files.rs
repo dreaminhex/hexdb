@@ -80,6 +80,7 @@ fn human(bytes: u64) -> String {
 
 /// Upload local files (folders with `recursive`) into `folder` of a files tessellation.
 pub async fn put(config: &HexConfig, base: &str, token: Option<&str>, tess: &str, paths: &[PathBuf], folder: &str, recursive: bool) -> Result<()> {
+    crate::check_transport(base, token)?;
     let http = client(config)?;
     let mut jobs: Vec<(PathBuf, String)> = Vec::new();
     for path in paths {
@@ -202,6 +203,7 @@ async fn put_one(http: &reqwest::Client, base: &str, token: Option<&str>, tess: 
 
 /// Download a file by path (`folder/name`) or ID to `out` (default: its name, here).
 pub async fn get(config: &HexConfig, base: &str, token: Option<&str>, tess: &str, file: &str, out: Option<PathBuf>, version: Option<u64>) -> Result<()> {
+    crate::check_transport(base, token)?;
     let http = client(config)?;
     let by_id = file.len() == 26 && file.chars().all(|c| c.is_ascii_alphanumeric());
     let mut url = if by_id {
@@ -254,6 +256,7 @@ pub async fn get(config: &HexConfig, base: &str, token: Option<&str>, tess: &str
 
 /// List a folder (subfolders and files), or search with `query`.
 pub async fn ls(config: &HexConfig, base: &str, token: Option<&str>, tess: &str, folder: &str, query: Option<&str>) -> Result<()> {
+    crate::check_transport(base, token)?;
     let http = client(config)?;
     let auth = |r: reqwest::RequestBuilder| match token {
         Some(t) => r.bearer_auth(t),

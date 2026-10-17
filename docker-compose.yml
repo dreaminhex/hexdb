@@ -15,6 +15,13 @@ x-hex: &hex
   build: .
   image: hexdb:local
   restart: unless-stopped
+  # Hardening: the image runs as an unprivileged user and writes only its
+  # volume, so the rest of the file system is read-only and it needs no
+  # Linux capabilities.
+  read_only: true
+  tmpfs: ["/tmp"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
   environment: &env
     HEXDB_NETWORK__LATTICE_NAME: "Compose Lattice"
     HEXDB_NETWORK__LATTICE_SECRET: ${HEXDB_LATTICE_SECRET:?set HEXDB_LATTICE_SECRET (see the top of this file)}

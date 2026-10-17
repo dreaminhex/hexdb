@@ -873,6 +873,25 @@ fn base_url(config_path: Option<&Path>, url: Option<String>) -> Result<(String, 
     Ok((local_base_url_with(&endpoint, config.tls.enabled()), config))
 }
 
+/// Refuse to send credentials in clear text: over plain HTTP they go only to
+/// this machine. `HEXDB_ALLOW_PLAINTEXT=1` allows another host (a network you
+/// trust, e.g. a private LAN without TLS).
+pub(crate) fn check_transport(base: &str, token: Option<&str>) -> Result<()> {
+    if token.is_none() || !base.starts_with("http://") || std::env::var("HEXDB_ALLOW_PLAINTEXT").is_ok_and(|v| v == "1") {
+        return Ok(());
+    }
+    let url = reqwest::Url::parse(base).with_context(|| format!("Bad server address {}", base))?;
+    let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let local = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !local {
+        bail!(
+            "Not sending credentials to {} over plain HTTP: anyone on the network could read them. Use https:// (configure [tls] on the server), or set HEXDB_ALLOW_PLAINTEXT=1 if you trust the network.",
+            url.host_str().unwrap_or(base)
+        );
+    }
+    Ok(())
+}
+
 /// An HTTP client that also trusts `tls.ca_file` (for private certificates).
 fn http_client(config: &HexConfig) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
@@ -897,6 +916,7 @@ async fn request_text(
     token: Option<&str>,
     body: Option<&serde_json::Value>,
 ) -> Result<String> {
+    check_transport(base, token)?;
     let mut request = http_client(config)?.request(method, format!("{}{}", base, path));
     if let Some(token) = token {
         request = request.bearer_auth(token);
@@ -1219,6 +1239,18 @@ fn list_plugins() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_only_go_over_tls_or_to_this_machine() {
+        assert!(check_transport("http://127.0.0.1:7700", Some("k")).is_ok());
+        assert!(check_transport("http://localhost:7700", Some("k")).is_ok());
+        assert!(check_transport("http://[::1]:7700", Some("k")).is_ok());
+        assert!(check_transport("https://db.example.com", Some("k")).is_ok());
+        assert!(check_transport("http://db.example.com:7700", None).is_ok(), "nothing to leak");
+        assert!(check_transport("http://192.168.1.20:7700", Some("k")).is_err());
+        assert!(check_transport("http://db.example.com:7700", Some("k")).is_err());
+        assert!(check_transport("http://127.0.0.1.evil.example:7700", Some("k")).is_err());
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("hexdb-cli-{}-{}", tag, std::process::id()));

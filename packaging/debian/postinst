@@ -9,7 +9,8 @@ if [ "$1" = "configure" ]; then
     chmod 750 /var/lib/hexdb
     if [ ! -f /etc/hexdb/hexdb.local.toml ]; then
         key="base64:$(head -c 32 /dev/urandom | base64)"
-        printf '[storage]\nencryption_key = "%s"\n' "$key" > /etc/hexdb/hexdb.local.toml
+        # Created private: never readable by others, even for a moment.
+        (umask 077 && printf '[storage]\nencryption_key = "%s"\n' "$key" > /etc/hexdb/hexdb.local.toml)
         chown hexdb:hexdb /etc/hexdb/hexdb.local.toml
         chmod 600 /etc/hexdb/hexdb.local.toml
         echo "HexDB: created /etc/hexdb/hexdb.local.toml with a new storage key. Back it up: without it the data can't be read."
