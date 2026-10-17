@@ -25,6 +25,8 @@
 // lets the server re-extract older files.
 
 mod docs;
+mod gpmf;
+mod icc;
 mod image;
 mod media;
 pub mod sandbox;
@@ -38,7 +40,8 @@ use std::time::{Duration, Instant};
 
 /// Bumped whenever extraction changes what it finds.
 /// 2: thumbnails from H.264 video keyframes.
-pub const VERSION: u64 = 2;
+/// 3: PDF body text, ICC color profiles, GoPro GPMF telemetry.
+pub const VERSION: u64 = 3;
 
 /// Longest string kept in a value.
 const MAX_STRING: usize = 4096;
@@ -407,6 +410,7 @@ type Extractor = fn(&mut Ctx) -> anyhow::Result<bool>;
 const EXTRACTORS: &[(&str, Extractor)] = &[
     ("exif", image::exif),
     ("png", image::png_text),
+    ("icc", icc::icc),
     ("iptc", image::iptc),
     ("psd", image::psd),
     ("image", image::dimensions),
@@ -414,6 +418,7 @@ const EXTRACTORS: &[(&str, Extractor)] = &[
     ("bext", media::riff_chunks),
     ("asf", media::asf),
     ("track", media::track),
+    ("gpmf", gpmf::gpmf),
     ("matroska", media::matroska),
     ("pdf", docs::pdf),
     ("eps", docs::eps),

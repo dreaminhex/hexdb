@@ -13,6 +13,10 @@ const MAX_PDF: u64 = 64 * 1024 * 1024;
 const MAX_MEMBER: u64 = 8 * 1024 * 1024;
 /// Names listed from an archive.
 const MAX_LISTED: usize = 1000;
+/// Pages read for a PDF's body text.
+const MAX_TEXT_PAGES: usize = 2000;
+/// Decompressed content read from one PDF page (against compression bombs).
+const MAX_PAGE_CONTENT: usize = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // PDF and Illustrator
@@ -78,6 +82,23 @@ pub(crate) fn pdf(ctx: &mut Ctx) -> anyhow::Result<bool> {
     // Illustrator files are PDFs that say so in their creator.
     if ctx.ext() == "ai" || text("Creator").is_some_and(|c| c.contains("Illustrator")) {
         raw.insert("illustrator".into(), json!(true));
+    }
+    // Body text, page by page until the text budget is full. Encrypted PDFs
+    // (with a password) and scanned pages (images, no text) have none.
+    if !doc.is_encrypted() {
+        let mut pages_with_text = 0;
+        for (number, _) in doc.get_pages().into_iter().take(MAX_TEXT_PAGES) {
+            if ctx.text.len() >= ctx.limits.max_text_bytes {
+                break;
+            }
+            let Ok(page) = doc.extract_text_with_limit(&[number], MAX_PAGE_CONTENT) else { continue };
+            let page = page.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !page.is_empty() {
+                pages_with_text += 1;
+                ctx.add_text(&page);
+            }
+        }
+        raw.insert("text_pages".into(), json!(pages_with_text));
     }
     ctx.raw("pdf", raw);
     Ok(true)

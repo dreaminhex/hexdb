@@ -24,7 +24,7 @@ const MAX_TOP_BOXES: usize = 10_000;
 const MAX_SIDE: usize = 8192;
 
 /// A box inside a buffer: its type and contents (after the header).
-fn children(mut data: &[u8]) -> Vec<([u8; 4], &[u8])> {
+pub(crate) fn children(mut data: &[u8]) -> Vec<([u8; 4], &[u8])> {
     let mut out = Vec::new();
     while data.len() >= 8 {
         let size = u32::from_be_bytes(data[..4].try_into().unwrap()) as u64;
@@ -44,19 +44,19 @@ fn children(mut data: &[u8]) -> Vec<([u8; 4], &[u8])> {
     out
 }
 
-fn child<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
+pub(crate) fn child<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
     children(data).into_iter().find(|(k, _)| k == kind).map(|(_, d)| d)
 }
 
-fn path<'a>(data: &'a [u8], kinds: &[&[u8; 4]]) -> Option<&'a [u8]> {
+pub(crate) fn path<'a>(data: &'a [u8], kinds: &[&[u8; 4]]) -> Option<&'a [u8]> {
     kinds.iter().try_fold(data, |d, k| child(d, k))
 }
 
-fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+pub(crate) fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(b.get(at..at + 2)?.try_into().ok()?))
 }
 
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
@@ -127,7 +127,7 @@ fn track_id(tkhd: &[u8]) -> Option<u32> {
 }
 
 /// Where one sample lives: file offset and length.
-fn sample_location(stbl: &[u8], sample: usize) -> Option<(u64, u64)> {
+pub(crate) fn sample_location(stbl: &[u8], sample: usize) -> Option<(u64, u64)> {
     let stsz = child(stbl, b"stsz")?;
     let fixed = u32_at(stsz, 4)? as u64;
     let count = u32_at(stsz, 8)? as usize;
@@ -292,13 +292,8 @@ pub fn keyframe(source: &mut Source) -> anyhow::Result<Option<RgbImage>> {
     Ok(keyframes(source, &[1.0 / 3.0])?.into_iter().next())
 }
 
-/// Decoded keyframes near these points of the video (fractions of its length),
-/// upright and without repeats; empty when there's no H.264 video track (or no
-/// decoder). Fragmented MP4 gives its first keyframe only.
-pub fn keyframes(source: &mut Source, fractions: &[f64]) -> anyhow::Result<Vec<RgbImage>> {
-    if !cfg!(feature = "video-thumbnails") {
-        return Ok(Vec::new());
-    }
+/// The `moov` box's contents (it can be anywhere: often at the end) and the fragments (`moof` offsets and sizes).
+pub(crate) fn top_boxes(source: &mut Source) -> anyhow::Result<(Option<Vec<u8>>, Vec<(u64, u64)>)> {
     // Top-level boxes: find moov (anywhere: often at the end) and the fragments.
     let len = source.len();
     let mut at = 0u64;
@@ -328,12 +323,26 @@ pub fn keyframes(source: &mut Source, fractions: &[f64]) -> anyhow::Result<Vec<R
         }
         at += size;
     }
-    let Some((moov_at, moov_size, moov_header)) = moov else { return Ok(Vec::new()) };
+    let Some((moov_at, moov_size, moov_header)) = moov else { return Ok((None, moofs)) };
     if moov_size > MAX_MOOV {
         bail!("the video's index is over {} MB", MAX_MOOV / (1024 * 1024));
     }
     let moov_bytes = source.range(moov_at, moov_size as usize)?;
     let moov = moov_bytes.get(moov_header..).unwrap_or_default();
+
+    Ok((Some(moov.to_vec()), moofs))
+}
+
+/// Decoded keyframes near these points of the video (fractions of its length),
+/// upright and without repeats; empty when there's no H.264 video track (or no
+/// decoder). Fragmented MP4 gives its first keyframe only.
+pub fn keyframes(source: &mut Source, fractions: &[f64]) -> anyhow::Result<Vec<RgbImage>> {
+    if !cfg!(feature = "video-thumbnails") {
+        return Ok(Vec::new());
+    }
+    let (moov, moofs) = top_boxes(source)?;
+    let Some(moov_bytes) = moov else { return Ok(Vec::new()) };
+    let moov = moov_bytes.as_slice();
 
     for (kind, trak) in children(moov) {
         if &kind != b"trak" {

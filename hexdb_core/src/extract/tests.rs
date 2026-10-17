@@ -532,6 +532,97 @@ fn pdf_info_dictionary() {
 }
 
 #[test]
+fn png_color_profile() {
+    use std::io::Write;
+    let profile = super::icc::tests::profile("Display P3");
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&profile).unwrap();
+    let data = [b"Display P3\0\0".to_vec(), z.finish().unwrap()].concat();
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend((data.len() as u32).to_be_bytes());
+    png.extend(b"iCCP");
+    png.extend(&data);
+    png.extend([0u8; 4]);
+    png.extend([0, 0, 0, 0]);
+    png.extend(b"IEND");
+    png.extend([0u8; 4]);
+    let out = run(png, "wide.png", "image/png");
+    assert_eq!(get(&out.meta, "color_profile"), "Display P3");
+    assert_eq!(get(&out.meta, "icc.device_class"), "display");
+}
+
+#[test]
+fn gopro_telemetry() {
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        [((body.len() + 8) as u32).to_be_bytes().to_vec(), kind.to_vec(), body.to_vec()].concat()
+    }
+    fn full(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        mp4_box(kind, &[vec![0u8; 4], body.to_vec()].concat())
+    }
+    let samples = [super::gpmf::tests::sample(47.6062, -122.3321, "240315093000.000"), super::gpmf::tests::sample(47.6072, -122.3321, "240315093001.000")];
+    let ftyp = mp4_box(b"ftyp", b"mp41\0\0\0\0mp41");
+    let mdat_at = ftyp.len() as u32 + 8;
+    let mdat = mp4_box(b"mdat", &samples.concat());
+    let sizes: Vec<u8> = [0u32, 2, samples[0].len() as u32, samples[1].len() as u32].iter().flat_map(|v| v.to_be_bytes()).collect();
+    let stbl = mp4_box(
+        b"stbl",
+        &[
+            full(b"stsd", &[1u32.to_be_bytes().to_vec(), mp4_box(b"gpmd", &[0u8; 8])].concat()),
+            full(b"stsz", &sizes),
+            full(b"stsc", &[1u32, 1, 2, 1].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>()),
+            full(b"stco", &[1u32, mdat_at].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>()),
+        ]
+        .concat(),
+    );
+    let hdlr = full(b"hdlr", &[0u32.to_be_bytes().to_vec(), b"meta".to_vec(), vec![0u8; 12], b"GoPro MET\0".to_vec()].concat());
+    let moov = mp4_box(b"moov", &mp4_box(b"trak", &mp4_box(b"mdia", &[hdlr, mp4_box(b"minf", &stbl)].concat())));
+    let out = run([ftyp, mdat, moov].concat(), "GX010001.MP4", "video/mp4");
+    let m = &out.meta;
+    assert_eq!(get(m, "gpmf.device"), "HERO9 Black");
+    assert_eq!(get(m, "camera.model"), "HERO9 Black");
+    assert_eq!(get(m, "gpmf.gps.points"), 2);
+    assert_eq!(get(m, "gpmf.gps.start"), "2024-03-15T09:30:00.000Z");
+    assert_eq!(get(m, "gps.lat"), 47.6062);
+    let distance = get(m, "gpmf.gps.distance_m").as_f64().unwrap();
+    assert!((distance - 111.2).abs() < 1.0, "{}", distance);
+    assert_eq!(get(m, "gpmf.gps.track").as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn pdf_body_text() {
+    use lopdf::{content::{Content, Operation}, dictionary, Object, Stream};
+    let mut doc = lopdf::Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let font_id = doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+    let resources_id = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font_id } });
+    let mut kids = Vec::new();
+    for line in ["Quarterly revenue grew", "beekeeping cooperative"] {
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                Operation::new("Td", vec![72.into(), 700.into()]),
+                Operation::new("Tj", vec![Object::string_literal(line)]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! { "Type" => "Page", "Parent" => pages_id, "Contents" => content_id, "Resources" => resources_id, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()] });
+        kids.push(page_id.into());
+    }
+    doc.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 2 }));
+    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    let out = run(bytes, "report.pdf", "application/pdf");
+    let text = get(&out.meta, "text").as_str().unwrap_or_default().to_string();
+    assert!(text.contains("Quarterly revenue grew"), "{}", text);
+    assert!(text.contains("beekeeping cooperative"), "both pages: {}", text);
+    assert_eq!(get(&out.meta, "pdf.text_pages"), 2);
+}
+
+#[test]
 fn matroska_info_tracks_and_tags() {
     let out = run(webm(), "holiday.webm", "video/webm");
     let m = &out.meta;

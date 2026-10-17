@@ -979,10 +979,11 @@ After each upload, new version or version restore, the Overseer reads the file i
 | `taken_at`, `recorded_at` | EXIF, IPTC, XMP, QuickTime, Broadcast WAV |
 | `duration_ms`, `bitrate_kbps`, `sample_rate`, `channels`, `bit_depth`, `codec` | Audio and video streams |
 | `width`, `height`, `orientation`, `color_mode`, `layers` | Images, video, Photoshop, DICOM |
-| `camera` (`make`, `model`, `lens`, `serial`), `exposure` (`f_number`, `exposure_time`, `focal_length`, `iso`, ...) | EXIF, XMP, QuickTime, DICOM |
-| `gps` (`lat`, `lon`, `alt`), `location` (`city`, `state`, `country`, `sublocation`) | EXIF, QuickTime, IPTC, XMP |
+| `color_profile` | The embedded ICC profile's description ("sRGB IEC61966-2.1", "Display P3", ...) |
+| `camera` (`make`, `model`, `lens`, `serial`), `exposure` (`f_number`, `exposure_time`, `focal_length`, `iso`, ...) | EXIF, XMP, QuickTime, GoPro telemetry, DICOM |
+| `gps` (`lat`, `lon`, `alt`), `location` (`city`, `state`, `country`, `sublocation`) | EXIF, QuickTime, GoPro telemetry (the first fix), IPTC, XMP |
 | `pages`, `words`, `lines`, `slides` | PDF, Office, OpenDocument, text |
-| `text` | The start of the file's text (plain text, Markdown, Word, PowerPoint, Excel, OpenDocument, SVG, archive listings), for `$text` |
+| `text` | The start of the file's text (plain text, Markdown, PDF, Word, PowerPoint, Excel, OpenDocument, SVG, archive listings), for `$text` |
 
 **Tag families.** Each is kept under its own key in `meta`:
 
@@ -1000,7 +1001,9 @@ After each upload, new version or version restore, the Overseer reads the file i
 | `quicktime` | MOV, MP4, 3GP and Matroska/WebM track metadata (make, model, creation date, duration, size, ISO 6709 location) |
 | `matroska` | MKV and WebM Info, Tracks and Tags |
 | `mpeg7` | MPEG-7 descriptions (titles, people, keywords, annotations, genres), in XML files or embedded |
-| `pdf` | PDF and Illustrator (AI) Info dictionaries and page counts (files up to 64 MB) |
+| `pdf` | PDF and Illustrator (AI) Info dictionaries and page counts, and `text_pages`, the pages that had text (files up to 64 MB). Body text goes to `text`, page by page; PDFs that need a password and scanned pages (images of text) have none |
+| `icc` | Embedded ICC color profiles in JPEG, PNG, WebP, TIFF, PSD, HEIC and AVIF: description, copyright, manufacturer, model, version, device class, color space, connection space, rendering intent, creation date |
+| `gpmf` | GoPro telemetry in MP4: the camera (`device`), the sensors it logged (accelerometer, gyroscope, GPS, ...), and from GPS (GPS5, or GPS9 on HERO11 and later) `gps` with the fix count, start and end times, distance, top speed, altitude range and a `track` of up to 500 `[lat, lon, alt]` points |
 | `eps` | EPS/PostScript DSC comments |
 | `office`, `odf`, `epub` | Word, Excel and PowerPoint properties; OpenDocument meta; EPUB package metadata |
 | `font` | TrueType and OpenType name tables |
@@ -1013,7 +1016,9 @@ After each upload, new version or version restore, the Overseer reads the file i
 
 **The parser sandbox.** Files come from users, and file parsers are where a hostile file does harm, so extraction, thumbnails and video frames are made in a separate worker process (`files.sandbox`, on by default): the server's own executable, started for one file at a time. The worker never sees the store, the keys or the network. It asks the hex for byte ranges of the file over a pipe, and the hex reads them from the encrypted store, enforcing the read budget and deadline itself. The worker gets an empty environment and no handles but its pipes, and is killed at the deadline or if the hex exits. On Linux it also runs under resource limits (`files.sandbox_memory_mb`, 1024, of memory, CPU seconds, no file writes, few descriptors) and a seccomp filter that allows only memory, thread, clock and pipe system calls: opening files, sockets and starting programs fail. On macOS the resource limits apply (macOS doesn't enforce the memory one). On Windows the worker runs in its own job object with a memory limit, a CPU-time limit, no child processes and UI restrictions. `/status` shows `storage.files.parser_sandbox` (runs, failures, workers stopped at the deadline). Turning the sandbox off parses files in the server process, as before 2.0.
 
-Not read yet: PDF body text (the AI can read it; see `pdf` in [AI](#ai)), GoPro GPMF telemetry, ICC profile descriptions (other than PNG `iCCP` names), frames of video that isn't H.264.
+Not read yet: text in scanned PDFs and images (no OCR; the AI can read them, see [AI](#ai)), frames of video that isn't H.264.
+
+Extractor version 3 (2.0) added PDF body text, ICC profiles and GoPro telemetry: files read by an older version are read again when a hex becomes the Overseer. AI results are kept, since the content hasn't changed.
 
 ### Thumbnails
 
