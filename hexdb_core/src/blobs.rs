@@ -24,6 +24,14 @@
 // shard is) is rebuilt at startup from the record headers. A torn record at
 // the end of a vertex's newest pack (a crash mid-append) is cut off.
 //
+// Only a vertex's newest pack is ever appended to: the others are sealed. The
+// first startup that scans a sealed pack saves its records next to it
+// (`<number>.hxi`: the pack's length, the records, and a BLAKE3 checksum), and
+// later startups read that one small file instead of every record header. An
+// index that doesn't verify or doesn't match the pack's length is ignored and
+// the pack is scanned again; reads check each shard's own header and hash
+// either way. Deleting a pack deletes its index.
+//
 // Unreferenced chunks are removed by mark and sweep: the caller starts a mark
 // (`begin_mark`), collects every chunk its documents reference, and calls
 // `sweep`. Chunks written, reused or released after the mark began (by
@@ -59,10 +67,17 @@ const PACK_HEADER_LEN: u64 = 8;
 const RECORD_MAGIC: &[u8; 4] = b"SHRD";
 const RECORD_HEADER_LEN: usize = 98;
 /// A pack is closed and a new one started once it reaches this size.
+#[cfg(not(test))]
 const MAX_PACK_BYTES: u64 = 256 * 1024 * 1024;
+/// Small in tests, so they can fill packs.
+#[cfg(test)]
+const MAX_PACK_BYTES: u64 = 1024 * 1024;
 const FLAG_ZSTD: u8 = 1;
 const NO_PACK: u32 = u32::MAX;
 const MAX_OPEN_PACKS: usize = 256;
+const INDEX_MAGIC: &[u8; 4] = b"HXI1";
+/// id, shard index, flags, key ID, plain length, cipher length, offset.
+const INDEX_RECORD_LEN: usize = 32 + 1 + 1 + 8 + 4 + 4 + 8;
 
 /// A chunk ID as text.
 pub fn chunk_hex(id: &ChunkId) -> String {
@@ -179,17 +194,6 @@ impl RecordHeader {
             shard_len: u32_at(54),
             hash: b[58..90].try_into().unwrap(),
         })
-    }
-
-    fn entry(&self) -> Entry {
-        Entry {
-            cipher_len: self.cipher_len,
-            plain_len: self.plain_len,
-            flags: self.flags,
-            key_id: self.key_id,
-            shards: [ShardLoc::NONE; VERTEX_COUNT],
-            generation: 0,
-        }
     }
 }
 
@@ -356,8 +360,20 @@ impl BlobStore {
             let mut packs = BTreeMap::new();
             for (i, &number) in numbers.iter().enumerate() {
                 let last = i + 1 == numbers.len();
-                let (size, count) = scan_pack(&pack_path(dir, number), v, number, last, &mut variants)?;
-                records += count;
+                let path = pack_path(dir, number);
+                // A sealed pack's saved index, if it's still good.
+                let saved = if last { None } else { fs::metadata(&path).ok().and_then(|m| read_pack_index(&index_path(dir, number), m.len())) };
+                let (size, found, clean) = match saved {
+                    Some((size, found)) => (size, found, false),
+                    None => scan_pack(&path, v, last)?,
+                };
+                if clean && !last {
+                    if let Err(e) = write_pack_index(&index_path(dir, number), size, &found) {
+                        warn!("⚠️ Couldn't save the index of {}: {:#}", path.display(), e);
+                    }
+                }
+                records += found.len();
+                add_records(v, number, &found, &mut variants);
                 packs.insert(number, size);
             }
             let active = match packs.iter().next_back() {
@@ -812,6 +828,7 @@ impl BlobStore {
             if let Err(e) = fs::remove_file(path) {
                 warn!("⚠️ Couldn't delete {}: {}", path.display(), e);
             }
+            let _ = fs::remove_file(path.with_extension("hxi"));
         }
         report.packs_deleted = doomed.len();
         Ok(report)
@@ -963,10 +980,106 @@ fn append(vertex: &mut VertexPacks, v: usize, header: &RecordHeader, shard: &[u8
     Ok(loc)
 }
 
-/// Read a pack's record headers into `variants`. Returns the pack's usable
-/// size and its record count. A torn or corrupt record ends the scan; in the
-/// newest pack (where a crash mid-append leaves one) the tail is cut off.
-fn scan_pack(path: &Path, v: usize, number: u32, newest: bool, variants: &mut HashMap<ChunkId, Vec<Entry>>) -> Result<(u64, usize)> {
+/// One shard record: where it is and what its header says.
+#[derive(Clone, Debug, PartialEq)]
+struct PackRecord {
+    id: ChunkId,
+    index: u8,
+    flags: u8,
+    key_id: u64,
+    plain_len: u32,
+    cipher_len: u32,
+    offset: u64,
+}
+
+fn index_path(dir: &Path, number: u32) -> PathBuf {
+    dir.join(format!("{:08}.hxi", number))
+}
+
+/// Add a pack's records (for vertex `v`) to the chunk variants.
+fn add_records(v: usize, number: u32, records: &[PackRecord], variants: &mut HashMap<ChunkId, Vec<Entry>>) {
+    for r in records {
+        let list = variants.entry(r.id).or_default();
+        let fresh = Entry { cipher_len: r.cipher_len, plain_len: r.plain_len, flags: r.flags, key_id: r.key_id, shards: [ShardLoc::NONE; VERTEX_COUNT], generation: 0 };
+        let slot = match list.iter().position(|e| e.same_encoding(&fresh)) {
+            Some(i) => i,
+            None => {
+                list.push(fresh);
+                list.len() - 1
+            }
+        };
+        list[slot].shards[v] = ShardLoc { pack: number, offset: r.offset };
+    }
+}
+
+/// Save a sealed pack's records: magic, pack length, count, records, then a
+/// BLAKE3 checksum of everything before it. Written to a temporary file and
+/// renamed, so a crash leaves the old index or none.
+fn write_pack_index(path: &Path, pack_len: u64, records: &[PackRecord]) -> Result<()> {
+    let mut b = Vec::with_capacity(16 + records.len() * INDEX_RECORD_LEN + 32);
+    b.extend_from_slice(INDEX_MAGIC);
+    b.extend_from_slice(&pack_len.to_be_bytes());
+    b.extend_from_slice(&(records.len() as u32).to_be_bytes());
+    for r in records {
+        b.extend_from_slice(&r.id);
+        b.push(r.index);
+        b.push(r.flags);
+        b.extend_from_slice(&r.key_id.to_be_bytes());
+        b.extend_from_slice(&r.plain_len.to_be_bytes());
+        b.extend_from_slice(&r.cipher_len.to_be_bytes());
+        b.extend_from_slice(&r.offset.to_be_bytes());
+    }
+    let check = *blake3::hash(&b).as_bytes();
+    b.extend_from_slice(&check);
+    let tmp = path.with_extension("hxi.tmp");
+    let mut file = File::create(&tmp)?;
+    file.write_all(&b)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// A sealed pack's saved records, if the index verifies and matches a pack of `pack_len` bytes.
+fn read_pack_index(path: &Path, pack_len: u64) -> Option<(u64, Vec<PackRecord>)> {
+    let b = fs::read(path).ok()?;
+    if b.len() < 16 + 32 || &b[..4] != INDEX_MAGIC {
+        return None;
+    }
+    let (body, check) = b.split_at(b.len() - 32);
+    if blake3::hash(body).as_bytes() != check {
+        return None;
+    }
+    let saved_len = u64::from_be_bytes(body[4..12].try_into().unwrap());
+    let count = u32::from_be_bytes(body[12..16].try_into().unwrap()) as usize;
+    if saved_len != pack_len || body.len() != 16 + count.checked_mul(INDEX_RECORD_LEN)? {
+        return None;
+    }
+    let mut records = Vec::with_capacity(count);
+    for r in body[16..].as_chunks::<INDEX_RECORD_LEN>().0 {
+        let record = PackRecord {
+            id: r[0..32].try_into().unwrap(),
+            index: r[32],
+            flags: r[33],
+            key_id: u64::from_be_bytes(r[34..42].try_into().unwrap()),
+            plain_len: u32::from_be_bytes(r[42..46].try_into().unwrap()),
+            cipher_len: u32::from_be_bytes(r[46..50].try_into().unwrap()),
+            offset: u64::from_be_bytes(r[50..58].try_into().unwrap()),
+        };
+        let end = record.offset.checked_add((RECORD_HEADER_LEN + shard_len(record.cipher_len as usize)) as u64)?;
+        if record.offset < PACK_HEADER_LEN || end > pack_len {
+            return None;
+        }
+        records.push(record);
+    }
+    Some((pack_len, records))
+}
+
+/// Read a pack's record headers for vertex `v`. Returns the pack's usable
+/// size, its records, and whether the scan reached the end cleanly. A torn or
+/// corrupt record ends the scan; in the newest pack (where a crash mid-append
+/// leaves one) the tail is cut off.
+fn scan_pack(path: &Path, v: usize, newest: bool) -> Result<(u64, Vec<PackRecord>, bool)> {
     let file = OpenOptions::new().read(true).write(newest).open(path).with_context(|| format!("Failed to open {}", path.display()))?;
     let len = file.metadata()?.len();
     let mut head = [0u8; PACK_HEADER_LEN as usize];
@@ -979,7 +1092,7 @@ fn scan_pack(path: &Path, v: usize, number: u32, newest: bool, variants: &mut Ha
             file.write_all(&PACK_VERSION.to_be_bytes())?;
             file.write_all(&[v as u8, 0])?;
             file.sync_all()?;
-            return Ok((PACK_HEADER_LEN, 0));
+            return Ok((PACK_HEADER_LEN, Vec::new(), true));
         }
         bail!("{} is not a HexDB pack file", path.display());
     }
@@ -987,7 +1100,7 @@ fn scan_pack(path: &Path, v: usize, number: u32, newest: bool, variants: &mut Ha
         bail!("{} has an unsupported pack version", path.display());
     }
     let mut offset = PACK_HEADER_LEN;
-    let mut count = 0;
+    let mut records = Vec::new();
     let mut header = [0u8; RECORD_HEADER_LEN];
     let end = loop {
         if offset == len {
@@ -1002,17 +1115,15 @@ fn scan_pack(path: &Path, v: usize, number: u32, newest: bool, variants: &mut Ha
             break Some("an incomplete record");
         }
         if record.index as usize == v && record.shard_len as usize == shard_len(record.cipher_len as usize) {
-            let list = variants.entry(record.id).or_default();
-            let fresh = record.entry();
-            let slot = match list.iter().position(|e| e.same_encoding(&fresh)) {
-                Some(i) => i,
-                None => {
-                    list.push(fresh);
-                    list.len() - 1
-                }
-            };
-            list[slot].shards[v] = ShardLoc { pack: number, offset };
-            count += 1;
+            records.push(PackRecord {
+                id: record.id,
+                index: record.index,
+                flags: record.flags,
+                key_id: record.key_id,
+                plain_len: record.plain_len,
+                cipher_len: record.cipher_len,
+                offset,
+            });
         }
         offset = next;
     };
@@ -1021,7 +1132,7 @@ fn scan_pack(path: &Path, v: usize, number: u32, newest: bool, variants: &mut Ha
             warn!("⚠️ {} ends with {} at byte {} (a crash mid-write); cutting it off.", path.display(), problem, offset);
             file.set_len(offset)?;
             file.sync_all()?;
-            return Ok((offset, count));
+            return Ok((offset, records, true));
         }
         warn!(
             "⚠️ {} has {} at byte {}; shards after it are rebuilt from the other vertices when read or scrubbed.",
@@ -1029,8 +1140,10 @@ fn scan_pack(path: &Path, v: usize, number: u32, newest: bool, variants: &mut Ha
             problem,
             offset
         );
+        // Not saved as an index: a later scan may read past a record repaired by hand.
+        return Ok((len, records, false));
     }
-    Ok((len, count))
+    Ok((len, records, true))
 }
 
 #[cfg(test)]
@@ -1087,6 +1200,69 @@ mod tests {
         assert_eq!(*s.get(&a.id).unwrap(), data);
         assert_eq!(*s.get(&t.id).unwrap(), text);
         assert_eq!(s.stats().chunks, 2);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn sealed_packs_load_from_their_index() {
+        let root = temp_root("hxi");
+        let keys = Arc::new(KeyRing::new(&[1u8; 32], &[]));
+        let s = store(&root, &keys);
+        let mut pins = Pins::new(s.clone());
+        // Shards of about 150 KB: several packs per vertex.
+        let chunks: Vec<(ChunkId, Vec<u8>)> = (0..16).map(|i| {
+            let data = sample(600_000, 40 + i);
+            (s.put(&data, false, &mut pins).unwrap().id, data)
+        }).collect();
+        s.sync().unwrap();
+        drop(pins);
+        drop(s);
+        let v0 = &dirs(&root)[0];
+        assert!(pack_path(v0, 2).exists(), "the test needs more than one pack");
+        assert!(!index_path(v0, 1).exists(), "indexes are written when a sealed pack is first scanned");
+
+        // The first reopen scans and saves the sealed packs' indexes; the newest pack has none.
+        let s = store(&root, &keys);
+        for (id, data) in &chunks {
+            assert_eq!(*s.get(id).unwrap(), *data);
+        }
+        drop(s);
+        let packs: Vec<u32> = (1..100).take_while(|n| pack_path(v0, *n).exists()).collect();
+        let newest = *packs.last().unwrap();
+        for n in &packs {
+            assert_eq!(index_path(v0, *n).exists(), *n != newest, "pack {}", n);
+        }
+        let len = fs::metadata(pack_path(v0, 1)).unwrap().len();
+        let (_, scanned, clean) = scan_pack(&pack_path(v0, 1), 0, false).unwrap();
+        assert!(clean);
+        assert_eq!(read_pack_index(&index_path(v0, 1), len).unwrap().1, scanned, "the index has exactly the scanned records");
+        assert!(read_pack_index(&index_path(v0, 1), len + 1).is_none(), "an index for a different pack length is ignored");
+
+        // From the indexes: everything is still found.
+        let s = store(&root, &keys);
+        assert_eq!(s.stats().chunks, chunks.len());
+        for (id, data) in &chunks {
+            assert_eq!(*s.get(id).unwrap(), *data);
+        }
+        drop(s);
+
+        // A damaged index is ignored (the pack is scanned) and written again.
+        let mut bytes = fs::read(index_path(v0, 1)).unwrap();
+        bytes[20] ^= 0xFF;
+        fs::write(index_path(v0, 1), &bytes).unwrap();
+        assert!(read_pack_index(&index_path(v0, 1), len).is_none());
+        let s = store(&root, &keys);
+        for (id, data) in &chunks {
+            assert_eq!(*s.get(id).unwrap(), *data);
+        }
+        assert!(read_pack_index(&index_path(v0, 1), len).is_some(), "rewritten");
+
+        // Deleting packs deletes their indexes.
+        let mark = s.begin_mark();
+        let report = s.sweep(&HashSet::new(), mark).unwrap();
+        assert!(report.packs_deleted > 0);
+        assert!(!pack_path(v0, 1).exists());
+        assert!(!index_path(v0, 1).exists());
         fs::remove_dir_all(&root).ok();
     }
 

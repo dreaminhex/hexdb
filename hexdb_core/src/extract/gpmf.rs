@@ -273,7 +273,7 @@ pub(crate) mod tests {
         out.extend([kind, size]);
         out.extend(repeat.to_be_bytes());
         out.extend(data);
-        while out.len() % 4 != 0 {
+        while !out.len().is_multiple_of(4) {
             out.push(0);
         }
         out

@@ -292,8 +292,11 @@ pub fn keyframe(source: &mut Source) -> anyhow::Result<Option<RgbImage>> {
     Ok(keyframes(source, &[1.0 / 3.0])?.into_iter().next())
 }
 
+/// The `moov` box's contents, and the `moof` fragments' offsets and sizes.
+pub(crate) type TopBoxes = (Option<Vec<u8>>, Vec<(u64, u64)>);
+
 /// The `moov` box's contents (it can be anywhere: often at the end) and the fragments (`moof` offsets and sizes).
-pub(crate) fn top_boxes(source: &mut Source) -> anyhow::Result<(Option<Vec<u8>>, Vec<(u64, u64)>)> {
+pub(crate) fn top_boxes(source: &mut Source) -> anyhow::Result<TopBoxes> {
     // Top-level boxes: find moov (anywhere: often at the end) and the fragments.
     let len = source.len();
     let mut at = 0u64;
