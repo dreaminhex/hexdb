@@ -46,6 +46,22 @@ class HexDBError(Exception):
         return f"HexDBError({self.status}, {self.code!r}, {self.message!r})"
 
 
+class _SameOriginAuth(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but send the API key only to the server it was given for."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and _origin(newurl) != _origin(req.full_url):
+            new.headers.pop("Authorization", None)
+            new.unredirected_hdrs.pop("Authorization", None)
+        return new
+
+
+def _origin(url: str) -> Tuple[str, str]:
+    parts = urllib.parse.urlsplit(url)
+    return (parts.scheme.lower(), parts.netloc.lower())
+
+
 def _quote(text: str) -> str:
     return urllib.parse.quote(text, safe="")
 
@@ -67,6 +83,10 @@ class HexDB:
         self.retries = retries
         self.timeout = timeout
         self._context = ssl.create_default_context(cafile=ca_file) if ca_file else None
+        handlers: List[Any] = [_SameOriginAuth()]
+        if self._context is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=self._context))
+        self._opener = urllib.request.build_opener(*handlers)
 
     # -- transport ---------------------------------------------------------
 
@@ -84,7 +104,7 @@ class HexDB:
         while True:
             req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
             try:
-                with urllib.request.urlopen(req, timeout=timeout or self.timeout, context=self._context) as response:
+                with self._opener.open(req, timeout=timeout or self.timeout) as response:
                     if response.status == 204:
                         return None
                     text = response.read().decode("utf-8")
@@ -115,7 +135,7 @@ class HexDB:
             headers["Authorization"] = f"Bearer {self.token}"
         req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
         try:
-            response = urllib.request.urlopen(req, timeout=timeout or self.timeout, context=self._context)
+            response = self._opener.open(req, timeout=timeout or self.timeout)
         except urllib.error.HTTPError as e:
             text = e.read().decode("utf-8", "replace")
             e.close()

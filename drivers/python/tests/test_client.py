@@ -146,3 +146,64 @@ class ClientTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedirectTests(unittest.TestCase):
+    """The API key isn't sent to another server on a redirect."""
+
+    def test_api_key_stays_with_its_server(self):
+        import http.server
+        import threading
+
+        seen = {}
+
+        def server(handler):
+            httpd = http.server.HTTPServer(("127.0.0.1", 0), handler)
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            return httpd
+
+        class Other(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen["other"] = self.headers.get("Authorization")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        other = server(Other)
+        target = "http://127.0.0.1:%d/landing" % other.server_address[1]
+
+        class First(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.setdefault("first", self.headers.get("Authorization"))
+                if self.path == "/same":
+                    self.send_response(302)
+                    self.send_header("Location", "/landing")
+                elif self.path == "/landing":
+                    seen["same"] = self.headers.get("Authorization")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+                    return
+                else:
+                    self.send_response(302)
+                    self.send_header("Location", target)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        first = server(First)
+        client = HexDB("http://127.0.0.1:%d" % first.server_address[1], "hxk_secret")
+        client.request("GET", "/same")
+        self.assertEqual(seen["same"], "Bearer hxk_secret", "kept on the same server")
+        client.request("GET", "/elsewhere")
+        self.assertEqual(seen["first"], "Bearer hxk_secret")
+        self.assertIsNone(seen["other"], "dropped for another server")
+        first.shutdown()
+        other.shutdown()
+
