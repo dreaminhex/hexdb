@@ -32,7 +32,21 @@ jobs:
       - name: Build
         run: cargo build --locked --workspace --all-targets
       - name: Test
-        run: cargo test --locked --workspace --no-fail-fast
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked --workspace --no-fail-fast 2>&1 | tee test-output.txt
+      - name: Summarize test failures
+        if: failure()
+        shell: bash
+        # One annotation per failing test, with its panic message, so failures
+        # show on the run's summary without opening the log.
+        run: |
+          grep -E '^---- .* stdout ----$' test-output.txt | sed -E 's/^---- (.*) stdout ----$/\1/' | while read -r name; do
+            detail=$(awk -v t="---- $name stdout ----" '$0==t{f=1;next} f&&/^---- /{exit} f' test-output.txt | grep -m1 -A3 'panicked at' | tr '\n' ' ' | cut -c1-900)
+            title=$(printf '%s' "$name" | sed 's/%/%25/g; s/:/%3A/g; s/,/%2C/g')
+            echo "::error title=Test failed%3A $title::$(printf '%s' "$detail" | sed 's/%/%25/g')"
+          done
 
   audit:
     name: Dependency audit
