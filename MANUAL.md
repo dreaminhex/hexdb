@@ -144,7 +144,17 @@ docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
 
 ### As a service
 
-[packaging/systemd/hexdb.service](packaging/systemd/hexdb.service) runs HexDB under systemd. The Debian package (from the APT repository, or built by `cargo deb -p hexdb_api`) installs it, creates a `hexdb` user and a key in `/etc/hexdb/hexdb.local.toml`; start it with `sudo systemctl enable --now hexdb`. Homebrew runs it with `brew services start hexdb`. On Windows there's no service mode yet: run `hexdb start -s`, or have Task Scheduler run it at sign-in. Every way to install HexDB is listed in the README's Installing section, and [packaging/RELEASING.md](packaging/RELEASING.md) explains how each is built.
+[packaging/systemd/hexdb.service](packaging/systemd/hexdb.service) runs HexDB under systemd. The Debian package (from the APT repository, or built by `cargo deb -p hexdb_api`) installs it, creates a `hexdb` user and a key in `/etc/hexdb/hexdb.local.toml`; start it with `sudo systemctl enable --now hexdb`. Homebrew runs it with `brew services start hexdb`. On Windows, run it as a service from an elevated (administrator) prompt:
+
+```powershell
+hexdb --config C:\HexDB\hexdb.toml service install   # starts with Windows; --name, --account, --server-bin
+hexdb service start
+hexdb service status
+hexdb service stop                                    # graceful: flushes to disk first
+hexdb service uninstall                               # data and configuration stay
+```
+
+The service runs `hexdb_api --service --config <hexdb.toml>` under its own virtual account, `NT SERVICE\HexDB`, not LocalSystem. Install gives that account read access to the configuration's folder and modify access to the data directory (both are private to their owner otherwise); with `--account` you grant access yourself. Its recovery actions restart it 5, 10 and 30 seconds after a crash (or any nonzero exit), resetting after a day. Output goes to `hexdb.log` in the data directory. The CLI's `hexdb stop` can't stop the service (the runtime file is private to the service's account); use `hexdb service stop`. Without a service, `hexdb start -s` runs it in the background, restarted if it crashes, until you sign out. Every way to install HexDB is listed in the README's Installing section, and [packaging/RELEASING.md](packaging/RELEASING.md) explains how each is built.
 
 ## 4. The admin UI
 

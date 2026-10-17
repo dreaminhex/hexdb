@@ -17,6 +17,13 @@ use tokio::sync::watch;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
+#[cfg(windows)]
+mod service;
+
+/// Set when the Windows service manager asks the service to stop.
+#[cfg_attr(not(windows), allow(dead_code))]
+static SERVICE_STOP: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 /// Names a hex can be given. Embedded so the server doesn't depend on its working directory.
 const HEX_NAMES: &str = include_str!("../data/names.txt");
 
@@ -25,6 +32,10 @@ fn main() -> anyhow::Result<()> {
     // runtime, no threads, no logging), so its restrictions cover all it does.
     if std::env::args().nth(1).as_deref() == Some(hexdb_core::extract::sandbox::WORKER_ARG) {
         hexdb_core::extract::sandbox::worker_main();
+    }
+    #[cfg(windows)]
+    if std::env::args().any(|a| a == service::SERVICE_ARG) {
+        return service::run();
     }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(server())
 }
@@ -394,6 +405,9 @@ fn parse_args() -> anyhow::Result<Option<PathBuf>> {
                 config = Some(PathBuf::from(path));
             }
             s if s.starts_with("--config=") => config = Some(PathBuf::from(&s["--config=".len()..])),
+            // Running as the Windows service (see service.rs).
+            #[cfg(windows)]
+            "--service" => {}
             "-h" | "--help" => {
                 println!("HexDB server\n\nUsage: hexdb_api [--config <path/to/hexdb.toml>]\n\nWithout --config, the HEXDB_CONFIG environment variable, ./hexdb.toml, and hexdb.toml next to the executable are checked in that order.");
                 std::process::exit(0);
@@ -430,12 +444,18 @@ async fn shutdown_signal() {
     {
         use tokio::signal::ctrl_c;
 
-        if let Err(e) = ctrl_c().await {
-            error!("❌ Failed to capture shutdown (Ctrl+C): {}. Shutdown can still occur, but it could result in data loss.", e);
-            // Never resolve, so a signal-handler failure doesn't shut the server down.
-            std::future::pending::<()>().await;
-        } else {
-            warn!("🛑 Received Ctrl+C...");
+        let ctrl_c = async {
+            if let Err(e) = ctrl_c().await {
+                error!("❌ Failed to capture shutdown (Ctrl+C): {}. Shutdown can still occur, but it could result in data loss.", e);
+                // Never resolve, so a signal-handler failure doesn't shut the server down.
+                std::future::pending::<()>().await;
+            } else {
+                warn!("🛑 Received Ctrl+C...");
+            }
+        };
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = SERVICE_STOP.notified() => warn!("🛑 The Windows service manager asked HexDB to stop..."),
         }
     }
 }

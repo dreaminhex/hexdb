@@ -15,6 +15,7 @@ use std::{
 mod config;
 mod files;
 mod lattice;
+mod service;
 mod supervise;
 
 #[derive(Parser)]
@@ -57,6 +58,11 @@ enum Commands {
         /// In the background, don't restart the server if it crashes.
         #[arg(long)]
         no_restart: bool,
+    },
+    /// Run HexDB as a Windows service (install, uninstall, start, stop, status)
+    Service {
+        #[command(subcommand)]
+        action: ServiceCommand,
     },
     /// Run the server and restart it if it crashes (used by `start --silent`)
     #[command(hide = true)]
@@ -275,6 +281,42 @@ enum LatticeCommand {
 }
 
 #[derive(Subcommand)]
+enum ServiceCommand {
+    /// Register the service (starts with Windows, restarts after a crash). Needs an elevated prompt.
+    Install {
+        /// Service name
+        #[arg(long, default_value = "HexDB")]
+        name: String,
+        /// Path to the hexdb_api server binary. Defaults to the one next to this CLI, then PATH.
+        #[arg(long, env = "HEXDB_SERVER_BIN")]
+        server_bin: Option<PathBuf>,
+        /// Account to run as. Defaults to the service's own virtual account, NT SERVICE\<name>.
+        #[arg(long)]
+        account: Option<String>,
+    },
+    /// Stop and remove the service (data and configuration stay)
+    Uninstall {
+        #[arg(long, default_value = "HexDB")]
+        name: String,
+    },
+    /// Start the service
+    Start {
+        #[arg(long, default_value = "HexDB")]
+        name: String,
+    },
+    /// Stop the service gracefully
+    Stop {
+        #[arg(long, default_value = "HexDB")]
+        name: String,
+    },
+    /// Show the service's state and configuration
+    Status {
+        #[arg(long, default_value = "HexDB")]
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum PluginCommand {
     /// Register a plugin from the plugins directory
     Add {
@@ -311,6 +353,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Start { silent, server_bin, no_restart } => start(config_path, silent, server_bin, !no_restart).await,
+        Commands::Service { action } => service_command(config_path, action),
         Commands::Supervise { server, log } => {
             let config = load(config_path)?;
             supervise::supervise(&server, config.source.as_deref(), &config.storage_dir(), &log).await
@@ -436,6 +479,36 @@ async fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Server lifecycle
 // ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn service_command(config_path: Option<&Path>, action: ServiceCommand) -> Result<()> {
+    match action {
+        ServiceCommand::Install { name, server_bin, account } => {
+            let config = load(config_path)?;
+            let Some(source) = config.source.clone() else {
+                bail!("No hexdb.toml found. Pass --config <path>, or run `hexdb init` first: the service needs a configuration file.");
+            };
+            let server = resolve_server_bin(server_bin);
+            let server = if server.components().count() == 1 { which_server(&server).unwrap_or(server) } else { server };
+            service::install(&name, &server, &source, &config.storage_dir(), account.as_deref())
+        }
+        ServiceCommand::Uninstall { name } => service::uninstall(&name),
+        ServiceCommand::Start { name } => service::start(&name),
+        ServiceCommand::Stop { name } => service::stop(&name),
+        ServiceCommand::Status { name } => service::status(&name),
+    }
+}
+
+/// Find a bare program name on PATH.
+#[cfg(windows)]
+fn which_server(name: &Path) -> Option<PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).map(|dir| dir.join(name)).find(|p| p.is_file()))
+}
+
+#[cfg(not(windows))]
+fn service_command(_config_path: Option<&Path>, _action: ServiceCommand) -> Result<()> {
+    service::unsupported()
+}
 
 async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<PathBuf>, restart: bool) -> Result<()> {
     let mut config = load(config_path)?;
