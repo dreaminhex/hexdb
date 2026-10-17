@@ -831,15 +831,18 @@ impl HexDBEngine {
 }
 
 /// Apply new configuration versions as they arrive (every hex).
-pub fn spawn_config_task(engine: std::sync::Arc<HexDBEngine>, mut shutdown_rx: watch::Receiver<()>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = shutdown_rx.changed() => {
-                    debug!("🛑 Configuration task is shutting down...");
-                    break;
+pub fn spawn_config_task(engine: std::sync::Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
+    crate::tasks::supervise("configuration", shutdown_rx.clone(), move || {
+        let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
+        async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        debug!("🛑 Configuration task is shutting down...");
+                        break;
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => engine.refresh_lattice_config().await,
                 }
-                _ = tokio::time::sleep(Duration::from_secs(1)) => engine.refresh_lattice_config().await,
             }
         }
     });

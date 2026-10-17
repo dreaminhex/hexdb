@@ -97,6 +97,46 @@ pub fn panics_since_start() -> u64 {
     PANICS.load(Ordering::Relaxed)
 }
 
+/// A supervised background task (see `crate::tasks::supervise`).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TaskHealth {
+    pub name: String,
+    /// Times it panicked and was started again.
+    pub restarts: u64,
+    pub last_panic: Option<String>,
+    /// Epoch milliseconds.
+    pub last_panic_at: Option<i64>,
+    /// False once it has stopped (at shutdown, or a task that finished its work).
+    pub running: bool,
+}
+
+static TASKS: std::sync::Mutex<std::collections::BTreeMap<String, TaskHealth>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+pub(crate) fn task_started(name: &str) {
+    let mut tasks = TASKS.lock().unwrap_or_else(|e| e.into_inner());
+    let task = tasks.entry(name.to_string()).or_insert_with(|| TaskHealth { name: name.to_string(), ..Default::default() });
+    task.running = true;
+}
+
+pub(crate) fn task_panicked(name: &str, message: &str) {
+    let mut tasks = TASKS.lock().unwrap_or_else(|e| e.into_inner());
+    let task = tasks.entry(name.to_string()).or_insert_with(|| TaskHealth { name: name.to_string(), ..Default::default() });
+    task.restarts += 1;
+    task.last_panic = Some(message.chars().take(500).collect());
+    task.last_panic_at = Some(chrono::Utc::now().timestamp_millis());
+}
+
+pub(crate) fn task_stopped(name: &str) {
+    if let Some(task) = TASKS.lock().unwrap_or_else(|e| e.into_inner()).get_mut(name) {
+        task.running = false;
+    }
+}
+
+/// The supervised tasks, for `/status`.
+pub fn tasks() -> Vec<TaskHealth> {
+    TASKS.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect()
+}
+
 /// If the previous process left its runtime file behind, it didn't shut down
 /// cleanly: describe that crash. Call before this process writes its own runtime file.
 pub fn detect(storage_dir: &Path, recovery_ms: u64) -> Option<CrashReport> {
@@ -139,6 +179,8 @@ pub fn status(storage_dir: &Path) -> Value {
         "last": reports.first(),
         "recent": reports.iter().take(5).collect::<Vec<_>>(),
         "panics_since_start": panics_since_start(),
+        "task_restarts": tasks().iter().map(|t| t.restarts).sum::<u64>(),
+        "tasks": tasks(),
         "supervised": std::env::var("HEXDB_SUPERVISED").is_ok_and(|v| v == "1"),
     })
 }

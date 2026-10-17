@@ -224,22 +224,25 @@ impl HexDBEngine {
 // ---------------------------------------------------------------------------
 
 /// Start following the Overseer whenever this hex isn't one.
-pub fn spawn_replication_task(engine: Arc<HexDBEngine>, mut shutdown_rx: watch::Receiver<()>) {
-    tokio::spawn(async move {
-        let mut follower = Follower::new(engine.clone());
-        loop {
-            let pause = tokio::select! {
-                _ = shutdown_rx.changed() => break,
-                pause = follower.step() => pause,
-            };
-            if !pause.is_zero() {
-                tokio::select! {
+pub fn spawn_replication_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
+    crate::tasks::supervise("replication", shutdown_rx.clone(), move || {
+        let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
+        async move {
+            let mut follower = Follower::new(engine.clone());
+            loop {
+                let pause = tokio::select! {
                     _ = shutdown_rx.changed() => break,
-                    _ = tokio::time::sleep(pause) => {}
+                    pause = follower.step() => pause,
+                };
+                if !pause.is_zero() {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => break,
+                        _ = tokio::time::sleep(pause) => {}
+                    }
                 }
             }
+            debug!("🛑 Replication task is shutting down...");
         }
-        debug!("🛑 Replication task is shutting down...");
     });
 }
 

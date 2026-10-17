@@ -395,7 +395,8 @@ pub fn spawn_plugins(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>)
                 engine.plugins.plugins.lock().unwrap().push(status);
                 if entry.enabled {
                     info!("🧩 Loaded plugin '{}' ({} {}).", id, m.name, m.version);
-                    tokio::spawn(run_plugin(engine.clone(), m, dir, shutdown_rx.clone()));
+                    let (engine, rx) = (engine.clone(), shutdown_rx.clone());
+                    crate::tasks::supervise(format!("plugin {}", id), shutdown_rx.clone(), move || run_plugin(engine.clone(), m.clone(), dir.clone(), rx.clone()));
                 } else {
                     info!("🧩 Plugin '{}' is disabled in the registry.", id);
                 }

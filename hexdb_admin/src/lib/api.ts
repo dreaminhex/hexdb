@@ -218,7 +218,11 @@ export interface CrashReport {
 }
 
 export interface Status {
-  restarts?: { unclean_shutdowns: number; last: CrashReport | null; recent: CrashReport[]; panics_since_start: number; supervised: boolean }
+  restarts?: { unclean_shutdowns: number; last: CrashReport | null; recent: CrashReport[]; panics_since_start: number
+    supervised: boolean
+    task_restarts: number
+    tasks: { name: string; restarts: number; last_panic: string | null; last_panic_at: number | null; running: boolean }[]
+  }
   id: string
   name: string
   start_datetime: string

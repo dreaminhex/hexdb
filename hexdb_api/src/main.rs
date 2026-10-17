@@ -229,8 +229,12 @@ async fn server() -> anyhow::Result<()> {
             .collect();
     }
 
+    // Create channels for shutdown signals
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+
     // Answer other hexes' discovery handshakes.
-    tokio::spawn(start_discovery_listener(engine.clone()));
+    let listening = engine.clone();
+    hexdb_core::tasks::supervise("discovery listener", shutdown_rx.clone(), move || start_discovery_listener(listening.clone()));
 
     // Initialize security settings & create defaults if not present.
     info!("🔐 Initializing security settings...");
@@ -240,8 +244,6 @@ async fn server() -> anyhow::Result<()> {
         engine.resume_schema_migrations().await;
     }
 
-    // Create channels for shutdown signals
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
     let shutdown_tx = Arc::new(shutdown_tx);
 
     // Start the SST compaction task

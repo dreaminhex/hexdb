@@ -744,29 +744,32 @@ impl HexDBEngine {
 }
 
 /// Run due schedules on the Overseer.
-pub fn spawn_scheduler(engine: Arc<HexDBEngine>, mut shutdown_rx: watch::Receiver<()>) {
-    tokio::spawn(async move {
-        let running: Arc<std::sync::Mutex<BTreeSet<String>>> = Default::default();
-        loop {
-            tokio::select! {
-                _ = shutdown_rx.changed() => break,
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-            }
-            if !engine.is_writable() {
-                continue;
-            }
-            let Ok(schedules) = engine.list_schedules().await else { continue };
-            let now = Utc::now().timestamp_millis();
-            for schedule in schedules.into_iter().filter(|s| s.enabled && s.next_run <= now) {
-                if !running.lock().unwrap().insert(schedule.name.clone()) {
+pub fn spawn_scheduler(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
+    crate::tasks::supervise("scheduler", shutdown_rx.clone(), move || {
+        let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
+        async move {
+            let running: Arc<std::sync::Mutex<BTreeSet<String>>> = Default::default();
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+                if !engine.is_writable() {
                     continue;
                 }
-                let (engine, running) = (engine.clone(), running.clone());
-                tokio::spawn(async move {
-                    let name = schedule.name.clone();
-                    let _ = engine.run_schedule(schedule).await;
-                    running.lock().unwrap().remove(&name);
-                });
+                let Ok(schedules) = engine.list_schedules().await else { continue };
+                let now = Utc::now().timestamp_millis();
+                for schedule in schedules.into_iter().filter(|s| s.enabled && s.next_run <= now) {
+                    if !running.lock().unwrap().insert(schedule.name.clone()) {
+                        continue;
+                    }
+                    let (engine, running) = (engine.clone(), running.clone());
+                    tokio::spawn(async move {
+                        let name = schedule.name.clone();
+                        let _ = engine.run_schedule(schedule).await;
+                        running.lock().unwrap().remove(&name);
+                    });
+                }
             }
         }
     });

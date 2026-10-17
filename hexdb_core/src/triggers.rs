@@ -379,68 +379,71 @@ fn cursor_id() -> Ulid {
 
 /// Run after triggers on the Overseer, following the change feed from the
 /// saved position (at-least-once: a change may run again after a crash).
-pub fn spawn_trigger_runner(engine: Arc<HexDBEngine>, mut shutdown_rx: watch::Receiver<()>) {
-    tokio::spawn(async move {
-        let mut reader: Option<crate::engine::ChangeReader> = None;
-        let mut saved = 0u64;
-        // The last change to a user tessellation that has been handled. System
-        // changes (including this runner's own cursor saves) don't move it, so
-        // saving the cursor doesn't cause another save.
-        let mut handled = 0u64;
-        let mut last_save = std::time::Instant::now();
-        loop {
-            if !engine.is_writable() {
-                reader = None;
-                tokio::select! {
-                    _ = shutdown_rx.changed() => break,
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
-                }
-            }
-            if reader.is_none() {
-                let end = engine.changes.published_seq();
-                let start = match engine.get_system_document(TRIGGER_CURSORS_TESSELLATION, cursor_id()).await.ok().flatten() {
-                    Some(doc) => match serde_json::from_value::<SavedCursor>(doc.data_json()) {
-                        Ok(c) if c.history_id == engine.history_id() && c.seq >= engine.history_available_after() && c.seq <= end => c.seq,
-                        _ => end,
-                    },
-                    None => end,
-                };
-                debug!("Trigger runner starts after sequence {}.", start);
-                saved = start;
-                handled = start;
-                reader = Some(crate::engine::ChangeReader::new(start));
-            }
-            let r = reader.as_mut().unwrap();
-            let next = tokio::select! {
-                _ = shutdown_rx.changed() => break,
-                next = tokio::time::timeout(Duration::from_secs(1), r.next(&engine)) => next,
-            };
-            match next {
-                Ok(Some(change)) => {
-                    engine.run_after_triggers(&change).await;
-                    if !change.tessellation.starts_with('_') {
-                        handled = change.seq;
+pub fn spawn_trigger_runner(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
+    crate::tasks::supervise("triggers", shutdown_rx.clone(), move || {
+        let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
+        async move {
+            let mut reader: Option<crate::engine::ChangeReader> = None;
+            let mut saved = 0u64;
+            // The last change to a user tessellation that has been handled. System
+            // changes (including this runner's own cursor saves) don't move it, so
+            // saving the cursor doesn't cause another save.
+            let mut handled = 0u64;
+            let mut last_save = std::time::Instant::now();
+            loop {
+                if !engine.is_writable() {
+                    reader = None;
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => continue,
                     }
                 }
-                Ok(None) => {
-                    reader = None;
-                    continue;
+                if reader.is_none() {
+                    let end = engine.changes.published_seq();
+                    let start = match engine.get_system_document(TRIGGER_CURSORS_TESSELLATION, cursor_id()).await.ok().flatten() {
+                        Some(doc) => match serde_json::from_value::<SavedCursor>(doc.data_json()) {
+                            Ok(c) if c.history_id == engine.history_id() && c.seq >= engine.history_available_after() && c.seq <= end => c.seq,
+                            _ => end,
+                        },
+                        None => end,
+                    };
+                    debug!("Trigger runner starts after sequence {}.", start);
+                    saved = start;
+                    handled = start;
+                    reader = Some(crate::engine::ChangeReader::new(start));
                 }
-                Err(_) => {}
+                let r = reader.as_mut().unwrap();
+                let next = tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    next = tokio::time::timeout(Duration::from_secs(1), r.next(&engine)) => next,
+                };
+                match next {
+                    Ok(Some(change)) => {
+                        engine.run_after_triggers(&change).await;
+                        if !change.tessellation.starts_with('_') {
+                            handled = change.seq;
+                        }
+                    }
+                    Ok(None) => {
+                        reader = None;
+                        continue;
+                    }
+                    Err(_) => {}
+                }
+                if handled > saved && last_save.elapsed() >= Duration::from_secs(1) {
+                    let cursor = SavedCursor { history_id: engine.history_id(), seq: handled };
+                    if engine.put_system_document(TRIGGER_CURSORS_TESSELLATION, cursor_id(), json!(cursor), None).await.is_ok() {
+                        saved = handled;
+                    }
+                    last_save = std::time::Instant::now();
+                }
             }
-            if handled > saved && last_save.elapsed() >= Duration::from_secs(1) {
+            if reader.is_some() && handled > saved {
                 let cursor = SavedCursor { history_id: engine.history_id(), seq: handled };
-                if engine.put_system_document(TRIGGER_CURSORS_TESSELLATION, cursor_id(), json!(cursor), None).await.is_ok() {
-                    saved = handled;
-                }
-                last_save = std::time::Instant::now();
+                let _ = engine.put_system_document(TRIGGER_CURSORS_TESSELLATION, cursor_id(), json!(cursor), None).await;
             }
+            info!("🛑 Trigger runner stopped.");
         }
-        if reader.is_some() && handled > saved {
-            let cursor = SavedCursor { history_id: engine.history_id(), seq: handled };
-            let _ = engine.put_system_document(TRIGGER_CURSORS_TESSELLATION, cursor_id(), json!(cursor), None).await;
-        }
-        info!("🛑 Trigger runner stopped.");
     });
 }
 

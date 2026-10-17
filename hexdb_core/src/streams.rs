@@ -364,18 +364,21 @@ impl HexDBEngine {
 // ---------------------------------------------------------------------------
 
 /// Keep each stream's sources and destinations running on the Overseer.
-pub fn spawn_streams(engine: Arc<HexDBEngine>, mut shutdown_rx: watch::Receiver<()>) {
-    tokio::spawn(async move {
-        loop {
-            reconcile(&engine).await;
-            tokio::select! {
-                _ = shutdown_rx.changed() => break,
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+pub fn spawn_streams(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
+    crate::tasks::supervise("streams", shutdown_rx.clone(), move || {
+        let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
+        async move {
+            loop {
+                reconcile(&engine).await;
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                }
             }
-        }
-        let mut running = engine.stream_tasks.running.lock().unwrap();
-        for (_, (_, handle)) in running.drain() {
-            handle.abort();
+            let mut running = engine.stream_tasks.running.lock().unwrap();
+            for (_, (_, handle)) in running.drain() {
+                handle.abort();
+            }
         }
     });
 }

@@ -412,17 +412,20 @@ pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
 }
 
 /// Re-probe peers every `interval`, track their liveness, and re-run the election.
-pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, mut shutdown_rx: watch::Receiver<()>) {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = shutdown_rx.changed() => {
-                    debug!("🛑 Discovery task is shutting down...");
-                    break;
+pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_rx: watch::Receiver<()>) {
+    crate::tasks::supervise("discovery", shutdown_rx.clone(), move || {
+        let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
+        async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        debug!("🛑 Discovery task is shutting down...");
+                        break;
+                    }
+                    _ = tokio::time::sleep(interval) => {}
                 }
-                _ = tokio::time::sleep(interval) => {}
+                discovery_round(&engine, interval).await;
             }
-            discovery_round(&engine, interval).await;
         }
     });
 }
