@@ -37,12 +37,14 @@ pub fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the service account needs: to read the configuration and its
+/// `hexdb.local.toml` (those files only, not their folder, which could be
+/// anything: a home or a desktop), and to change the data directory.
 #[cfg(any(windows, test))]
-/// The folders the service account needs: the configuration's (read) and the data directory (modify).
 pub fn grants(config_file: &Path, storage_dir: &Path) -> Vec<(std::path::PathBuf, &'static str)> {
-    let mut grants = Vec::new();
-    if let Some(dir) = config_file.parent() {
-        grants.push((dir.to_path_buf(), "(OI)(CI)RX"));
+    let mut grants = vec![(config_file.to_path_buf(), "R")];
+    if let Some(local) = config_file.parent().map(|d| d.join(hexdb_core::LOCAL_CONFIG_FILE_NAME)).filter(|p| p.is_file()) {
+        grants.push((local, "R"));
     }
     grants.push((storage_dir.to_path_buf(), "(OI)(CI)M"));
     grants
@@ -74,7 +76,13 @@ mod windows {
     }
 
     fn grant(path: &Path, account: &str, rights: &str) -> Result<()> {
-        let output = Command::new("icacls").arg(path).arg("/grant").arg(format!("{}:{}", account, rights)).arg("/T").arg("/C").arg("/Q").output().context("Couldn't run icacls")?;
+        // A folder's grant reaches what's in it (/T); a file's is just the file.
+        let mut command = Command::new("icacls");
+        command.arg(path).arg("/grant").arg(format!("{}:{}", account, rights));
+        if path.is_dir() {
+            command.arg("/T");
+        }
+        let output = command.arg("/C").arg("/Q").output().context("Couldn't run icacls")?;
         if !output.status.success() {
             bail!("icacls couldn't give {} access to {}: {}", account, path.display(), String::from_utf8_lossy(&output.stdout).trim());
         }
@@ -190,8 +198,9 @@ mod tests {
         assert!(check_name("bad name").is_err());
         assert!(check_name("a\\b").is_err());
         assert_eq!(virtual_account("HexDB"), "NT SERVICE\\HexDB");
-        let grants = grants(Path::new("C:/hexdb/hexdb.toml"), Path::new("C:/hexdb/data"));
-        assert_eq!(grants[0].1, "(OI)(CI)RX", "the configuration is read-only to the service");
-        assert_eq!(grants[1].1, "(OI)(CI)M");
+        let grants = grants(Path::new("C:/no-such-dir/hexdb.toml"), Path::new("C:/no-such-dir/data"));
+        assert_eq!(grants[0], (Path::new("C:/no-such-dir/hexdb.toml").to_path_buf(), "R"), "the configuration file only, read-only");
+        assert_eq!(grants.last().unwrap().1, "(OI)(CI)M");
+        assert_eq!(grants.len(), 2, "no hexdb.local.toml there");
     }
 }
