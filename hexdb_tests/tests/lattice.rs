@@ -198,7 +198,14 @@ fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
             Ok(doc_on(replica, "notes", &id)? == Some(json!({ "id": id, "text": "patched", "tx": true })))
         });
         if let Err(e) = streamed {
-            bail!("{}: replica replication {}, document {:?}", e, replication(replica)?, doc_on(replica, "notes", &id)?);
+            bail!(
+                "{}: replica replication {}, document {:?}\n---- replica log ----\n{}\n---- overseer log ----\n{}",
+                e,
+                replication(replica)?,
+                doc_on(replica, "notes", &id)?,
+                replica.log_tail(40),
+                big.log_tail(25)
+            );
         }
         assert!(doc_on(replica, "notes", &victim)?.is_none());
         assert_eq!(count_on(replica, "ledger")?, 1);

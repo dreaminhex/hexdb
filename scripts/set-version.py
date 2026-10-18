@@ -81,7 +81,6 @@ def main() -> None:
     sub("packaging/winget/DreamInHex.HexDB.installer.yaml", r"download/v[^/]+/", f"download/v{v}/")
     sub("packaging/winget/DreamInHex.HexDB.locale.en-US.yaml", r"tag/v\S+", f"tag/v{v}")
     sub("plugins/examples/change-logger/plugin.toml", r'^version = "[^"]+"$', f'version = "{v}"', count=1)
-    sub("bench/results/windows-full.md", r"HexDB \d+\.\d+\.\d+\S*, release build", f"HexDB {v}, release build", count=1)
 
     print("Updating Cargo.lock...")
     subprocess.run(["cargo", "update", "--workspace", "--quiet"], cwd=ROOT, check=True)

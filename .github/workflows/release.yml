@@ -213,6 +213,14 @@ jobs:
     needs: [binaries, msi, dmg, deb]
     runs-on: ubuntu-latest
     steps:
+      # For the release notes (packaging/release-notes/<tag>.md, if there is one).
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: packaging/release-notes
+      - name: Release notes
+        run: |
+          notes="packaging/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then cp "$notes" release-notes.md; else : > release-notes.md; fi
       # Only the release files: the ui artifact is an input, not a download.
       - uses: actions/download-artifact@v4
         with:
@@ -237,6 +245,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          # The notes go above the generated list of changes.
+          body_path: release-notes.md
           generate_release_notes: true
 
   image:

@@ -142,7 +142,7 @@ For Windows, the usual choice is Azure Trusted Signing (about $10 a month, after
    ```
 
 3. Watch **Actions > Release**. It takes about 25 minutes, most of it the Rust builds.
-4. Edit the release on GitHub to add highlights above the generated notes.
+4. The release's text comes from `packaging/release-notes/v<version>.md` (write it before tagging), followed by GitHub's generated list of changes. Without that file it's the generated list only.
 
 A failed job can be rerun from the run's page without retagging. To redo a release from scratch, delete the GitHub release and the tag (`git push --delete origin v1.0.1 && git tag -d v1.0.1`), fix, commit and tag again. Don't redo a version that already reached npm, PyPI, NuGet or Chocolatey: those registries never accept the same version twice. Use the next patch version instead.
 
