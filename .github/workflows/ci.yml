@@ -33,9 +33,22 @@ jobs:
         run: cargo build --locked --workspace --all-targets
       - name: Test
         shell: bash
+        env:
+          # Keep each test server's folder (logs) under a known path, for the artifact below.
+          HEXDB_TEST_KEEP: "1"
+          HEXDB_TEST_DIR: ${{ runner.temp }}/hexdb-tests
         run: |
           set -o pipefail
           cargo test --locked --workspace --no-fail-fast 2>&1 | tee test-output.txt
+      - name: Keep the test servers' logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/hexdb-tests/*/server.log
+            ${{ runner.temp }}/hexdb-tests/*/test.txt
+          retention-days: 7
       - name: Summarize test failures
         if: failure()
         shell: bash

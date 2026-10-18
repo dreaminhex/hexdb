@@ -166,7 +166,16 @@ impl TestServer {
 
     /// Create a fresh directory and start a server with the given options.
     pub fn start_with(options: TestOptions) -> Result<Self> {
-        let dir = tempfile::Builder::new().prefix("hexdb-test-").tempdir()?;
+        // HEXDB_TEST_DIR puts test servers in a known folder (CI keeps their logs from there).
+        let dir = match std::env::var_os("HEXDB_TEST_DIR") {
+            Some(base) => {
+                fs::create_dir_all(&base)?;
+                tempfile::Builder::new().prefix("hexdb-test-").tempdir_in(base)?
+            }
+            None => tempfile::Builder::new().prefix("hexdb-test-").tempdir()?,
+        };
+        // Which test this server belongs to (test threads are named after their test).
+        let _ = fs::write(dir.path().join("test.txt"), thread::current().name().unwrap_or("unnamed"));
         let mut server = Self {
             dir: Some(dir),
             child: None,
