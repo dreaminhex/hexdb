@@ -117,8 +117,11 @@ fn streams_publish_consume_source_and_deliver() -> Result<()> {
     wait_until(Duration::from_secs(15), "webhook delivery", || Ok(delivered.lock().unwrap().len() >= 4))?;
     let ns: Vec<Value> = delivered.lock().unwrap().iter().take(3).map(|m| m["payload"]["n"].clone()).collect();
     assert_eq!(ns, vec![json!(1), json!(2), json!(3)]);
-    let status = server.request(Method::GET, "/streams/big-orders", None, &[])?;
-    assert!(status.body["destinations"][0]["delivered"].as_u64().unwrap() >= 4, "{}", status.body);
+    // The stream counts a delivery once the webhook's answer is back, a moment after the webhook has it.
+    wait_until(Duration::from_secs(10), "the delivery count", || {
+        let status = server.request(Method::GET, "/streams/big-orders", None, &[])?;
+        Ok(status.body["destinations"][0]["delivered"].as_u64().unwrap_or(0) >= 4)
+    })?;
 
     // Permissions: a reader of the stream can consume but not publish or configure.
     let reader = server.user_with_roles("rex", json!([{ "name": "reader", "tessellations": ["stream:big-orders"] }]))?;
