@@ -638,11 +638,27 @@ pub struct SignIn {
     pub principal: Principal,
 }
 
+/// The address a throttle counts a client by: IPv4 as is, IPv6 by its /64.
+/// A home connection or a server gets a whole /64, so counting single IPv6
+/// addresses would let one client rotate through them.
+pub fn client_bucket(client: &str) -> String {
+    match client.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        _ => client.to_string(),
+    }
+}
+
 /// Check a login, password and (with MFA) one-time code, and start a session.
 pub async fn login(engine: &HexDBEngine, login: &str, password: &str, code: Option<&str>, client: &str) -> Result<SignIn> {
     let throttle = &engine.login_throttle;
     let login_key = format!("login:{}", login.trim().to_ascii_lowercase());
-    let client_key = format!("client:{}", client);
+    let client_key = format!("client:{}", client_bucket(client));
     let blocked = match throttle.blocked(&[&login_key, &client_key]) {
         Some(wait) => Some(wait),
         None => lattice_blocked(engine, &[&login_key, &client_key]).await,
@@ -759,7 +775,7 @@ fn throttle_id(key: &str) -> Ulid {
 /// can't be used to guess the password or code.
 pub async fn check_reauth(engine: &HexDBEngine, login: &str, client: &str) -> Result<()> {
     let login_key = format!("login:{}", login.trim().to_ascii_lowercase());
-    let client_key = format!("client:{}", client);
+    let client_key = format!("client:{}", client_bucket(client));
     let blocked = match engine.login_throttle.blocked(&[&login_key, &client_key]) {
         Some(wait) => Some(wait),
         None => lattice_blocked(engine, &[&login_key, &client_key]).await,
@@ -777,7 +793,7 @@ pub async fn check_reauth(engine: &HexDBEngine, login: &str, client: &str) -> Re
 /// Count a wrong password or code given to a signed-in user's re-check.
 pub async fn reauth_failed(engine: &HexDBEngine, login: &str, client: &str, action: &str) {
     let login_key = format!("login:{}", login.trim().to_ascii_lowercase());
-    let client_key = format!("client:{}", client);
+    let client_key = format!("client:{}", client_bucket(client));
     engine.login_throttle.fail(&[&login_key, &client_key]);
     share_throttle(engine, &[&login_key, &client_key], &[]).await;
     warn!(%client, "🚫 Wrong password or code for '{}' ({}) from {}.", login, action, client);
@@ -931,6 +947,15 @@ impl LoginThrottle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_clients_are_throttled_per_64() {
+        assert_eq!(client_bucket("203.0.113.9"), "203.0.113.9");
+        assert_eq!(client_bucket("2001:db8:1:2:aaaa::1"), client_bucket("2001:db8:1:2:ffff::9"), "one /64");
+        assert_ne!(client_bucket("2001:db8:1:2::1"), client_bucket("2001:db8:1:3::1"));
+        assert_eq!(client_bucket("::ffff:203.0.113.9"), "203.0.113.9");
+        assert_eq!(client_bucket("unknown"), "unknown");
+    }
 
     fn principal_with(roles: &[(&str, &[&str])], definitions: &RoleDefinitions) -> Principal {
         Principal::new(

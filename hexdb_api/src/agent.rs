@@ -14,9 +14,12 @@
 // The chat (`ai.chat.*` in the lattice configuration) answers a question
 // with the configured provider, a tool-use loop of at most
 // `ai.chat.max_tool_calls` lookups, and limits so a public deployment's users
-// can't use up its owner's tokens: tokens per answer, per user per day, per
-// client address per day (visitors to a demo share one login), and questions
-// per address per minute, on top of the lattice's monthly budget. Chat
+// can't use up its owner's tokens: tokens per answer and per question, per
+// user per day, per client address per day (visitors to a demo share one
+// login), and questions per address per minute, on top of the lattice's
+// monthly budget. Each step's tokens are estimated before it's sent, so one
+// question can't run past what's left. IPv6 clients are counted per /64 (one
+// home or server gets a whole /64, so single addresses are free to rotate). Chat
 // requests are writes as far as forwarding goes, so they all run on the
 // Overseer, where the counters live (in memory: they restart with the
 // Overseer; the monthly budget doesn't).
@@ -302,6 +305,7 @@ fn today() -> String {
 
 struct ChatLimits {
     max_tokens: u64,
+    max_per_question: u64,
     max_tool_calls: u64,
     max_question_chars: usize,
     max_history: usize,
@@ -315,6 +319,7 @@ fn limits(engine: &HexDBEngine) -> ChatLimits {
     let n = |key: &str, default: u64| engine.config_value(key).as_u64().unwrap_or(default);
     ChatLimits {
         max_tokens: n("ai.chat.max_tokens_per_answer", 1024),
+        max_per_question: n("ai.chat.max_tokens_per_question", 20_000),
         max_tool_calls: n("ai.chat.max_tool_calls", 6),
         max_question_chars: n("ai.chat.max_question_chars", 2000) as usize,
         max_history: n("ai.chat.max_history", 10) as usize,
@@ -323,6 +328,24 @@ fn limits(engine: &HexDBEngine) -> ChatLimits {
         per_minute: n("ai.chat.client_questions_per_minute", 6) as usize,
         model: engine.config_value("ai.chat.model").as_str().map(str::to_string).filter(|m| !m.trim().is_empty()),
     }
+}
+
+/// Longest history, in characters in all (the oldest items go first).
+const MAX_HISTORY_CHARS: usize = 16_000;
+
+/// About how many tokens a request will use: its text at four characters a
+/// token (an overestimate for English and JSON), plus the most it may write.
+fn estimate_tokens(system: &str, turns: &[Turn], tools: &[AiTool], max_tokens: u64) -> u64 {
+    let mut chars = system.len();
+    for turn in turns {
+        chars += match turn {
+            Turn::User(text) => text.len(),
+            Turn::Assistant { text, calls } => text.len() + calls.iter().map(|c| c.name.len() + c.input.to_string().len()).sum::<usize>(),
+            Turn::Results(results) => results.iter().map(|r| r.content.len() + 16).sum(),
+        };
+    }
+    chars += tools.iter().map(|t| t.name.len() + t.description.len() + t.input_schema.to_string().len()).sum::<usize>();
+    (chars as u64).div_ceil(4) + max_tokens
 }
 
 /// Refuse while the user or address is over a daily limit; returns what's left.
@@ -397,6 +420,7 @@ pub async fn chat(
     }
     let Json(input) = body?;
     let limits = limits(&engine);
+    let client = hexdb_core::auth::client_bucket(&client);
     let question = input.question.trim();
     if question.is_empty() || question.chars().count() > limits.max_question_chars {
         return Err(ApiError::invalid(format!("Ask a question of 1-{} characters.", limits.max_question_chars)));
@@ -406,7 +430,20 @@ pub async fn chat(
 
     let mut turns: Vec<Turn> = Vec::new();
     let history = &input.history[input.history.len().saturating_sub(limits.max_history)..];
-    for item in history {
+    // Newest first, up to MAX_HISTORY_CHARS in all.
+    let mut room = MAX_HISTORY_CHARS;
+    let first_kept = history
+        .iter()
+        .rposition(|item| {
+            let len = item.content.chars().count().min(4000);
+            if len > room {
+                return true;
+            }
+            room -= len;
+            false
+        })
+        .map_or(0, |i| i + 1);
+    for item in &history[first_kept..] {
         let content: String = item.content.chars().take(4000).collect();
         match item.role.as_str() {
             "user" => turns.push(Turn::User(content)),
@@ -423,16 +460,27 @@ pub async fn chat(
     let tools = tools();
     let (mut input_tokens, mut output_tokens, mut calls_made) = (0u64, 0u64, 0u64);
     let mut steps: Vec<Value> = Vec::new();
-    let mut model;
+    let mut model = limits.model.clone().unwrap_or_default();
     let answer = loop {
         // Out of lookups: the model must answer with what it has.
         let offer_tools = calls_made < limits.max_tool_calls;
+        let offered = if offer_tools { tools.clone() } else { Vec::new() };
+        // This step must fit in what's left: of the question's allowance, and the user's and address's today.
+        let estimate = estimate_tokens(CHAT_SYSTEM, &turns, &offered, limits.max_tokens);
+        let (user_left, client_left) = tokens_left(&principal.login, &client, &limits)?;
+        let room = [Some(limits.max_per_question.saturating_sub(input_tokens + output_tokens)), user_left, client_left].into_iter().flatten().min().unwrap_or(u64::MAX);
+        if estimate > room {
+            if input_tokens + output_tokens == 0 {
+                return Err(ApiError::new(axum::http::StatusCode::TOO_MANY_REQUESTS, "chat_limit", "This question needs more of the chat allowance than is left today. Ask something shorter, or try again tomorrow."));
+            }
+            break "This question needed more lookups than its allowance covers; here is what was found so far. Try a narrower question.".to_string();
+        }
         let reply = engine
             .ai_chat(ChatRequest {
                 feature: "chat".into(),
                 system: CHAT_SYSTEM.into(),
                 turns: turns.clone(),
-                tools: if offer_tools { tools.clone() } else { Vec::new() },
+                tools: offered,
                 max_tokens: limits.max_tokens,
                 model: limits.model.clone(),
             })
@@ -462,10 +510,7 @@ pub async fn chat(
         }
         turns.push(Turn::Assistant { text: reply.text, calls: reply.calls });
         turns.push(Turn::Results(results));
-        // Stop early if a daily allowance ran out mid-answer.
-        if tokens_left(&principal.login, &client, &limits).is_err() {
-            break "Today's chat allowance ran out while answering. Try again tomorrow.".to_string();
-        }
+
     };
     let (user_left, client_left) = tokens_left(&principal.login, &client, &limits).unwrap_or((Some(0), Some(0)));
     engine
@@ -495,6 +540,7 @@ fn chat_error(e: anyhow::Error) -> ApiError {
 
 /// `GET /ai/chat`: whether the chat is on for the caller, and what's left today.
 pub async fn chat_status(axum::extract::State(engine): Engine, Auth(principal): Auth, crate::client::ClientIp(client): crate::client::ClientIp) -> ApiResult {
+    let client = hexdb_core::auth::client_bucket(&client);
     let enabled = engine.config_value("ai.chat.enabled") == json!(true) && principal.has(Action::Chat) && engine.ai_summary()["configured"] == json!(true);
     let limits = limits(&engine);
     let (user_left, client_left) = tokens_left(&principal.login, &client, &limits).unwrap_or((Some(0), Some(0)));
@@ -503,4 +549,21 @@ pub async fn chat_status(axum::extract::State(engine): Engine, Auth(principal): 
     map.insert("max_question_chars".into(), json!(limits.max_question_chars));
     map.insert("left".into(), json!({ "user_today": user_left, "client_today": client_left }));
     Ok(Json(Value::Object(map)).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimates_grow_with_each_step() {
+        let tools = tools();
+        let mut turns = vec![Turn::User("How many orders shipped?".into())];
+        let first = estimate_tokens(CHAT_SYSTEM, &turns, &tools, 1024);
+        assert!(first > 1024 && first < 6000, "{}", first);
+        let call = ToolCall { id: "1".into(), name: "count".into(), input: json!({ "tessellation": "orders" }) };
+        turns.push(Turn::Assistant { text: String::new(), calls: vec![call] });
+        turns.push(Turn::Results(vec![ToolResult { id: "1".into(), content: "x".repeat(MAX_RESULT), is_error: false }]));
+        assert!(estimate_tokens(CHAT_SYSTEM, &turns, &tools, 1024) >= first + (MAX_RESULT as u64) / 4);
+    }
 }

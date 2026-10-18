@@ -129,8 +129,16 @@ pub struct Share {
     pub max_downloads: Option<u64>,
     #[serde(default)]
     pub downloads: u64,
+    /// The part of a download served so far (0-1): downloads are counted in
+    /// bytes, so fetching a file in ranges counts as much as fetching it whole.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub partial: f64,
     #[serde(default)]
     pub note: String,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 impl Share {
@@ -268,6 +276,7 @@ impl HexDBEngine {
                 password_hash: password.map(crate::crypt::create_hash),
                 max_downloads: input.max_downloads,
                 downloads: 0,
+                partial: 0.0,
                 note: note.clone(),
             };
             self.put_system_document(SHARES_TESSELLATION, id, serde_json::to_value(&share)?, None).await?;
@@ -317,12 +326,14 @@ impl HexDBEngine {
         Ok(share)
     }
 
-    /// Count one download (on the Overseer; a replica sends it there).
-    pub async fn count_share_download(&self, code: &str) {
+    /// Count `fraction` of a download: the bytes served over the file's size
+    /// (on the Overseer; a replica sends it there).
+    pub async fn count_share_download(&self, code: &str, fraction: f64) {
+        let fraction = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 1.0 };
         let outcome = if self.is_writable() {
-            self.store_share_download(code).await
+            self.store_share_download(code, fraction).await
         } else {
-            tokio::time::timeout(Duration::from_secs(3), crate::replication::post_to_overseer(self, "/lattice/share-download", &json!({ "code": code })))
+            tokio::time::timeout(Duration::from_secs(3), crate::replication::post_to_overseer(self, "/lattice/share-download", &json!({ "code": code, "fraction": fraction })))
                 .await
                 .unwrap_or_else(|_| Err(anyhow!("timed out")))
         };
@@ -331,11 +342,16 @@ impl HexDBEngine {
         }
     }
 
-    pub async fn store_share_download(&self, code: &str) -> Result<()> {
+    pub async fn store_share_download(&self, code: &str, fraction: f64) -> Result<()> {
         static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _guard = LOCK.lock().await;
         let Some(mut share) = self.share(code).await? else { return Ok(()) };
-        share.downloads += 1;
+        share.partial += fraction.clamp(0.0, 1.0);
+        // Rounding: a whole file served in ranges adds up to just under 1.
+        while share.partial >= 1.0 - 1e-6 {
+            share.downloads += 1;
+            share.partial = (share.partial - 1.0).max(0.0);
+        }
         self.put_system_document(SHARES_TESSELLATION, code_id(code).expect("a valid code"), serde_json::to_value(&share)?, None).await
     }
 
@@ -379,7 +395,7 @@ impl HexDBEngine {
 
     /// Refuse while this address has made too many bad link attempts (the sign-in limits).
     pub async fn share_attempt_allowed(&self, client: &str) -> Result<()> {
-        let key = format!("share:{}", client);
+        let key = format!("share:{}", crate::auth::client_bucket(client));
         let blocked = match self.login_throttle.blocked(&[&key]) {
             Some(wait) => Some(wait),
             None => crate::auth::lattice_blocked(self, &[&key]).await,
@@ -392,7 +408,7 @@ impl HexDBEngine {
 
     /// Count a bad link attempt (unknown code, wrong password) from this address.
     pub async fn share_attempt_failed(&self, client: &str) {
-        let key = format!("share:{}", client);
+        let key = format!("share:{}", crate::auth::client_bucket(client));
         self.login_throttle.fail(&[&key]);
         crate::auth::share_throttle(self, &[&key], &[]).await;
     }

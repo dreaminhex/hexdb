@@ -191,15 +191,40 @@ pub async fn content(
     let caller = Arc::new(principal);
     let id = hexdb_core::access::as_caller(caller.clone(), target(&engine, &share, params.file.as_deref())).await?;
     let response = hexdb_core::access::as_caller(caller, serve(engine.clone(), &share.tessellation, &id, ContentParams { version: None, download: params.download }, &method, &headers)).await?;
-    // A download is a GET that starts at the beginning of the file.
-    let from_start = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).is_none_or(|r| r.trim_start_matches("bytes=").starts_with("0-"));
-    if method == Method::GET && response.status().is_success() && from_start {
-        engine.count_share_download(&code).await;
-        engine
-            .record_audit(AuditEvent::new("-", "share.download", &share.name).client(&client).details(json!({ "code": code, "file_id": id, "shared_by": share.created_by })))
-            .await;
+    // Downloads are counted in bytes: each answer adds what it serves over the
+    // file's size, so a file fetched in ranges counts as one download, and
+    // ranges can't be used to get around max_downloads.
+    if method == Method::GET && response.status().is_success() {
+        let fraction = served_fraction(response.headers());
+        if fraction > 0.0 {
+            engine.count_share_download(&code, fraction).await;
+        }
+        let from_start = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).is_none_or(|r| r.trim_start_matches("bytes=").starts_with("0-"));
+        if from_start {
+            engine
+                .record_audit(AuditEvent::new("-", "share.download", &share.name).client(&client).details(json!({ "code": code, "file_id": id, "shared_by": share.created_by })))
+                .await;
+        }
     }
     Ok(no_index(response))
+}
+
+/// The part of the file an answer carries: its length over the file's size
+/// (from `Content-Range` for a range, else the whole file).
+fn served_fraction(headers: &HeaderMap) -> f64 {
+    let length = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<f64>().ok());
+    let total = headers
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit_once('/'))
+        .and_then(|(_, total)| total.trim().parse::<f64>().ok());
+    match (length, total) {
+        (Some(length), Some(total)) if total > 0.0 => (length / total).clamp(0.0, 1.0),
+        (Some(_), None) => 1.0,
+        // A streamed answer without a length: the whole file.
+        (None, _) => 1.0,
+        _ => 0.0,
+    }
 }
 
 /// `GET /_s/{code}/thumbnail`.

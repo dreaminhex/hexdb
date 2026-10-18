@@ -188,6 +188,16 @@ fn the_chat_answers_from_the_users_data_within_its_limits() -> Result<()> {
     assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS, "{}", limited.body);
     assert!(limited.headers.contains_key("retry-after"));
 
+    // A question whose next step wouldn't fit its allowance isn't sent at all:
+    // each step is estimated (the conversation, the tools, the most the answer may use) before it goes.
+    configure(&server, json!({ "ai.chat.client_questions_per_minute": 0, "ai.chat.max_tokens_per_question": 1000 }))?;
+    let sent = seen.lock().unwrap().len();
+    let too_big = ask(&server, &key, "How many orders?")?;
+    assert_eq!(too_big.status, StatusCode::TOO_MANY_REQUESTS, "{}", too_big.body);
+    assert_eq!(too_big.error_code(), Some("chat_limit"));
+    assert_eq!(seen.lock().unwrap().len(), sent, "nothing reached the provider");
+    configure(&server, json!({ "ai.chat.max_tokens_per_question": 20000 }))?;
+
     // Usage is counted as the chat feature, and each question is audited.
     let usage = server.request(Method::GET, "/ai", None, &[])?.body;
     assert!(usage["usage"]["features"]["chat"]["calls"].as_u64().unwrap() >= 6, "{}", usage);

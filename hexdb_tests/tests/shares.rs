@@ -93,6 +93,19 @@ fn links_reach_only_what_they_name_as_their_maker_sees_it() -> Result<()> {
     let once = res.body["code"].as_str().unwrap().to_string();
     assert_eq!(server.get_bytes_as(None, &format!("/_s/{}/content", once), &[])?.0, StatusCode::OK);
     assert_eq!(server.get_bytes_as(None, &format!("/_s/{}/content", once), &[])?.0, StatusCode::NOT_FOUND, "used up");
+    // Ranges count by the bytes they serve: skipping byte 0 doesn't get around the limit.
+    let res = share(&server, &sam, json!({ "tessellation": "media", "file_id": a, "max_downloads": 2 }))?;
+    let twice = res.body["code"].as_str().unwrap().to_string();
+    let ranged = || server.get_bytes_as(None, &format!("/_s/{}/content", twice), &[("Range", "bytes=1-")]);
+    for _ in 0..3 {
+        let (status, _, bytes) = ranged()?;
+        assert_eq!((status, bytes.as_slice()), (StatusCode::PARTIAL_CONTENT, &b"lpha"[..]));
+    }
+    // Four fifths three times is two downloads and more: used up. (Checked in the maker's
+    // list: a request to a dead link would count toward this address's lockout.)
+    let mine = server.request_as(Some(&sam), Method::GET, "/shares", None, &[])?.body;
+    let link = mine["shares"].as_array().unwrap().iter().find(|s| s["code"] == twice.as_str()).cloned().unwrap();
+    assert_eq!(link["downloads"], 2, "{}", link);
     let res = share(&server, &sam, json!({ "tessellation": "media", "file_id": a, "expires_in_days": 0.00001 }))?;
     let brief = res.body["code"].as_str().unwrap().to_string();
     std::thread::sleep(std::time::Duration::from_millis(1500));

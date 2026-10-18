@@ -131,6 +131,7 @@ pub const CONFIG: &[ConfigDef] = &[
     def("ai.chat.enabled", ConfigKind::Boolean, "false", "Let users with the chat permission ask the AI about the data they can read (the admin UI's Ask page and POST /ai/chat)."),
     text("ai.chat.model", "Model for the chat (empty: ai.model). A smaller, cheaper model is usually enough, e.g. claude-haiku-5-5."),
     def("ai.chat.max_tokens_per_answer", ConfigKind::Integer { min: 64, max: 16_000 }, "1024", "Most tokens one chat answer may use."),
+    def("ai.chat.max_tokens_per_question", ConfigKind::Integer { min: 1000, max: 1_000_000 }, "20000", "Most tokens one question may use in all, input and output across every lookup (a question resends the conversation and the lookups' results each step)."),
     def("ai.chat.max_tool_calls", ConfigKind::Integer { min: 0, max: 20 }, "6", "Most lookups (queries, searches) the AI may make to answer one question."),
     def("ai.chat.max_question_chars", ConfigKind::Integer { min: 50, max: 20_000 }, "2000", "Longest question, in characters."),
     def("ai.chat.max_history", ConfigKind::Integer { min: 0, max: 50 }, "10", "Earlier questions and answers sent along with a question (0: none)."),

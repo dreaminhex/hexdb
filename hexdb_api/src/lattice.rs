@@ -264,7 +264,9 @@ pub async fn share_download(method: Method, uri: Uri, headers: HeaderMap, axum::
     authorize(&engine, &headers, &method, &uri, &body)?;
     let body: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
     let code = body["code"].as_str().ok_or_else(|| ApiError::invalid("code is required."))?;
-    engine.store_share_download(code).await?;
+    // Hexes before byte counting send no fraction: a whole download.
+    let fraction = body["fraction"].as_f64().unwrap_or(1.0);
+    engine.store_share_download(code, fraction).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
