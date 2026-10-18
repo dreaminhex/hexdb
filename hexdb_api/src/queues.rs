@@ -33,6 +33,15 @@ fn require(principal: &Principal, permission: Permission, name: &str) -> Result<
     principal.require(permission, &queues::resource(name)).map_err(ApiError::from)
 }
 
+/// Messages that fail too often are moved to the dead-letter queue: that's
+/// writing to it, so a queue may only name one its maker can write to.
+fn require_dead_letter(principal: &Principal, config: &QueueConfig) -> Result<(), ApiError> {
+    match config.dead_letter.as_deref() {
+        Some(dead) => require(principal, Permission::Write, dead),
+        None => Ok(()),
+    }
+}
+
 pub async fn list(axum::extract::State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     let list: Vec<QueueConfig> = engine.list_queues().await?.into_iter().filter(|q| principal.can(Permission::Read, &queues::resource(&q.name))).collect();
     Ok(Json(json!({ "queues": list })).into_response())
@@ -41,6 +50,7 @@ pub async fn list(axum::extract::State(engine): Engine, Auth(principal): Auth) -
 pub async fn create(axum::extract::State(engine): Engine, Auth(principal): Auth, body: Result<Json<QueueConfig>, JsonRejection>) -> ApiResult {
     let Json(config) = body?;
     require(&principal, Permission::Manage, &config.name)?;
+    require_dead_letter(&principal, &config)?;
     let saved = engine.save_queue(config, &principal.login, true).await?;
     engine.audit(&principal.login, "queue.create", &saved.name, json!({})).await;
     Ok((StatusCode::CREATED, Json(json!(saved))).into_response())
@@ -55,6 +65,7 @@ pub async fn update(Path(name): Path<String>, axum::extract::State(engine): Engi
     require(&principal, Permission::Manage, &name)?;
     let Json(mut config) = body?;
     config.name = name.clone();
+    require_dead_letter(&principal, &config)?;
     let saved = engine.save_queue(config, &principal.login, false).await?;
     engine.audit(&principal.login, "queue.update", &name, json!({})).await;
     Ok(Json(json!(saved)).into_response())

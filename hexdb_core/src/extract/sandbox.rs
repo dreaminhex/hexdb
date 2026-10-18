@@ -135,13 +135,52 @@ fn thumb_out(t: Thumbnail) -> ThumbOut {
     ThumbOut { data: STANDARD.encode(&t.bytes), width: t.width, height: t.height, content_type: t.content_type.to_string() }
 }
 
+/// Largest thumbnail or video frame taken from a worker (a 1024 px JPEG is far smaller).
+const MAX_THUMBNAIL_BYTES: usize = 4 * 1024 * 1024;
+const MAX_THUMBNAIL_SIDE: u32 = 4096;
+
 fn thumb_in(t: ThumbOut) -> Result<Thumbnail> {
     let content_type = match t.content_type.as_str() {
         "image/png" => "image/png",
         "image/jpeg" => "image/jpeg",
         other => bail!("the worker returned a thumbnail of type {}", other),
     };
-    Ok(Thumbnail { bytes: STANDARD.decode(t.data.as_bytes()).context("the worker's thumbnail isn't base64")?, width: t.width, height: t.height, content_type })
+    if t.data.len() > MAX_THUMBNAIL_BYTES * 4 / 3 + 4 || t.width == 0 || t.height == 0 || t.width > MAX_THUMBNAIL_SIDE || t.height > MAX_THUMBNAIL_SIDE {
+        bail!("the worker returned an implausible thumbnail");
+    }
+    let bytes = STANDARD.decode(t.data.as_bytes()).context("the worker's thumbnail isn't base64")?;
+    // It must at least start like what it says it is.
+    let looks_right = match content_type {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        _ => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+    };
+    if !looks_right {
+        bail!("the worker's thumbnail isn't a {}", content_type);
+    }
+    Ok(Thumbnail { bytes, width: t.width, height: t.height, content_type })
+}
+
+/// A worker's results get the same limits as in-process extraction, again on
+/// this side: a worker a hostile file took over could send anything up to the
+/// frame limit.
+fn checked(out: Output) -> Extracted {
+    // The map itself too: no more top-level fields than any object may have.
+    let mut whole = Value::Object(out.meta);
+    super::cap(&mut whole, 0);
+    let Value::Object(mut meta) = whole else { unreachable!("still an object") };
+    super::fit(&mut meta);
+    // `fit` drops tag families; extraction never makes huge top-level fields, but a worker could.
+    let size = |m: &Map<String, Value>| serde_json::to_vec(m).map_or(0, |b| b.len());
+    while size(&meta) > super::MAX_META_BYTES {
+        let Some(largest) = meta.iter().max_by_key(|(_, v)| serde_json::to_vec(v).map_or(0, |b| b.len())).map(|(k, _)| k.clone()) else { break };
+        meta.remove(&largest);
+    }
+    let mut out = Output { meta, ..out };
+    out.extractors.truncate(64);
+    out.extractors.iter_mut().for_each(|e| *e = super::truncate(e, 64).to_string());
+    out.errors.truncate(32);
+    out.errors.iter_mut().for_each(|e| *e = super::truncate(e, 300).to_string());
+    Extracted { meta: out.meta, extractors: out.extractors, errors: out.errors }
 }
 
 fn limits_of(max_read_bytes: u64, timeout_ms: u64, max_text_bytes: usize) -> Limits {
@@ -193,13 +232,13 @@ pub fn extract(inner: Box<dyn ByteSource>, name: &str, content_type: &str, limit
     // The thumbnail reads the file again, with its own budget and time, as in-process.
     let budget = Limits { max_read_bytes: limits.max_read_bytes.saturating_mul(2), timeout: limits.timeout * 2, ..*limits };
     match run(worker, inner, &job, &budget) {
-        Ok(out) => {
-            let thumbnail = out.thumbnail.map(|t| match t {
+        Ok(mut out) => {
+            let thumbnail = out.thumbnail.take().map(|t| match t {
                 Ok(Some(t)) => thumb_in(t).map(Some),
                 Ok(None) => Ok(None),
-                Err(e) => Err(anyhow!(e)),
+                Err(e) => Err(anyhow!(super::truncate(&e, 300).to_string())),
             });
-            (Extracted { meta: out.meta, extractors: out.extractors, errors: out.errors }, thumbnail)
+            (checked(out), thumbnail)
         }
         Err(e) => (Extracted { errors: vec![format!("extraction failed: {}", super::truncate(&format!("{:#}", e), 300))], ..Default::default() }, None),
     }
@@ -215,6 +254,7 @@ pub fn video_frames(inner: Box<dyn ByteSource>, count: usize, px: u32, limits: &
     let job = Job::VideoFrames { len: inner.len(), max_read_bytes: limits.max_read_bytes, timeout_ms: limits.timeout.as_millis() as u64, count, px };
     let out = run(worker, inner, &job, limits)?;
     match out.frames {
+        Some(Ok(frames)) if frames.len() > count.max(1) * 2 => bail!("the worker returned {} frames for {}", frames.len(), count),
         Some(Ok(frames)) => frames.into_iter().map(thumb_in).collect(),
         Some(Err(e)) => Err(anyhow!(e)),
         None => bail!("the worker returned no frames"),
@@ -632,6 +672,28 @@ mod restrict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hostile_workers_results_are_checked_again() {
+        let png = ThumbOut { data: STANDARD.encode(b"\x89PNG\r\n\x1a\nrest"), width: 10, height: 10, content_type: "image/png".into() };
+        assert!(thumb_in(png).is_ok());
+        let html = ThumbOut { data: STANDARD.encode(b"<script>alert(1)</script>"), width: 10, height: 10, content_type: "image/png".into() };
+        assert!(thumb_in(html).is_err(), "bytes that aren't the type it claims");
+        let typed = ThumbOut { data: STANDARD.encode(b"<html>"), width: 10, height: 10, content_type: "text/html".into() };
+        assert!(thumb_in(typed).is_err());
+        let huge = ThumbOut { data: "A".repeat(MAX_THUMBNAIL_BYTES * 2), width: 10, height: 10, content_type: "image/jpeg".into() };
+        assert!(thumb_in(huge).is_err());
+
+        let mut meta = Map::new();
+        for i in 0..2000 {
+            meta.insert(format!("field{}", i), Value::String("x".repeat(10_000)));
+        }
+        let out = Output { meta, extractors: vec!["e".repeat(1000); 500], errors: vec!["boom".repeat(1000); 500], ..Default::default() };
+        let extracted = checked(out);
+        assert!(serde_json::to_vec(&extracted.meta).unwrap().len() <= 300 * 1024, "meta is fitted to its limit");
+        assert!(extracted.extractors.len() <= 64 && extracted.errors.len() <= 32);
+        assert!(extracted.errors.iter().all(|e| e.len() <= 300));
+    }
 
     #[test]
     fn frames_round_trip_and_refuse_oversized_payloads() {

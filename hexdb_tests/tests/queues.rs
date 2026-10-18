@@ -76,3 +76,22 @@ fn queues_deliver_to_one_consumer_with_permissions() -> Result<()> {
     }
     Ok(())
 }
+
+/// Moving failed messages to a dead-letter queue writes to it: a queue may only
+/// name one its maker can write to.
+#[test]
+fn a_dead_letter_queue_needs_write_permission() -> Result<()> {
+    let server = TestServer::start()?;
+    assert_eq!(post(&server, None, "/queues", json!({ "name": "payroll" }))?.status, StatusCode::CREATED);
+    let role = json!({ "name": "queue-owner", "permissions": ["read", "write", "manage"] });
+    assert!(server.request(Method::POST, "/roles", Some(&role), &[])?.status.is_success());
+    let owner = server.user_with_roles("quinn", json!([{ "name": "queue-owner", "tessellations": ["queue:mine", "queue:mine-dead"] }]))?;
+
+    let refused = post(&server, Some(&owner), "/queues", json!({ "name": "mine", "dead_letter": "payroll" }))?;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert_eq!(post(&server, Some(&owner), "/queues", json!({ "name": "mine-dead" }))?.status, StatusCode::CREATED);
+    assert_eq!(post(&server, Some(&owner), "/queues", json!({ "name": "mine", "dead_letter": "mine-dead" }))?.status, StatusCode::CREATED);
+    let changed = server.request_as(Some(&owner), Method::PUT, "/queues/mine", Some(&json!({ "name": "mine", "dead_letter": "payroll" })), &[])?;
+    assert_eq!(changed.status, StatusCode::FORBIDDEN, "{}", changed.body);
+    Ok(())
+}
