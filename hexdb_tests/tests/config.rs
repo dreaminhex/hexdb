@@ -256,6 +256,15 @@ fn demo_mode_lets_everyone_look_but_only_admins_change() -> Result<()> {
             let res = server.request_as(Some(&visitor), method, path, body.as_ref(), &[])?;
             assert_eq!(res.status, 403, "{} with demo_mode = {}: {}", path, demo, res.body);
         }
+        // Visitors share the demo account: they can't change its password or MFA.
+        if demo {
+            for path in ["/auth/password", "/auth/mfa/setup", "/auth/mfa/disable", "/auth/mfa/backup-codes"] {
+                let body = json!({ "current_password": "x", "new_password": "a long new password", "password": "x", "code": "123456" });
+                let res = server.request_as(Some(&visitor), Method::POST, path, Some(&body), &[])?;
+                assert_eq!(res.status, 403, "{}: {}", path, res.body);
+                assert!(res.body.to_string().contains("shared demo account"), "{}: {}", path, res.body);
+            }
+        }
         // Not even signed in: nothing.
         assert_eq!(server.request_as(None, Method::GET, "/config", None, &[])?.status, 401);
     }

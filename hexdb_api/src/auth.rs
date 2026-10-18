@@ -382,12 +382,23 @@ async fn reauth<T>(
 
 /// Change your own password. Signs out every session, then starts a new one
 /// for this request's client.
+/// On a public demo (`security.demo_mode`) visitors share one account: none
+/// of them may change its password or MFA, which would lock the others out
+/// until the demo resets. Administrators can.
+fn demo_account_locked(engine: &HexDBEngine, principal: &Principal) -> Result<(), ApiError> {
+    if engine.config.security.demo_mode && !principal.is_admin() {
+        return Err(ApiError::forbidden("This is a shared demo account: its password and MFA can't be changed."));
+    }
+    Ok(())
+}
+
 pub async fn change_password(
     State(engine): Engine,
     Auth(principal): Auth,
     crate::client::ClientIp(client): crate::client::ClientIp,
     body: Result<Json<PasswordChange>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
+    demo_account_locked(&engine, &principal)?;
     let Json(input) = body?;
     reauth(&engine, &principal, &client, "auth.password_change", users::change_own_password(&engine, &principal.user_id, &input.current_password, &input.new_password)).await?;
     // Every older session is now invalid; issue a fresh one if this was a session.
@@ -427,6 +438,7 @@ pub async fn mfa_setup(
     crate::client::ClientIp(client): crate::client::ClientIp,
     body: Result<Json<MfaSetup>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
+    demo_account_locked(&engine, &principal)?;
     let Json(input) = body?;
     let (secret, uri) = reauth(&engine, &principal, &client, "auth.mfa_setup", users::mfa_setup(&engine, &principal.user_id, &input.password)).await?;
     Ok(Json(json!({ "secret": secret, "otpauth_uri": uri })).into_response())
@@ -448,6 +460,7 @@ pub async fn mfa_enable(
     crate::client::ClientIp(client): crate::client::ClientIp,
     body: Result<Json<MfaCode>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
+    demo_account_locked(&engine, &principal)?;
     let Json(input) = body?;
     let codes = users::mfa_enable(&engine, &principal.user_id, &input.code).await?;
     engine.record_audit(AuditEvent::new(&principal.login, "auth.mfa_enable", &principal.login).client(&client)).await;
@@ -468,6 +481,7 @@ pub async fn mfa_disable(
     crate::client::ClientIp(client): crate::client::ClientIp,
     body: Result<Json<MfaCode>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
+    demo_account_locked(&engine, &principal)?;
     let Json(input) = body?;
     let password = input.password.ok_or_else(|| ApiError::invalid("password is required."))?;
     reauth(&engine, &principal, &client, "auth.mfa_disable", users::mfa_disable(&engine, &principal.user_id, &password, &input.code)).await?;
@@ -482,6 +496,7 @@ pub async fn mfa_backup_codes(
     crate::client::ClientIp(client): crate::client::ClientIp,
     body: Result<Json<MfaCode>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
+    demo_account_locked(&engine, &principal)?;
     let Json(input) = body?;
     let password = input.password.ok_or_else(|| ApiError::invalid("password is required."))?;
     let codes = reauth(&engine, &principal, &client, "auth.mfa_backup_codes", users::mfa_new_backup_codes(&engine, &principal.user_id, &password, &input.code)).await?;
