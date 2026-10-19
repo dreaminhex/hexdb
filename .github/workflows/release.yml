@@ -40,7 +40,7 @@ jobs:
           node-version: 22
       - run: npm ci && npm run build
         working-directory: hexdb_admin
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ui
           path: hexdb_admin/dist
@@ -104,7 +104,7 @@ jobs:
             *) cp "target/$TARGET/release/libhexdb_odbc.so" "$name/odbc/" ;;
           esac
           if [ "$ARCHIVE" = zip ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
           path: hexdb-*.${{ matrix.archive }}
@@ -127,7 +127,7 @@ jobs:
           Expand-Archive (Get-ChildItem dl\*.zip | Select-Object -First 1).FullName -DestinationPath stage
           $dir = (Get-ChildItem stage -Directory | Select-Object -First 1).FullName
           ./packaging/windows/build-msi.ps1 -Version $env:GITHUB_REF_NAME -StageDir $dir -Out hexdb-windows-x64.msi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: msi
           path: hexdb-windows-x64.msi
@@ -169,7 +169,7 @@ jobs:
           arm="dl/hexdb-${GITHUB_REF_NAME}-aarch64-apple-darwin"
           intel="dl/hexdb-${GITHUB_REF_NAME}-x86_64-apple-darwin"
           bash packaging/macos/build-dmg.sh "$GITHUB_REF_NAME" "$arm" "$intel" hexdb-macos-universal.dmg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dmg
           path: hexdb-macos-universal.dmg
@@ -203,7 +203,7 @@ jobs:
           pip install cargo-zigbuild ziglang
           cargo zigbuild --locked --release --target "$TARGET.2.28" -p hexdb_api -p hexdb_cli -p hexdb_odbc
           cargo deb -p hexdb_api --no-build --target "$TARGET"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: deb-${{ matrix.arch }}
           path: target/debian/*.deb
