@@ -29,7 +29,7 @@ byteorder = "1.5"
 argon2 = "0.5.3"
 futures = "0.3.31"
 reed-solomon-simd = "3"
-toml = "0.8"
+toml = "1.1"
 hmac = "0.12"
 sha1 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
