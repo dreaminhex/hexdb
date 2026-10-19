@@ -14,7 +14,7 @@ async fn setup() -> (TempDir, Arc<HexDBEngine>, HexDBSchema) {
     let mut config = HexConfig::default();
     config.storage.path = dir.path().join("data").to_string_lossy().into_owned();
     config.storage.encryption_key = format!("base64:{}", STANDARD.encode([3u8; 32]));
-    let identity = HexIdentity { id: Ulid::new(), name: "Test".into(), hex_type: "Overseer".into() };
+    let identity = HexIdentity { id: Ulid::generate(), name: "Test".into(), hex_type: "Overseer".into() };
     let engine = Arc::new(HexDBEngine::open(config.clone(), identity, Arc::new(hexdb_core::KeyRing::new(&[3u8; 32], &[]))).await.unwrap());
     users::bootstrap(&engine, &config.security).await.unwrap();
     let schema = build_schema(engine.clone());

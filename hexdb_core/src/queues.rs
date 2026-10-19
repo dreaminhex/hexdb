@@ -342,7 +342,7 @@ impl HexDBEngine {
                 }
                 state.dedupe.insert(key.clone(), now);
             }
-            let id = self.stream_ids.lock().unwrap().generate().unwrap_or_else(|_| Ulid::new());
+            let id = self.stream_ids.lock().unwrap().generate().unwrap_or_else(|_| Ulid::generate());
             let stored = Stored { body: m.body, sent_at: now, sent_by: by.to_string(), ready_at: now + m.delay_seconds as i64 * 1000, lease: None, receives: 0, dead_from: None };
             self.put_message(&tess, id, &stored, config.retention_hours).await?;
             Self::set_ready(&mut state, id, Some(stored.ready_at));
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn receipts_parse_and_configs_validate() {
-        let id = Ulid::new();
+        let id = Ulid::generate();
         assert_eq!(parse_receipt(&format!("{}.abc", id)), Some((id, "abc")));
         assert!(parse_receipt("nonsense").is_none());
         let mut config = QueueConfig { name: "jobs".into(), description: String::new(), visibility_seconds: 30, max_receives: 5, dead_letter: None, retention_hours: 96, created: 0, created_by: String::new() };

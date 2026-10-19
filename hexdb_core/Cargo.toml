@@ -1,6 +1,6 @@
 [package]
 name = "hexdb_core"
-version = "2.0.0"
+version = "2.0.1"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -15,7 +15,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time",
 dashmap = "6.1.0"
 async-trait = "0.1"
 blake3 = "1.8.2"
-ulid = { version = "1.2.1", features = ["serde"] }
+ulid = { version = "3.0.0", features = ["serde"] }
 rust_decimal = { version = "1.37.1", features = ["serde"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.41", features = ["serde"] }
@@ -26,18 +26,18 @@ hex = "0.4.3"
 zstd = "0.13.3"
 getrandom = "0.3.3"
 byteorder = "1.5"
-argon2 = "0.5.3"
+argon2 = "0.6.0"
 futures = "0.3.31"
 reed-solomon-simd = "3"
 toml = "1.1"
-hmac = "0.12"
-sha1 = "0.10"
+hmac = "0.13"
+sha1 = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlparser = "0.63.0"
 fastcdc = "5.0.0"
 infer = "0.22.0"
 mime_guess = "2.0.5"
-sha2 = "0.10"
+sha2 = "0.11"
 lofty = "0.25.4"
 nom-exif = "3.8.0"
 imagesize = "0.15.0"

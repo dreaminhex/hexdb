@@ -2,6 +2,7 @@
 // value generation, and the (unsupported) explicit transactions.
 
 using System.Collections;
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -110,8 +111,15 @@ public class HexDBValueGeneratorSelector : ValueGeneratorSelector
 
     public HexDBValueGeneratorSelector(ValueGeneratorSelectorDependencies dependencies) : base(dependencies) { }
 
-    public override ValueGenerator Create(IProperty property, ITypeBase typeBase) =>
-        property.ClrType == typeof(string) && property.IsPrimaryKey() ? Ulids : base.Create(property, typeBase);
+    public override bool TryCreate(IProperty property, ITypeBase typeBase, [NotNullWhen(true)] out ValueGenerator? valueGenerator)
+    {
+        if (property.ClrType == typeof(string) && property.IsPrimaryKey())
+        {
+            valueGenerator = Ulids;
+            return true;
+        }
+        return base.TryCreate(property, typeBase, out valueGenerator);
+    }
 }
 
 /// <summary>A type HexDB stores as JSON.</summary>

@@ -398,7 +398,7 @@ mod tests {
     }
 
     fn doc(data: Value) -> Document {
-        Document { id: ulid::Ulid::new(), tessellation: "orders".into(), data: crate::document::infer_fields_from_json(&data), ttl: None }
+        Document { id: ulid::Ulid::generate(), tessellation: "orders".into(), data: crate::document::infer_fields_from_json(&data), ttl: None }
     }
 
     #[test]

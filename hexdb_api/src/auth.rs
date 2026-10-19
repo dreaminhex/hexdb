@@ -67,8 +67,7 @@ enum Via {
 
 fn is_public(method: &Method, path: &str) -> bool {
     path == "/"
-        || path == "/ui"
-        || path.starts_with("/ui/")
+        || crate::routes::is_ui_path(path)
         || (path == "/health" && method == Method::GET)
         || (path == "/openapi.json" && method == Method::GET)
         || (path == "/auth/login" && method == Method::POST)
@@ -222,7 +221,7 @@ pub async fn authenticate(State(engine): State<Arc<HexDBEngine>>, mut request: R
 
 /// Security headers on every response.
 pub async fn security_headers(State(engine): State<Arc<HexDBEngine>>, request: Request, next: Next) -> Response {
-    let ui = request.uri().path().starts_with("/ui") || request.uri().path() == "/";
+    let ui = crate::routes::is_ui_path(request.uri().path()) || request.uri().path() == "/";
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     let set = |headers: &mut HeaderMap, name: &'static str, value: &'static str| {

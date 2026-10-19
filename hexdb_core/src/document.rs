@@ -298,6 +298,24 @@ pub fn infer_fields_from_json(value: &Value) -> CompactFields {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Document IDs are ULIDs stored as text and as 128-bit numbers: a new
+    /// version of the ulid crate must read and write them exactly as before.
+    #[test]
+    fn ulid_encoding_is_stable() {
+        let text = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let id = Ulid::from_string(text).unwrap();
+        assert_eq!(u128::from(id), 0x01563E3AB5D3D6764C61EFB99302BD5B);
+        assert_eq!(id.to_string(), text);
+        assert_eq!(Ulid::from(0x01563E3AB5D3D6764C61EFB99302BD5Bu128), id);
+        assert_eq!(id.timestamp_ms(), 1_469_922_850_259);
+        // Ordering by ID is ordering by time.
+        let later = Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAW").unwrap();
+        assert!(id < later && id.to_string() < later.to_string());
+        let new = Ulid::generate();
+        assert_eq!(new.to_string().len(), 26);
+        assert!(new > id);
+    }
     use serde_json::json;
 
     #[test]
@@ -316,7 +334,7 @@ mod tests {
         });
 
         let fields = infer_fields_from_json(&input);
-        let doc = Document { id: Ulid::new(), tessellation: "t".into(), data: fields, ttl: None };
+        let doc = Document { id: Ulid::generate(), tessellation: "t".into(), data: fields, ttl: None };
         assert_eq!(doc.data_json(), input);
     }
 
@@ -338,7 +356,7 @@ mod tests {
     #[test]
     fn documents_are_stored_as_plain_json_and_old_tagged_ones_still_read() {
         let doc = Document {
-            id: Ulid::new(),
+            id: Ulid::generate(),
             tessellation: "t".into(),
             data: infer_fields_from_json(&json!({ "name": "Ada", "n": 1, "f": 2.5, "big": 18446744073709551615u64, "when": "2024-05-01T12:30:00Z", "tags": ["a", null], "o": { "type": "String", "value": "x" } })),
             ttl: Some(9),
@@ -358,7 +376,7 @@ mod tests {
     #[test]
     fn document_serde_round_trips() {
         let doc = Document {
-            id: Ulid::new(),
+            id: Ulid::generate(),
             tessellation: "t".into(),
             data: infer_fields_from_json(&json!({ "a": [1, { "b": "c" }] })),
             ttl: Some(5),
@@ -375,7 +393,7 @@ mod api_json_tests {
 
     #[test]
     fn api_json_is_plain_with_metadata() {
-        let id = Ulid::new();
+        let id = Ulid::generate();
         let doc = Document {
             id,
             tessellation: "t".into(),

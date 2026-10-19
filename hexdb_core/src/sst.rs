@@ -771,7 +771,7 @@ impl SstStore {
             return Ok(());
         }
         let dir = self.base.join(tess);
-        let path = dir.join(format!("{}.{}", Ulid::new(), SST_EXTENSION));
+        let path = dir.join(format!("{}.{}", Ulid::generate(), SST_EXTENSION));
         let level = self.compression_level;
         let keys = self.keys.clone();
         let file = tokio::task::spawn_blocking(move || -> Result<SstFile> {
@@ -895,7 +895,7 @@ impl SstStore {
                     let data = if entry.tombstone { None } else { Some(crate::document::upgrade_stored(file.read_entry(&id, &entry)?)) };
                     entries.push(SstEntry { id, seq: entry.seq, ttl: entry.ttl, data });
                 }
-                let path = write_dir.join(format!("{}.{}", Ulid::new(), SST_EXTENSION));
+                let path = write_dir.join(format!("{}.{}", Ulid::generate(), SST_EXTENSION));
                 Ok(Some(SstFile::write(&path, entries, level, seq_floor, &keys)?))
             })
             .await??;
@@ -942,7 +942,7 @@ mod tests {
     }
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hexdb-sst-test-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-sst-test-{}", Ulid::generate()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -983,7 +983,7 @@ mod tests {
     fn version_4_index_is_chunked_encrypted_and_complete() {
         let dir = temp_dir();
         let path = dir.join("big.hxs");
-        let mut ids: Vec<Ulid> = (0..1000).map(|_| Ulid::new()).collect();
+        let mut ids: Vec<Ulid> = (0..1000).map(|_| Ulid::generate()).collect();
         ids.sort();
         let entries: Vec<SstEntry> = ids
             .iter()
@@ -1008,7 +1008,7 @@ mod tests {
                 assert_eq!(file.read_entry(id, &e).unwrap(), format!("{{\"n\":{}}}", i).into_bytes());
             }
         }
-        assert!((0..200).all(|_| file.index.get(&Ulid::new()).is_none()));
+        assert!((0..200).all(|_| file.index.get(&Ulid::generate()).is_none()));
         // Ordered iteration, from the start and from any cursor, across chunks.
         assert_eq!(file.index.iter().map(|(id, _)| id).collect::<Vec<_>>(), ids);
         for cut in [0usize, 63, 64, 65, 500, 998, 999] {
@@ -1029,7 +1029,7 @@ mod tests {
         let tess_dir = dir.join("t");
         fs::create_dir_all(&tess_dir).unwrap();
         let keys = test_keys();
-        let (a, b) = (Ulid::new(), Ulid::new());
+        let (a, b) = (Ulid::generate(), Ulid::generate());
         write_v3(&tess_dir.join("old.hxs"), &[(a, 1, b"{\"v\":1}"), (b, 2, b"{\"v\":2}")], &keys);
         let store = SstStore::open(&dir, 0, keys.clone()).unwrap();
         let Some(DiskLookup::Live { file, entry }) = store.lookup("t", &a).await else { panic!() };
@@ -1050,7 +1050,7 @@ mod tests {
         let tess_dir = dir.join("t");
         fs::create_dir_all(&tess_dir).unwrap();
         let keys = test_keys();
-        let id = Ulid::new();
+        let id = Ulid::generate();
         // A document in the earlier type-tagged form, in a file marked version 4.
         let legacy = serde_json::to_vec(&serde_json::json!({
             "id": id.to_string(), "tessellation": "t",
@@ -1083,8 +1083,8 @@ mod tests {
     #[test]
     fn writes_and_reads_entries() {
         let dir = temp_dir();
-        let a = Ulid::new();
-        let b = Ulid::new();
+        let a = Ulid::generate();
+        let b = Ulid::generate();
         let path = dir.join("x.hxs");
         let file = SstFile::write(
             &path,
@@ -1114,7 +1114,7 @@ mod tests {
         let dir = temp_dir();
         let path = dir.join("x.hxs");
         let secret = b"{\"card\":\"4111-1111-1111-1111\"}".to_vec();
-        let (a, b) = (Ulid::new(), Ulid::new());
+        let (a, b) = (Ulid::generate(), Ulid::generate());
         let file = SstFile::write(
             &path,
             vec![
@@ -1155,7 +1155,7 @@ mod tests {
         fs::create_dir_all(&tess_dir).unwrap();
         let (old_key, new_key) = ([1u8; 32], [2u8; 32]);
         let old = Arc::new(KeyRing::new(&old_key, &[]));
-        let (a, b) = (Ulid::new(), Ulid::new());
+        let (a, b) = (Ulid::generate(), Ulid::generate());
         SstFile::write(&tess_dir.join("a.hxs"), vec![SstEntry { id: a, seq: 1, ttl: None, data: Some(b"{\"v\":\"a\"}".to_vec()) }], 0, 0, &old).unwrap();
         SstFile::write_impl(&tess_dir.join("b.hxs"), vec![SstEntry { id: b, seq: 2, ttl: None, data: Some(b"{\"v\":\"b\"}".to_vec()) }], 0, 0, &old, false).unwrap();
 
@@ -1184,7 +1184,7 @@ mod tests {
     fn detects_corrupt_index() {
         let dir = temp_dir();
         let path = dir.join("x.hxs");
-        SstFile::write(&path, vec![SstEntry { id: Ulid::new(), seq: 1, ttl: None, data: Some(b"{}".to_vec()) }], 0, 0, &test_keys())
+        SstFile::write(&path, vec![SstEntry { id: Ulid::generate(), seq: 1, ttl: None, data: Some(b"{}".to_vec()) }], 0, 0, &test_keys())
             .unwrap();
         let mut bytes = fs::read(&path).unwrap();
         let last = bytes.len() - 1;
@@ -1198,8 +1198,8 @@ mod tests {
     async fn newest_version_wins_and_compaction_drops_tombstones() {
         let dir = temp_dir();
         let store = SstStore::open(&dir, 0, test_keys()).unwrap();
-        let id = Ulid::new();
-        let other = Ulid::new();
+        let id = Ulid::generate();
+        let other = Ulid::generate();
 
         store
             .add_table("t", vec![

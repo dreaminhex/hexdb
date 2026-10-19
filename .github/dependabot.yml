@@ -18,10 +18,6 @@ updates:
       # yet, so `npm run lint` fails on it. Remove this once it does.
       - dependency-name: typescript
         versions: [">=7"]
-      # eslint-plugin-react-hooks doesn't support ESLint 10 yet (its peer
-      # range stops at 9), so npm can't install it. Remove this once it does.
-      - dependency-name: eslint
-        versions: [">=10"]
   - package-ecosystem: npm
     directory: /drivers/node
     schedule: { interval: weekly }

@@ -427,7 +427,7 @@ mod tests {
             json!({ "status": "live", "views": 1 }),
         ]
         .iter()
-        .map(|j| Document { id: Ulid::new(), tessellation: "t".into(), data: infer_fields_from_json(j), ttl: None })
+        .map(|j| Document { id: Ulid::generate(), tessellation: "t".into(), data: infer_fields_from_json(j), ttl: None })
         .collect()
     }
 

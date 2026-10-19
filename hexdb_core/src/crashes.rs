@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn a_leftover_runtime_file_is_a_crash() {
-        let root = std::env::temp_dir().join(format!("hexdb-crashes-{}", ulid::Ulid::new()));
+        let root = std::env::temp_dir().join(format!("hexdb-crashes-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&root).unwrap();
         struct Dir(PathBuf);
         impl Dir {

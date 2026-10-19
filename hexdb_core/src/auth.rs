@@ -412,7 +412,7 @@ pub fn issue_session_for(key: &[u8; 32], user_id: &str, hours: u64, trigger: Opt
     let now = Utc::now();
     let claims = SessionClaims {
         sub: user_id.to_string(),
-        sid: Ulid::new().to_string(),
+        sid: Ulid::generate().to_string(),
         iat: now.timestamp_millis(),
         exp: now.timestamp() + (hours.clamp(1, 24 * 30) as i64) * 3600,
         trg: trigger,
@@ -494,7 +494,7 @@ pub async fn create_api_key(engine: &HexDBEngine, owner: &Principal, name: &str,
         return Err(EngineError::Invalid("name must be 1-100 characters.".into()).into());
     }
     engine.ensure_writable()?;
-    let id = Ulid::new();
+    let id = Ulid::generate();
     let secret = URL_SAFE_NO_PAD.encode(random_bytes(32));
     let now = Utc::now().timestamp();
     let stored = StoredApiKey {
@@ -1049,7 +1049,7 @@ mod tests {
 
     #[test]
     fn api_keys_parse_strictly() {
-        let id = Ulid::new();
+        let id = Ulid::generate();
         let secret = "a".repeat(43);
         assert_eq!(split_api_key(&format!("hxk_{}_{}", id, secret)).map(|(i, _)| i), Some(id));
         assert!(split_api_key(&format!("hxk_{}_short", id)).is_none());

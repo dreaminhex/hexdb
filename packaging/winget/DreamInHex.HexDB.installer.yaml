@@ -1,5 +1,5 @@
 PackageIdentifier: DreamInHex.HexDB
-PackageVersion: 2.0.0
+PackageVersion: 2.0.1
 InstallerType: wix
 Scope: machine
 InstallModes:
@@ -12,7 +12,7 @@ Commands:
   - hexdb_api
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/dreaminhex/hexdb/releases/download/v2.0.0/hexdb-windows-x64.msi
+    InstallerUrl: https://github.com/dreaminhex/hexdb/releases/download/v2.0.1/hexdb-windows-x64.msi
     InstallerSha256: REPLACE_WITH_SHA256_OF_THE_MSI
 ManifestType: installer
 ManifestVersion: 1.6.0

@@ -206,7 +206,7 @@ mod tests {
         assert!(validate("storage.encryption_key", &Value::from("x")).is_err(), "not a runtime setting");
         assert!(SETTINGS.iter().all(|s| get(&HexConfig::default(), s.key).is_some()), "every setting exists in the config");
 
-        let dir = std::env::temp_dir().join(format!("hexdb-settings-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-settings-{}", ulid::Ulid::generate()));
         let keys = KeyRing::new(&[3u8; 32], &[]);
         save_overrides(&dir, &keys, &overrides).unwrap();
         assert_eq!(load_overrides(&dir, &keys).unwrap(), overrides);

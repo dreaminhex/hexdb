@@ -329,6 +329,19 @@ fn responses_carry_security_headers_and_no_cors() -> Result<()> {
 }
 
 #[test]
+fn tessellations_named_like_the_ui_get_api_headers() -> Result<()> {
+    // Only /ui and /ui/... are the admin UI; "uikit" is an ordinary tessellation.
+    let server = TestServer::start()?;
+    let created = server.request(Method::POST, "/uikit", Some(&json!({ "secret": 1 })), &[])?;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let res = server.request(Method::GET, &format!("/uikit/{}", created.body["id"].as_str().unwrap()), None, &[])?;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.headers.get("cache-control").map(|v| v.to_str().unwrap()), Some("no-store"));
+    assert_eq!(res.headers["content-security-policy"].to_str()?, "default-src 'none'; frame-ancestors 'none'");
+    Ok(())
+}
+
+#[test]
 fn lattice_endpoints_need_a_fresh_signature() -> Result<()> {
     let server = TestServer::start()?;
     for path in ["/lattice/snapshot", "/lattice/catalog", "/lattice/changes?after=0", "/lattice/snapshot/users"] {

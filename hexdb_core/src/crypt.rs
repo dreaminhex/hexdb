@@ -4,8 +4,8 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use anyhow::{anyhow, Result};
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordVerifier, SaltString};
-use argon2::{Argon2, PasswordHasher};
+use argon2::password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::Argon2;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 /// Length in bytes of the AES-256 storage encryption key.
@@ -15,9 +15,8 @@ pub const NONCE_LEN: usize = 12;
 
 /// Hash a password with Argon2id and a random salt (PHC string format).
 pub fn create_hash(input: &str) -> String {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(input.as_bytes(), &salt)
+    // A random 16-byte salt from the operating system, made by hash_password.
+    PasswordHasher::<PasswordHash>::hash_password(&Argon2::default(), input.as_bytes())
         .map(|h| h.to_string())
         // Hashing only fails for out-of-range parameters, which the defaults aren't.
         .unwrap_or_default()
@@ -25,10 +24,9 @@ pub fn create_hash(input: &str) -> String {
 
 /// True if `input` matches an Argon2 hash. A malformed or empty hash never matches.
 pub fn verify_hash(input: &str, hash: &str) -> bool {
-    match PasswordHash::new(hash) {
-        Ok(parsed) => Argon2::default().verify_password(input.as_bytes(), &parsed).is_ok(),
-        Err(_) => false,
-    }
+    // The parameters and salt come from the stored PHC string, so hashes made
+    // by earlier versions (or with other parameters) still verify.
+    !hash.is_empty() && Argon2::default().verify_password(input.as_bytes(), hash).is_ok()
 }
 
 /// `count` random bytes from the operating system's CSPRNG.
@@ -249,6 +247,21 @@ mod tests {
     }
 
     #[test]
+    fn earlier_hashes_still_verify() {
+        // Made by libargon2 (the reference implementation): the first with
+        // the parameters HexDB 2.0 used, the second with others. Stored
+        // password and backup-code hashes must survive crate upgrades.
+        for hash in [
+            "$argon2id$v=19$m=19456,t=2,p=1$aGV4ZGItY29tcGF0LXNhbHQ$E/bur/kf0lexz3o+Ipx7WYDjYnZd0ioPn7sTnq7bKyI",
+            "$argon2id$v=19$m=65536,t=3,p=4$MDEyMzQ1Njc4OWFiY2RlZg$UiBIPUuhY3xdXfQ7N3p/au05phWWk9ACmj5PdtUGaas",
+        ] {
+            assert!(verify_hash("correct horse battery", hash), "{}", hash);
+            assert!(!verify_hash("correct horse batterz", hash), "{}", hash);
+        }
+        assert!(create_hash("x").starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+    }
+
+    #[test]
     fn key_ring_encrypts_rotates_and_binds_aad() {
         let (old, new) = ([1u8; 32], [2u8; 32]);
         let before = KeyRing::new(&old, &[]);
@@ -270,7 +283,7 @@ mod tests {
 
     #[test]
     fn sealed_files_round_trip_and_resist_swapping() {
-        let dir = std::env::temp_dir().join(format!("hexdb-sealed-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-sealed-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let keys = KeyRing::new(&[4u8; 32], &[]);
         let a = dir.join("a.hxe");

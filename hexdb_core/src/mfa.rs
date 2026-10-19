@@ -17,7 +17,7 @@
 // API keys are separate credentials and don't use MFA.
 
 use crate::crypt::{create_hash, random_bytes, verify_hash};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 
 /// Seconds per TOTP step.

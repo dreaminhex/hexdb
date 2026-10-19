@@ -275,7 +275,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | JavaScript / TypeScript | [drivers/node](drivers/node) | Node.js 18+, Deno, Bun or a browser |
 | Python | [drivers/python](drivers/python) | Python 3.9+, standard library only |
 | .NET | [drivers/dotnet](drivers/dotnet) | .NET 8+ |
-| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | .NET 8+, EF Core 8 |
+| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | .NET 8+, EF Core 9 |
 | ODBC | [drivers/odbc](drivers/odbc) | Windows, Linux (unixODBC); 64-bit |
 
 See [drivers/README.md](drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](hexdb_api/openapi.json)).

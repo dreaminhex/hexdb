@@ -1,6 +1,6 @@
 [package]
 name = "hexdb_tests"
-version = "2.0.0"
+version = "2.0.1"
 license = "Apache-2.0"
 edition = "2021"
 publish = false
@@ -16,10 +16,10 @@ rcgen = "0.14"
 
 [dev-dependencies]
 tokio = { version = "1.37", features = ["full"] }
-ulid = "1.2.1"
+ulid = "3.0.0"
 base64 = "0.22.1"
 chrono = "0.4.41"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 # A WebSocket client for the live-feed tests.

@@ -176,7 +176,7 @@ fn transactions_and_ids_dont_reveal_hidden_rows_or_fields() -> Result<()> {
     let server = TestServer::start()?;
     let eu = server.insert("notes", &json!({ "n": 1, "region": "eu", "secret": "omega" }))?;
     let us = server.insert("notes", &json!({ "n": 2, "region": "us", "secret": "usonly" }))?;
-    let nowhere = ulid::Ulid::new().to_string();
+    let nowhere = ulid::Ulid::generate().to_string();
     let role = json!({ "name": "eu_writer", "permissions": ["read", "write"], "restrictions": { "notes": { "filter": { "region": "eu" }, "hide": ["secret"] } } });
     assert!(server.request(Method::POST, "/roles", Some(&role), &[])?.status.is_success());
     let writer = server.user_with_roles("walt", json!([{ "name": "eu_writer", "tessellations": ["notes"] }]))?;

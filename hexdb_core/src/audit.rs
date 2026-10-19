@@ -154,7 +154,7 @@ impl HexDBEngine {
         let days = self.live().audit_retention_days;
         let ttl = (days > 0).then(|| event.time + days as i64 * 86_400_000);
         let first = !self.tessellation_exists(AUDIT_TESSELLATION);
-        self.put_system_document(AUDIT_TESSELLATION, Ulid::new(), serde_json::to_value(event)?, ttl).await?;
+        self.put_system_document(AUDIT_TESSELLATION, Ulid::generate(), serde_json::to_value(event)?, ttl).await?;
         if first {
             self.ensure_internal_index(AUDIT_TESSELLATION, time_index()).await?;
         }

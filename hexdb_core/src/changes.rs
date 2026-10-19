@@ -200,7 +200,7 @@ mod tests {
     use super::*;
 
     fn change(seq: u64) -> Change {
-        Change { seq, timestamp: Utc::now(), kind: ChangeKind::Delete, tessellation: "t".into(), id: Some(Ulid::new()), document: None, created: false, origin: None }
+        Change { seq, timestamp: Utc::now(), kind: ChangeKind::Delete, tessellation: "t".into(), id: Some(Ulid::generate()), document: None, created: false, origin: None }
     }
 
     fn seqs(changes: &[Arc<Change>]) -> Vec<u64> {

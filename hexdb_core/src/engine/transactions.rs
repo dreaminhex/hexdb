@@ -307,7 +307,7 @@ impl HexDBEngine {
 
         for (i, op) in ops.iter().enumerate() {
             let at = |m: String| format!("operations[{}]: {}", i, m);
-            let id = op.id.unwrap_or_else(Ulid::new);
+            let id = op.id.unwrap_or_else(Ulid::generate);
             let key = DocKey::new(&op.tessellation, id);
 
             let (read, write) = scopes

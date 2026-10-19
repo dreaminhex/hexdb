@@ -280,7 +280,7 @@ impl HexDBEngine {
             // Offsets must increase even within one millisecond.
             let mut generator = self.stream_ids.lock().unwrap();
             for m in messages {
-                let id = generator.generate().unwrap_or_else(|_| Ulid::new());
+                let id = generator.generate().unwrap_or_else(|_| Ulid::generate());
                 let data = json!({ "payload": m.payload, "key": m.key, "headers": m.headers, "published_by": by });
                 docs.push(crate::document::Document { id, tessellation: tess.clone(), data: crate::document::infer_fields_from_json(&data), ttl });
                 ids.push(id.to_string());

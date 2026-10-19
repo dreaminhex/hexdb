@@ -696,7 +696,7 @@ mod tests {
     use serde_json::json;
 
     fn doc(json: Value) -> Document {
-        Document { id: Ulid::new(), tessellation: "t".into(), data: infer_fields_from_json(&json), ttl: None }
+        Document { id: Ulid::generate(), tessellation: "t".into(), data: infer_fields_from_json(&json), ttl: None }
     }
 
     fn ready(def: IndexDef, docs: &[Document]) -> Index {

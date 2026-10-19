@@ -35,6 +35,6 @@ export function parseJson<T = unknown>(text: string, what: string): T {
   try {
     return JSON.parse(text) as T
   } catch (e) {
-    throw new Error(`${what} isn't valid JSON: ${e instanceof Error ? e.message : String(e)}`)
+    throw new Error(`${what} isn't valid JSON: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
   }
 }

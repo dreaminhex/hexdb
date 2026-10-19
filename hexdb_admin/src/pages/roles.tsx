@@ -58,7 +58,7 @@ function RoleDialog({
         try {
           parsed = JSON.parse(restrictions)
         } catch (e) {
-          throw new Error(`Restrictions aren't valid JSON: ${e instanceof Error ? e.message : String(e)}`)
+          throw new Error(`Restrictions aren't valid JSON: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
         }
       }
       if (role) {

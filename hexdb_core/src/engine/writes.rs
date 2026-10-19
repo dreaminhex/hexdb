@@ -628,7 +628,7 @@ impl HexDBEngine {
                 }
                 None => {
                     summary.inserted += 1;
-                    let doc = Document { id: Ulid::new(), tessellation: tess.to_string(), data: fields.clone(), ttl };
+                    let doc = Document { id: Ulid::generate(), tessellation: tess.to_string(), data: fields.clone(), ttl };
                     if !write.allows(&doc) {
                         return Err(outside_scope(tess));
                     }
@@ -771,7 +771,7 @@ impl HexDBEngine {
         fields
             .iter()
             .map(|data| {
-                let doc = Document { id: Ulid::new(), tessellation: tess.to_string(), data: data.clone(), ttl };
+                let doc = Document { id: Ulid::generate(), tessellation: tess.to_string(), data: data.clone(), ttl };
                 BatchItem { key: DocKey::new(tess, doc.id), op: WalOp::Put(doc), expected_seq: None }
             })
             .collect()

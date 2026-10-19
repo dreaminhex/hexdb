@@ -456,7 +456,7 @@ mod tests {
         let t: Trigger = serde_json::from_value(json!({ "name": "big-orders", "tessellation": "orders", "events": ["insert"], "function": "notify", "filter": { "total": { "$gt": 100 } } })).unwrap();
         t.validate().unwrap();
         assert_eq!(t.timing, Timing::After);
-        let doc = |total: i64| Document { id: Ulid::new(), tessellation: "orders".into(), data: crate::document::infer_fields_from_json(&json!({ "total": total })), ttl: None };
+        let doc = |total: i64| Document { id: Ulid::generate(), tessellation: "orders".into(), data: crate::document::infer_fields_from_json(&json!({ "total": total })), ttl: None };
         assert!(t.applies("orders", "insert", Some(&doc(500))));
         assert!(!t.applies("orders", "insert", Some(&doc(5))));
         assert!(!t.applies("orders", "update", Some(&doc(500))));

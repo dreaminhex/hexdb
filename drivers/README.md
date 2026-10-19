@@ -16,7 +16,7 @@ Client libraries for HexDB's REST API, plus an Entity Framework Core provider an
 | JavaScript / TypeScript | [node](node) | `@dreaminhex/hexdb` (npm) | Node.js 18+, Deno, Bun or a browser; no dependencies |
 | Python | [python](python) | `hexdb` (PyPI) | Python 3.9+; standard library only |
 | .NET (C#, F#) | [dotnet](dotnet) | `HexDB.Client` (NuGet) | .NET 8+ |
-| Entity Framework Core | [dotnet/HexDB.EntityFrameworkCore](dotnet/HexDB.EntityFrameworkCore) | `HexDB.EntityFrameworkCore` (NuGet) | .NET 8+, EF Core 8 |
+| Entity Framework Core | [dotnet/HexDB.EntityFrameworkCore](dotnet/HexDB.EntityFrameworkCore) | `HexDB.EntityFrameworkCore` (NuGet) | .NET 8+, EF Core 9 |
 | ODBC | [odbc](odbc) | release archives (`odbc/`) | 64-bit Windows, Linux (unixODBC) |
 
 The three drivers authenticate with an API key (create one on the admin UI's Account page) or by signing in with a login and password. They retry `429` and `503` answers for reads, and for writes that carry an idempotency key.
@@ -73,7 +73,7 @@ var page = await media.Documents.QueryAsync(new Query { Filter = new { path = "/
 
 ## Entity Framework Core
 
-`HexDB.EntityFrameworkCore` is an EF Core 8 provider over the .NET driver. Each entity type is a tessellation and each `SaveChanges` is one atomic transaction:
+`HexDB.EntityFrameworkCore` is an EF Core 9 provider over the .NET driver. Each entity type is a tessellation and each `SaveChanges` is one atomic transaction:
 
 ```csharp
 protected override void OnConfiguring(DbContextOptionsBuilder options) =>

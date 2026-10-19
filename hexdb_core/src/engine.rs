@@ -311,12 +311,12 @@ const MAX_WRITE_RETRIES: usize = 16;
 /// engine and the directory (delete it when done).
 #[cfg(test)]
 pub(crate) async fn test_engine() -> (HexDBEngine, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("hexdb-engine-test-{}", Ulid::new()));
+    let dir = std::env::temp_dir().join(format!("hexdb-engine-test-{}", Ulid::generate()));
     let mut config = HexConfig::default();
     config.storage.path = dir.join("data").to_string_lossy().into_owned();
     config.storage.encryption_key = "base64:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=".into();
     let keys = Arc::new(crate::crypt::KeyRing::new(&[7u8; 32], &[]));
-    let identity = HexIdentity { id: Ulid::new(), name: "Test".into(), hex_type: crate::network::discovery::ROLE_OVERSEER.into() };
+    let identity = HexIdentity { id: Ulid::generate(), name: "Test".into(), hex_type: crate::network::discovery::ROLE_OVERSEER.into() };
     let engine = HexDBEngine::open(config, identity, keys).await.expect("a test engine");
     (engine, dir)
 }
@@ -352,7 +352,7 @@ impl HexDBEngine {
         let sst = SstStore::open(&storage_dir, level, keys.clone())?;
         let mut history_created = false;
         if catalog.history_id.is_empty() {
-            catalog.history_id = Ulid::new().to_string();
+            catalog.history_id = Ulid::generate().to_string();
             history_created = true;
         }
         let history_id = catalog.history_id.clone();
