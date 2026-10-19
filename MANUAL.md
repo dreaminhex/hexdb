@@ -2169,7 +2169,7 @@ A hex that didn't shut down cleanly leaves its runtime file behind, and the next
 | JavaScript / TypeScript | [drivers/node](drivers/node) | `npm install @dreaminhex/hexdb` (Node.js 18+, Deno, Bun, browsers) |
 | Python | [drivers/python](drivers/python) | `pip install hexdb` (3.9+, no dependencies) |
 | .NET | [drivers/dotnet](drivers/dotnet) | `dotnet add package HexDB.Client` (.NET 8+) |
-| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 8+, EF Core 8) |
+| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 8+, EF Core 9) |
 | ODBC | [drivers/odbc](drivers/odbc) | Release archives (`odbc/`), or `cargo build --release -p hexdb_odbc` |
 
 The Node.js, Python and .NET drivers each cover:
@@ -2184,7 +2184,7 @@ The Entity Framework Core provider and the ODBC driver, described below, build o
 
 ### Entity Framework Core
 
-`HexDB.EntityFrameworkCore` (in [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore)) is an EF Core 8 provider built on `HexDB.Client`. Install it with `dotnet add package HexDB.EntityFrameworkCore` and configure a context:
+`HexDB.EntityFrameworkCore` (in [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore)) is an EF Core 9 provider built on `HexDB.Client`. Install it with `dotnet add package HexDB.EntityFrameworkCore` and configure a context:
 
 ```csharp
 public class Order

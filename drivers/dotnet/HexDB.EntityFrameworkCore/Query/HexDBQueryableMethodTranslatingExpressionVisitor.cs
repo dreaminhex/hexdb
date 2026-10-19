@@ -106,7 +106,11 @@ public class HexDBQueryableMethodTranslatingExpressionVisitor : QueryableMethodT
 
     private ShapedQueryExpression? TranslateSingleResult(ShapedQueryExpression source, LambdaExpression? predicate, bool returnDefault, int rows)
     {
-        if (predicate is not null && (source = TranslateWhere(source, predicate)!) is null) return null;
+        if (predicate is not null)
+        {
+            if (TranslateWhere(source, predicate) is not { } filtered) return null;
+            source = filtered;
+        }
         var query = Query(source);
         if (query.Kind != HexDBQueryKind.Entities) return null;
         if (query.Take is null)
@@ -138,7 +142,11 @@ public class HexDBQueryableMethodTranslatingExpressionVisitor : QueryableMethodT
 
     private ShapedQueryExpression? TranslateScalar(ShapedQueryExpression source, LambdaExpression? predicate, HexDBQueryKind kind, Type type)
     {
-        if (predicate is not null && (source = TranslateWhere(source, predicate)!) is null) return null;
+        if (predicate is not null)
+        {
+            if (TranslateWhere(source, predicate) is not { } filtered) return null;
+            source = filtered;
+        }
         var query = Query(source);
         if (query.Kind != HexDBQueryKind.Entities) return null;
         query.Kind = kind;
