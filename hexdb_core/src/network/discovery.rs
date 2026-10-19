@@ -394,7 +394,7 @@ pub fn resolve_hex_identity(config: &HexConfig, keys: &crate::crypt::KeyRing, na
 
 /// The pure part of `resolve_hex_identity`.
 pub fn choose_hex_identity(configured: Option<&str>, saved_id: &str, saved_name: &str, names: &[String]) -> (Ulid, String, NameSource) {
-    let id = Ulid::from_string(saved_id).unwrap_or_else(|_| Ulid::new());
+    let id = Ulid::from_string(saved_id).unwrap_or_else(|_| Ulid::generate());
     let saved_name = saved_name.trim();
     match configured {
         Some(name) => (id, name.to_string(), NameSource::Configured),
@@ -524,7 +524,7 @@ mod tests {
 
     #[test]
     fn configured_name_wins_and_saved_id_is_kept() {
-        let saved = Ulid::new();
+        let saved = Ulid::generate();
         let (id, name, source) = choose_hex_identity(Some("Great Dane"), &saved.to_string(), "Lion", &names());
         assert_eq!(id, saved);
         assert_eq!(name, "Great Dane");

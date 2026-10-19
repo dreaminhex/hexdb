@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     fn temp_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("hexdb-blobs-{}-{}", name, ulid::Ulid::new()));
+        let root = std::env::temp_dir().join(format!("hexdb-blobs-{}-{}", name, ulid::Ulid::generate()));
         fs::create_dir_all(&root).unwrap();
         root
     }

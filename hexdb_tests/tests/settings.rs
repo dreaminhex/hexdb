@@ -60,7 +60,7 @@ fn settings_change_live_or_at_restart_and_persist() -> Result<()> {
 fn writes_stop_at_the_disk_quota_but_deletes_continue() -> Result<()> {
     let server = TestServer::start_with(TestOptions { disk_mb: Some(1), ..Default::default() })?;
     // Fill past 1 MB with data that doesn't compress, then flush so the usage is measured.
-    let noise = || (0..400).map(|_| ulid::Ulid::new().to_string()).collect::<String>();
+    let noise = || (0..400).map(|_| ulid::Ulid::generate().to_string()).collect::<String>();
     let chunk: Vec<Value> = (0..40).map(|i| json!({ "i": i, "pad": noise() })).collect();
     let mut first = None;
     for _ in 0..8 {

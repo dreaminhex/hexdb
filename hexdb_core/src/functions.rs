@@ -551,7 +551,7 @@ impl HexDBEngine {
         }
         let runtime = def.runtime.as_deref().unwrap_or_default();
         let code = def.code.clone().unwrap_or_default();
-        let dir = std::env::temp_dir().join(format!("hexdb-fn-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-fn-{}", Ulid::generate()));
         std::fs::create_dir_all(&dir)?;
         let (program, args, file) = match runtime {
             "python" => (self.config.functions.python.clone(), vec![], "main.py"),

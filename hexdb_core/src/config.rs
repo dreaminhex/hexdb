@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn relative_paths_resolve_against_config_dir() {
-        let dir = std::env::temp_dir().join(format!("hexdb-config-test-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-config-test-{}", ulid::Ulid::generate()));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("hexdb.toml");
         fs::write(
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn local_file_overrides_secrets() {
-        let dir = std::env::temp_dir().join(format!("hexdb-config-test-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-config-test-{}", ulid::Ulid::generate()));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("hexdb.toml");
         fs::write(&file, "[storage]
@@ -870,7 +870,7 @@ encryption_key = \"base64:secret\"
 
     #[test]
     fn retired_query_endpoint_still_loads() {
-        let dir = std::env::temp_dir().join(format!("hexdb-config-test-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-config-test-{}", ulid::Ulid::generate()));
         fs::create_dir_all(&dir).unwrap();
         let file = dir.join("hexdb.toml");
         fs::write(&file, "[network]\nquery_endpoint = \"127.0.0.1:7701\"\n").unwrap();

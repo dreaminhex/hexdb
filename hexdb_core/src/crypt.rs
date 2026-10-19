@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn sealed_files_round_trip_and_resist_swapping() {
-        let dir = std::env::temp_dir().join(format!("hexdb-sealed-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-sealed-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let keys = KeyRing::new(&[4u8; 32], &[]);
         let a = dir.join("a.hxe");

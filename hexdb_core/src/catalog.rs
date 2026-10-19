@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn saves_and_loads() {
-        let dir = std::env::temp_dir().join(format!("hexdb-catalog-test-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-catalog-test-{}", ulid::Ulid::generate()));
         fs::create_dir_all(&dir).unwrap();
         let keys = KeyRing::new(&[1u8; 32], &[]);
         assert!(Catalog::load(&dir, &keys).unwrap().is_none());

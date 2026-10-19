@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn round_trips_runtime_file() {
-        let dir = std::env::temp_dir().join(format!("hexdb-runtime-test-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-runtime-test-{}", ulid::Ulid::generate()));
         let info = RuntimeInfo::for_current_process("127.0.0.1:7700", 1, false).unwrap();
         assert_eq!(info.shutdown_token.len(), 64);
 

@@ -411,7 +411,7 @@ impl HexDBEngine {
                         "extract": { "status": "pending" },
                     });
                     let Value::Object(map) = map else { unreachable!() };
-                    (document(tess, Ulid::new(), map, None), 0, true)
+                    (document(tess, Ulid::generate(), map, None), 0, true)
                 }
             };
             if !write.allows(&doc) {
@@ -486,7 +486,7 @@ impl HexDBEngine {
             self.check_quota(&caller_login(), size, self.find_file(tess, &path, &name).await?.is_none()).await?;
         }
         self.disk_used.fetch_sub(size.unwrap_or(0), Ordering::Relaxed);
-        let id = Ulid::new();
+        let id = Ulid::generate();
         let map = json!({
             "tessellation": tess, "path": path, "name": name, "size": size, "offset": 0,
             "declared_type": options.content_type, "modified_at": options.modified_at.map(time_text), "created_at": options.created_at.map(time_text),

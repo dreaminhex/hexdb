@@ -659,7 +659,7 @@ mod tests {
             created: Vec::new(),
             origin: None,
             op: WalOp::Put(Document {
-                id: Ulid::new(),
+                id: Ulid::generate(),
                 tessellation: "t".into(),
                 data: infer_fields_from_json(&json!({ "n": seq })),
                 ttl: None,
@@ -668,7 +668,7 @@ mod tests {
     }
 
     fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("hexdb-wal-test-{}", Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("hexdb-wal-test-{}", Ulid::generate()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

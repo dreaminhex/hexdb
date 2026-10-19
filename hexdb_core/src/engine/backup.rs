@@ -237,7 +237,7 @@ impl HexDBEngine {
 
         // The copying runs on the blocking pool; compaction stays held off.
         let (_compaction, tables) = self.sst.hold_tables().await;
-        catalog.history_id = ulid::Ulid::new().to_string();
+        catalog.history_id = ulid::Ulid::generate().to_string();
         let job = CopyJob {
             catalog,
             keys: self.keys.clone(),
