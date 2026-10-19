@@ -9,7 +9,7 @@ use hexdb_core::{
     config::CONFIG_FILE_NAME, discover_peers, init_logging, load_config_from,
     spawn_compaction_task, spawn_extraction_task, spawn_flush_task, spawn_scrub_task, spawn_ttl_sweep_task,
     elect, parse_preference, spawn_discovery_task, spawn_metrics_task, spawn_vertex_monitoring_task,
-    start_discovery_listener, LatticeMember, NameSource, ROLE_OVERSEER,
+    bind_discovery, start_discovery_listener, LatticeMember, NameSource, ROLE_OVERSEER,
     HexDBEngine, HexIdentity, PeerHex, RuntimeInfo,
 };
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -245,8 +245,10 @@ async fn server() -> anyhow::Result<()> {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
     // Answer other hexes' discovery handshakes.
+    // Bound here, so a hex that can't be reached stops instead of running without its lattice.
+    let discovery = bind_discovery(&config.network.discovery_endpoint).await?;
     let listening = engine.clone();
-    hexdb_core::tasks::supervise("discovery listener", shutdown_rx.clone(), move || start_discovery_listener(listening.clone()));
+    hexdb_core::tasks::supervise("discovery listener", shutdown_rx.clone(), move || start_discovery_listener(listening.clone(), discovery.clone()));
 
     // Initialize security settings & create defaults if not present.
     info!("🔐 Initializing security settings...");
