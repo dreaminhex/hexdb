@@ -22,7 +22,7 @@ jobs:
         # ubuntu-24.04-arm: 64-bit ARM (the same architecture as a Raspberry Pi 4 or 5).
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -65,7 +65,7 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
@@ -84,7 +84,7 @@ jobs:
     name: Drivers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v7
@@ -117,7 +117,7 @@ jobs:
     name: ODBC (Windows driver manager)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v7
@@ -149,7 +149,7 @@ jobs:
       run:
         working-directory: hexdb_admin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 22
