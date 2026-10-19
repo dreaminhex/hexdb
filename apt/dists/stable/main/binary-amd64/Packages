@@ -58,3 +58,23 @@ Description: HexDB server: a document database with REST, GraphQL, replication a
  HexDB, a document database: the server, the hexdb CLI, the admin UI and the
  ODBC driver.
 
+Package: hexdb
+Architecture: amd64
+Version: 2.0.0-1
+Priority: optional
+Section: database
+Maintainer: Dream In Hex <matthew@dreaminhex.com>
+Installed-Size: 58950
+Depends: adduser, libc6 (>= 2.28)
+Filename: pool/main/h/hexdb/hexdb_2.0.0-1_amd64.deb
+Size: 16008752
+MD5sum: 1cdc5e2140f5778f84908737ae8416a0
+SHA1: e2ca6d39a879074866d03d4e010fe2ea98fc3595
+SHA256: cf1c7aff2977fdcdad0aadd5fcc76cafa3b9d1d969d5f00c67a4fd068336d107
+SHA512: 60056693cc19f896ea77c698cda702118ad39b3a1ebc46fa1dd35ec8236d47ff7e791a0b02b22d05c753e9e5ffb955d0c5179433b09756e026dc68468dbcc37c
+Homepage: https://hexdb-website.vercel.app
+Description: HexDB server: a document database with REST, GraphQL, replication and an admin
+ UI
+ HexDB, a document database: the server, the hexdb CLI, the admin UI and the
+ ODBC driver.
+
