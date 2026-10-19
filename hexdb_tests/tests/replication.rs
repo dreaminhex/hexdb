@@ -154,12 +154,13 @@ fn schemas_and_indexes_reach_every_hex_promptly() -> Result<()> {
     assert_eq!(overseer.request(Method::POST, "/tessellations/customers/schemas", Some(&schema), &[])?.status.as_u16(), 201);
     assert_eq!(overseer.request(Method::POST, "/tessellations/customers/indexes", Some(&json!({ "fields": ["email"], "unique": true })), &[])?.status.as_u16(), 201);
 
-    // ...reach the replica well within the periodic catalog check (15 s).
+    // ...reach the replica well within the periodic catalog check (15 s), and
+    // the index is built there (listed indexes can still be catching up).
     let started = Instant::now();
     wait_until(Duration::from_secs(10), "the schema and index on the replica", || {
         let schemas = replica.request(Method::GET, "/tessellations/customers/schemas", None, &[])?.body;
         let indexes = replica.request(Method::GET, "/tessellations/customers/indexes", None, &[])?.body;
-        let has_index = indexes.as_array().or_else(|| indexes["indexes"].as_array()).is_some_and(|l| l.iter().any(|i| i["name"] == "email"));
+        let has_index = indexes.as_array().or_else(|| indexes["indexes"].as_array()).is_some_and(|l| l.iter().any(|i| i["name"] == "email" && i["ready"] == true));
         Ok(schemas["current"] == 1 && has_index)
     })?;
     assert!(started.elapsed() < Duration::from_secs(10));
