@@ -176,6 +176,8 @@ enum Ex {
     DistinctFrom(Box<Ex>, Box<Ex>, bool),
     InList(Box<Ex>, Vec<Ex>, bool),
     InSub(Box<Ex>, usize, bool),
+    /// `x op ANY (subquery)` (false) or `x op ALL (subquery)` (true).
+    Quantified(Box<Ex>, BinaryOperator, usize, bool),
     Exists(usize, bool),
     Scalar(usize),
     Like { expr: Box<Ex>, pattern: Box<Ex>, escape: Option<char>, negated: bool, ci: bool },
@@ -247,6 +249,15 @@ enum Func {
     Sign,
     Now,
     CurrentDate,
+    CurrentTime,
+    Locate,
+    Exp,
+    Ln,
+    Log10,
+    Pi,
+    Truncate,
+    DayName,
+    MonthName,
 }
 
 impl Func {
@@ -277,6 +288,16 @@ impl Func {
             "sign" => (Func::Sign, 1, 1),
             "now" | "current_timestamp" | "localtimestamp" => (Func::Now, 0, 0),
             "current_date" | "curdate" => (Func::CurrentDate, 0, 0),
+            "current_time" | "curtime" | "localtime" => (Func::CurrentTime, 0, 0),
+            "locate" => (Func::Locate, 2, 3),
+            "exp" => (Func::Exp, 1, 1),
+            // LOG is the natural logarithm, as in ODBC.
+            "ln" | "log" => (Func::Ln, 1, 1),
+            "log10" => (Func::Log10, 1, 1),
+            "pi" => (Func::Pi, 0, 0),
+            "truncate" | "trunc" => (Func::Truncate, 1, 2),
+            "dayname" => (Func::DayName, 1, 1),
+            "monthname" => (Func::MonthName, 1, 1),
             _ => return None,
         })
     }
@@ -551,59 +572,7 @@ impl<'p> Compiler<'p> {
         // Bindings on the null-filled side of an outer join (no pushdown there).
         let mut nullable: HashSet<usize> = HashSet::new();
         for table in &select.from {
-            let mut node = self.source(&table.relation, &mut next)?;
-            for join in &table.joins {
-                let right = self.source(&join.relation, &mut next)?;
-                let (kind, constraint) = match &join.join_operator {
-                    JoinOperator::Join(c) | JoinOperator::Inner(c) => (JoinKind::Inner, Some(c)),
-                    JoinOperator::Left(c) | JoinOperator::LeftOuter(c) => (JoinKind::Left, Some(c)),
-                    JoinOperator::Right(c) | JoinOperator::RightOuter(c) => (JoinKind::Right, Some(c)),
-                    JoinOperator::FullOuter(c) => (JoinKind::Full, Some(c)),
-                    JoinOperator::CrossJoin(c) => (JoinKind::Cross, Some(c)),
-                    other => return Err(unsupported(format!("{:?} joins", other).split('(').next().unwrap_or("that join").to_string())),
-                };
-                let left_bindings = node_bindings(&node);
-                let right_bindings = node_bindings(&right);
-                let on = match constraint {
-                    Some(JoinConstraint::On(expr)) => Some(self.expr(expr, None)?),
-                    Some(JoinConstraint::Using(names)) => {
-                        let mut on: Option<Ex> = None;
-                        for name in names {
-                            let column = ident_name(name)?;
-                            let (Some(&l), Some(&r)) = (left_bindings.last(), right_bindings.first()) else {
-                                return Err(invalid("USING needs a table on each side."));
-                            };
-                            let eq = Ex::Cmp(
-                                Box::new(Ex::Col(ColRef { depth: 0, binding: Some(l), path: vec![column.clone()] })),
-                                BinaryOperator::Eq,
-                                Box::new(Ex::Col(ColRef { depth: 0, binding: Some(r), path: vec![column] })),
-                            );
-                            on = Some(match on {
-                                None => eq,
-                                Some(prev) => Ex::And(Box::new(prev), Box::new(eq)),
-                            });
-                        }
-                        on
-                    }
-                    Some(JoinConstraint::Natural) => return Err(unsupported("NATURAL joins (name the columns with ON or USING)")),
-                    Some(JoinConstraint::None) | None => {
-                        if kind != JoinKind::Cross {
-                            return Err(invalid("this join needs ON or USING."));
-                        }
-                        None
-                    }
-                };
-                match kind {
-                    JoinKind::Left => nullable.extend(right_bindings.iter().copied()),
-                    JoinKind::Right => nullable.extend(left_bindings.iter().copied()),
-                    JoinKind::Full => {
-                        nullable.extend(left_bindings.iter().copied());
-                        nullable.extend(right_bindings.iter().copied());
-                    }
-                    _ => {}
-                }
-                node = FromNode::Join { kind, left: Box::new(node), right: Box::new(right), on, left_bindings, right_bindings };
-            }
+            let node = self.joined(table, &mut next, &mut nullable)?;
             from = Some(match from {
                 None => node,
                 Some(left) => {
@@ -765,6 +734,64 @@ impl<'p> Compiler<'p> {
         })
     }
 
+    /// A FROM item and its joins, as one tree.
+    fn joined(&mut self, table: &ast::TableWithJoins, next: &mut usize, nullable: &mut HashSet<usize>) -> Result<FromNode> {
+        let mut node = self.source(&table.relation, next, nullable)?;
+        for join in &table.joins {
+            let right = self.source(&join.relation, next, nullable)?;
+            let (kind, constraint) = match &join.join_operator {
+                JoinOperator::Join(c) | JoinOperator::Inner(c) => (JoinKind::Inner, Some(c)),
+                JoinOperator::Left(c) | JoinOperator::LeftOuter(c) => (JoinKind::Left, Some(c)),
+                JoinOperator::Right(c) | JoinOperator::RightOuter(c) => (JoinKind::Right, Some(c)),
+                JoinOperator::FullOuter(c) => (JoinKind::Full, Some(c)),
+                JoinOperator::CrossJoin(c) => (JoinKind::Cross, Some(c)),
+                other => return Err(unsupported(format!("{:?} joins", other).split('(').next().unwrap_or("that join").to_string())),
+            };
+            let left_bindings = node_bindings(&node);
+            let right_bindings = node_bindings(&right);
+            let on = match constraint {
+                Some(JoinConstraint::On(expr)) => Some(self.expr(expr, None)?),
+                Some(JoinConstraint::Using(names)) => {
+                    let mut on: Option<Ex> = None;
+                    for name in names {
+                        let column = ident_name(name)?;
+                        let (Some(&l), Some(&r)) = (left_bindings.last(), right_bindings.first()) else {
+                            return Err(invalid("USING needs a table on each side."));
+                        };
+                        let eq = Ex::Cmp(
+                            Box::new(Ex::Col(ColRef { depth: 0, binding: Some(l), path: vec![column.clone()] })),
+                            BinaryOperator::Eq,
+                            Box::new(Ex::Col(ColRef { depth: 0, binding: Some(r), path: vec![column] })),
+                        );
+                        on = Some(match on {
+                            None => eq,
+                            Some(prev) => Ex::And(Box::new(prev), Box::new(eq)),
+                        });
+                    }
+                    on
+                }
+                Some(JoinConstraint::Natural) => return Err(unsupported("NATURAL joins (name the columns with ON or USING)")),
+                Some(JoinConstraint::None) | None => {
+                    if kind != JoinKind::Cross {
+                        return Err(invalid("this join needs ON or USING."));
+                    }
+                    None
+                }
+            };
+            match kind {
+                JoinKind::Left => nullable.extend(right_bindings.iter().copied()),
+                JoinKind::Right => nullable.extend(left_bindings.iter().copied()),
+                JoinKind::Full => {
+                    nullable.extend(left_bindings.iter().copied());
+                    nullable.extend(right_bindings.iter().copied());
+                }
+                _ => {}
+            }
+            node = FromNode::Join { kind, left: Box::new(node), right: Box::new(right), on, left_bindings, right_bindings };
+        }
+        Ok(node)
+    }
+
     /// Give each scan in the tree the filter for what can be pushed to it.
     fn apply_pushdown(&mut self, node: &FromNode, pushed: &HashMap<usize, Vec<Ex>>) {
         match node {
@@ -788,7 +815,10 @@ impl<'p> Compiler<'p> {
     }
 
     /// A table reference: a tessellation, a CTE, or a derived table.
-    fn source(&mut self, factor: &TableFactor, next: &mut usize) -> Result<FromNode> {
+    fn source(&mut self, factor: &TableFactor, next: &mut usize, nullable: &mut HashSet<usize>) -> Result<FromNode> {
+        if let TableFactor::NestedJoin { table_with_joins, alias: None } = factor {
+            return self.joined(table_with_joins, next, nullable);
+        }
         let binding = *next;
         *next += 1;
         let source = match factor {
@@ -826,7 +856,7 @@ impl<'p> Compiler<'p> {
                 let columns = alias.as_ref().map(|a| a.columns.iter().map(|c| c.name.value.clone()).collect()).unwrap_or_default();
                 Source::Derived(Box::new(query?), columns)
             }
-            TableFactor::NestedJoin { .. } => return Err(unsupported("parenthesized joins")),
+            TableFactor::NestedJoin { .. } => return Err(unsupported("an alias on parenthesized joins")),
             other => return Err(unsupported(format!("'{}' in FROM", other))),
         };
         Ok(FromNode::Source { binding, source })
@@ -917,6 +947,16 @@ impl<'p> Compiler<'p> {
                 Ex::InSub(target, self.sub(subquery)?, *negated)
             }
             Expr::Exists { subquery, negated } => Ex::Exists(self.sub(subquery)?, *negated),
+            Expr::AnyOp { left, compare_op, right, .. } | Expr::AllOp { left, compare_op, right } => {
+                let Expr::Subquery(q) = right.as_ref() else {
+                    return Err(unsupported("ANY / ALL over something other than a subquery"));
+                };
+                if !super::comparison(compare_op) {
+                    return Err(invalid(format!("ANY / ALL needs a comparison, not {}.", compare_op)));
+                }
+                let target = e!(left);
+                Ex::Quantified(target, compare_op.clone(), self.sub(q)?, matches!(expr, Expr::AllOp { .. }))
+            }
             Expr::Subquery(q) => Ex::Scalar(self.sub(q)?),
             Expr::Between { expr: inner, negated, low, high } => {
                 let (target, low, high) = (self.expr(inner, aggs.as_deref_mut())?, self.expr(low, aggs.as_deref_mut())?, self.expr(high, aggs.as_deref_mut())?);
@@ -1065,6 +1105,27 @@ impl<'p> Compiler<'p> {
         if distinct {
             return Err(invalid(format!("DISTINCT only goes inside an aggregate, not {}.", name.to_uppercase())));
         }
+        let part = match name.as_str() {
+            "year" => Some(DatePart::Year),
+            "quarter" => Some(DatePart::Quarter),
+            "month" => Some(DatePart::Month),
+            "week" => Some(DatePart::Week),
+            "day" | "dayofmonth" => Some(DatePart::Day),
+            "dayofweek" => Some(DatePart::DayOfWeek),
+            "dayofyear" => Some(DatePart::DayOfYear),
+            "hour" => Some(DatePart::Hour),
+            "minute" => Some(DatePart::Minute),
+            "second" => Some(DatePart::Second),
+            _ => None,
+        };
+        if let Some(part) = part {
+            let [FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))] = list.as_slice() else {
+                return Err(invalid(format!("{} takes one argument.", name.to_uppercase())));
+            };
+            let extracted = Ex::Extract(part, Box::new(self.expr(arg, aggs.as_deref_mut())?));
+            // ODBC's DAYOFWEEK counts from 1 (Sunday); EXTRACT(DOW) from 0.
+            return Ok(if part == DatePart::DayOfWeek { Ex::Arith(Box::new(extracted), Arith::Add, Box::new(Ex::Lit(json!(1)))) } else { extracted });
+        }
         let Some((func, min, max)) = Func::by_name(&name) else {
             return Err(unsupported(format!("the function {}", name.to_uppercase())));
         };
@@ -1185,7 +1246,13 @@ fn collect_bindings(factor: &TableFactor, out: &mut Vec<String>) -> Result<()> {
         }),
         TableFactor::Derived { alias: Some(a), .. } => out.push(a.name.value.clone()),
         TableFactor::Derived { alias: None, .. } => return Err(invalid("a subquery in FROM needs an alias: (SELECT ...) AS name.")),
-        TableFactor::NestedJoin { .. } => return Err(unsupported("parenthesized joins")),
+        TableFactor::NestedJoin { table_with_joins, alias: None } => {
+            collect_bindings(&table_with_joins.relation, out)?;
+            for join in &table_with_joins.joins {
+                collect_bindings(&join.relation, out)?;
+            }
+        }
+        TableFactor::NestedJoin { alias: Some(_), .. } => return Err(unsupported("an alias on parenthesized joins")),
         other => return Err(unsupported(format!("'{}' in FROM", other))),
     }
     Ok(())
@@ -1291,7 +1358,7 @@ fn columns_of<'e>(ex: &'e Ex, out: &mut Vec<&'e ColRef>) -> bool {
                 && otherwise.as_ref().is_none_or(|o| columns_of(o, out))
         }
         Ex::Func(_, args) => args.iter().all(|e| columns_of(e, out)),
-        Ex::InSub(..) | Ex::Exists(..) | Ex::Scalar(_) | Ex::Agg(_) => false,
+        Ex::InSub(..) | Ex::Quantified(..) | Ex::Exists(..) | Ex::Scalar(_) | Ex::Agg(_) => false,
     }
 }
 
@@ -1428,7 +1495,7 @@ fn contains_agg(ex: &Ex) -> bool {
     match ex {
         Ex::Agg(_) => true,
         Ex::Lit(_) | Ex::Col(_) | Ex::Exists(..) | Ex::Scalar(_) => false,
-        Ex::InSub(a, _, _) | Ex::Neg(a) | Ex::Not(a) | Ex::IsNull(a, _) | Ex::IsBool(a, _, _) | Ex::Cast(a, _, _) | Ex::Extract(_, a) => {
+        Ex::InSub(a, _, _) | Ex::Quantified(a, _, _, _) | Ex::Neg(a) | Ex::Not(a) | Ex::IsNull(a, _) | Ex::IsBool(a, _, _) | Ex::Cast(a, _, _) | Ex::Extract(_, a) => {
             contains_agg(a)
         }
         Ex::Arith(a, _, b) | Ex::Cmp(a, _, b) | Ex::And(a, b) | Ex::Or(a, b) | Ex::Concat(a, b) | Ex::DistinctFrom(a, b, _) => {
@@ -1455,7 +1522,7 @@ fn check_grouped(ex: &Ex, keys: &[Ex]) -> std::result::Result<(), ()> {
         // Outer columns are constant within a group.
         Ex::Col(c) if c.depth > 0 => Ok(()),
         Ex::Col(_) => Err(()),
-        Ex::InSub(a, _, _) | Ex::Neg(a) | Ex::Not(a) | Ex::IsNull(a, _) | Ex::IsBool(a, _, _) | Ex::Cast(a, _, _) | Ex::Extract(_, a) => {
+        Ex::InSub(a, _, _) | Ex::Quantified(a, _, _, _) | Ex::Neg(a) | Ex::Not(a) | Ex::IsNull(a, _) | Ex::IsBool(a, _, _) | Ex::Cast(a, _, _) | Ex::Extract(_, a) => {
             check_grouped(a, keys)
         }
         Ex::Arith(a, _, b) | Ex::Cmp(a, _, b) | Ex::And(a, b) | Ex::Or(a, b) | Ex::Concat(a, b) | Ex::DistinctFrom(a, b, _) => {
@@ -2149,6 +2216,28 @@ impl<'g> Ctx<'g> {
                 in_values(&target, out.rows.iter().map(|r| &r[0]), *negated)
             }
             Ex::Exists(sub, negated) => Value::Bool(self.subquery(*sub, env)?.rows.is_empty() == *negated),
+            Ex::Quantified(a, op, sub, all) => {
+                let target = self.eval(a, env)?;
+                let out = self.subquery(*sub, env)?;
+                if out.names.len() != 1 {
+                    return Err(invalid("a subquery after ANY or ALL must return one column."));
+                }
+                self.tick(out.rows.len())?;
+                let mut unknown = false;
+                for row in out.rows.iter() {
+                    match compare_values(&target, op, &row[0]) {
+                        // ALL fails on one false; ANY succeeds on one true.
+                        Some(hit) if hit != *all => return Ok(Value::Bool(hit)),
+                        Some(_) => {}
+                        None => unknown = true,
+                    }
+                }
+                if unknown {
+                    Value::Null
+                } else {
+                    Value::Bool(*all)
+                }
+            }
             Ex::Scalar(sub) => {
                 let out = self.subquery(*sub, env)?;
                 if out.names.len() != 1 {
@@ -2521,6 +2610,8 @@ fn call(func: Func, args: &[Value], now: chrono::DateTime<chrono::Utc>) -> Resul
     Ok(match func {
         Func::Now => Value::String(now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()),
         Func::CurrentDate => Value::String(now.format("%Y-%m-%d").to_string()),
+        Func::CurrentTime => Value::String(now.format("%H:%M:%S").to_string()),
+        Func::Pi => float(std::f64::consts::PI),
         Func::Concat => Value::String(args.iter().map(text).collect()),
         Func::Coalesce => args.iter().find(|v| !v.is_null()).cloned().unwrap_or(Value::Null),
         Func::NullIf => {
@@ -2598,6 +2689,41 @@ fn call(func: Func, args: &[Value], now: chrono::DateTime<chrono::Utc>) -> Resul
             }
         }
         Func::Mod => arith(arg(0), Arith::Mod, arg(1))?,
+        Func::Locate => {
+            // LOCATE(needle, haystack [, start]): 1-based, 0 if absent.
+            let (needle, haystack) = (text(arg(0)), text(arg(1)));
+            let chars: Vec<char> = haystack.chars().collect();
+            let start = if args.len() > 2 { (int_arg(2, "LOCATE")?.max(1) - 1) as usize } else { 0 };
+            if start > chars.len() {
+                json!(0)
+            } else {
+                let rest: String = chars[start..].iter().collect();
+                json!(rest.find(&needle).map_or(0, |byte| start + rest[..byte].chars().count() + 1))
+            }
+        }
+        Func::Exp => float(number(arg(0), "EXP")?.unwrap_or(0.0).exp()),
+        Func::Ln | Func::Log10 => {
+            let f = number(arg(0), "LOG")?.unwrap_or(0.0);
+            if f <= 0.0 {
+                return Err(invalid("the logarithm of a number that isn't positive."));
+            }
+            float(if func == Func::Ln { f.ln() } else { f.log10() })
+        }
+        Func::Truncate => {
+            let f = number(arg(0), "TRUNCATE")?.unwrap_or(0.0);
+            let digits = if args.len() > 1 { int_arg(1, "TRUNCATE")? } else { 0 };
+            let scale = 10f64.powi(digits.clamp(-15, 15) as i32);
+            let r = (f * scale).trunc() / scale;
+            if digits <= 0 && r.abs() < 9.0e15 {
+                json!(r as i64)
+            } else {
+                float(r)
+            }
+        }
+        Func::DayName | Func::MonthName => match parse_datetime(arg(0))? {
+            None => Value::Null,
+            Some(dt) => Value::String(dt.format(if func == Func::DayName { "%A" } else { "%B" }).to_string()),
+        },
         Func::Power => float(number(arg(0), "POWER")?.unwrap_or(0.0).powf(number(arg(1), "POWER")?.unwrap_or(0.0))),
         Func::Sqrt => {
             let f = number(arg(0), "SQRT")?.unwrap_or(0.0);

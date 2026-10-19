@@ -58,35 +58,39 @@ pub fn get(info_type: u16, client: Option<&Client>) -> Option<Info> {
         15 => U16(1),                                      // SQL_ODBC_SQL_CONFORMANCE (ODBC 2): core
         9 => U16(1),                                       // SQL_ODBC_API_CONFORMANCE (ODBC 2): level 1
         169 => U32(0x7F),                                  // SQL_AGGREGATE_FUNCTIONS: AVG COUNT MAX MIN SUM DISTINCT ALL
-        88 => U16(2),                                      // SQL_GROUP_BY: SQL_GB_GROUP_BY_CONTAINS_SELECT
+        88 => U16(3),                                      // SQL_GROUP_BY: SQL_GB_NO_RELATION
         90 => return s("N"),                               // SQL_ORDER_BY_COLUMNS_IN_SELECT
-        27 => return s("N"),                               // SQL_EXPRESSIONS_IN_ORDERBY
+        27 => return s("Y"),                               // SQL_EXPRESSIONS_IN_ORDERBY
         87 => return s("Y"),                               // SQL_COLUMN_ALIAS
         74 => U16(2),                                      // SQL_CORRELATION_NAME: SQL_CN_ANY
         113 => return s("Y"),                              // SQL_LIKE_ESCAPE_CLAUSE
         73 => return s("N"),                               // SQL_INTEGRITY
-        38 => return s("N"),                               // SQL_OUTER_JOINS
-        115 => U32(0),                                     // SQL_OJ_CAPABILITIES
-        161 => U32(0),                                     // SQL_SQL92_RELATIONAL_JOIN_OPERATORS
-        // SQL_SQL92_PREDICATES: BETWEEN, IS NOT NULL, IS NULL, LIKE, IN, comparisons
-        160 => U32(0x0000_0001 | 0x0000_0004 | 0x0000_0020 | 0x0000_0040 | 0x0000_0080 | 0x0000_0200 | 0x0000_0400 | 0x0000_0800 | 0x0000_1000 | 0x0000_2000),
-        164 => U32(0),                                     // SQL_SQL92_STRING_FUNCTIONS
+        38 => return s("Y"),                               // SQL_OUTER_JOINS
+        115 => U32(0x7F),                                  // SQL_OJ_CAPABILITIES: LEFT RIGHT FULL NESTED NOT_ORDERED INNER ALL_COMPARISON_OPS
+        161 => U32(0x17E),                                 // SQL_SQL92_RELATIONAL_JOIN_OPERATORS: CROSS_JOIN EXCEPT_JOIN FULL_OUTER_JOIN INNER_JOIN INTERSECT_JOIN LEFT_OUTER_JOIN RIGHT_OUTER_JOIN
+        // SQL_SQL92_PREDICATES: EXISTS ISNOTNULL ISNULL LIKE IN BETWEEN COMPARISON QUANTIFIED_COMPARISON
+        160 => U32(0x3E07),
+        164 => U32(0xEE),                                  // SQL_SQL92_STRING_FUNCTIONS: LOWER UPPER SUBSTRING TRIM_BOTH TRIM_LEADING TRIM_TRAILING
         163 => U32(0),                                     // SQL_SQL92_ROW_VALUE_CONSTRUCTOR
-        165 => U32(0),                                     // SQL_SQL92_VALUE_EXPRESSIONS
-        156 | 157 | 158 | 159 | 162 | 166 | 167 | 168 | 171 | 172 | 173 | 174 => U32(0),
-        49..=52 => U32(0),                                 // numeric, string, system, timedate functions
-        48 => U32(0),                                      // SQL_CONVERT_FUNCTIONS
+        165 => U32(0xF),                                   // SQL_SQL92_VALUE_EXPRESSIONS: CASE CAST COALESCE NULLIF
+        159 => U32(0x2E),                                  // SQL_SQL92_NUMERIC_VALUE_FUNCTIONS: CHAR_LENGTH CHARACTER_LENGTH EXTRACT POSITION
+        156 | 157 | 158 | 162 | 166 | 167 | 168 | 171 | 172 | 173 | 174 => U32(0),
+        49 => U32(0xD95F21),                               // SQL_NUMERIC_FUNCTIONS: ABS CEILING EXP FLOOR LOG MOD SIGN SQRT PI LOG10 POWER ROUND TRUNCATE
+        50 => U32(0xB11F7D),                               // SQL_STRING_FUNCTIONS: CONCAT LEFT LTRIM LENGTH LOCATE LCASE REPLACE RIGHT RTRIM SUBSTRING UCASE LOCATE_2 CHAR_LENGTH CHARACTER_LENGTH POSITION
+        51 => U32(0x4),                                    // SQL_SYSTEM_FUNCTIONS: IFNULL
+        52 => U32(0x1F9FFF),                               // SQL_TIMEDATE_FUNCTIONS: NOW CURDATE DAYOFMONTH DAYOFWEEK DAYOFYEAR MONTH QUARTER WEEK YEAR CURTIME HOUR MINUTE SECOND DAYNAME MONTHNAME CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP EXTRACT
+        48 => U32(0x2),                                    // SQL_CONVERT_FUNCTIONS: CAST
         53..=70 | 71 | 122 | 123 | 124 | 125 | 126 => U32(0), // SQL_CONVERT_* : no conversions
-        76 => U32(0),                                      // SQL_BOOKMARK_PERSISTENCE
+        82 => U32(0),                                      // SQL_BOOKMARK_PERSISTENCE
         85 => U16(1),                                      // SQL_NULL_COLLATION: SQL_NC_LOW
-        22 => U16(1),                                      // SQL_CONCAT_NULL_BEHAVIOR: SQL_CB_NON_NULL
+        22 => U16(0),                                      // SQL_CONCAT_NULL_BEHAVIOR: SQL_CB_NULL (a || NULL is NULL)
         75 => U16(0),                                      // SQL_NON_NULLABLE_COLUMNS: SQL_NNC_NULL
         36 => return s("N"),                               // SQL_MULT_RESULT_SETS
         37 => return s("N"),                               // SQL_MULTIPLE_ACTIVE_TXN
         111 => return s("N"),                              // SQL_NEED_LONG_DATA_LEN
         10002 => return s("N"),                            // SQL_DESCRIBE_PARAMETER
         11 => return s("N"),                               // SQL_ROW_UPDATES
-        110 => return s("N"),                              // SQL_MAX_ROW_SIZE_INCLUDES_LONG
+        103 => return s("N"),                              // SQL_MAX_ROW_SIZE_INCLUDES_LONG
         // Cursors and statements
         44 => U32(1),                                      // SQL_SCROLL_OPTIONS: SQL_SO_FORWARD_ONLY
         43 => U32(1),                                      // SQL_SCROLL_CONCURRENCY: SQL_SCCO_READ_ONLY
@@ -99,7 +103,7 @@ pub fn get(info_type: u16, client: Option<&Client>) -> Option<Info> {
         78 => U32(0),                                      // SQL_LOCK_TYPES
         79 => U32(0),                                      // SQL_POS_OPERATIONS
         80 => U32(0),                                      // SQL_POSITIONED_STATEMENTS
-        82 => U32(0),                                      // SQL_STATIC_SENSITIVITY
+        83 => U32(0),                                      // SQL_STATIC_SENSITIVITY
         // Transactions: none (each statement reads a consistent page)
         46 => U16(0),                                      // SQL_TXN_CAPABLE: SQL_TC_NONE
         26 => U32(0),                                      // SQL_DEFAULT_TXN_ISOLATION
@@ -121,8 +125,10 @@ pub fn get(info_type: u16, client: Option<&Client>) -> Option<Info> {
         10025 => U32(0),                                   // SQL_ASYNC_NOTIFICATION
         170 => U32(0),                                     // SQL_DDL_INDEX
         119 => U32(0),                                     // SQL_DATETIME_LITERALS
-        155 => U32(0),                                     // SQL_SQL92_DATETIME_FUNCTIONS
-        109 => U32(0),                                     // SQL_SUBQUERIES
+        155 => U32(0x7),                                   // SQL_SQL92_DATETIME_FUNCTIONS: CURRENT_DATE CURRENT_TIME CURRENT_TIMESTAMP
+        95 => U32(0x1F),                                   // SQL_SUBQUERIES: COMPARISON EXISTS IN QUANTIFIED CORRELATED_SUBQUERIES
+        96 => U32(0x3),                                    // SQL_UNION: UNION, UNION ALL
+        109 | 110 => U32(0),                               // SQL_TIMEDATE_ADD/DIFF_INTERVALS: no TIMESTAMPADD/DIFF
         84 => U32(0),                                      // SQL_FILE_USAGE: not a file-based driver
         _ => return None,
     })

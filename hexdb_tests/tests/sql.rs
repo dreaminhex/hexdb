@@ -311,6 +311,18 @@ fn joins_subqueries_and_expressions() -> Result<()> {
         json!([[2]])
     );
 
+    // ANY / ALL, parenthesized joins, ODBC's date functions.
+    assert_eq!(q(&server, "SELECT sku FROM purchases WHERE total >= ALL (SELECT total FROM purchases)")?, json!([["A_1"]]));
+    assert_eq!(q(&server, "SELECT COUNT(*) FROM purchases WHERE total < ANY (SELECT total FROM purchases WHERE shipping = 0)")?, json!([[1]]));
+    assert_eq!(
+        q(&server, "SELECT COUNT(*) FROM (purchases p JOIN customers c ON p.customer = c.code) LEFT JOIN customers d ON d.code = c.code")?,
+        json!([[3]])
+    );
+    assert_eq!(
+        q(&server, "SELECT YEAR(placed), MONTH(placed), DAYOFWEEK(placed), DAYNAME(placed) FROM purchases WHERE sku = 'A_1'")?,
+        json!([[2026, 1, 5, "Thursday"]])
+    );
+
     // WITH, UNION, INTERSECT and EXCEPT.
     assert_eq!(
         q(&server, "WITH nl AS (SELECT code FROM customers WHERE country = 'NL') SELECT COUNT(*) FROM purchases WHERE customer IN (SELECT code FROM nl)")?,

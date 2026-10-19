@@ -1837,6 +1837,10 @@ mod tests {
             "WITH c AS (SELECT a FROM t) SELECT * FROM c",
             "SELECT a FROM t WHERE a IN (SELECT a FROM u)",
             "SELECT CASE WHEN a > 1 THEN 'big' ELSE 'small' END FROM t",
+            "SELECT CURRENT_DATE, CURRENT_TIMESTAMP, NOW() FROM t",
+            "SELECT * FROM (a JOIN b ON a.k = b.k) LEFT JOIN c ON c.k = a.k",
+            "SELECT a FROM t WHERE a > ALL (SELECT a FROM u) OR a = ANY (SELECT b FROM u)",
+            "SELECT YEAR(d), DAYOFWEEK(d), LOCATE('x', s), TRUNCATE(n, 1) FROM t",
         ] {
             assert_eq!(translate(sql)["executor"], "general", "{}", sql);
         }

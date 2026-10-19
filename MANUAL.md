@@ -536,7 +536,7 @@ GraphQL: `aggregate(tessellation: "orders", groupBy: ["status"], aggregates: { n
 
 ## 10. SQL
 
-`POST /sql` runs a read-only SQL `SELECT`. It's translated into the query or aggregation the REST API already runs, so indexes, permissions, row filters and field masks all apply the same way. BI tools and the [ODBC driver](#odbc) use it; the `hexdb sql` command prints its results as a table.
+`POST /sql` runs a read-only SQL `SELECT`: joins, subqueries, `UNION`, `WITH`, expressions and functions included. Each table is read through the same query path as the REST API, so indexes, permissions, row filters and field masks apply the same way. BI tools and the [ODBC driver](#odbc) use it; the `hexdb sql` command prints its results as a table.
 
 ```bash
 curl -X POST http://localhost:7700/sql -H "Authorization: Bearer $HEXDB_API_KEY" -H "Content-Type: application/json" -d '{
@@ -562,7 +562,7 @@ HEXDB_TOKEN=... hexdb sql "SELECT customer, total FROM orders WHERE total > ? OR
 - `columns`: each column's name and a type inferred from the page's values: `boolean`, `integer`, `number`, `string`, `json` (objects, arrays, or mixed types) or `null` (no values).
 - `rows`: arrays of values in column order.
 - `next`: a cursor, or null on the last page.
-- `translated`: the filter, sort and aggregation the statement became. Use it to check which index a query can use.
+- `translated`: how the statement runs. A single-table statement becomes one query or aggregation, shown as its filter, sort and aggregation. Anything else shows `"executor": "general"` and the filter sent with each table read (`reads`). Use it to check which index a statement can use.
 
 **Catalog.** SQL clients list tables and columns before they query:
 - `GET /sql/tables` returns the tessellations the caller can read.
@@ -572,7 +572,14 @@ HEXDB_TOKEN=... hexdb sql "SELECT customer, total FROM orders WHERE total > ? OR
   - then, unless the schema forbids other fields, the fields found in the first 100 documents (`source: "sample"`).
 - Hidden fields of the caller's role aren't listed.
 
-**What's supported.**
+**Two ways a statement runs.**
+- **One query.** A `SELECT` from one tessellation in the shape below becomes a single query or aggregation, run where the data is. It uses indexes for its filter and sort, and pages through results with a cursor, so it handles any table size.
+- **The general executor.** Everything else: joins, subqueries, `UNION` / `INTERSECT` / `EXCEPT`, `WITH`, and expressions over fields. Each table is read once through the query path, with the conditions in `WHERE` and `ON` that compare one table's field with a value sent along as that read's filter (so indexes apply). The rest runs in memory: hash joins on equality conditions, then filters, grouping, sorting and limits.
+  - One read may return at most `limits.sql_max_rows` documents (100,000). A larger read is refused with a message, never cut short: narrow it with `WHERE`.
+  - The same limit, times 100, bounds the work a statement may do (rows read, compared and produced), which stops runaway joins without an equality condition.
+  - Pages after the first run the statement again and skip the rows already returned.
+
+The single-query shape:
 
 | Clause | Supported |
 | --- | --- |
@@ -596,8 +603,9 @@ Notes:
   - `SUM` of no values is NULL;
   - a missing field reads as NULL.
 - **LIKE patterns.**
-  - `%` may appear only at the start or end, giving an exact, prefix, suffix or substring match. Matching is case-sensitive.
-  - `_` isn't supported. To match a literal `_`, escape it: `LIKE 'a!_%' ESCAPE '!'`.
+  - `%` matches any run of characters and `_` one character. `ESCAPE` makes the next character literal: `LIKE 'a!_%' ESCAPE '!'`.
+  - Matching is case-sensitive; `ILIKE` ignores case.
+  - Patterns with `%` only at the start or end become an index-friendly prefix, suffix or substring filter. Other patterns are checked in the general executor.
 - **Aggregates.**
   - They follow [Aggregations](#9-aggregations), including the 100,000-group limit.
   - `HAVING` is evaluated over every group before paging.
@@ -608,10 +616,51 @@ Notes:
   - Filtering, grouping or sorting by a hidden field is refused with 403, as in the REST API.
 - **Replicas.** `POST /sql` is a read, so a replica answers it itself instead of forwarding it to the Overseer.
 
-**Not supported.** These are refused with a message naming the part that isn't supported:
-- joins, subqueries, `UNION`, `WITH`;
-- expressions over fields (`total * 2`, `UPPER(name)`, `CASE`), comparing two fields, `ILIKE`;
-- window functions;
+### Joins, subqueries and expressions
+
+```sql
+-- Revenue per customer country, for paid orders, with customers who ordered nothing.
+SELECT c.country, COUNT(o.id) AS orders, COALESCE(SUM(o.total + o.shipping), 0) AS revenue
+FROM customers c
+LEFT JOIN orders o ON o.customer = c.code AND o.status = 'paid'
+GROUP BY c.country
+HAVING COUNT(o.id) > 0
+ORDER BY revenue DESC
+
+-- Customers whose largest order is above their country's average.
+WITH by_country AS (SELECT country, AVG(total) AS average FROM orders GROUP BY country)
+SELECT name FROM customers c
+WHERE (SELECT MAX(total) FROM orders o WHERE o.customer = c.code)
+    > (SELECT average FROM by_country b WHERE b.country = c.country)
+```
+
+**Joins.**
+- `[INNER] JOIN`, `LEFT [OUTER] JOIN`, `RIGHT [OUTER] JOIN`, `FULL [OUTER] JOIN` and `CROSS JOIN`, with `ON` or `USING (field, ...)`, and parenthesized joins. A comma join with its condition in `WHERE` (`FROM a, b WHERE a.x = b.y`) is an inner join.
+- Equality conditions between the two sides make a hash join. Other conditions are checked pair by pair, which the work limit bounds.
+- Every table in `FROM` needs a distinct name or alias. `alias.field` reads a table's field. An unqualified name reads the only table in `FROM`, or, with several, the one whose document has that field (two having it is an error: qualify it).
+- `SELECT *` lists each table's columns in turn; `alias.*` lists one table's.
+
+**Subqueries and set operations.**
+- `x IN (SELECT ...)`, `EXISTS (SELECT ...)`, `x > ANY (SELECT ...)` / `ALL (...)`, and a subquery as a value (it must return at most one row and one column).
+- Subqueries may refer to the outer query's tables by alias (correlated). Uncorrelated subqueries run once.
+- Subqueries in `FROM` need an alias: `FROM (SELECT ...) AS t`, optionally naming its columns, `AS t (a, b)`.
+- `WITH name [(columns)] AS (SELECT ...)` defines a table for the statement; each runs once. `WITH RECURSIVE` isn't supported.
+- `UNION`, `INTERSECT` and `EXCEPT` (`MINUS`), each with or without `ALL`. Both sides need the same number of columns. A trailing `ORDER BY` names result columns or positions.
+
+**Expressions,** anywhere a value can go (`SELECT`, `WHERE`, `ON`, `GROUP BY`, `HAVING`, `ORDER BY`):
+- arithmetic `+ - * / %` (integers stay exact; `7 / 2` is `3.5`; dividing by zero is an error), `||` to join text;
+- comparisons between fields, `IS [NOT] DISTINCT FROM`, `CASE`, `CAST(x AS type)` (integer, number, string, boolean, date, timestamp, json; `TRY_CAST` gives NULL instead of an error);
+- text: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`, `TRIM` / `LTRIM` / `RTRIM`, `CONCAT`, `REPLACE`, `LEFT`, `RIGHT`, `POSITION`, `LOCATE`;
+- numbers: `ABS`, `ROUND`, `TRUNCATE`, `FLOOR`, `CEIL`, `MOD`, `POWER`, `SQRT`, `SIGN`, `EXP`, `LOG` (natural), `LOG10`, `PI`;
+- NULLs: `COALESCE`, `IFNULL`, `NULLIF`;
+- dates (ISO 8601 strings): `EXTRACT(part FROM x)` and `YEAR`, `QUARTER`, `MONTH`, `WEEK`, `DAY`, `DAYOFWEEK` (1 = Sunday), `DAYOFYEAR`, `HOUR`, `MINUTE`, `SECOND`, `DAYNAME`, `MONTHNAME`; `CURRENT_DATE`, `CURRENT_TIME`, `NOW()`.
+- Aggregates take expressions (`SUM(price * quantity)`), and `DISTINCT` (`SUM(DISTINCT x)`). `GROUP BY` takes expressions too. In a grouped query, every selected expression must be grouped or inside an aggregate.
+- `ORDER BY` takes expressions and `NULLS FIRST` / `NULLS LAST`. NULLs sort first ascending and last descending by default.
+
+**Access.** Each table a statement reads, in joins, subqueries and `WITH` included, needs read permission, and each is read with the caller's row filters and hidden fields. A hidden field reads as NULL in expressions, and a filter on it sent with a read is refused with 403. System tessellations can't be read.
+
+**Not supported.** These are refused with a message naming the part:
+- window functions (`OVER`), `WITH RECURSIVE`, `NATURAL` joins, `LATERAL`;
 - statements other than `SELECT` (SQL is read-only; write through the REST API or transactions).
 
 ## 11. Transactions
@@ -1918,6 +1967,7 @@ The ciphertext is `nonce (12) | AES-256-GCM(chunk, maybe compressed)` with the c
 | --- | --- | --- |
 | Document size | 1 MB of JSON | `limits.max_document_kb` (live) |
 | Bulk, query, transaction and GraphQL bodies | 32 MB | `limits.max_request_mb` |
+| Documents one table read returns in SQL with joins, subqueries or expressions | 100,000 | `limits.sql_max_rows` |
 | Single-document writes (`POST /{tessellation}`, `PUT` and `PATCH` of `/{tessellation}/{id}`) | The larger of 32 MB and `limits.max_document_kb` | Follows those two settings, as they are at startup |
 | Other request bodies | 2 MB | fixed |
 | Documents per bulk request | 10,000 | fixed |

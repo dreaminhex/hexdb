@@ -82,6 +82,17 @@ check(row.n == 13 and abs(row.avg_price - 18.0) < 1e-9, f"aggregates ({row.n}, {
 cursor.execute("SELECT sku FROM products WHERE added >= {ts '2026-02-20 00:00:00'} ORDER BY sku")
 check(len(cursor.fetchall()) == 6, "ODBC escape sequences")
 
+# Joins and scalar functions as BI tools write them: {oj ...} and {fn ...}.
+api("POST", "/shelves/_bulk", [{"stock": i, "aisle": f"a{i % 3}"} for i in range(0, 25, 5)])
+cursor.execute("SELECT {fn UCASE(p.sku)} AS sku, s.aisle, {fn YEAR(p.added)} AS y FROM {oj products p LEFT OUTER JOIN shelves s ON p.stock = s.stock} WHERE p.stock < 6 ORDER BY p.stock")
+rows = [tuple(r) for r in cursor.fetchall()]
+check(rows[0] == ("P-0", "a0", 2026) and rows[1] == ("P-1", None, 2026) and len(rows) == 6, f"outer join with escapes {rows[:2]}")
+cursor.execute("SELECT COUNT(*) FROM (products p INNER JOIN shelves s ON p.stock = s.stock) WHERE s.aisle IN (SELECT aisle FROM shelves WHERE stock > 10)")
+check(cursor.fetchone()[0] == 4, "parenthesized join and a subquery")
+for name, bits in (("SQL_OJ_CAPABILITIES", 0x7F), ("SQL_SUBQUERIES", 0x1F), ("SQL_UNION", 0x3)):
+    if hasattr(pyodbc, name):
+        check(db.getinfo(getattr(pyodbc, name)) == bits, f"SQLGetInfo: {name}")
+
 tables = [t.table_name for t in cursor.tables()]
 check("products" in tables, f"SQLTables {tables}")
 columns = {c.column_name: c.type_name for c in cursor.columns(table="products")}
