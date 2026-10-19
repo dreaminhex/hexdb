@@ -13,6 +13,11 @@ updates:
     schedule: { interval: weekly }
     groups:
       admin-ui: { patterns: ["*"], update-types: [minor, patch] }
+    ignore:
+      # typescript-eslint (the admin UI's linter) doesn't support TypeScript 7
+      # yet, so `npm run lint` fails on it. Remove this once it does.
+      - dependency-name: typescript
+        versions: [">=7"]
   - package-ecosystem: npm
     directory: /drivers/node
     schedule: { interval: weekly }
