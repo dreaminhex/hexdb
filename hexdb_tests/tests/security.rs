@@ -373,16 +373,25 @@ fn nothing_is_stored_in_plaintext() -> Result<()> {
     server.insert("notes", &json!({ "secret": marker }))?;
     // In the WAL...
     for entry in walk(&server.data_dir()) {
-        assert!(!std::fs::read(&entry)?.windows(marker.len()).any(|w| w == marker.as_bytes()), "{}", entry.display());
+        assert!(!read_at_rest(&entry)?.windows(marker.len()).any(|w| w == marker.as_bytes()), "{}", entry.display());
     }
     // ...and in SSTables after a flush and a restart.
     server.flush()?;
     server.restart()?;
     for entry in walk(&server.data_dir()) {
-        assert!(!std::fs::read(&entry)?.windows(marker.len()).any(|w| w == marker.as_bytes()), "{}", entry.display());
+        assert!(!read_at_rest(&entry)?.windows(marker.len()).any(|w| w == marker.as_bytes()), "{}", entry.display());
     }
     assert_eq!(server.request(Method::POST, "/notes/_query", Some(&json!({})), &[])?.body["documents"][0]["secret"], marker);
     Ok(())
+}
+
+/// A file's bytes, or none if it was replaced or removed after the listing
+/// (the running server writes some files to a temporary name and renames it).
+fn read_at_rest(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        other => other,
+    }
 }
 
 fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

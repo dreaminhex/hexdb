@@ -12,7 +12,7 @@ anyhow = "1.0"
 serde_json = "1.0.140"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tempfile = "3"
-rcgen = "0.13"
+rcgen = "0.14"
 
 [dev-dependencies]
 tokio = { version = "1.37", features = ["full"] }
@@ -23,7 +23,7 @@ sha2 = "0.10"
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 # A WebSocket client for the live-feed tests.
-tungstenite = "0.29"
+tungstenite = "0.30"
 # A gRPC client for the gRPC tests, generated from hexdb_api/proto.
 tonic = { version = "0.14.6", default-features = false, features = ["codegen", "transport"] }
 tonic-prost = "0.14.6"
