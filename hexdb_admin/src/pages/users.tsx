@@ -147,7 +147,7 @@ function UserDialog({
         try {
           attrs = JSON.parse(attributes)
         } catch (e) {
-          throw new Error(`Attributes aren't valid JSON: ${e instanceof Error ? e.message : String(e)}`)
+          throw new Error(`Attributes aren't valid JSON: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
         }
       }
       // Empty: the lattice's default; a number (0: no limit).
