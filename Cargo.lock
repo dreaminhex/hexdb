@@ -1582,7 +1582,7 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "futures",
  "hexdb_core",
@@ -1614,7 +1614,7 @@ name = "hexdb_bench"
 version = "2.0.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "hexdb_core",
  "hexdb_tests",
  "reqwest",
@@ -1627,7 +1627,7 @@ name = "hexdb_cli"
 version = "2.0.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "clap",
  "hexdb_core",
@@ -1650,7 +1650,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake3",
  "byteorder",
  "chrono",
@@ -1712,7 +1712,7 @@ version = "2.0.1"
 dependencies = [
  "anyhow",
  "async-graphql",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "hexdb_core",
  "serde",
@@ -1728,7 +1728,7 @@ name = "hexdb_tests"
 version = "2.0.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "hex",
  "hexdb_core",
