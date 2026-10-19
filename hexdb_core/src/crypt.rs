@@ -7,7 +7,6 @@ use anyhow::{anyhow, Result};
 use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordVerifier, SaltString};
 use argon2::{Argon2, PasswordHasher};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use rand::RngCore;
 
 /// Length in bytes of the AES-256 storage encryption key.
 pub const ENCRYPTION_KEY_LEN: usize = 32;
@@ -35,7 +34,7 @@ pub fn verify_hash(input: &str, hash: &str) -> bool {
 /// `count` random bytes from the operating system's CSPRNG.
 pub fn random_bytes(count: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; count];
-    rand::rng().fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("the operating system's random source is available");
     bytes
 }
 
@@ -90,7 +89,7 @@ impl KeyRing {
     /// authenticated but not stored; decryption needs the same value.
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         let mut nonce = [0u8; NONCE_LEN];
-        rand::rng().fill_bytes(&mut nonce);
+        getrandom::fill(&mut nonce).expect("the operating system's random source is available");
         let ciphertext = self
             .current
             .1
