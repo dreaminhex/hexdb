@@ -1700,7 +1700,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 ### Discovery and election
 
-Every hex runs a TCP discovery listener (`network.discovery_endpoint`, default port 7702). Every `discovery_interval_seconds` (10), it probes:
+Every hex runs a TCP discovery listener (`network.discovery_endpoint`, default port 7702). A hex that can't open it (another program has the port) stops at startup with `Failed to bind the discovery endpoint`, as it does for the API port, since an unreachable hex can't replicate, vote or fail over. Every `discovery_interval_seconds` (10), it probes:
 - the seed addresses in `network.peers` (other hexes' discovery endpoints);
 - the local ports 7702-7709, unless `scan_local_ports = false`.
 

@@ -263,3 +263,15 @@ fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
     assert!(doc_on(&medium, "notes", res.body["id"].as_str().unwrap())?.is_some());
     Ok(())
 }
+
+/// A hex that can't open its discovery port can't take part in its lattice,
+/// so it stops at startup and says why, instead of running unreachable.
+#[test]
+fn a_taken_discovery_port_stops_startup() -> Result<()> {
+    let port = TestServer::free_port()?;
+    let _taken = std::net::TcpListener::bind(("127.0.0.1", port))?;
+    let started = TestServer::start_with(TestOptions { discovery_port: Some(port), ..Default::default() });
+    let error = format!("{:#}", started.err().expect("the server must not start"));
+    assert!(error.contains("Failed to bind the discovery endpoint"), "{}", error);
+    Ok(())
+}
