@@ -1611,6 +1611,8 @@ HexDB records security-relevant events as documents in the `_audit` system tesse
 
 Each event holds the actor, the action, the target, the outcome, the client address and details. Passwords, tokens and keys are never recorded. Events expire after `security.audit_retention_days` (90; 0 keeps them forever).
 
+`access.denied` is recorded for signed-in callers refused with 403, up to 30 per user per minute. The 30th says the rest of that minute's denials aren't recorded (they're still in the request log at warn), so a caller can't fill the disk with refused requests.
+
 ```bash
 curl "http://localhost:7700/audit?actor=ada&action=auth.&since=1760000000000&limit=100"
 ```

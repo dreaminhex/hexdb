@@ -276,13 +276,21 @@ async fn log_request(axum::extract::State(engine): axum::extract::State<Arc<HexD
         tracing::error!(target: "hexdb_api::requests", %method, %path, status, millis, %user, %client, "{} {} -> {}", method, path, status);
     } else if status == 401 || status == 403 {
         tracing::warn!(target: "hexdb_api::requests", %method, %path, status, millis, %user, %client, "{} {} -> {}", method, path, status);
-        // A signed-in user refused something is worth keeping; anonymous 401s are only noise.
+        // A signed-in user refused something is worth keeping; anonymous 401s
+        // are only noise. Capped per user, so denials can't fill the disk.
         if status == 403 {
-            let event = hexdb_core::AuditEvent::new(&user, "access.denied", &path)
-                .outcome("denied")
-                .client(&client)
-                .details(serde_json::json!({ "method": method.as_str() }));
-            engine.record_audit(event).await;
+            let details = match denial_budget(&user) {
+                Denial::Record => Some(serde_json::json!({ "method": method.as_str() })),
+                Denial::RecordLast => Some(serde_json::json!({
+                    "method": method.as_str(),
+                    "note": format!("More than {} denials this minute; the rest of this minute's aren't recorded.", DENIALS_PER_MINUTE),
+                })),
+                Denial::Skip => None,
+            };
+            if let Some(details) = details {
+                let event = hexdb_core::AuditEvent::new(&user, "access.denied", &path).outcome("denied").client(&client).details(details);
+                engine.record_audit(event).await;
+            }
         }
     } else if read && status < 400 {
         tracing::debug!(target: "hexdb_api::requests", %method, %path, status, millis, %user, %client, "{} {} -> {}", method, path, status);
@@ -290,4 +298,58 @@ async fn log_request(axum::extract::State(engine): axum::extract::State<Arc<HexD
         tracing::info!(target: "hexdb_api::requests", %method, %path, status, millis, %user, %client, "{} {} -> {}", method, path, status);
     }
     response
+}
+
+/// Denied requests recorded in the audit trail per user per minute.
+const DENIALS_PER_MINUTE: u32 = 30;
+
+#[derive(Debug, PartialEq)]
+enum Denial {
+    Record,
+    /// The last one recorded this minute (it says so).
+    RecordLast,
+    Skip,
+}
+
+fn denial_budget(user: &str) -> Denial {
+    static COUNTS: std::sync::Mutex<Option<std::collections::HashMap<String, (u64, u32)>>> = std::sync::Mutex::new(None);
+    let minute = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() / 60).unwrap_or(0);
+    let mut guard = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    let counts = guard.get_or_insert_with(Default::default);
+    if counts.len() > 10_000 {
+        counts.retain(|_, (m, _)| *m == minute);
+    }
+    let entry = counts.entry(user.to_string()).or_insert((minute, 0));
+    if entry.0 != minute {
+        *entry = (minute, 0);
+    }
+    entry.1 = entry.1.saturating_add(1);
+    match entry.1 {
+        n if n < DENIALS_PER_MINUTE => Denial::Record,
+        n if n == DENIALS_PER_MINUTE => Denial::RecordLast,
+        _ => Denial::Skip,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn denials_are_capped_per_user() {
+        let user = "denial-test-user";
+        let seen: Vec<Denial> = (0..DENIALS_PER_MINUTE + 5).map(|_| denial_budget(user)).collect();
+        // A minute boundary mid-test restarts the count; only check when it didn't.
+        if seen.iter().filter(|d| **d == Denial::RecordLast).count() == 1 {
+            assert_eq!(seen.iter().filter(|d| **d == Denial::Record).count() as u32, DENIALS_PER_MINUTE - 1);
+            assert_eq!(seen.iter().filter(|d| **d == Denial::Skip).count(), 5);
+        }
+        assert_eq!(denial_budget("someone-else"), Denial::Record);
+    }
+
+    #[test]
+    fn ui_paths_are_exact() {
+        assert!(is_ui_path("/ui") && is_ui_path("/ui/") && is_ui_path("/ui/assets/x.js"));
+        assert!(!is_ui_path("/uikit") && !is_ui_path("/uploads/1") && !is_ui_path("/"));
+    }
 }
