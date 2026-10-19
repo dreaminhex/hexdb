@@ -30,8 +30,13 @@ argon2 = "0.5.3"
 futures = "0.3.31"
 reed-solomon-simd = "3"
 toml = "1.1"
+<<<<<<< HEAD
 hmac = "0.13"
 sha1 = "0.10"
+=======
+hmac = "0.12"
+sha1 = "0.11"
+>>>>>>> pr-36
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlparser = "0.63.0"
 fastcdc = "5.0.0"
