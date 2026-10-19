@@ -78,9 +78,14 @@ admin_email = "admin@example.com"
     adminLogin: "admin",
     adminPassword: password,
     async stop() {
-      child.kill()
-      await new Promise((r) => setTimeout(r, 300))
-      rmSync(dir, { recursive: true, force: true })
+      // Wait for the server to exit (it may still be writing its data
+      // directory), then remove the directory, retrying briefly.
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = new Promise((r) => child.once("exit", r))
+        child.kill()
+        await Promise.race([exited, new Promise((r) => setTimeout(r, 10_000))])
+      }
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
     },
   }
 }

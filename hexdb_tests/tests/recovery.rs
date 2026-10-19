@@ -37,7 +37,7 @@ fn an_unclean_shutdown_is_reported_after_recovery() -> Result<()> {
 }
 
 fn healthy(server: &TestServer) -> bool {
-    reqwest::blocking::Client::new().get(server.url("/health")).timeout(Duration::from_secs(2)).send().is_ok_and(|r| r.status().is_success())
+    hexdb_tests::http().build().unwrap().get(server.url("/health")).timeout(Duration::from_secs(2)).send().is_ok_and(|r| r.status().is_success())
 }
 
 fn kill(pid: u32) -> Result<()> {

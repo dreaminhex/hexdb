@@ -53,7 +53,7 @@ fn links_reach_only_what_they_name_as_their_maker_sees_it() -> Result<()> {
     assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
     assert_eq!(headers.get("x-robots-tag").unwrap(), "noindex, nofollow");
     // Browsers following the link land on its page.
-    let no_redirects = reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+    let no_redirects = hexdb_tests::http().redirect(reqwest::redirect::Policy::none()).build()?;
     let page = no_redirects.get(server.url(&format!("/_s/{}", code))).header("Accept", "text/html").send()?;
     assert_eq!(page.status(), StatusCode::SEE_OTHER);
     assert_eq!(page.headers().get("location").unwrap(), &format!("/ui/s/{}", code));

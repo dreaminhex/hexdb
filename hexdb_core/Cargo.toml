@@ -32,7 +32,8 @@ reed-solomon-simd = "3"
 toml = "1.1"
 hmac = "0.13"
 sha1 = "0.11"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 sqlparser = "0.63.0"
 fastcdc = "5.0.0"
 infer = "0.22.0"

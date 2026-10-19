@@ -446,7 +446,7 @@ fn https_serves_the_api_and_carries_replication() -> Result<()> {
 
     // Plain HTTP to the TLS port doesn't get an answer.
     let plain = overseer.url("/health").replace("https://", "http://");
-    assert!(!reqwest::blocking::get(&plain).map(|r| r.status().is_success()).unwrap_or(false));
+    assert!(!hexdb_tests::http().build()?.get(&plain).send().map(|r| r.status().is_success()).unwrap_or(false));
 
     // A replica follows the Overseer over HTTPS (signed requests, verified certificate).
     let replica = TestServer::start_with(options(1, 1024))?;

@@ -27,7 +27,7 @@ futures = "0.3"
 hyper-util = { version = "0.1", features = ["server", "server-auto", "server-graceful", "service", "tokio"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tower = { version = "0.5", features = ["util"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router"] }
 tonic-prost = "0.14.6"
@@ -56,7 +56,7 @@ priority = "optional"
 # Not $auto: the binaries are built against glibc 2.28 (cargo zigbuild) and need
 # only libc, libm, libpthread and libdl, but dpkg-shlibdeps on a newer build
 # machine would ask for that machine's glibc.
-depends = "adduser, libc6 (>= 2.28)"
+depends = "adduser, libc6 (>= 2.28), ca-certificates"
 maintainer-scripts = "../packaging/debian"
 conf-files = ["/etc/hexdb/hexdb.toml"]
 assets = [

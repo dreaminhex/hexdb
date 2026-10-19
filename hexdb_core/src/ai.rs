@@ -369,7 +369,7 @@ fn month_key(when: chrono::DateTime<Utc>) -> (Ulid, String) {
 }
 
 fn client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder().timeout(REQUEST_TIMEOUT).connect_timeout(Duration::from_secs(15)).build()?)
+    Ok(crate::crypt::http_client().timeout(REQUEST_TIMEOUT).connect_timeout(Duration::from_secs(15)).build()?)
 }
 
 /// A provider's error without anything that could carry the key, shortened.

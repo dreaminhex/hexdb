@@ -91,7 +91,7 @@ fn streams_publish_consume_source_and_deliver() -> Result<()> {
     let base = server.url("");
     let token = server.token().to_string();
     let poller = std::thread::spawn(move || -> Result<Value> {
-        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(20)).build()?;
+        let client = hexdb_tests::http().timeout(Duration::from_secs(20)).build()?;
         Ok(client.get(format!("{}/streams/big-orders/messages?after={}&wait=10", base, after)).bearer_auth(token).send()?.json()?)
     });
     std::thread::sleep(Duration::from_millis(500));
@@ -132,7 +132,7 @@ fn streams_publish_consume_source_and_deliver() -> Result<()> {
     assert_eq!(listed.body["streams"].as_array().unwrap().len(), 1);
 
     // Server-Sent Events from a given offset.
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let client = hexdb_tests::http().timeout(Duration::from_secs(10)).build()?;
     let response = client.get(server.url(&format!("/streams/big-orders/subscribe?after={}", offsets[0]))).bearer_auth(server.token()).send()?;
     let mut data = None;
     for line in BufReader::new(response).lines() {

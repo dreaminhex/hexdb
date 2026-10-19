@@ -115,7 +115,7 @@ fn server_sent_events_stream_backlog_and_live_changes() -> Result<()> {
     server.insert("notes", &json!({ "n": 1 }))?;
     server.insert("other", &json!({ "n": 0 }))?;
 
-    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build()?;
+    let client = hexdb_tests::http().timeout(Duration::from_secs(30)).build()?;
     let response = client
         .get(server.url(&format!("/changes/stream?after={}&tessellation=notes", cursor)))
         .bearer_auth(server.token())

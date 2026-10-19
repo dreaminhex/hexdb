@@ -54,7 +54,7 @@ fn queues_deliver_to_one_consumer_with_permissions() -> Result<()> {
         let key = producer.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(800));
-            reqwest::blocking::Client::new().post(url).bearer_auth(key).json(&json!({ "messages": [{ "body": "late" }] })).send().map(|r| r.status())
+            hexdb_tests::http().build().unwrap().post(url).bearer_auth(key).json(&json!({ "messages": [{ "body": "late" }] })).send().map(|r| r.status())
         })
     };
     let waited = post(&server, Some(&consumer), "/queues/jobs/receive", json!({ "wait_seconds": 10 }))?.body;
