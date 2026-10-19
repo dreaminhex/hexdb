@@ -41,7 +41,7 @@
     "cm6-graphql": "^0.2.2",
     "codemirror": "^6.0.2",
     "graphql": "^16.14.2",
-    "lucide-react": "0.511.0",
+    "lucide-react": "1.58.0",
     "next-themes": "^0.4.6",
     "qrcode-generator": "2.0.4",
     "react": "^19.3.1",
@@ -65,7 +65,7 @@
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.71.2",
     "vite": "^6.3.5",
-    "vite-plugin-svgr": "^4.3.0"
+    "vite-plugin-svgr": "^5.2.0"
   },
   "overrides": {
     "rollup": "4.63.6"
