@@ -155,7 +155,7 @@ pub struct TestOptions {
 /// A self-signed certificate for localhost and 127.0.0.1: (PEM cert, PEM key).
 pub fn self_signed_certificate() -> Result<(String, String)> {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
-    Ok((cert.cert.pem(), cert.key_pair.serialize_pem()))
+    Ok((cert.cert.pem(), cert.signing_key.serialize_pem()))
 }
 
 impl TestServer {
