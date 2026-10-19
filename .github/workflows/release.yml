@@ -62,7 +62,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ui
           path: ui
@@ -114,7 +114,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bin-x86_64-pc-windows-msvc
           path: dl
@@ -140,7 +140,7 @@ jobs:
       MACOS_CERTS_PASSWORD: ${{ secrets.MACOS_CERTS_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: bin-*-apple-darwin
           path: dl
@@ -191,7 +191,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ui
           path: hexdb_admin/dist
@@ -222,21 +222,21 @@ jobs:
           notes="packaging/release-notes/${GITHUB_REF_NAME}.md"
           if [ -f "$notes" ]; then cp "$notes" release-notes.md; else : > release-notes.md; fi
       # Only the release files: the ui artifact is an input, not a download.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: bin-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: deb-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: msi
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dmg
           path: dist
@@ -286,7 +286,7 @@ jobs:
       APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: env.APT_GPG_PRIVATE_KEY != ''
         with:
           pattern: deb-*
