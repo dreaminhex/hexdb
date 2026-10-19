@@ -41,7 +41,7 @@
     "test": "npm run build && node --test test/client.test.mjs"
   },
   "devDependencies": {
-    "typescript": "~7.0.2",
-    "@types/node": "^22.15.18"
+    "@types/node": "^26.6.5",
+    "typescript": "~7.0.2"
   }
 }
