@@ -476,7 +476,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: env.NUGET_USER != '' || env.NUGET_API_KEY != ''
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         if: env.NUGET_USER != '' || env.NUGET_API_KEY != ''
         with:
           dotnet-version: "8.0.x"
