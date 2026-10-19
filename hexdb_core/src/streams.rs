@@ -506,7 +506,7 @@ async fn run_source(engine: Arc<HexDBEngine>, config: StreamConfig, index: usize
 async fn run_destination(engine: Arc<HexDBEngine>, config: StreamConfig, index: usize, key: String) {
     let destination = config.destinations[index].clone();
     let group = format!("__destination:{}", index);
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build() {
+    let client = match crate::crypt::http_client().timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build() {
         Ok(c) => c,
         Err(_) => return,
     };

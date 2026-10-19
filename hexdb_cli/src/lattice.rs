@@ -153,7 +153,7 @@ pub async fn spawn(config: &HexConfig, count: usize, role: &str, server: &Path) 
         let pid = child.id();
 
         let url = local_base_url_with(&api, config.tls.enabled());
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).danger_accept_invalid_certs(config.tls.enabled()).build()?;
+        let client = hexdb_core::crypt::http_client().timeout(Duration::from_secs(2)).danger_accept_invalid_certs(config.tls.enabled()).build()?;
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(status) = child.try_wait()? {

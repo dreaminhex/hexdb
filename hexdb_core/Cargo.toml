@@ -17,14 +17,14 @@ async-trait = "0.1"
 blake3 = "1.8.2"
 ulid = { version = "3.0.0", features = ["serde"] }
 rust_decimal = { version = "1.37.1", features = ["serde"] }
-base64 = "0.22.1"
+base64 = "0.23.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 aes-gcm = "0.10.3"
 rand = { version = "0.10.3", features = ["std"] }
 rand_core = "0.9.3"
 hex = "0.4.3"
-zstd = "0.13.3"
-getrandom = "0.3.3"
+zstd = "0.14.3"
+getrandom = "0.4.3"
 byteorder = "1.5"
 argon2 = "0.6.0"
 futures = "0.3.31"
@@ -32,7 +32,8 @@ reed-solomon-simd = "3"
 toml = "1.1"
 hmac = "0.13"
 sha1 = "0.11"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 sqlparser = "0.63.0"
 fastcdc = "5.0.0"
 infer = "0.22.0"
@@ -56,7 +57,7 @@ openh264 = { version = "0.9.8", optional = true }
 libc = "0.2"
 
 [target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))'.dependencies]
-seccompiler = "0.4"
+seccompiler = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

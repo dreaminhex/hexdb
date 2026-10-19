@@ -894,7 +894,7 @@ pub(crate) fn check_transport(base: &str, token: Option<&str>) -> Result<()> {
 
 /// An HTTP client that also trusts `tls.ca_file` (for private certificates).
 fn http_client(config: &HexConfig) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
+    let mut builder = hexdb_core::crypt::http_client().timeout(Duration::from_secs(5));
     if !config.tls.ca_file.is_empty() {
         let pem = fs::read(&config.tls.ca_file).with_context(|| format!("Failed to read tls.ca_file {}", config.tls.ca_file))?;
         for cert in reqwest::Certificate::from_pem_bundle(&pem)? {

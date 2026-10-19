@@ -118,6 +118,13 @@ fn free_port() -> Result<u16> {
 // ---------------------------------------------------------------------------
 
 /// A running `hexdb_api` process with its own temporary directory.
+/// A blocking HTTP client builder with the TLS crypto provider installed
+/// (reqwest panics without one). Every test client starts here.
+pub fn http() -> reqwest::blocking::ClientBuilder {
+    hexdb_core::crypt::install_tls_provider();
+    Client::builder()
+}
+
 pub struct TestServer {
     dir: Option<TempDir>,
     child: Option<Child>,
@@ -198,8 +205,8 @@ impl TestServer {
             child: None,
             base_url: String::new(),
             launches: 0,
-            client: Client::builder().timeout(Duration::from_secs(10)).build()?,
-            anon: Client::builder().timeout(Duration::from_secs(10)).build()?,
+            client: http().timeout(Duration::from_secs(10)).build()?,
+            anon: http().timeout(Duration::from_secs(10)).build()?,
             token: None,
             last_startup: Duration::ZERO,
             options,
@@ -426,7 +433,7 @@ admin_email = "admin@example.com"
 
     /// A client builder that trusts this server's test certificate, if any.
     fn client_builder(&self) -> Result<reqwest::blocking::ClientBuilder> {
-        let mut builder = Client::builder().timeout(Duration::from_secs(10));
+        let mut builder = http().timeout(Duration::from_secs(10));
         if let Some((cert, _)) = &self.options.tls {
             builder = builder.add_root_certificate(reqwest::Certificate::from_pem(cert.as_bytes())?);
         }

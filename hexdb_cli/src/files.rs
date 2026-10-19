@@ -15,7 +15,7 @@ const PART: u64 = 8 * 1024 * 1024;
 
 /// A client without an overall timeout (transfers take as long as they take).
 fn client(config: &HexConfig) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
+    let mut builder = hexdb_core::crypt::http_client().connect_timeout(Duration::from_secs(10));
     if !config.tls.ca_file.is_empty() {
         let pem = std::fs::read(&config.tls.ca_file).with_context(|| format!("Failed to read tls.ca_file {}", config.tls.ca_file))?;
         for cert in reqwest::Certificate::from_pem_bundle(&pem)? {

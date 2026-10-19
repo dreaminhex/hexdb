@@ -637,7 +637,7 @@ async fn run_once(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path) ->
         return result;
     }
 
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
+    let client = crate::crypt::http_client().timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build()?;
     let batch_size = manifest.webhook.as_ref().map(|w| w.batch_size).unwrap_or(500).clamp(1, 10_000);
     loop {
         let Some(batch) = feed.next_batch(engine, manifest, batch_size).await else { return Ok(()) };

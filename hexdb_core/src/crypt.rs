@@ -13,6 +13,24 @@ pub const ENCRYPTION_KEY_LEN: usize = 32;
 /// Length of an AES-GCM nonce.
 pub const NONCE_LEN: usize = 12;
 
+/// Make ring the process's TLS crypto provider (once). reqwest builds its
+/// TLS configuration from it and panics without one.
+pub fn install_tls_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Already installed (by the server at startup, say): keep that one.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// A reqwest client builder, with the TLS crypto provider installed. Every
+/// HTTP client in HexDB starts here. Certificates are checked against the
+/// operating system's trust store, plus any roots the caller adds.
+pub fn http_client() -> reqwest::ClientBuilder {
+    install_tls_provider();
+    reqwest::Client::builder()
+}
+
 /// Hash a password with Argon2id and a random salt (PHC string format).
 pub fn create_hash(input: &str) -> String {
     // A random 16-byte salt from the operating system, made by hash_password.

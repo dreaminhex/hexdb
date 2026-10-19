@@ -17,4 +17,4 @@ ureq = { version = "3.4.2", features = ["json", "platform-verifier"] }
 [dev-dependencies]
 hexdb_tests = { path = "../../hexdb_tests" }
 anyhow = "1.0"
-reqwest = { version = "0.12", default-features = false }
+reqwest = { version = "0.13", default-features = false }

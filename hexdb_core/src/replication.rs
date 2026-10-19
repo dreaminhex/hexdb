@@ -61,7 +61,7 @@ const CATALOG_EVERY: Duration = Duration::from_secs(15);
 /// An HTTP client for talking to other hexes: HTTPS-capable, trusting the
 /// system roots plus `tls.ca_file` if set.
 pub fn lattice_client(config: &HexConfig, timeout: Duration) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().use_rustls_tls().timeout(timeout).https_only(config.tls.enabled());
+    let mut builder = crate::crypt::http_client().timeout(timeout).https_only(config.tls.enabled());
     if !config.tls.ca_file.is_empty() {
         let pem = std::fs::read(&config.tls.ca_file).with_context(|| format!("Failed to read tls.ca_file {}", config.tls.ca_file))?;
         for cert in reqwest::Certificate::from_pem_bundle(&pem).context("tls.ca_file is not valid PEM")? {
@@ -295,7 +295,7 @@ impl Follower {
     fn new(engine: Arc<HexDBEngine>) -> Self {
         let client = lattice_client(&engine.config, Duration::from_secs(POLL_SECONDS + 30)).unwrap_or_else(|e| {
             warn!("⚠️ Replication client: {:#}. Using system certificates only.", e);
-            reqwest::Client::new()
+            crate::crypt::http_client().build().unwrap_or_default()
         });
         Follower { engine, client, session: None, was_leading: None, key_index: std::sync::atomic::AtomicUsize::new(0) }
     }

@@ -149,7 +149,7 @@ fn lattice_answers_are_signed_for_their_request() -> Result<()> {
     server.insert("notes", &json!({ "n": 1 }))?;
     let config = hexdb_core::load_config_from(Some(&server.dir().join("hexdb.toml")))?;
     let keys = hexdb_core::network::lattice_auth::LatticeKeys::with_previous(&config.lattice_keys()?);
-    let client = reqwest::blocking::Client::new();
+    let client = hexdb_tests::http().build()?;
     for path in ["/lattice/snapshot", "/lattice/changes?after=0&limit=10"] {
         let signature = keys.sign_request("GET", path, b"");
         let res = client.get(server.url(path)).header(hexdb_core::LATTICE_SIGNATURE_HEADER, &signature).send()?;
