@@ -30,7 +30,7 @@ use crate::{
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
@@ -440,6 +440,12 @@ mod tests {
         assert_eq!(a, mar62(b"key one", 1_700_000_000_000_000_000, "a1b2c3", &["media", "01JABC"]), "deterministic");
         // 47 bits always fit in 8 Base62 characters (62^8 > 2^47).
         assert!(base62_encode(0x7FFF_FFFF_FFFF).len() <= CODE_LEN);
+    }
+
+    #[test]
+    fn mar62_known_answer() {
+        // Computed independently (Python hmac); existing links must keep their codes.
+        assert_eq!(mar62(b"key one", 1_700_000_000_000_000_000, "a1b2c3", &["media", "01JABC"]), "BV7pHLqr");
     }
 
     #[test]
