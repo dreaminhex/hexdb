@@ -29,8 +29,13 @@
 // and `x <> 1`, `NOT x = 1` and `x NOT IN (...)` don't match documents where x
 // is missing or null. Identifiers are case-sensitive, like HexDB field names.
 //
-// Not supported: joins, subqueries, UNION, expressions over fields (`total *
-// 2`, `UPPER(name)`), comparing two fields, and statements other than SELECT.
+// Statements this translation can't express (joins, subqueries, UNION /
+// INTERSECT / EXCEPT, WITH, expressions over fields such as `total * 2` or
+// `UPPER(name)`, comparing two fields, CASE, CAST and functions) run in the
+// general executor (`exec.rs`). Statements other than SELECT aren't supported.
+
+mod exec;
+pub use exec::DEFAULT_SQL_MAX_ROWS;
 
 use crate::{
     aggregate::{AggregateOp, AggregateSpec, Aggregation, MAX_GROUPS},
@@ -88,6 +93,8 @@ enum Body {
         sort: Vec<SortKey>,
         columns: Vec<DocColumn>,
     },
+    /// Run by the general executor.
+    General(std::sync::Arc<exec::General>),
     Aggregate {
         filter: Value,
         group_by: Vec<String>,
@@ -262,14 +269,25 @@ impl SqlQuery {
             return Err(invalid("only SELECT statements are supported; HexDB's SQL is read-only."));
         };
         let mut translator = Translator { params: Params::new(text, params)?, table: None, alias: None };
-        let result = translator.query(query)?;
-        translator.params.check_all_used()?;
-        Ok(result)
+        let translated = translator.query(query).and_then(|q| translator.params.check_all_used().map(|_| q));
+        match translated {
+            Ok(q) => Ok(q),
+            // What the translation can't express, the general executor runs.
+            // It accepts everything the translation does, so its errors are the ones to report.
+            Err(_) => {
+                let general = exec::General::compile(query, Params::new(text, params)?)?;
+                Ok(SqlQuery { tessellation: None, body: Body::General(std::sync::Arc::new(general)), offset: 0, limit: None })
+            }
+        }
     }
 
-    /// The tessellation the statement reads (`None` for SELECT without FROM).
-    pub fn tessellation(&self) -> Option<&str> {
-        self.tessellation.as_deref()
+    /// Every tessellation the statement reads (none for SELECT without FROM).
+    /// The caller's read permission must be checked on each.
+    pub fn tessellations(&self) -> Vec<&str> {
+        match &self.body {
+            Body::General(g) => g.tables().iter().map(String::as_str).collect(),
+            _ => self.tessellation.as_deref().into_iter().collect(),
+        }
     }
 
     /// What the statement was translated into, for the response and for debugging.
@@ -279,6 +297,7 @@ impl SqlQuery {
             out.insert("tessellation".into(), json!(t));
         }
         match &self.body {
+            Body::General(g) => return g.describe(),
             Body::Constant(_) => {
                 out.insert("constant".into(), json!(true));
             }
@@ -1387,7 +1406,19 @@ impl HexDBEngine {
         let start = query.offset.saturating_add(cursor.returned);
         let tess = query.tessellation.as_deref().unwrap_or_default();
 
+        if let Body::General(general) = &query.body {
+            // The whole result is computed, then paged by position.
+            let out = self.run_general(general).await?;
+            let columns = exec::output_columns(&out);
+            let total = out.rows.len();
+            let rows: Vec<Vec<Value>> = out.rows.into_iter().skip(cursor.returned).take(size).collect();
+            let returned = cursor.returned + rows.len();
+            let next = if returned < total { Some(format!("o{}", returned)) } else { None };
+            return Ok(SqlResult { columns, rows, next });
+        }
+
         let (names, rows, more, after): (Vec<String>, Vec<Vec<Value>>, bool, Option<ulid::Ulid>) = match &query.body {
+            Body::General(_) => unreachable!("handled above"),
             Body::Constant(values) => {
                 let names = values.iter().map(|(n, _)| n.clone()).collect();
                 let row: Vec<Value> = values.iter().map(|(_, v)| v.clone()).collect();
@@ -1502,6 +1533,7 @@ impl HexDBEngine {
 /// The field each output column reads (`None` for values and aggregates).
 fn column_fields(body: &Body, names: &[String]) -> Vec<Option<String>> {
     match body {
+        Body::General(_) => vec![None; names.len()],
         Body::Constant(values) => vec![None; values.len()],
         Body::Aggregate { columns, .. } => columns
             .iter()
@@ -1780,16 +1812,55 @@ mod tests {
     #[test]
     fn unsupported_sql_is_refused_with_a_reason() {
         assert!(error("DELETE FROM t").contains("read-only"));
-        assert!(error("SELECT * FROM a JOIN b ON a.x = b.x").contains("JOIN"));
-        assert!(error("SELECT * FROM t WHERE a = b").contains("comparing two fields"));
-        assert!(error("SELECT * FROM t WHERE UPPER(a) = 'X'").contains("UPPER"));
-        assert!(error("SELECT * FROM t WHERE a LIKE 'a_b'").contains("_ in the LIKE"));
-        assert!(error("SELECT * FROM t WHERE a LIKE 'a%b'").contains("% only at the start or end"));
         assert!(error("SELECT name, COUNT(*) FROM t").contains("GROUP BY"));
-        assert!(error("SELECT total * 2 FROM t").contains("isn't supported in SELECT"));
-        assert!(error("SELECT * FROM (SELECT * FROM t) x").contains("subquery"));
-        assert!(error("SELECT * FROM t UNION SELECT * FROM u").contains("UNION"));
         assert!(error("SELECT 1; SELECT 2").contains("one statement"));
+        assert!(error("WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r").contains("WITH RECURSIVE"));
+        assert!(error("SELECT a, ROW_NUMBER() OVER (ORDER BY a) FROM t").contains("window functions"));
+        assert!(error("SELECT * FROM a NATURAL JOIN b").contains("NATURAL"));
+        assert!(error("SELECT * FROM a JOIN b").contains("ON or USING"));
+        assert!(error("SELECT * FROM (SELECT * FROM t)").contains("needs an alias"));
+        let e = error("SELECT * FROM t WHERE SUM(a) > 1");
+        assert!(e.contains("HAVING"), "{}", e);
+        assert!(error("SELECT * FROM t, t").contains("appears twice"));
+    }
+
+    #[test]
+    fn richer_statements_use_the_general_executor() {
+        for sql in [
+            "SELECT * FROM a JOIN b ON a.x = b.x",
+            "SELECT * FROM t WHERE a = b",
+            "SELECT * FROM t WHERE UPPER(a) = 'X'",
+            "SELECT * FROM t WHERE a LIKE 'a_b'",
+            "SELECT total * 2 FROM t",
+            "SELECT * FROM (SELECT * FROM t) x",
+            "SELECT a FROM t UNION SELECT a FROM u",
+            "WITH c AS (SELECT a FROM t) SELECT * FROM c",
+            "SELECT a FROM t WHERE a IN (SELECT a FROM u)",
+            "SELECT CASE WHEN a > 1 THEN 'big' ELSE 'small' END FROM t",
+        ] {
+            assert_eq!(translate(sql)["executor"], "general", "{}", sql);
+        }
+        // Plain statements still become one query.
+        assert!(translate("SELECT * FROM t WHERE a = 1").get("executor").is_none());
+    }
+
+    #[test]
+    fn general_reads_get_pushed_filters() {
+        let plan = translate("SELECT o.id, c.name FROM orders o JOIN customers c ON o.customer = c.id WHERE o.status = 'paid' AND c.country IN ('NL', 'BE')");
+        assert_eq!(plan["reads"][0], json!({ "tessellation": "orders", "filter": { "status": { "$eq": "paid" } } }));
+        assert_eq!(plan["reads"][1], json!({ "tessellation": "customers", "filter": { "country": { "$in": ["NL", "BE"] } } }));
+        // Not into the null-filled side of an outer join.
+        let plan = translate("SELECT * FROM a LEFT JOIN b ON a.k = b.k WHERE b.v = 1");
+        assert_eq!(plan["reads"][1]["filter"], json!({}));
+        // A LEFT join's ON narrows its right side's read.
+        let plan = translate("SELECT * FROM a LEFT JOIN b ON a.k = b.k AND b.v = 1");
+        assert_eq!(plan["reads"][1]["filter"], json!({ "v": { "$eq": 1 } }));
+        // Parameters fill values anywhere.
+        let q = SqlQuery::parse("SELECT a * ? FROM t WHERE b = ?", &[json!(2), json!("x")]).unwrap();
+        assert_eq!(q.describe()["reads"][0]["filter"], json!({ "b": { "$eq": "x" } }));
+        assert_eq!(q.tessellations(), vec!["t"]);
+        let q = SqlQuery::parse("SELECT * FROM a WHERE EXISTS (SELECT 1 FROM b WHERE b.k = a.k)", &[]).unwrap();
+        assert_eq!(q.tessellations(), vec!["a", "b"]);
     }
 
     #[test]

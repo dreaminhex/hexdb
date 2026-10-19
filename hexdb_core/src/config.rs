@@ -374,6 +374,15 @@ pub struct LimitsConfig {
     /// Largest request body for bulk writes, queries, transactions and GraphQL, in MB.
     #[serde(default = "default_max_request_mb")]
     pub max_request_mb: u64,
+    /// Most documents one table read may return in SQL that joins, nests
+    /// queries or computes expressions (see `sql::exec`). It also scales
+    /// how much work such a statement may do.
+    #[serde(default = "default_sql_max_rows")]
+    pub sql_max_rows: usize,
+}
+
+fn default_sql_max_rows() -> usize {
+    crate::sql::DEFAULT_SQL_MAX_ROWS
 }
 
 fn default_max_document_kb() -> u64 {
@@ -409,6 +418,7 @@ impl Default for LimitsConfig {
             header_timeout_seconds: default_header_timeout(),
             max_document_kb: default_max_document_kb(),
             max_request_mb: default_max_request_mb(),
+            sql_max_rows: default_sql_max_rows(),
         }
     }
 }

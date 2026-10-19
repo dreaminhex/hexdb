@@ -270,7 +270,7 @@ async fn run_tool(engine: &HexDBEngine, principal: &Principal, name: &str, input
         "sql" => {
             let text = text_arg(input, "query")?;
             let query = hexdb_core::sql::SqlQuery::parse(text, &[]).map_err(err)?;
-            if let Some(tess) = query.tessellation() {
+            for tess in query.tessellations() {
                 readable(principal, engine, tess)?;
             }
             let result = engine.sql(&query, &hexdb_core::sql::SqlPage { size: MAX_DOCS, cursor: None }).await.map_err(err)?;
