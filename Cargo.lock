@@ -1659,7 +1659,7 @@ dependencies = [
  "fastcdc",
  "flate2",
  "futures",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "hex",
  "hmac",
  "image",
