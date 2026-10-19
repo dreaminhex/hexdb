@@ -51,7 +51,7 @@ pub fn signed_target(path_and_query: &str, client: &str) -> String {
 fn handled_locally(method: &Method, path: &str) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
         || path.starts_with("/lattice/")
-        || path.starts_with("/ui")
+        || crate::routes::is_ui_path(path)
         || matches!(path, "/auth/login" | "/auth/logout" | "/shutdown" | "/flush" | "/compact" | "/scrub" | "/backup" | "/settings" | "/analyzers/_analyze")
         || path.ends_with("/_query")
         || path.ends_with("/_aggregate")

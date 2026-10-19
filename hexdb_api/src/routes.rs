@@ -16,6 +16,12 @@ use crate::handlers::*;
 pub const UI_PREFIX: &str = "/ui";
 const UI_ROOT: &str = "/ui/";
 
+/// True for the admin UI's paths (`/ui` and below), and not for tessellations
+/// whose names merely start with "ui".
+pub fn is_ui_path(path: &str) -> bool {
+    path == UI_PREFIX || path.starts_with(UI_ROOT)
+}
+
 /// Request body limit for bulk endpoints (`limits.max_request_mb`). Single-document writes allow at least `limits.max_document_kb`; other endpoints use axum's 2 MB default.
 pub fn bulk_body_limit(engine: &HexDBEngine) -> usize {
     (engine.config.limits.max_request_mb.max(1) as usize).saturating_mul(1024 * 1024)
@@ -259,7 +265,7 @@ async fn log_request(axum::extract::State(engine): axum::extract::State<Arc<HexD
     let user = response.extensions().get::<AuditUser>().map(|u| u.0.clone()).unwrap_or_else(|| "-".into());
     let status = response.status().as_u16();
     let millis = started.elapsed().as_millis() as u64;
-    if path.starts_with(UI_PREFIX) {
+    if is_ui_path(&path) {
         return response;
     }
     // Query and aggregate requests are POSTs but only read.
