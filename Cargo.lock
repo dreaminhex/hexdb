@@ -1595,7 +1595,7 @@ dependencies = [
  "nom-exif",
  "openh264",
  "quick-xml",
- "rand 0.9.5",
+ "rand 0.10.3",
  "rand_core 0.9.5",
  "reed-solomon-simd",
  "reqwest",
