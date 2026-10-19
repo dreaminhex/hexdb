@@ -92,8 +92,25 @@ fn build_bin(package: &str, name: &str) -> Result<PathBuf> {
     Ok(bin)
 }
 
+/// Ports for test servers come from 20000-31999: below the ranges operating
+/// systems hand out for outgoing connections (Linux from 32768, Windows and
+/// macOS from 49152), so a client connection can't take a port between the
+/// test picking it and the server binding it. Each test process starts at its
+/// own place in the range and moves on from there.
+const TEST_PORTS: std::ops::Range<u16> = 20000..32000;
+static NEXT_PORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
 fn free_port() -> Result<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+    use std::sync::atomic::Ordering;
+    let span = (TEST_PORTS.end - TEST_PORTS.start) as u32;
+    let _ = NEXT_PORT.compare_exchange(u32::MAX, std::process::id().wrapping_mul(2654435761) % span, Ordering::SeqCst, Ordering::SeqCst);
+    for _ in 0..span {
+        let port = TEST_PORTS.start + (NEXT_PORT.fetch_add(1, Ordering::SeqCst) % span) as u16;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Ok(port);
+        }
+    }
+    bail!("No free port in {}-{}", TEST_PORTS.start, TEST_PORTS.end - 1)
 }
 
 // ---------------------------------------------------------------------------

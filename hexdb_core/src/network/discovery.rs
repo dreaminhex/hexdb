@@ -177,15 +177,18 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
 const MAX_HANDSHAKES: usize = 64;
 
 /// Answer discovery handshakes with this hex's current identity.
-pub async fn start_discovery_listener(engine: Arc<HexDBEngine>) {
+/// Bind the discovery endpoint. The server does this at startup and stops if
+/// it can't: a hex that can't be reached can't take part in its lattice
+/// (no replication, elections or failover), so running on would only hide it.
+pub async fn bind_discovery(addr: &str) -> anyhow::Result<Arc<TcpListener>> {
+    TcpListener::bind(addr)
+        .await
+        .map(Arc::new)
+        .map_err(|e| anyhow::anyhow!("Failed to bind the discovery endpoint {} (network.discovery_endpoint): {}", addr, e))
+}
+
+pub async fn start_discovery_listener(engine: Arc<HexDBEngine>, listener: Arc<TcpListener>) {
     let addr = engine.config.network.discovery_endpoint.clone();
-    let listener = match TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
-        Err(e) => {
-            warn!(%addr, "❗ Failed to bind the discovery endpoint ({}); other hexes won't find this one.", e);
-            return;
-        }
-    };
     info!(%addr, "📡 Discovery listener active.");
 
     // Handshakes are short; strangers holding connections open can't use more than this many.
