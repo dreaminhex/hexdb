@@ -48,7 +48,7 @@ protox = "0.10.0"
 [package.metadata.deb]
 name = "hexdb"
 maintainer = "Dream In Hex <matthew@dreaminhex.com>"
-copyright = "2026, Dream In Hex. Apache License 2.0."
+copyright = "2026, Martinforged, LLC (Dream In Hex). Apache License 2.0."
 license-file = ["../LICENSE", "0"]
 extended-description = "HexDB, a document database: the server, the hexdb CLI, the admin UI and the ODBC driver."
 section = "database"
