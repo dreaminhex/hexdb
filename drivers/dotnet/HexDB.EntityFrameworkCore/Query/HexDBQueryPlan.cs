@@ -312,11 +312,13 @@ public sealed class HexDBQueryExpression : Expression, IPrintableExpression
     {
         var type = ConcreteType(queried, json);
         var properties = type.GetProperties();
-        var values = new object?[length ??= queried.GetDerivedTypesInclusive().SelectMany(t => t.GetProperties()).Max(p => p.GetIndex()) + 1];
+        // The last slot holds the document, for its owned entities.
+        var values = new object?[length ??= queried.GetDerivedTypesInclusive().SelectMany(t => t.GetProperties()).Max(p => p.GetIndex()) + 2];
         foreach (var property in properties)
         {
             values[property.GetIndex()] = JsonValues.FromJson(json[property.GetJsonPropertyName()], property);
         }
+        values[^1] = json;
         return new ValueBuffer(values);
     }
 

@@ -114,13 +114,34 @@ public class HexDBValueGeneratorSelector : ValueGeneratorSelector
 
     public override bool TryCreate(IProperty property, ITypeBase typeBase, [NotNullWhen(true)] out ValueGenerator? valueGenerator)
     {
-        if (property.ClrType == typeof(string) && property.IsPrimaryKey())
+        var owned = typeBase is IEntityType { } entityType && entityType.IsOwned();
+        if (property.ClrType == typeof(string) && property.IsPrimaryKey() && !owned)
         {
             valueGenerator = Ulids;
             return true;
         }
+        // The position key of an owned collection's items: HexDB doesn't store it, so any unique value works.
+        if (owned && property.IsPrimaryKey() && !property.IsForeignKey() && (Nullable.GetUnderlyingType(property.ClrType) ?? property.ClrType) == typeof(int))
+        {
+            valueGenerator = new OwnedOrdinalGenerator();
+            return true;
+        }
         return base.TryCreate(property, typeBase, out valueGenerator);
     }
+}
+
+/// <summary>
+/// Keys for new items of owned collections. Items read from a document are
+/// numbered by position (1, 2, ...); new ones count from far above that, so
+/// they never collide.
+/// </summary>
+public sealed class OwnedOrdinalGenerator : ValueGenerator<int>
+{
+    private static int _next = int.MaxValue / 2;
+
+    public override bool GeneratesTemporaryValues => false;
+
+    public override int Next(EntityEntry entry) => Interlocked.Increment(ref _next);
 }
 
 /// <summary>A type HexDB stores as JSON.</summary>

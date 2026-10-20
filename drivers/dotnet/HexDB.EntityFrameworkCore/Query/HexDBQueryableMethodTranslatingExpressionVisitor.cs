@@ -156,9 +156,50 @@ public class HexDBQueryableMethodTranslatingExpressionVisitor : QueryableMethodT
     protected override ShapedQueryExpression TranslateSelect(ShapedQueryExpression source, LambdaExpression selector)
     {
         if (selector.Body == selector.Parameters[0]) return source;
-        // The projection runs on the client over each materialized result.
-        var shaper = ReplacingExpressionVisitor.Replace(selector.Parameters[0], source.ShaperExpression, selector.Body);
+        // The projection runs on the client over each materialized result. EF Core
+        // writes navigations as EF.Property(x, "Name"), which only works inside a
+        // query: on the client they're plain member reads (owned entities are loaded).
+        // EF Core also drops null checks (x.A == null ? null : x.A.B), as a database
+        // propagates nulls itself; the reads here do the same.
+        var body = new PropertyAccessRewriter().Visit(selector.Body);
+        var shaper = ReplacingExpressionVisitor.Replace(selector.Parameters[0], source.ShaperExpression, body);
         return source.UpdateShaperExpression(shaper);
+    }
+
+    private sealed class PropertyAccessRewriter : ExpressionVisitor
+    {
+        private static readonly MethodInfo EFProperty = typeof(EF).GetMethod(nameof(EF.Property))!;
+
+        protected override Expression VisitMethodCall(MethodCallExpression node)
+        {
+            if (node.Method.IsGenericMethod && node.Method.GetGenericMethodDefinition() == EFProperty && node.Arguments[1] is ConstantExpression { Value: string name })
+            {
+                var instance = Visit(node.Arguments[0]);
+                var target = instance.Type;
+                var member = (MemberInfo?)target.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    ?? target.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (member is not null)
+                {
+                    var access = NullSafe(instance, Expression.MakeMemberAccess(instance, member));
+                    return access.Type == node.Type ? access : Expression.Convert(access, node.Type);
+                }
+            }
+            return base.VisitMethodCall(node);
+        }
+
+        protected override Expression VisitMember(MemberExpression node)
+        {
+            if (node.Expression is null) return node;
+            var instance = Visit(node.Expression);
+            return NullSafe(instance, node.Update(instance));
+        }
+
+        /// <summary>A read through something that may be null (a navigation) gives null (or the default).</summary>
+        private static Expression NullSafe(Expression instance, MemberExpression access)
+        {
+            if (instance.Type.IsValueType || instance is ParameterExpression || instance is ConstantExpression || instance.NodeType == ExpressionType.Extension) return access;
+            return Expression.Condition(Expression.Equal(instance, Expression.Constant(null, instance.Type)), Expression.Default(access.Type), access);
+        }
     }
 
     // Everything else isn't supported (yet): EF Core reports it as untranslatable.
@@ -309,9 +350,48 @@ internal sealed class FilterTranslator
                 && StripConvert(call.Arguments[0]) == entity && call.Arguments[1] is ConstantExpression { Value: string n } => n,
             _ => null,
         };
-        if (name is null) return null;
-        var property = entityType.FindProperty(name);
-        return property is null ? null : (property.GetJsonPropertyName(), property);
+        if (name is not null)
+        {
+            var property = entityType.FindProperty(name);
+            return property is null ? null : (property.GetJsonPropertyName(), property);
+        }
+        // A property of an owned entity (x.Address.City, which EF Core may write as
+        // EF.Property(x, "Address").City): a dotted path into the document.
+        var names = new Stack<string>();
+        Expression? current = expression;
+        while (true)
+        {
+            current = current is null ? null : StripConvert(current);
+            if (current is MemberExpression { Expression: not null } m)
+            {
+                names.Push(m.Member.Name);
+                current = m.Expression;
+            }
+            else if (current is MethodCallExpression c && c.Method.IsGenericMethod && c.Method.GetGenericMethodDefinition() == EFPropertyMethod
+                && c.Arguments[1] is ConstantExpression { Value: string n })
+            {
+                names.Push(n);
+                current = c.Arguments[0];
+            }
+            else
+            {
+                break;
+            }
+        }
+        if (current != entity || names.Count < 2) return null;
+        var path = new List<string>();
+        IReadOnlyEntityType type = entityType;
+        while (names.Count > 1)
+        {
+            var navigation = type.FindNavigation(names.Pop());
+            if (navigation is null || navigation.IsCollection || !navigation.TargetEntityType.IsOwned()) return null;
+            path.Add(navigation.GetJsonPropertyName());
+            type = navigation.TargetEntityType;
+        }
+        var leaf = type.FindProperty(names.Pop());
+        if (leaf is null || leaf.IsPrimaryKey()) return null;
+        path.Add(leaf.GetJsonPropertyName());
+        return (string.Join(".", path), leaf);
     }
 
     private static readonly MethodInfo EFPropertyMethod = typeof(EF).GetMethod(nameof(EF.Property))!;

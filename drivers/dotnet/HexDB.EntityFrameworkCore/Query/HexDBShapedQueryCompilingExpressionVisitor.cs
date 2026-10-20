@@ -41,7 +41,13 @@ public class HexDBShapedQueryCompilingExpressionVisitor : ShapedQueryCompilingEx
     {
         var query = (HexDBQueryExpression)shapedQueryExpression.QueryExpression;
         var valueBuffer = Expression.Parameter(typeof(ValueBuffer), "valueBuffer");
-        var shaper = InjectEntityMaterializers(shapedQueryExpression.ShaperExpression);
+        var tracking = QueryCompilationContext.QueryTrackingBehavior == QueryTrackingBehavior.TrackAll;
+        // Owned entities come from the document (OwnedLoader), not from EF Core's includes.
+        var shaper = new OwnedLoader.IncludeStripper().Visit(shapedQueryExpression.ShaperExpression);
+        var plans = new Dictionary<IEntityType, OwnedPlan?>();
+        shaper = new OwnedLoader.Injector(t => Plan(t, query, plans), tracking).Visit(shaper);
+        shaper = InjectEntityMaterializers(shaper);
+        shaper = new OwnedLoader.Lowering().Visit(shaper);
         shaper = new ValueBufferRewriter(valueBuffer).Visit(shaper);
         var lambda = Expression.Lambda(shaper, QueryCompilationContext.QueryContextParameter, valueBuffer);
         return Expression.New(
@@ -52,6 +58,37 @@ public class HexDBShapedQueryCompilingExpressionVisitor : ShapedQueryCompilingEx
             Expression.Constant(_contextType),
             Expression.Constant(QueryCompilationContext.QueryTrackingBehavior == QueryTrackingBehavior.NoTrackingWithIdentityResolution),
             Expression.Constant(_threadSafetyChecksEnabled));
+    }
+
+    private OwnedPlan? Plan(IEntityType entityType, HexDBQueryExpression query, Dictionary<IEntityType, OwnedPlan?> plans)
+    {
+        if (!plans.TryGetValue(entityType, out var plan))
+        {
+            plan = OwnedPlan.Build(entityType, owned => Materializer(owned, query));
+            plans[entityType] = plan;
+        }
+        return plan;
+    }
+
+    /// <summary>EF Core's materializer for an (owned) entity type, reading a ValueBuffer.</summary>
+    private Func<QueryContext, ValueBuffer, object?> Materializer(IEntityType entityType, HexDBQueryExpression query)
+    {
+        var valueBuffer = Expression.Parameter(typeof(ValueBuffer), "valueBuffer");
+        var binding = new ProjectionBindingExpression(query, new ProjectionMember(), typeof(ValueBuffer));
+        var shaper = Expression.Convert(new StructuralTypeShaperExpression(entityType, binding, nullable: false), typeof(object));
+        // EF Core only builds a tracking materializer for an owned type next to its
+        // owners'. They're here, in a branch that never runs: by the time an owned
+        // entity is materialized, LoadOwned has its owner (tracked) already.
+        var owners = new List<Expression>();
+        for (var owner = entityType.FindOwnership()?.PrincipalEntityType; owner is not null; owner = owner.FindOwnership()?.PrincipalEntityType)
+        {
+            owners.Add(Expression.Convert(new StructuralTypeShaperExpression(owner, binding, nullable: true), typeof(object)));
+        }
+        Expression body = owners.Count == 0
+            ? shaper
+            : Expression.Condition(Expression.Constant(false), Expression.Block(typeof(object), owners.Append(Expression.Constant(null, typeof(object)))), shaper);
+        body = new ValueBufferRewriter(valueBuffer).Visit(InjectEntityMaterializers(body));
+        return Expression.Lambda<Func<QueryContext, ValueBuffer, object?>>(body, QueryCompilationContext.QueryContextParameter, valueBuffer).Compile();
     }
 
     /// <summary>Points the materializer's reads at our ValueBuffer: entity values by property index, scalars at 0.</summary>

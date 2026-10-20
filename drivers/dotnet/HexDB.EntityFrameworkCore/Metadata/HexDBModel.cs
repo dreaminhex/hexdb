@@ -49,6 +49,8 @@ namespace HexDB.EntityFrameworkCore.Metadata
             var sets = _dependencies.SetFinder.FindSets(_dependencies.ContextType);
             foreach (var entityType in modelBuilder.Metadata.GetEntityTypes())
             {
+                // Owned types live inside their owner's document.
+                if (entityType.IsOwned()) continue;
                 // Derived types are stored with their root type (one tessellation per hierarchy).
                 if (entityType.BaseType is null && entityType.FindAnnotation(HexDBAnnotationNames.Tessellation) is null)
                 {
@@ -85,13 +87,13 @@ namespace HexDB.EntityFrameworkCore.Metadata
             foreach (var entityType in model.GetEntityTypes())
             {
                 var name = entityType.DisplayName();
-                if (entityType.IsOwned())
-                    throw new InvalidOperationException($"'{name}' is an owned entity type; the HexDB provider doesn't support owned types yet. Map nested data as a property of a JSON-serializable type instead.");
+                // Owned types are stored in their owner's document; their keys come from it.
+                if (entityType.IsOwned()) continue;
                 if (entityType.BaseType is not null && entityType.FindAnnotation(HexDBAnnotationNames.Tessellation) is { Value: string own } && own != entityType.GetRootType().GetTessellation())
                     throw new InvalidOperationException($"'{name}' derives from '{entityType.GetRootType().DisplayName()}', so it's stored in that type's tessellation ('{entityType.GetRootType().GetTessellation()}'); call ToTessellation on the root type only.");
                 if ((entityType.BaseType is not null || entityType.GetDirectlyDerivedTypes().Any()) && entityType.FindDiscriminatorProperty() is null)
                     throw new InvalidOperationException($"'{name}' is part of an inheritance hierarchy without a discriminator; HexDB stores a hierarchy in one tessellation and needs one to tell the types apart.");
-                if (entityType.GetNavigations().Any() || entityType.GetSkipNavigations().Any())
+                if (entityType.GetNavigations().Any(n => !n.TargetEntityType.IsOwned()) || entityType.GetSkipNavigations().Any())
                     throw new InvalidOperationException($"'{name}' has navigation properties; the HexDB provider doesn't support relationships yet. Store related ids as properties and query them separately.");
                 var key = entityType.FindPrimaryKey()
                     ?? throw new InvalidOperationException($"'{name}' has no key. HexDB documents have an id: give the entity a string or Guid key.");
@@ -132,6 +134,18 @@ namespace Microsoft.EntityFrameworkCore
             var root = entityType.GetRootType();
             return root.FindAnnotation(HexDBAnnotationNames.Tessellation)?.Value as string ?? root.ClrType.Name;
         }
+
+        /// <summary>Store an owned navigation under another name in the document (default: the navigation's name).</summary>
+        public static OwnedNavigationBuilder<TOwner, TDependent> ToJsonProperty<TOwner, TDependent>(this OwnedNavigationBuilder<TOwner, TDependent> builder, string name)
+            where TOwner : class where TDependent : class
+        {
+            builder.Metadata.PrincipalToDependent!.SetAnnotation(HexDBAnnotationNames.JsonPropertyName, name);
+            return builder;
+        }
+
+        /// <summary>The document field an owned navigation is stored in.</summary>
+        public static string GetJsonPropertyName(this IReadOnlyNavigationBase navigation) =>
+            navigation.FindAnnotation(HexDBAnnotationNames.JsonPropertyName)?.Value as string ?? navigation.Name;
 
         /// <summary>The document field a property is stored in (`id` for the key).</summary>
         public static string GetJsonPropertyName(this IReadOnlyProperty property) =>

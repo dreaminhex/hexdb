@@ -57,8 +57,37 @@ public class Kitten : Cat
     public int AgeWeeks { get; set; }
 }
 
+public class Location
+{
+    public double Lat { get; set; }
+    public double Lng { get; set; }
+}
+
+public class Address
+{
+    public string Street { get; set; } = "";
+    public string City { get; set; } = "";
+    public Location? Location { get; set; }
+}
+
+public class InvoiceLine
+{
+    public string Sku { get; set; } = "";
+    public int Quantity { get; set; }
+    public decimal Price { get; set; }
+}
+
+public class Invoice
+{
+    public string Id { get; set; } = null!;
+    public string Number { get; set; } = "";
+    public Address? Billing { get; set; }
+    public List<InvoiceLine> Lines { get; set; } = new();
+}
+
 public class ShopContext : DbContext
 {
+    public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<Animal> Animals => Set<Animal>();
@@ -72,6 +101,12 @@ public class ShopContext : DbContext
         model.Entity<Order>().ToTessellation("ef_orders");
         model.Entity<Customer>().ToTessellation("ef_customers").Property(c => c.Email).ToJsonProperty("email");
         model.Entity<Animal>().ToTessellation("ef_animals");
+        model.Entity<Invoice>(invoice =>
+        {
+            invoice.ToTessellation("ef_invoices");
+            invoice.OwnsOne(i => i.Billing, billing => billing.OwnsOne(a => a.Location));
+            invoice.OwnsMany(i => i.Lines).ToJsonProperty("lines");
+        });
         model.Entity<Cat>();
         model.Entity<Kitten>();
     }
@@ -337,6 +372,79 @@ public class EntityFrameworkTests
         await using (var db = new ShopContext())
         {
             Assert.Equal(10, (await db.Dogs.SingleAsync(d => d.Name == "Rex")).Barks);
+        }
+    }
+
+    [SkippableFact]
+    public async Task OwnedTypesAreNestedInTheDocument()
+    {
+        Skip.IfNot(Configured, "set HEXDB_URL and HEXDB_API_KEY");
+        await Seed();
+        string id;
+        await using (var db = new ShopContext())
+        {
+            var invoice = new Invoice
+            {
+                Number = "INV-1",
+                Billing = new Address { Street = "Karl Johans gate 1", City = "Oslo", Location = new Location { Lat = 59.91, Lng = 10.75 } },
+                Lines = { new InvoiceLine { Sku = "A", Quantity = 2, Price = 9.5m }, new InvoiceLine { Sku = "B", Quantity = 1, Price = 20m } },
+            };
+            db.Invoices.AddRange(invoice, new Invoice { Number = "INV-2" });
+            await db.SaveChangesAsync();
+            id = invoice.Id;
+        }
+
+        // Stored as nested JSON, with no keys of its own.
+        using (var client = new HexDBClient(new Uri(Environment.GetEnvironmentVariable("HEXDB_URL")!), Environment.GetEnvironmentVariable("HEXDB_API_KEY")))
+        {
+            var doc = await client.RequestAsync(HttpMethod.Get, "/ef_invoices/" + id);
+            Assert.Equal("Oslo", doc!["Billing"]!["City"]!.GetValue<string>());
+            Assert.Equal(59.91, doc["Billing"]!["Location"]!["Lat"]!.GetValue<double>());
+            Assert.Equal(2, doc["lines"]!.AsArray().Count);
+            Assert.Equal("A", doc["lines"]![0]!["Sku"]!.GetValue<string>());
+            Assert.Null(doc["lines"]![0]!["InvoiceId"]);
+            Assert.Null(doc["lines"]![0]!["Id"]);
+        }
+
+        // Read back, tracked and not, and filtered on an owned property.
+        await using (var db = new ShopContext())
+        {
+            var invoice = await db.Invoices.SingleAsync(i => i.Billing!.City == "Oslo");
+            Assert.Equal("INV-1", invoice.Number);
+            Assert.Equal(10.75, invoice.Billing!.Location!.Lng);
+            Assert.Equal(new[] { "A", "B" }, invoice.Lines.Select(l => l.Sku));
+            Assert.Equal(9.5m, invoice.Lines[0].Price);
+            var empty = await db.Invoices.SingleAsync(i => i.Number == "INV-2");
+            Assert.Null(empty.Billing);
+            Assert.Empty(empty.Lines);
+
+            var detached = await db.Invoices.AsNoTracking().SingleAsync(i => i.Number == "INV-1");
+            Assert.Equal("Oslo", detached.Billing!.City);
+            Assert.Equal(2, detached.Lines.Count);
+            Assert.Equal(new[] { "Oslo", null }, await db.Invoices.OrderBy(i => i.Number).Select(i => i.Billing == null ? null : i.Billing.City).ToListAsync());
+
+            // Change an owned field, add and remove items, then save.
+            invoice.Billing.City = "Bergen";
+            invoice.Lines.RemoveAt(0);
+            invoice.Lines.Add(new InvoiceLine { Sku = "C", Quantity = 5, Price = 1m });
+            empty.Billing = new Address { Street = "Bryggen", City = "Bergen" };
+            await db.SaveChangesAsync();
+        }
+        await using (var db = new ShopContext())
+        {
+            var invoice = await db.Invoices.SingleAsync(i => i.Number == "INV-1");
+            Assert.Equal("Bergen", invoice.Billing!.City);
+            Assert.Equal(59.91, invoice.Billing.Location!.Lat);
+            Assert.Equal(new[] { "B", "C" }, invoice.Lines.Select(l => l.Sku));
+            Assert.Equal(2, await db.Invoices.CountAsync(i => i.Billing!.City == "Bergen"));
+
+            // Removing an owned reference removes it from the document.
+            invoice.Billing = null;
+            await db.SaveChangesAsync();
+        }
+        await using (var db = new ShopContext())
+        {
+            Assert.Null((await db.Invoices.SingleAsync(i => i.Number == "INV-1")).Billing);
         }
     }
 }
