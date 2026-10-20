@@ -3,7 +3,7 @@
 
     python scripts/set-version.py 1.0.1
 
-Updates the Rust crates (and Cargo.lock), the Node, Python and .NET drivers,
+Updates the Rust crates (and Cargo.lock), the Node, Python, .NET and Java drivers,
 the admin UI, the OpenAPI description, the package manifests (Homebrew,
 Chocolatey, winget), the example plugin and the benchmark report. Each file
 keeps its own line endings. Then commit, and tag with the same version:
@@ -71,6 +71,7 @@ def main() -> None:
     sub("drivers/python/hexdb/__init__.py", r'^__version__ = "[^"]+"$', f'__version__ = "{v}"', count=1)
     for proj in ["HexDB.Client", "HexDB.EntityFrameworkCore"]:
         sub(f"drivers/dotnet/{proj}/{proj}.csproj", r"<Version>[^<]+</Version>", f"<Version>{v}</Version>", count=1)
+    sub("drivers/java/pom.xml", r"(<artifactId>hexdb-jdbc</artifactId>\s*<version>)[^<]+(</version>)", rf"\g<1>{v}\g<2>", count=1)
     sub("hexdb_api/openapi.json", r'("info": \{[^}]*?"version": )"[^"]+"', rf'\g<1>"{v}"', count=1, flags=re.S)
     sub("scripts/openapi.py", r'("version": )"[^"]+"', rf'\g<1>"{v}"', count=1)
     sub("packaging/homebrew/hexdb.rb", r'^  version "[^"]+"$', f'  version "{v}"', count=1)

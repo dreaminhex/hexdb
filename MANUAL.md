@@ -2225,6 +2225,7 @@ A hex that didn't shut down cleanly leaves its runtime file behind, and the next
 | .NET | [drivers/dotnet](drivers/dotnet) | `dotnet add package HexDB.Client` (.NET 8+) |
 | Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 8+, EF Core 9) |
 | ODBC | [drivers/odbc](drivers/odbc) | Release archives (`odbc/`), or `cargo build --release -p hexdb_odbc` |
+| JDBC | [drivers/java](drivers/java) | `com.dreaminhex:hexdb-jdbc` from Maven Central, or the release's `hexdb-jdbc-<version>.jar` (Java 11+, no dependencies) |
 
 The Node.js, Python and .NET drivers each cover:
 - documents, queries, counts, aggregations and upserts;
@@ -2234,7 +2235,7 @@ The Node.js, Python and .NET drivers each cover:
 - functions and GraphQL;
 - files: `files(name)` (`Files(name)` in .NET) uploads (resumable from 16 MB), downloads by path or ID (whole, streamed or a byte range), lists folders, searches, and handles versions, the trash, thumbnails and re-extraction.
 
-The Entity Framework Core provider and the ODBC driver, described below, build on them or on SQL. The three client drivers authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
+The Entity Framework Core provider and the ODBC and JDBC drivers, described below, build on them or on SQL. The three client drivers authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
 
 ### Entity Framework Core
 
@@ -2324,7 +2325,7 @@ Concurrency tokens (`[ConcurrencyCheck]` or `.IsConcurrencyToken()`) become an `
 
 ### ODBC
 
-The ODBC driver ([drivers/odbc](drivers/odbc)) lets applications that read data through ODBC (reporting tools, spreadsheets, pyodbc, R) query HexDB. It sends SQL to [`POST /sql`](#10-sql) over HTTP or HTTPS, so it supports what HexDB's SQL supports and nothing more: read-only `SELECT`s on one tessellation. Permissions, row filters and field masks apply as for any other client.
+The ODBC driver ([drivers/odbc](drivers/odbc)) lets applications that read data through ODBC (reporting tools, spreadsheets, pyodbc, R) query HexDB. It sends SQL to [`POST /sql`](#10-sql) over HTTP or HTTPS, so it supports what HexDB's SQL supports: read-only `SELECT`s with joins, subqueries, `UNION`, `WITH` and expressions. `SQLGetInfo` reports those capabilities, so tools that read them can send joins and functions to the server. Permissions, row filters and field masks apply as for any other client.
 
 Build it with `cargo build --release -p hexdb_odbc` (release archives include it in `odbc/`), then register it:
 - **Windows:** run `drivers/odbc/install-windows.ps1` from an elevated PowerShell.
@@ -2349,12 +2350,25 @@ Driver={HexDB};Server=http://127.0.0.1:7700;ApiKey=hxk_...
   - Objects and arrays are `SQL_WLONGVARCHAR` holding JSON.
   - A column's type comes from the tessellation's schema when there is one, otherwise from the first page of results.
 - **Catalog.** Tessellations are tables in no catalog or schema, and `id` is each one's primary key.
-- **Escapes.** ODBC escape sequences for dates and timestamps become string literals.
+- **Escapes.** ODBC escape sequences for dates and timestamps become string literals, `{fn ...}` becomes the function call, and `{oj ...}` becomes the join inside it.
 - **Cursors.** Forward-only and read-only.
 
 See [drivers/odbc/README.md](drivers/odbc/README.md) for installation on each platform, every connection key, conversions and limits.
 
-The driver is tested with pyodbc through unixODBC on Linux and through the Windows driver manager (in CI). Desktop tools such as Excel and Power BI haven't been tested with it yet. There's no JDBC driver.
+The driver is tested with pyodbc through unixODBC on Linux and through the Windows driver manager (in CI). Desktop tools such as Excel and Power BI haven't been tested with it yet.
+
+### JDBC
+
+The JDBC driver ([drivers/java](drivers/java)) is for Java tools and applications: DBeaver, IntelliJ and DataGrip, Spark, reporting tools, and plain JDBC code. Like the ODBC driver, it sends SQL to [`POST /sql`](#10-sql), so permissions, row filters and field masks apply. It needs Java 11 or later and has no dependencies.
+
+```java
+Connection db = DriverManager.getConnection("jdbc:hexdb://127.0.0.1:7700?apiKey=" + System.getenv("HEXDB_API_KEY"));
+```
+
+- **URLs and properties.** `jdbc:hexdb://host:port` (add `?ssl=true` for HTTPS, or write `jdbc:hexdb:https://host:port`), with `apiKey`, or `user` and `password`, plus `caFile`, `pageSize` and `timeout`.
+- **Behavior.** Results are forward-only and read-only, fetched a page at a time. Types and the catalog follow the ODBC driver: booleans, `BIGINT`, `DOUBLE`, `VARCHAR`, and JSON text for objects and arrays; tessellations are tables in no catalog or schema, with `id` as the primary key. JDBC escape sequences are rewritten like ODBC's. There are no transactions: autocommit stays on, and `commit` and `rollback` do nothing.
+
+See [drivers/java/README.md](drivers/java/README.md) for every property, conversions, errors and limits.
 
 ## 25. FAQ
 

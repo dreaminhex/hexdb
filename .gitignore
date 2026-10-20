@@ -39,3 +39,6 @@ plugins/**/changes.ndjson
 # Local secrets (see hexdb_core config: hexdb.local.toml)
 **/hexdb.local.toml
 **/initial-admin-password.txt
+
+# JDBC driver build output
+drivers/java/target/

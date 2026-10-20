@@ -277,6 +277,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | .NET | [drivers/dotnet](drivers/dotnet) | .NET 8+ |
 | Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | .NET 8+, EF Core 9 |
 | ODBC | [drivers/odbc](drivers/odbc) | Windows, Linux (unixODBC); 64-bit |
+| JDBC | [drivers/java](drivers/java) | Java 11+, no dependencies |
 
 See [drivers/README.md](drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](hexdb_api/openapi.json)).
 
@@ -327,7 +328,7 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 ## Limitations
 
 - Every hex holds a full copy of the data. Horizontal partitioning (sharding across hexes) isn't implemented.
-- SQL is read-only. Statements with joins, subqueries or expressions run in memory over table reads of at most `limits.sql_max_rows` documents each (100,000), and window functions and recursive `WITH` aren't supported. The ODBC driver is tested with pyodbc (unixODBC and the Windows driver manager), not yet with desktop tools such as Excel or Power BI. There's no JDBC driver.
+- SQL is read-only. Statements with joins, subqueries or expressions run in memory over table reads of at most `limits.sql_max_rows` documents each (100,000), and window functions and recursive `WITH` aren't supported. The ODBC driver is tested with pyodbc (unixODBC and the Windows driver manager) and the JDBC driver with JUnit, not yet with desktop tools such as Excel, Power BI or DBeaver.
 - The Entity Framework Core provider maps one entity type to one tessellation. It doesn't support relationships, owned types, inheritance or explicit transactions (see [MANUAL.md](MANUAL.md#entity-framework-core)).
 
 ## License

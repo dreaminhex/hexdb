@@ -96,6 +96,11 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
       - name: Build the server
         run: |
           cargo build --locked -p hexdb_api
@@ -106,6 +111,8 @@ jobs:
         run: node drivers/testing/server.mjs python -m unittest discover -s drivers/python/tests -t drivers/python -v
       - name: .NET
         run: node drivers/testing/server.mjs dotnet test drivers/dotnet
+      - name: JDBC
+        run: node drivers/testing/server.mjs mvn -B -f drivers/java test
       - name: ODBC (unixODBC, pyodbc)
         run: |
           sudo apt-get install -y unixodbc

@@ -18,6 +18,7 @@ Pushing a tag such as `v1.0.1` runs [.github/workflows/release.yml](../.github/w
 | npm | `npm install @dreaminhex/hexdb` | npmjs.com | an account and token | `NPM_TOKEN` |
 | PyPI | `pip install hexdb` | pypi.org | an account and token | `PYPI_TOKEN` |
 | NuGet | `dotnet add package HexDB.Client` / `HexDB.EntityFrameworkCore` | nuget.org | an account and a trusted publishing policy | `NUGET_USER` (or `NUGET_API_KEY`) |
+| Maven Central | `com.dreaminhex:hexdb-jdbc` (the JDBC driver; the jar is also on each release) | central.sonatype.com | an account, a verified namespace, a GPG key | `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`, `MAVEN_GPG_PRIVATE_KEY`, `MAVEN_GPG_PASSPHRASE` |
 
 Every package name above was free on 2026-10-09: `hexdb` on PyPI, Chocolatey and crates.io, `HexDB.Client` and `HexDB.EntityFrameworkCore` on NuGet, `DreamInHex.HexDB` on winget. Claim them with the first release.
 
@@ -107,6 +108,15 @@ The `chocolatey` job packs [packaging/chocolatey](chocolatey) (which runs the MS
 3. Optional but worth it: ask NuGet to reserve the `HexDB.` prefix for your account (email account@nuget.org, see https://learn.microsoft.com/nuget/nuget-org/id-prefix-reservation). Reserved packages get a verified checkmark and nobody else can publish `HexDB.Something`.
 
 New packages take a few minutes to validate and index before `dotnet add package` finds them.
+
+### Maven Central
+
+1. Sign in at https://central.sonatype.com and verify the `com.dreaminhex` namespace: Central gives a TXT record to add to `dreaminhex.com`'s DNS. (Without the domain, use `io.github.dreaminhex`, which is verified through GitHub, and change `groupId` in `drivers/java/pom.xml`.)
+2. Under **View Account > Generate User Token**, save the token's user name and password as `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD`.
+3. Make a signing key and publish its public half: `gpg --quick-gen-key "Dream In Hex <matthew@dreaminhex.com>" rsa4096 sign 2y`, then `gpg --keyserver keys.openpgp.org --send-keys <KEYID>`.
+4. Save `gpg --armor --export-secret-keys <KEYID>` as `MAVEN_GPG_PRIVATE_KEY` and its passphrase as `MAVEN_GPG_PASSPHRASE`.
+
+The `maven-central` job then runs `mvn -P release deploy`, which signs the jar, sources and javadoc and publishes them. A version can't be republished; use the next patch version to fix one.
 
 ### Signing the installers (optional, recommended)
 
