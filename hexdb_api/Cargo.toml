@@ -36,7 +36,7 @@ prost = "0.14.4"
 [target.'cfg(windows)'.dependencies]
 # Running as a Windows service (hexdb service install).
 windows-service = "0.8.1"
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14.6", default-features = false }
