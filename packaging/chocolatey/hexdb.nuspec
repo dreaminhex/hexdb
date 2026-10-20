@@ -9,7 +9,7 @@
     <title>HexDB</title>
     <authors>Dream In Hex</authors>
     <owners>dreaminhex</owners>
-    <projectUrl>https://hexdb-website.vercel.app</projectUrl>
+    <projectUrl>https://hexdb.app</projectUrl>
     <projectSourceUrl>https://github.com/dreaminhex/hexdb</projectSourceUrl>
     <packageSourceUrl>https://github.com/dreaminhex/hexdb/tree/main/packaging/chocolatey</packageSourceUrl>
     <docsUrl>https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md</docsUrl>

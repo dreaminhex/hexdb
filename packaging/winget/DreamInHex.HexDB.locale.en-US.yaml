@@ -6,7 +6,7 @@ PublisherUrl: https://dreaminhex.com
 PublisherSupportUrl: https://github.com/dreaminhex/hexdb/issues
 Author: Dream In Hex
 PackageName: HexDB
-PackageUrl: https://hexdb-website.vercel.app
+PackageUrl: https://hexdb.app
 License: Apache-2.0
 LicenseUrl: https://github.com/dreaminhex/hexdb/blob/main/LICENSE
 ShortDescription: Document database with REST, GraphQL, SQL, replication and an admin UI, in one program.

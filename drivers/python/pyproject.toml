@@ -14,7 +14,7 @@ authors = [{ name = "Dream In Hex" }]
 keywords = ["hexdb", "database", "document", "nosql", "client"]
 
 [project.urls]
-Homepage = "https://hexdb-website.vercel.app"
+Homepage = "https://hexdb.app"
 Source = "https://github.com/dreaminhex/hexdb"
 Issues = "https://github.com/dreaminhex/hexdb/issues"
 

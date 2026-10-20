@@ -6,7 +6,7 @@
 # so the copy here only needs editing when the formula itself changes.
 class Hexdb < Formula
   desc "Document database with REST, GraphQL, SQL, replication and an admin UI"
-  homepage "https://hexdb-website.vercel.app"
+  homepage "https://hexdb.app"
   version "2.1.2"
   license "Apache-2.0"
 

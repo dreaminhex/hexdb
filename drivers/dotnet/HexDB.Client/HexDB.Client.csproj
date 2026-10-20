@@ -9,7 +9,7 @@
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Authors>Dream In Hex</Authors>
     <Company>Dream In Hex</Company>
-    <PackageProjectUrl>https://hexdb-website.vercel.app</PackageProjectUrl>
+    <PackageProjectUrl>https://hexdb.app</PackageProjectUrl>
     <RepositoryUrl>https://github.com/dreaminhex/hexdb</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
