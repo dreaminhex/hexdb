@@ -327,7 +327,7 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 
 ## Limitations
 
-- Every hex holds a full copy of the data. Horizontal partitioning (sharding across hexes) isn't implemented.
+- Sharding (`replication.sharding`) splits the data across replicas, but the Overseer still keeps every shard, so a lattice can't hold more than one machine can, and sharded replicas pass queries to the Overseer.
 - SQL is read-only. Statements with joins, subqueries or expressions run in memory over table reads of at most `limits.sql_max_rows` documents each (100,000), and window functions and recursive `WITH` aren't supported. The ODBC driver is tested with pyodbc (unixODBC and the Windows driver manager) and the JDBC driver with JUnit, not yet with desktop tools such as Excel, Power BI or DBeaver.
 - The Entity Framework Core provider loads relationships with extra queries (no joins), so navigations can't be used inside server-side filters; many-to-many skip navigations, complex types and composite keys aren't supported (see [MANUAL.md](MANUAL.md#entity-framework-core)).
 

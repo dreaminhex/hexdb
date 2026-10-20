@@ -130,6 +130,9 @@ pub struct LatticeHex {
     pub applied_seq: u64,
     /// Changes behind the Overseer (replicas only, when known).
     pub lag: Option<u64>,
+    /// Whether the hex has `replication.sharding` on, and how many of the 64 shards it keeps.
+    pub sharding: bool,
+    pub shards_held: u32,
 }
 
 /// Report structure for the current lattice state.
@@ -193,6 +196,8 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         replication_state: me.replication_state,
         applied_seq: me.applied_seq,
         lag: None,
+        sharding: me.sharding,
+        shards_held: crate::sharding::count(me.shards_held),
     }];
     for member in engine.peers.lock().await.iter() {
         lattice_hexes.push(LatticeHex {
@@ -209,6 +214,8 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             replication_state: member.hex.replication_state.clone(),
             applied_seq: member.hex.applied_seq,
             lag: None,
+            sharding: member.hex.sharding,
+            shards_held: crate::sharding::count(member.hex.shards_held),
         });
     }
     // On the Overseer, replicas' positions are exact: each poll for changes

@@ -1768,7 +1768,7 @@ Every hex runs the same election over the same view, so they agree without a con
 
 ### Replication
 
-Every hex keeps a full copy. A replica:
+Every hex keeps a full copy, unless the lattice shards its data (see [Sharding](#sharding)). A replica:
 
 1. **Full sync.** It reads a consistent snapshot from the Overseer: its sequence number S, its tessellations and index definitions, then every document with its version, page by page. Local data the Overseer doesn't have is removed.
 2. **Streaming.** It follows the Overseer's change feed after S with long polls, applying each batch atomically together with its replication cursor, so a crash can't leave data and cursor out of step. A change older than the snapshot's version of a document is skipped, so changes made during the snapshot apply exactly once.
@@ -1797,6 +1797,26 @@ quorum = 2            # hexes (including itself) the Overseer must see to accept
 
 - **`min_acks`.** With it set, an acknowledged write exists on at least that many replicas. Writes to system tessellations that don't need it (the audit trail, sign-in throttling, replication state, plugin cursors) don't wait.
 - **`quorum`.** A hex cut off from the rest stops taking writes, with 503 `no_quorum`. With a majority quorum (2 of 3, 3 of 5), a network partition can't leave two Overseers both accepting writes. Startup work that needs to write (creating the first admin) waits for the quorum.
+
+### Sharding
+
+With `replication.sharding = true` on the Overseer and two or more replicas, the replicas share the data instead of each keeping a full copy, which saves their disk and memory:
+
+```toml
+[replication]
+sharding = true
+shard_copies = 1      # replicas that keep each shard
+recent_changes = 20000
+```
+
+- **Shards.** Every document of a user tessellation falls in one of 64 shards, by a hash of its tessellation and ID. System tessellations (users, roles, the audit trail, configuration) aren't sharded: every hex keeps them.
+- **Copies.** The Overseer keeps every shard, and each shard is also kept by `shard_copies` replicas. With the default of 1, any one hex can be lost without losing data. A lattice with a single replica keeps full copies, whatever the setting.
+- **Placement.** Every hex computes the same placement from the live hexes (rendezvous hashing), so a hex that joins or leaves moves only its own shards. A replica copies the shards it gains from the Overseer, and gives up a shard only once another live replica holds it, so no shard has fewer copies while a new hex catches up.
+- **Reads.** A sharded replica doesn't have all the data, so it forwards requests that read data (queries, SQL, GraphQL, documents, files, MCP and the chat) to the Overseer, and answers with what the Overseer returns. Live feeds (`/changes/stream`, `/changes/ws`, stream subscriptions) aren't proxied: a sharded replica answers 421 `sharded_replica`, naming the Overseer to connect to. Health, status, sign-in and the hex's own maintenance stay local.
+- **Failover.** When the Overseer is lost, the replica furthest along its history is elected. Before it serves data or takes writes (data requests get 503 `rebuilding` meanwhile), it collects the shards it lacks from the replicas that keep them, then applies its last `recent_changes` changes to bring each to its own position, so the data is consistent as of one point in history. A shard whose holder is down waits for it to come back; if a holder was further behind than those recent changes reach, the gap is logged and recorded in the audit trail as `lattice.shards_incomplete`. The other replicas then sync their shards from the new Overseer.
+- **Status.** `/status` shows `shards_held_count` and `sharded_documents` (the user documents this hex keeps) under `replication`.
+
+What sharding doesn't change: the Overseer still keeps everything (it runs every write, transaction and unique index), so a lattice can't hold more than the Overseer can. It saves space on the replicas, not on the Overseer.
 
 ### Adding a hex
 
@@ -2169,6 +2189,7 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `tls.ca_file` | empty | Extra CAs trusted for other hexes |
 | `limits.*` | see above | Request and connection limits |
 | `replication.min_acks`, `ack_timeout_ms`, `forward_writes`, `quorum` | 0, 5000, true, 0 | See [Durability options](#durability-options) |
+| `replication.sharding`, `shard_copies`, `recent_changes` | false, 1, 20000 | See [Sharding](#sharding) |
 | `plugins.enabled`, `registry` | true, `plugins.json` | Plugin loading |
 | `functions.scripts`, `python`, `node` | true, `python3`/`python`, `node` | Script runtimes |
 | `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Pre-1.6 query advisor key, used only while the lattice configuration's `ai.provider` is `none` |
