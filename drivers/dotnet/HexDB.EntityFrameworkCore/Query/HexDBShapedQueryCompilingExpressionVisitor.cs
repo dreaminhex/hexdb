@@ -45,6 +45,13 @@ public class HexDBShapedQueryCompilingExpressionVisitor : ShapedQueryCompilingEx
         // Owned entities come from the document (OwnedLoader), not from EF Core's includes.
         var shaper = new OwnedLoader.IncludeStripper().Visit(shapedQueryExpression.ShaperExpression);
         var plans = new Dictionary<IEntityType, OwnedPlan?>();
+        // Includes of related entities (taken out of the query by the preprocessor) apply when the query returns entities.
+        List<IncludeNode>? includes = null;
+        if (shaper is StructuralTypeShaperExpression { StructuralType: IEntityType rootType } && QueryCompilationContext is HexDBQueryCompilationContext context)
+        {
+            includes = IncludeNode.Build(rootType, context.IncludePaths, !context.UserIgnoresAutoIncludes, t => Materializer(t, query), t => Plan(t, query, plans));
+            if (includes.Count == 0) includes = null;
+        }
         shaper = new OwnedLoader.Injector(t => Plan(t, query, plans), tracking).Visit(shaper);
         shaper = InjectEntityMaterializers(shaper);
         shaper = new OwnedLoader.Lowering().Visit(shaper);
@@ -57,7 +64,9 @@ public class HexDBShapedQueryCompilingExpressionVisitor : ShapedQueryCompilingEx
             Expression.Constant(lambda.Compile()),
             Expression.Constant(_contextType),
             Expression.Constant(QueryCompilationContext.QueryTrackingBehavior == QueryTrackingBehavior.NoTrackingWithIdentityResolution),
-            Expression.Constant(_threadSafetyChecksEnabled));
+            Expression.Constant(_threadSafetyChecksEnabled),
+            Expression.Constant(includes, typeof(List<IncludeNode>)),
+            Expression.Constant(tracking));
     }
 
     private OwnedPlan? Plan(IEntityType entityType, HexDBQueryExpression query, Dictionary<IEntityType, OwnedPlan?> plans)
@@ -124,9 +133,14 @@ public sealed class HexDBQueryingEnumerable<T> : IEnumerable<T>, IAsyncEnumerabl
     private readonly Type _contextType;
     private readonly bool _standAloneStateManager;
     private readonly bool _threadSafetyChecksEnabled;
+    private readonly List<IncludeNode>? _includes;
+    private readonly bool _tracking;
 
-    public HexDBQueryingEnumerable(QueryContext queryContext, HexDBQueryExpression query, Func<QueryContext, ValueBuffer, T> shaper, Type contextType, bool standAloneStateManager, bool threadSafetyChecksEnabled)
+    public HexDBQueryingEnumerable(QueryContext queryContext, HexDBQueryExpression query, Func<QueryContext, ValueBuffer, T> shaper, Type contextType, bool standAloneStateManager, bool threadSafetyChecksEnabled,
+        List<IncludeNode>? includes, bool tracking)
     {
+        _includes = includes;
+        _tracking = tracking;
         _queryContext = queryContext;
         _query = query;
         _shaper = shaper;
@@ -141,8 +155,32 @@ public sealed class HexDBQueryingEnumerable<T> : IEnumerable<T>, IAsyncEnumerabl
     {
         using var guard = Guard();
         _queryContext.InitializeStateManager(_standAloneStateManager);
-        foreach (var row in Rows(() => _query.Execute(_queryContext))) yield return _shaper(_queryContext, row);
+        if (_includes is null)
+        {
+            foreach (var row in Rows(() => _query.Execute(_queryContext))) yield return _shaper(_queryContext, row);
+            yield break;
+        }
+        // With includes: a page of results, then their related entities, then the page.
+        var page = new List<(object Entity, ValueBuffer Buffer)>();
+        var results = new List<T>();
+        foreach (var row in Rows(() => _query.Execute(_queryContext)))
+        {
+            var result = _shaper(_queryContext, row);
+            results.Add(result);
+            if (result is not null) page.Add((result, row));
+            if (results.Count >= PageSize)
+            {
+                IncludeLoader.LoadAsync(_queryContext, page, _includes, _tracking, CancellationToken.None).GetAwaiter().GetResult();
+                foreach (var r in results) yield return r;
+                page.Clear();
+                results.Clear();
+            }
+        }
+        IncludeLoader.LoadAsync(_queryContext, page, _includes, _tracking, CancellationToken.None).GetAwaiter().GetResult();
+        foreach (var r in results) yield return r;
     }
+
+    private int PageSize => ((HexDBQueryContext)_queryContext).Connection.Options.PageSize;
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
@@ -151,6 +189,8 @@ public sealed class HexDBQueryingEnumerable<T> : IEnumerable<T>, IAsyncEnumerabl
         using var guard = Guard();
         _queryContext.InitializeStateManager(_standAloneStateManager);
         await using var rows = _query.ExecuteAsync(_queryContext, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        var page = new List<(object Entity, ValueBuffer Buffer)>();
+        var results = new List<T>();
         while (true)
         {
             bool more;
@@ -163,8 +203,27 @@ public sealed class HexDBQueryingEnumerable<T> : IEnumerable<T>, IAsyncEnumerabl
                 Log(e, cancellationToken);
                 throw;
             }
-            if (!more) yield break;
-            yield return _shaper(_queryContext, rows.Current);
+            if (!more) break;
+            if (_includes is null)
+            {
+                yield return _shaper(_queryContext, rows.Current);
+                continue;
+            }
+            var result = _shaper(_queryContext, rows.Current);
+            results.Add(result);
+            if (result is not null) page.Add((result, rows.Current));
+            if (results.Count >= PageSize)
+            {
+                await IncludeLoader.LoadAsync(_queryContext, page, _includes, _tracking, cancellationToken).ConfigureAwait(false);
+                foreach (var r in results) yield return r;
+                page.Clear();
+                results.Clear();
+            }
+        }
+        if (_includes is not null)
+        {
+            await IncludeLoader.LoadAsync(_queryContext, page, _includes, _tracking, cancellationToken).ConfigureAwait(false);
+            foreach (var r in results) yield return r;
         }
     }
 

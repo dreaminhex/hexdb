@@ -2281,6 +2281,8 @@ var big = await db.Orders.Where(o => o.Total > 10).OrderByDescending(o => o.Tota
   - `JsonNode` and `JsonElement` for free-form JSON.
 - Value converters apply as usual.
 - `decimal` is stored as a JSON number, which the server reads as a 64-bit float, so it keeps about 15 significant digits.
+- **Inheritance** (table-per-hierarchy): a hierarchy shares its root type's tessellation, and a discriminator field (`Discriminator`, or as configured) names each document's type. Querying a derived type's `DbSet`, or `OfType<T>()`, filters on the discriminator values of that type and its subtypes; each document is read as its own type.
+- **Owned types** (`OwnsOne`, `OwnsMany`) are stored inside the owner's document: a nested object or an array of objects, named after the navigation (`.ToJsonProperty("name")` on the owned navigation renames it). Owned types may own types. They have no `id` of their own and are always loaded with their owner. Filters can use their properties: `Where(i => i.Billing.City == "Oslo")` becomes a filter on `Billing.City`.
 
 **Queries.** LINQ is translated into one `_query` request: filters, sorting and paging run on the server. Results come back a page at a time and are tracked and identity-resolved like any EF Core query. Supported:
 - `Where`, with:
@@ -2302,10 +2304,17 @@ A query HexDB can't answer throws `InvalidOperationException` instead of loading
 - `GroupBy` and `Join`;
 - `Where` after `Skip`, `Take` or `Select`.
 
-**Saving.** `SaveChanges` sends every added, modified and deleted entity as one `POST /transactions`, so the save is atomic: if one operation fails, none apply.
-- Added entities are inserted.
-- Modified entities are patched with only the changed properties; a property set to `null` removes the field.
+**Relationships.** One-to-many and one-to-one relationships between entity types work as in EF Core: navigations, foreign key properties (stored as fields), fixup when you add a graph, and cascade deletes of the dependents you've loaded. HexDB itself doesn't enforce foreign keys or cascade on the server.
+- `Include`, `ThenInclude`, string includes (`Include("Books.Reviews")`) and `AutoInclude` load related entities. Each included navigation is one more query on the related tessellation per page of results, with the page's keys in an `$in` filter, so index the foreign key fields you include by.
+- Tracked queries connect entities through EF Core's change tracker; `AsNoTracking` queries connect them directly, in both directions.
+- Filter and sort on foreign key properties (`Where(b => b.AuthorId == id)`), not through navigations: `Where(b => b.Author.Name == "...")` would need a join and throws.
+
+**Saving.** `SaveChanges` sends every added, modified and deleted document as one `POST /transactions`, so the save is atomic: if one operation fails, none apply.
+- Added entities are inserted, with their owned entities.
+- Modified entities are patched with only the changed properties; a property set to `null` removes the field. A changed owned navigation is written whole: its object, or its array.
 - Deleted entities are deleted.
+
+**Transactions.** `BeginTransaction` groups several `SaveChanges` into one HexDB transaction: each save's operations wait, `Commit` sends them all atomically (up to 1,000 operations), and `Rollback`, or disposing the transaction without committing, discards them. Reads inside the transaction don't see its own uncommitted writes, and a concurrency conflict surfaces at `Commit` as `DbUpdateConcurrencyException`. Transactions don't nest.
 
 Concurrency tokens (`[ConcurrencyCheck]` or `.IsConcurrencyToken()`) become an `if_match` precondition on their original values. A document changed or deleted since it was read raises `DbUpdateConcurrencyException`. Any other refusal, such as a unique-index conflict, raises `DbUpdateException` with HexDB's status and message.
 
@@ -2316,11 +2325,11 @@ Concurrency tokens (`[ConcurrencyCheck]` or `.IsConcurrencyToken()`) become an `
 - Indexes, schemas and permissions aren't created from the model. Set them up through the API, the CLI or the admin UI.
 
 **Not supported yet.**
-- Navigations and relationships: store related ids as properties and query them separately.
-- Owned types and complex types: use a property of a JSON-serializable type instead.
-- Inheritance.
+- Many-to-many skip navigations: map the join entity, with a navigation to each side.
+- Filtered includes (`Include(a => a.Books.Where(...))`), and navigations inside server-side filters and sorts.
+- Complex types (`ComplexProperty`): use owned types.
+- Table-per-type and table-per-concrete-type inheritance (table-per-hierarchy works).
 - Composite keys.
-- Explicit transactions: `BeginTransaction` throws, because each `SaveChanges` is already one transaction.
 - Migrations.
 
 ### ODBC

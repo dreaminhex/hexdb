@@ -93,8 +93,13 @@ namespace HexDB.EntityFrameworkCore.Metadata
                     throw new InvalidOperationException($"'{name}' derives from '{entityType.GetRootType().DisplayName()}', so it's stored in that type's tessellation ('{entityType.GetRootType().GetTessellation()}'); call ToTessellation on the root type only.");
                 if ((entityType.BaseType is not null || entityType.GetDirectlyDerivedTypes().Any()) && entityType.FindDiscriminatorProperty() is null)
                     throw new InvalidOperationException($"'{name}' is part of an inheritance hierarchy without a discriminator; HexDB stores a hierarchy in one tessellation and needs one to tell the types apart.");
-                if (entityType.GetNavigations().Any(n => !n.TargetEntityType.IsOwned()) || entityType.GetSkipNavigations().Any())
-                    throw new InvalidOperationException($"'{name}' has navigation properties; the HexDB provider doesn't support relationships yet. Store related ids as properties and query them separately.");
+                if (entityType.GetDeclaredSkipNavigations().FirstOrDefault() is { } skip)
+                    throw new InvalidOperationException($"'{name}.{skip.Name}' is a many-to-many navigation; the HexDB provider doesn't support those. Map the join entity (with a navigation to each side) instead.");
+                foreach (var foreignKey in entityType.GetDeclaredForeignKeys().Where(f => !f.IsOwnership))
+                {
+                    if (foreignKey.Properties.Count != 1)
+                        throw new InvalidOperationException($"The relationship from '{name}' to '{foreignKey.PrincipalEntityType.DisplayName()}' has a composite foreign key; HexDB relationships use one foreign key property.");
+                }
                 var key = entityType.FindPrimaryKey()
                     ?? throw new InvalidOperationException($"'{name}' has no key. HexDB documents have an id: give the entity a string or Guid key.");
                 if (key.Properties.Count != 1 || (key.Properties[0].ClrType != typeof(string) && key.Properties[0].ClrType != typeof(Guid)))

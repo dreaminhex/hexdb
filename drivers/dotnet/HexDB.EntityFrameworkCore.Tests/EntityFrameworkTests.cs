@@ -85,8 +85,36 @@ public class Invoice
     public List<InvoiceLine> Lines { get; set; } = new();
 }
 
+public class Author
+{
+    public string Id { get; set; } = null!;
+    public string Name { get; set; } = "";
+    public List<Book> Books { get; set; } = new();
+}
+
+public class Book
+{
+    public string Id { get; set; } = null!;
+    public string Title { get; set; } = "";
+    public int Year { get; set; }
+    public string AuthorId { get; set; } = null!;
+    public Author? Author { get; set; }
+    public List<Review> Reviews { get; set; } = new();
+}
+
+public class Review
+{
+    public string Id { get; set; } = null!;
+    public int Stars { get; set; }
+    public string BookId { get; set; } = null!;
+    public Book? Book { get; set; }
+}
+
 public class ShopContext : DbContext
 {
+    public DbSet<Author> Authors => Set<Author>();
+    public DbSet<Book> Books => Set<Book>();
+    public DbSet<Review> Reviews => Set<Review>();
     public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<Customer> Customers => Set<Customer>();
@@ -101,6 +129,9 @@ public class ShopContext : DbContext
         model.Entity<Order>().ToTessellation("ef_orders");
         model.Entity<Customer>().ToTessellation("ef_customers").Property(c => c.Email).ToJsonProperty("email");
         model.Entity<Animal>().ToTessellation("ef_animals");
+        model.Entity<Author>().ToTessellation("ef_authors");
+        model.Entity<Book>().ToTessellation("ef_books");
+        model.Entity<Review>().ToTessellation("ef_reviews");
         model.Entity<Invoice>(invoice =>
         {
             invoice.ToTessellation("ef_invoices");
@@ -445,6 +476,77 @@ public class EntityFrameworkTests
         await using (var db = new ShopContext())
         {
             Assert.Null((await db.Invoices.SingleAsync(i => i.Number == "INV-1")).Billing);
+        }
+    }
+
+    [SkippableFact]
+    public async Task RelationshipsLoadWithInclude()
+    {
+        Skip.IfNot(Configured, "set HEXDB_URL and HEXDB_API_KEY");
+        await Seed();
+        // An object graph saves in one go; foreign keys come from the navigations.
+        await using (var db = new ShopContext())
+        {
+            var ursula = new Author { Name = "Ursula" };
+            for (var i = 0; i < 10; i++)
+            {
+                var book = new Book { Title = "Book " + i, Year = 1960 + i };
+                for (var r = 0; r < i % 3; r++) book.Reviews.Add(new Review { Stars = 3 + r });
+                ursula.Books.Add(book);
+            }
+            db.Authors.AddRange(ursula, new Author { Name = "Nobody" });
+            await db.SaveChangesAsync();
+            Assert.All(ursula.Books, b => Assert.Equal(ursula.Id, b.AuthorId));
+        }
+
+        await using (var db = new ShopContext())
+        {
+            // Collection, then a collection of each: across more than one page (PageSize 7).
+            var authors = await db.Authors.Include(a => a.Books).ThenInclude(b => b.Reviews).OrderBy(a => a.Name).ToListAsync();
+            Assert.Equal(new[] { "Nobody", "Ursula" }, authors.Select(a => a.Name));
+            Assert.Empty(authors[0].Books);
+            var ursula = authors[1];
+            Assert.Equal(10, ursula.Books.Count);
+            Assert.All(ursula.Books, b => Assert.Same(ursula, b.Author));
+            Assert.Equal(9, ursula.Books.Sum(b => b.Reviews.Count));
+            Assert.All(ursula.Books.SelectMany(b => b.Reviews), r => Assert.NotNull(r.Book));
+
+            // A reference, filtered on a foreign key.
+            var books = await db.Books.Include(b => b.Author).Where(b => b.AuthorId == ursula.Id && b.Year >= 1965).OrderBy(b => b.Year).ToListAsync();
+            Assert.Equal(5, books.Count);
+            Assert.All(books, b => Assert.Same(ursula, b.Author));
+        }
+
+        await using (var db = new ShopContext())
+        {
+            // Not tracked: connected in both directions all the same.
+            var books = await db.Books.AsNoTracking().Include("Author").Include(b => b.Reviews).OrderBy(b => b.Year).ToListAsync();
+            Assert.Equal(10, books.Count);
+            Assert.All(books, b => Assert.Equal("Ursula", b.Author!.Name));
+            Assert.Equal(new[] { 0, 1, 2 }, books.Take(3).Select(b => b.Reviews.Count));
+            Assert.All(books.SelectMany(b => b.Reviews), r => Assert.NotNull(r.Book));
+            Assert.Empty(db.ChangeTracker.Entries());
+
+            // Navigations can't be filtered on: use the foreign key.
+            await Assert.ThrowsAsync<InvalidOperationException>(() => db.Books.Where(b => b.Author!.Name == "Ursula").ToListAsync());
+        }
+
+        await using (var db = new ShopContext())
+        {
+            // Deleting a principal deletes its loaded dependents (EF Core's cascade).
+            var nobody = await db.Authors.SingleAsync(a => a.Name == "Nobody");
+            var ursula = await db.Authors.Include(a => a.Books).SingleAsync(a => a.Name == "Ursula");
+            var first = ursula.Books.OrderBy(b => b.Year).First();
+            first.Author = nobody;
+            await db.SaveChangesAsync();
+            Assert.Equal(nobody.Id, (await new ShopContext().Books.SingleAsync(b => b.Title == first.Title)).AuthorId);
+            db.Authors.Remove(ursula);
+            await db.SaveChangesAsync();
+        }
+        await using (var db = new ShopContext())
+        {
+            Assert.Equal(1, await db.Books.CountAsync());
+            Assert.Equal(1, await db.Authors.CountAsync());
         }
     }
 }

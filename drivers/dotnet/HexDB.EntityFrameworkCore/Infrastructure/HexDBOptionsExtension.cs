@@ -118,6 +118,8 @@ public static class HexDBServiceCollectionExtensions
             .TryAdd<IValueGeneratorSelector, HexDBValueGeneratorSelector>()
             .TryAdd<IShapedQueryCompilingExpressionVisitorFactory, HexDBShapedQueryCompilingExpressionVisitorFactory>()
             .TryAdd<IQueryableMethodTranslatingExpressionVisitorFactory, HexDBQueryableMethodTranslatingExpressionVisitorFactory>()
+            .TryAdd<IQueryCompilationContextFactory, HexDBQueryCompilationContextFactory>()
+            .TryAdd<IQueryTranslationPreprocessorFactory, HexDBQueryTranslationPreprocessorFactory>()
             .TryAddProviderSpecificServices(b => b.TryAddScoped<HexDBConnection, HexDBConnection>())
             .TryAddCoreServices();
         return services;

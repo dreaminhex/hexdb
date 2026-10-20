@@ -25,7 +25,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon sharding that repairs corrupted memory.
-- **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, an Entity Framework Core provider, and an ODBC driver.
+- **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, an Entity Framework Core provider, and ODBC and JDBC drivers.
 
 ## Performance
 
@@ -329,7 +329,7 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 
 - Every hex holds a full copy of the data. Horizontal partitioning (sharding across hexes) isn't implemented.
 - SQL is read-only. Statements with joins, subqueries or expressions run in memory over table reads of at most `limits.sql_max_rows` documents each (100,000), and window functions and recursive `WITH` aren't supported. The ODBC driver is tested with pyodbc (unixODBC and the Windows driver manager) and the JDBC driver with JUnit, not yet with desktop tools such as Excel, Power BI or DBeaver.
-- The Entity Framework Core provider maps one entity type to one tessellation. It doesn't support relationships, owned types, inheritance or explicit transactions (see [MANUAL.md](MANUAL.md#entity-framework-core)).
+- The Entity Framework Core provider loads relationships with extra queries (no joins), so navigations can't be used inside server-side filters; many-to-many skip navigations, complex types and composite keys aren't supported (see [MANUAL.md](MANUAL.md#entity-framework-core)).
 
 ## License
 
