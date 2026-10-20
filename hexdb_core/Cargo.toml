@@ -19,7 +19,7 @@ ulid = { version = "3.0.0", features = ["serde"] }
 rust_decimal = { version = "1.37.1", features = ["serde"] }
 base64 = "0.23.1"
 chrono = { version = "0.4.41", features = ["serde"] }
-aes-gcm = "0.10.3"
+aes-gcm = "0.11.1"
 rand = { version = "0.10.3", features = ["std"] }
 rand_core = "0.9.3"
 hex = "0.4.3"
