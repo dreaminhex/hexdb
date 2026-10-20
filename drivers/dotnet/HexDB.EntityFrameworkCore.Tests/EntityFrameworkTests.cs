@@ -36,10 +36,33 @@ public class Customer
     [ConcurrencyCheck] public int Version { get; set; }
 }
 
+public abstract class Animal
+{
+    public string Id { get; set; } = null!;
+    public string Name { get; set; } = "";
+}
+
+public class Dog : Animal
+{
+    public int Barks { get; set; }
+}
+
+public class Cat : Animal
+{
+    public bool Indoor { get; set; }
+}
+
+public class Kitten : Cat
+{
+    public int AgeWeeks { get; set; }
+}
+
 public class ShopContext : DbContext
 {
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<Customer> Customers => Set<Customer>();
+    public DbSet<Animal> Animals => Set<Animal>();
+    public DbSet<Dog> Dogs => Set<Dog>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder options) =>
         options.UseHexDB(Environment.GetEnvironmentVariable("HEXDB_URL")!, Environment.GetEnvironmentVariable("HEXDB_API_KEY"), o => o.PageSize(7));
@@ -48,6 +71,9 @@ public class ShopContext : DbContext
     {
         model.Entity<Order>().ToTessellation("ef_orders");
         model.Entity<Customer>().ToTessellation("ef_customers").Property(c => c.Email).ToJsonProperty("email");
+        model.Entity<Animal>().ToTessellation("ef_animals");
+        model.Entity<Cat>();
+        model.Entity<Kitten>();
     }
 }
 
@@ -223,6 +249,94 @@ public class EntityFrameworkTests
         {
             Assert.Equal(1, await db.Customers.CountAsync());
             Assert.Equal("Ada L.", (await db.Customers.SingleAsync()).Name);
+        }
+    }
+
+    [SkippableFact]
+    public async Task ExplicitTransactionsCommitAtomically()
+    {
+        Skip.IfNot(Configured, "set HEXDB_URL and HEXDB_API_KEY");
+        await Seed();
+        await using var db = new ShopContext();
+        await using var other = new ShopContext();
+
+        // Two saves in one transaction: nothing is written until Commit.
+        await using (var transaction = await db.Database.BeginTransactionAsync())
+        {
+            Assert.Same(transaction, db.Database.CurrentTransaction);
+            db.Orders.Add(new Order { Customer = "tx", Total = 1 });
+            await db.SaveChangesAsync();
+            db.Customers.Add(new Customer { Id = Guid.NewGuid(), Name = "Tx" });
+            await db.SaveChangesAsync();
+            Assert.Equal(0, await other.Orders.CountAsync(o => o.Customer == "tx"));
+            Assert.Throws<InvalidOperationException>(() => db.Database.BeginTransaction());
+            await transaction.CommitAsync();
+        }
+        Assert.Null(db.Database.CurrentTransaction);
+        Assert.Equal(1, await other.Orders.CountAsync(o => o.Customer == "tx"));
+        Assert.Equal(1, await other.Customers.CountAsync(c => c.Name == "Tx"));
+
+        // Rolled back, or disposed without a commit: nothing is written.
+        await using (var transaction = await db.Database.BeginTransactionAsync())
+        {
+            db.Orders.Add(new Order { Customer = "rolled-back" });
+            await db.SaveChangesAsync();
+            await transaction.RollbackAsync();
+        }
+        using (db.Database.BeginTransaction())
+        {
+            db.Orders.Add(new Order { Customer = "rolled-back" });
+            db.SaveChanges();
+        }
+        Assert.Equal(0, await other.Orders.CountAsync(o => o.Customer == "rolled-back"));
+
+        // A conflict surfaces at Commit, and nothing in the transaction is written.
+        var customer = await db.Customers.SingleAsync(c => c.Name == "Tx");
+        var stale = await other.Customers.SingleAsync(c => c.Name == "Tx");
+        customer.Version++;
+        await db.SaveChangesAsync();
+        await using (var transaction = await other.Database.BeginTransactionAsync())
+        {
+            stale.Version = 99;
+            other.Orders.Add(new Order { Customer = "conflicted" });
+            await other.SaveChangesAsync();
+            await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => transaction.CommitAsync());
+        }
+        await using var fresh = new ShopContext();
+        Assert.Equal(0, await fresh.Orders.CountAsync(o => o.Customer == "conflicted"));
+    }
+
+    [SkippableFact]
+    public async Task InheritanceSharesATessellation()
+    {
+        Skip.IfNot(Configured, "set HEXDB_URL and HEXDB_API_KEY");
+        await Seed();
+        await using (var db = new ShopContext())
+        {
+            db.Animals.AddRange(new Dog { Name = "Rex", Barks = 3 }, new Dog { Name = "Fido", Barks = 1 }, new Cat { Name = "Tom", Indoor = true },
+                new Kitten { Name = "Mini", Indoor = true, AgeWeeks = 8 });
+            await db.SaveChangesAsync();
+        }
+        await using (var db = new ShopContext())
+        {
+            var all = await db.Animals.OrderBy(a => a.Name).ToListAsync();
+            Assert.Equal(new[] { "Fido", "Mini", "Rex", "Tom" }, all.Select(a => a.Name));
+            Assert.IsType<Dog>(all[0]);
+            Assert.IsType<Kitten>(all[1]);
+            Assert.Equal(8, ((Kitten)all[1]).AgeWeeks);
+            Assert.IsType<Cat>(all[3]);
+            Assert.Equal(2, await db.Dogs.CountAsync());
+            Assert.Equal("Rex", (await db.Dogs.SingleAsync(d => d.Barks > 2)).Name);
+            // A derived set or OfType includes its own subtypes.
+            Assert.Equal(new[] { "Mini", "Tom" }, await db.Animals.OfType<Cat>().OrderBy(c => c.Name).Select(c => c.Name).ToListAsync());
+            Assert.Equal(1, await db.Set<Kitten>().CountAsync());
+            var rex = await db.Dogs.SingleAsync(d => d.Name == "Rex");
+            rex.Barks = 10;
+            await db.SaveChangesAsync();
+        }
+        await using (var db = new ShopContext())
+        {
+            Assert.Equal(10, (await db.Dogs.SingleAsync(d => d.Name == "Rex")).Barks);
         }
     }
 }

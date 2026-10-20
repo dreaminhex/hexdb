@@ -1,6 +1,7 @@
 // SaveChanges: every added, modified and deleted entity becomes one operation
 // of a single HexDB transaction (POST /transactions), so the whole save is
-// atomic. Updates are patches of the changed properties; properties marked as
+// atomic (inside an explicit transaction, the operations wait for Commit).
+// Updates are patches of the changed properties; properties marked as
 // concurrency tokens become `if_match` preconditions, so a document changed
 // by someone else since it was read fails the save with
 // DbUpdateConcurrencyException.
@@ -17,9 +18,10 @@ namespace HexDB.EntityFrameworkCore.Storage;
 
 public class HexDBDatabase : Database
 {
-    private readonly HexDBConnection _connection;
+    private readonly HexDBTransactionManager _transactions;
 
-    public HexDBDatabase(DatabaseDependencies dependencies, HexDBConnection connection) : base(dependencies) => _connection = connection;
+    public HexDBDatabase(DatabaseDependencies dependencies, IDbContextTransactionManager transactions) : base(dependencies) =>
+        _transactions = (HexDBTransactionManager)transactions;
 
     public override int SaveChanges(IList<IUpdateEntry> entries) => SaveChangesAsync(entries).GetAwaiter().GetResult();
 
@@ -35,19 +37,13 @@ public class HexDBDatabase : Database
             operations.Add(op);
         }
         if (operations.Count == 0) return 0;
-        try
+        // Inside an explicit transaction the operations wait for Commit.
+        if (_transactions.Current is { } transaction)
         {
-            await _connection.Client.TransactionAsync(operations, cancel: cancellationToken).ConfigureAwait(false);
+            transaction.Queue(operations, withPreconditions, entries);
+            return operations.Count;
         }
-        // Only a failed if_match is a concurrency conflict; other 409s (a unique index) aren't.
-        catch (HexDBException e) when (e.Status == 409 && withPreconditions && e.Message.Contains("if_match") || e.Status == 404)
-        {
-            throw new DbUpdateConcurrencyException($"A document was changed or deleted since it was read: {e.Message}", e, entries.ToList());
-        }
-        catch (HexDBException e)
-        {
-            throw new DbUpdateException($"HexDB refused the changes ({e.Status} {e.Code}): {e.Message}", e, entries.ToList());
-        }
+        await _transactions.SendAsync(operations, withPreconditions, entries.ToList(), cancellationToken).ConfigureAwait(false);
         return operations.Count;
     }
 

@@ -179,7 +179,18 @@ public class HexDBQueryableMethodTranslatingExpressionVisitor : QueryableMethodT
     protected override ShapedQueryExpression? TranslateLeftJoin(ShapedQueryExpression outer, ShapedQueryExpression inner, LambdaExpression outerKeySelector, LambdaExpression innerKeySelector, LambdaExpression resultSelector) => null;
     protected override ShapedQueryExpression? TranslateMax(ShapedQueryExpression source, LambdaExpression? selector, Type resultType) => null;
     protected override ShapedQueryExpression? TranslateMin(ShapedQueryExpression source, LambdaExpression? selector, Type resultType) => null;
-    protected override ShapedQueryExpression? TranslateOfType(ShapedQueryExpression source, Type resultType) => resultType == source.ShaperExpression.Type ? source : null;
+    protected override ShapedQueryExpression? TranslateOfType(ShapedQueryExpression source, Type resultType)
+    {
+        if (resultType == source.ShaperExpression.Type) return source;
+        if (source.ShaperExpression is not StructuralTypeShaperExpression shaper || shaper.StructuralType is not IEntityType entityType) return null;
+        var query = Query(source);
+        if (!IsEntityQuery(source) || query.Skip is not null || query.Take is not null) return null;
+        // A derived type of the hierarchy: filter by its discriminator values.
+        var derived = entityType.GetDerivedTypes().FirstOrDefault(t => t.ClrType == resultType);
+        if (derived is null) return null;
+        query.NarrowTo(derived);
+        return source.UpdateShaperExpression(new StructuralTypeShaperExpression(derived, shaper.ValueBufferExpression, shaper.IsNullable));
+    }
     protected override ShapedQueryExpression? TranslateReverse(ShapedQueryExpression source) => null;
     protected override ShapedQueryExpression? TranslateSelectMany(ShapedQueryExpression source, LambdaExpression collectionSelector, LambdaExpression resultSelector) => null;
     protected override ShapedQueryExpression? TranslateSelectMany(ShapedQueryExpression source, LambdaExpression selector) => null;

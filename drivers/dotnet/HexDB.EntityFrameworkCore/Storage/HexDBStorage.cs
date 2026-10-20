@@ -1,5 +1,5 @@
 // Storage plumbing: the connection, ULIDs, type mappings, JSON conversion,
-// value generation, and the (unsupported) explicit transactions.
+// value generation, and explicit transactions.
 
 using System.Collections;
 using System.Diagnostics.CodeAnalysis;
@@ -16,6 +16,7 @@ using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Storage.Json;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Microsoft.EntityFrameworkCore.Update;
 using Microsoft.EntityFrameworkCore.ValueGeneration;
 
 namespace HexDB.EntityFrameworkCore.Storage;
@@ -221,44 +222,147 @@ public static class JsonValues
     }
 }
 
-/// <summary>HexDB has no client-controlled transactions: SaveChanges is already atomic.</summary>
+/// <summary>
+/// Explicit transactions. HexDB applies a transaction's writes atomically when
+/// it's committed: while one is open, each SaveChanges queues its operations,
+/// Commit sends them all as one HexDB transaction, and Rollback (or disposing
+/// without committing) discards them. Reads inside the transaction don't see
+/// its queued writes, and a conflict (a failed concurrency token) surfaces at
+/// Commit. Without an explicit transaction, each SaveChanges is its own atomic
+/// HexDB transaction.
+/// </summary>
 public class HexDBTransactionManager : IDbContextTransactionManager
 {
-    private static readonly IDbContextTransaction Stub = new StubTransaction();
+    /// <summary>Most operations one HexDB transaction may hold.</summary>
+    public const int MaxOperations = 1000;
 
-    public IDbContextTransaction? CurrentTransaction => null;
+    private readonly HexDBConnection _connection;
+    private HexDBTransaction? _current;
 
-    public IDbContextTransaction BeginTransaction() => throw NotSupported();
+    public HexDBTransactionManager(HexDBConnection connection) => _connection = connection;
 
-    public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default) => throw NotSupported();
+    public IDbContextTransaction? CurrentTransaction => _current;
 
-    public void CommitTransaction() { }
+    internal HexDBTransaction? Current => _current;
 
-    public Task CommitTransactionAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public void RollbackTransaction() { }
-
-    public Task RollbackTransactionAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    public void ResetState() { }
-
-    public Task ResetStateAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-
-    private static NotSupportedException NotSupported() =>
-        new("HexDB doesn't support explicit transactions. Each SaveChanges is one atomic HexDB transaction; group the changes that belong together into one SaveChanges.");
-
-    private sealed class StubTransaction : IDbContextTransaction
+    public IDbContextTransaction BeginTransaction()
     {
-        public Guid TransactionId { get; } = Guid.NewGuid();
-        public void Commit() { }
-        public Task CommitAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public void Rollback() { }
-        public Task RollbackAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public void Dispose() { }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        if (_current is not null) throw new InvalidOperationException("A transaction is already in progress: commit or roll it back first. HexDB doesn't nest transactions.");
+        return _current = new HexDBTransaction(this);
     }
 
-    internal static IDbContextTransaction Transaction => Stub;
+    public Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default) => Task.FromResult(BeginTransaction());
+
+    public void CommitTransaction() => CommitTransactionAsync().GetAwaiter().GetResult();
+
+    public Task CommitTransactionAsync(CancellationToken cancellationToken = default) =>
+        (_current ?? throw new InvalidOperationException("No transaction is in progress.")).CommitAsync(cancellationToken);
+
+    public void RollbackTransaction() => (_current ?? throw new InvalidOperationException("No transaction is in progress.")).Rollback();
+
+    public Task RollbackTransactionAsync(CancellationToken cancellationToken = default)
+    {
+        RollbackTransaction();
+        return Task.CompletedTask;
+    }
+
+    public void ResetState() => _current = null;
+
+    public Task ResetStateAsync(CancellationToken cancellationToken = default)
+    {
+        ResetState();
+        return Task.CompletedTask;
+    }
+
+    internal void Ended(HexDBTransaction transaction)
+    {
+        if (_current == transaction) _current = null;
+    }
+
+    /// <summary>Send operations as one HexDB transaction, with EF Core's exceptions for failures.</summary>
+    internal async Task SendAsync(IReadOnlyList<JsonObject> operations, bool withPreconditions, IReadOnlyList<IUpdateEntry> entries, CancellationToken cancellationToken)
+    {
+        if (operations.Count == 0) return;
+        try
+        {
+            await _connection.Client.TransactionAsync(operations, cancel: cancellationToken).ConfigureAwait(false);
+        }
+        // Only a failed if_match is a concurrency conflict; other 409s (a unique index) aren't.
+        catch (HexDBException e) when (e.Status == 409 && withPreconditions && e.Message.Contains("if_match") || e.Status == 404)
+        {
+            throw new DbUpdateConcurrencyException($"A document was changed or deleted since it was read: {e.Message}", e, entries.ToList());
+        }
+        catch (HexDBException e)
+        {
+            throw new DbUpdateException($"HexDB refused the changes ({e.Status} {e.Code}): {e.Message}", e, entries.ToList());
+        }
+    }
+}
+
+/// <summary>An open HexDB transaction: the operations queued by SaveChanges until Commit.</summary>
+public sealed class HexDBTransaction : IDbContextTransaction
+{
+    private readonly HexDBTransactionManager _manager;
+    private readonly List<JsonObject> _operations = new();
+    private readonly List<IUpdateEntry> _entries = new();
+    private bool _withPreconditions;
+    private bool _ended;
+
+    internal HexDBTransaction(HexDBTransactionManager manager) => _manager = manager;
+
+    public Guid TransactionId { get; } = Guid.NewGuid();
+
+    internal void Queue(IReadOnlyList<JsonObject> operations, bool withPreconditions, IEnumerable<IUpdateEntry> entries)
+    {
+        if (_ended) throw new InvalidOperationException("The transaction has already been committed or rolled back.");
+        if (_operations.Count + operations.Count > HexDBTransactionManager.MaxOperations)
+            throw new InvalidOperationException($"A HexDB transaction holds at most {HexDBTransactionManager.MaxOperations} operations; this one would have {_operations.Count + operations.Count}. Commit in smaller transactions.");
+        _operations.AddRange(operations);
+        _entries.AddRange(entries);
+        _withPreconditions |= withPreconditions;
+    }
+
+    public void Commit() => CommitAsync().GetAwaiter().GetResult();
+
+    public async Task CommitAsync(CancellationToken cancellationToken = default)
+    {
+        if (_ended) throw new InvalidOperationException("The transaction has already been committed or rolled back.");
+        _ended = true;
+        _manager.Ended(this);
+        await _manager.SendAsync(_operations, _withPreconditions, _entries, cancellationToken).ConfigureAwait(false);
+    }
+
+    public void Rollback()
+    {
+        if (_ended) throw new InvalidOperationException("The transaction has already been committed or rolled back.");
+        End();
+    }
+
+    public Task RollbackAsync(CancellationToken cancellationToken = default)
+    {
+        Rollback();
+        return Task.CompletedTask;
+    }
+
+    private void End()
+    {
+        _ended = true;
+        _operations.Clear();
+        _entries.Clear();
+        _manager.Ended(this);
+    }
+
+    /// <summary>Disposing without committing discards the queued writes.</summary>
+    public void Dispose()
+    {
+        if (!_ended) End();
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Dispose();
+        return ValueTask.CompletedTask;
+    }
 }
 
 /// <summary>Logging definitions (the provider logs through EF Core's core events).</summary>

@@ -1,5 +1,6 @@
 // How entity types map to HexDB: each entity type is a tessellation (named
-// after its DbSet, or ToTessellation), each property a field of the document
+// after its DbSet, or ToTessellation; a hierarchy shares its root type's, with
+// a discriminator field naming each document's type), each property a field of the document
 // (named after the property, or ToJsonProperty), and the key is the
 // document's `id`, a ULID. String keys get a new ULID when an entity is added;
 // Guid keys are stored as the ULID with the same 128 bits.
@@ -48,7 +49,8 @@ namespace HexDB.EntityFrameworkCore.Metadata
             var sets = _dependencies.SetFinder.FindSets(_dependencies.ContextType);
             foreach (var entityType in modelBuilder.Metadata.GetEntityTypes())
             {
-                if (entityType.FindAnnotation(HexDBAnnotationNames.Tessellation) is null)
+                // Derived types are stored with their root type (one tessellation per hierarchy).
+                if (entityType.BaseType is null && entityType.FindAnnotation(HexDBAnnotationNames.Tessellation) is null)
                 {
                     var set = sets.Where(s => s.Type == entityType.ClrType).Select(s => s.Name).FirstOrDefault();
                     entityType.Builder.HasAnnotation(HexDBAnnotationNames.Tessellation, set ?? entityType.ClrType.Name);
@@ -85,8 +87,10 @@ namespace HexDB.EntityFrameworkCore.Metadata
                 var name = entityType.DisplayName();
                 if (entityType.IsOwned())
                     throw new InvalidOperationException($"'{name}' is an owned entity type; the HexDB provider doesn't support owned types yet. Map nested data as a property of a JSON-serializable type instead.");
-                if (entityType.BaseType is not null || entityType.GetDirectlyDerivedTypes().Any())
-                    throw new InvalidOperationException($"'{name}' is part of an inheritance hierarchy; the HexDB provider doesn't support inheritance yet.");
+                if (entityType.BaseType is not null && entityType.FindAnnotation(HexDBAnnotationNames.Tessellation) is { Value: string own } && own != entityType.GetRootType().GetTessellation())
+                    throw new InvalidOperationException($"'{name}' derives from '{entityType.GetRootType().DisplayName()}', so it's stored in that type's tessellation ('{entityType.GetRootType().GetTessellation()}'); call ToTessellation on the root type only.");
+                if ((entityType.BaseType is not null || entityType.GetDirectlyDerivedTypes().Any()) && entityType.FindDiscriminatorProperty() is null)
+                    throw new InvalidOperationException($"'{name}' is part of an inheritance hierarchy without a discriminator; HexDB stores a hierarchy in one tessellation and needs one to tell the types apart.");
                 if (entityType.GetNavigations().Any() || entityType.GetSkipNavigations().Any())
                     throw new InvalidOperationException($"'{name}' has navigation properties; the HexDB provider doesn't support relationships yet. Store related ids as properties and query them separately.");
                 var key = entityType.FindPrimaryKey()
@@ -122,9 +126,12 @@ namespace Microsoft.EntityFrameworkCore
             return builder;
         }
 
-        /// <summary>The tessellation an entity type is stored in.</summary>
-        public static string GetTessellation(this IReadOnlyEntityType entityType) =>
-            entityType.FindAnnotation(HexDBAnnotationNames.Tessellation)?.Value as string ?? entityType.ClrType.Name;
+        /// <summary>The tessellation an entity type is stored in (its root type's, in a hierarchy).</summary>
+        public static string GetTessellation(this IReadOnlyEntityType entityType)
+        {
+            var root = entityType.GetRootType();
+            return root.FindAnnotation(HexDBAnnotationNames.Tessellation)?.Value as string ?? root.ClrType.Name;
+        }
 
         /// <summary>The document field a property is stored in (`id` for the key).</summary>
         public static string GetJsonPropertyName(this IReadOnlyProperty property) =>
