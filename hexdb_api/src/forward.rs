@@ -21,10 +21,10 @@
 // Without a reachable Overseer, the request is handled locally, which refuses
 // writes with 421 `read_only_replica`.
 //
-// A sharded replica (`replication.sharding`) keeps only some of the data, so
+// A sliced replica (`replication.slicing`) keeps only some of the data, so
 // it forwards reads of user data too, and refuses live feeds (WebSocket and
 // Server-Sent Events) with 421 naming the Overseer. While a newly elected
-// Overseer collects shards, it answers data requests with 503.
+// Overseer collects slices, it answers data requests with 503.
 
 use axum::{
     body::{Body, Bytes},
@@ -67,7 +67,7 @@ fn handled_locally(method: &Method, path: &str) -> bool {
         || path.starts_with("/_s/")
 }
 
-/// What a sharded replica (or a rebuilding Overseer) still answers itself:
+/// What a sliced replica (or a rebuilding Overseer) still answers itself:
 /// requests that don't read user data.
 fn answers_without_data(path: &str) -> bool {
     path.starts_with("/lattice/")
@@ -195,7 +195,7 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
             return crate::handlers::ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "rebuilding", note).with_retry_after(5).into_response();
         }
     }
-    // A sharded replica only has some of the data: everything that reads it goes to the Overseer.
+    // A sliced replica only has some of the data: everything that reads it goes to the Overseer.
     let partial = !engine.is_writable() && engine.is_partial_replica() && !answers_without_data(&path);
     if !partial && (engine.is_writable() || !engine.config.replication.forward_writes || handled_locally(request.method(), &path)) {
         return next.run(request).await;
@@ -209,7 +209,7 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
             return crate::handlers::ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "overseer_unreachable",
-                "This hex keeps only some of the lattice's shards and no Overseer is reachable to answer; try again shortly.",
+                "This hex keeps only some of the lattice's slices and no Overseer is reachable to answer; try again shortly.",
             )
             .with_retry_after(5)
             .into_response();
@@ -219,9 +219,9 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     if partial && live_feed(&path) {
         return crate::handlers::ApiError::new(
             StatusCode::MISDIRECTED_REQUEST,
-            "sharded_replica",
+            "sliced_replica",
             format!(
-                "This hex keeps only some of the lattice's shards, so it doesn't serve live feeds. Connect to the Overseer '{}' at {}.",
+                "This hex keeps only some of the lattice's slices, so it doesn't serve live feeds. Connect to the Overseer '{}' at {}.",
                 overseer.name,
                 hexdb_core::replication::peer_base_url(&overseer)
             ),

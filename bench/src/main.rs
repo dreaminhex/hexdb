@@ -352,8 +352,8 @@ fn crypto_and_compression(report: &mut Report, orders: &[Vec<u8>]) -> Result<()>
 
 fn vertices(report: &mut Report, orders: &[Vec<u8>]) -> Result<()> {
     report.section(
-        "Vertices: Reed-Solomon shards in memory (one core)",
-        "Each document in memory is split into 4 data and 2 parity shards across six vertices, each shard with a BLAKE3 hash. Any 2 of the 6 can be lost. A lost or corrupt vertex is rebuilt from the other shards; these measure that in-process.",
+        "Vertices: Reed-Solomon fragments in memory (one core)",
+        "Each document in memory is split into 4 data and 2 parity fragments across six vertices, each with a BLAKE3 hash. Any 2 of the 6 can be lost. A lost or corrupt vertex is rebuilt from the other fragments; these measure that in-process.",
     );
     let mut hex = Hex::new();
     let keys: Vec<DocKey> = (0..orders.len()).map(|i| DocKey::new("orders", ulid::Ulid::from(i as u128 + 1))).collect();
@@ -363,8 +363,8 @@ fn vertices(report: &mut Report, orders: &[Vec<u8>]) -> Result<()> {
         hex.put(k, 1, None, d, false);
     }
     let encode = started.elapsed();
-    report.row(&format!("Encode {} order documents ({}) into shards", orders.len(), mb(raw as f64)), format!("{} ({})", ms(encode), throughput(raw as f64, encode)));
-    report.row("Memory used per byte of document (shards + parity)", format!("{:.2}x", hex.memory_bytes() as f64 / raw as f64));
+    report.row(&format!("Encode {} order documents ({}) into fragments", orders.len(), mb(raw as f64)), format!("{} ({})", ms(encode), throughput(raw as f64, encode)));
+    report.row("Memory used per byte of document (data + parity)", format!("{:.2}x", hex.memory_bytes() as f64 / raw as f64));
     let started = Instant::now();
     for k in &keys {
         hex.read(k);
@@ -386,8 +386,8 @@ fn vertices(report: &mut Report, orders: &[Vec<u8>]) -> Result<()> {
     let repair = hex.check_integrity(&keys);
     let took = started.elapsed();
     report.row(
-        &format!("Rebuild a lost vertex: repair all {} documents' shards", orders.len()),
-        format!("{} ({} shards repaired)", ms(took), repair.repaired_shards),
+        &format!("Rebuild a lost vertex: repair all {} documents' fragments", orders.len()),
+        format!("{} ({} fragments repaired)", ms(took), repair.repaired_shards),
     );
     for k in &keys {
         hex.corrupt_for_testing(k, 0);
@@ -395,7 +395,7 @@ fn vertices(report: &mut Report, orders: &[Vec<u8>]) -> Result<()> {
     }
     let started = Instant::now();
     let repair = hex.check_integrity(&keys);
-    report.row("Rebuild two lost vertices at once", format!("{} ({} shards repaired)", ms(started.elapsed()), repair.repaired_shards));
+    report.row("Rebuild two lost vertices at once", format!("{} ({} fragments repaired)", ms(started.elapsed()), repair.repaired_shards));
 
     let big = big_structured(10 << 20, 3);
     let k = DocKey::new("big", ulid::Ulid::from(1u128));
@@ -553,11 +553,11 @@ fn server_reads_and_writes(report: &mut Report, orders: &[Vec<u8>]) -> Result<()
     let all_raw: f64 = tess.iter().filter(|t| t["kind"] == "user").map(|t| t["total_size_bytes"].as_f64().unwrap_or(0.0)).sum();
     report.section(
         "Storage: memory and disk",
-        "After writing the orders above, flushing and compacting. Disk is everything in the data directory's SSTables (encrypted, compressed, with indexes); memory is the in-memory shards.",
+        "After writing the orders above, flushing and compacting. Disk is everything in the data directory's SSTables (encrypted, compressed, with indexes); memory is the in-memory fragments.",
     );
     report.row("Orders stored", format!("{} documents, {} of JSON", orders_metrics["document_count"], mb(orders_metrics["total_size_bytes"].as_f64().unwrap_or(0.0))));
     report.row("Disk used by all data (SSTables, encrypted and compressed)", format!("{} for {} of JSON ({:.0}%)", mb(disk), mb(all_raw), 100.0 * disk / all_raw.max(1.0)));
-    report.row("Memory used by the in-memory shards", format!("{} ({:.2}x the JSON)", mb(status["storage"]["memory_bytes"].as_f64().unwrap_or(0.0)), status["storage"]["memory_bytes"].as_f64().unwrap_or(0.0) / all_raw.max(1.0)));
+    report.row("Memory used by the in-memory fragments", format!("{} ({:.2}x the JSON)", mb(status["storage"]["memory_bytes"].as_f64().unwrap_or(0.0)), status["storage"]["memory_bytes"].as_f64().unwrap_or(0.0) / all_raw.max(1.0)));
 
     // 10 MB documents.
     report.section(

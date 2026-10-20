@@ -97,7 +97,7 @@ fn is_lattice_route(method: &Method, path: &str) -> bool {
     let one_segment = |prefix: &str| rest.strip_prefix(prefix).is_some_and(|s| !s.is_empty() && !s.contains('/'));
     match *method {
         Method::GET => {
-            matches!(rest, "snapshot" | "catalog" | "changes") || one_segment("snapshot/") || one_segment("shard-snapshot/") || one_segment("chunks/")
+            matches!(rest, "snapshot" | "catalog" | "changes") || one_segment("snapshot/") || one_segment("slice-snapshot/") || one_segment("chunks/")
         }
         Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "throttle" | "share-download"),
         _ => false,

@@ -149,7 +149,7 @@ ROUTES = [
     ("patch", "/{tessellation}/_uploads/{id}", "Files", "Send the next part (raw body) starting at ?offset= or Upload-Offset", {"parameters": [TESS, ID, param("offset", "query", schema={"type": "integer"}, required=False)], "requestBody": {"required": True, "content": {"application/octet-stream": {"schema": BINARY}}}, "responses": ok()}),
     ("post", "/{tessellation}/_uploads/{id}/complete", "Files", "Finish a resumable upload", {"parameters": [TESS, ID], "responses": {**ok("Created", status="201"), **ok("A new version")}}),
     ("delete", "/{tessellation}/_uploads/{id}", "Files", "Abandon a resumable upload", {"parameters": [TESS, ID], "responses": no_content()}),
-    ("post", "/scrub", "Maintenance", "Verify every file shard now and repair bad ones", {"responses": ok()}),
+    ("post", "/scrub", "Maintenance", "Verify every stored file fragment now and repair bad ones", {"responses": ok()}),
     ("post", "/transactions", "Documents", "Operations across tessellations, all or nothing", {"parameters": [IDEM], "requestBody": body(description="{\"operations\": [{\"op\": \"insert|replace|patch|delete|get|check\", \"tessellation\", \"id\", \"data\", \"if_version\"}]}"), "responses": ok()}),
     ("post", "/sql", "SQL", "Run a SQL SELECT (read-only; one page of rows, then pass next as cursor)", {"requestBody": body({"type": "object", "required": ["sql"], "properties": {"sql": {"type": "string"}, "params": {"type": "array", "description": "values for ? or $1, $2, ... placeholders"}, "page_size": {"type": "integer", "description": "rows per page, 1-10000 (default 1000)"}, "cursor": {"type": "string", "description": "next from the previous page"}}}), "responses": ok("{\"columns\": [{\"name\", \"type\"}], \"rows\": [[...]], \"next\", \"translated\"}")}),
     ("get", "/sql/tables", "SQL", "Tessellations the caller can read (a catalog for SQL clients)", {"responses": ok("{\"tables\": [{\"name\"}]}")}),
@@ -219,7 +219,7 @@ def build():
         "openapi": "3.1.0",
         "info": {
             "title": "HexDB REST API",
-            "version": "2.1.0",
+            "version": "2.1.1",
             "description": "HexDB's REST API. Authenticate with `Authorization: Bearer <API key or session token>` or the `hexdb_session` cookie (admin UI). Errors are `{\"error\": {\"code\", \"message\"}}`. See MANUAL.md for filters, aggregations, permissions and everything else.",
         },
         "servers": [{"url": "http://127.0.0.1:7700"}],

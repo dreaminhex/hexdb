@@ -183,9 +183,9 @@ async fn server() -> anyhow::Result<()> {
         config_sha256: String::new(),
         config_state: String::new(),
         signs_responses: true,
-        sharding: config.replication.sharding,
-        shard_copies: config.replication.shard_copies.max(1),
-        shards_held: hexdb_core::sharding::ALL_SHARDS,
+        slicing: config.replication.slicing,
+        slice_copies: config.replication.slice_copies.max(1),
+        slices_held: hexdb_core::slicing::ALL_SLICES,
         replication_source: String::new(),
     };
     let role = elect(&provisional, &peers);
@@ -221,8 +221,8 @@ async fn server() -> anyhow::Result<()> {
         }
     };
     info!("✅ Hex '{}' (id: {}) initializing as {}...", engine.name, engine.id, engine.role());
-    // A sharded replica's shards, history and position; one starting as the
-    // Overseer with only some shards collects the rest before serving data.
+    // A sliced replica's slices, history and position; one starting as the
+    // Overseer with only some slices collects the rest before serving data.
     engine.restore_replication_state().await;
     // The previous process's runtime file is still here if it didn't shut down cleanly.
     if let Some(report) = hexdb_core::crashes::detect(&storage_dir, opening.elapsed().as_millis() as u64) {

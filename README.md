@@ -24,7 +24,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
   - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region) and hidden fields per role. Uploading, deleting and restoring files are separate permissions that can be limited to folders.
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
-- **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon sharding that repairs corrupted memory.
+- **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon coding that repairs corrupted memory.
 - **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, an Entity Framework Core provider, and ODBC and JDBC drivers.
 
 ## Performance
@@ -37,7 +37,7 @@ Measured with `cargo run --release -p hexdb_bench` on a laptop (Intel Core i9-12
 | **Writes** | 31,000 documents/s in bulk (1,000 per request); single writes 2.5 ms median, 1,700/s from 8 clients |
 | **Reads** | 0.18 ms median by ID; 13,600/s from 8 clients |
 | **Queries** | Indexed lookup in 100,000 documents: 0.8 ms median. `SELECT COUNT(*)`: 0.4 ms |
-| **Memory** | 1.5x the JSON size: four data and two parity shards per document |
+| **Memory** | 1.5x the JSON size: four data and two parity fragments per document |
 | **Disk** | Structured JSON compresses to 16% of its size (a 10 MB document takes 1.6 MB); small documents average 81% after encryption and per-document overhead |
 | **Encryption** | AES-256-GCM: 890 MB/s encrypting, 1,150 MB/s decrypting, on one core |
 | **10 MB documents** | Written in 600 ms and read in 190 ms (structured JSON); 94 ms and 28 ms for data that doesn't compress |
@@ -327,7 +327,7 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 
 ## Limitations
 
-- Sharding (`replication.sharding`) splits the data across replicas, but the Overseer still keeps every shard, so a lattice can't hold more than one machine can, and sharded replicas pass queries to the Overseer.
+- Slicing (`replication.slicing`) splits the data across replicas, but the Overseer still keeps every slice, so a lattice can't hold more than one machine can, and replicas holding slices pass queries to the Overseer.
 - SQL is read-only. Statements with joins, subqueries or expressions run in memory over table reads of at most `limits.sql_max_rows` documents each (100,000), and window functions and recursive `WITH` aren't supported. The ODBC driver is tested with pyodbc (unixODBC and the Windows driver manager) and the JDBC driver with JUnit, not yet with desktop tools such as Excel, Power BI or DBeaver.
 - The Entity Framework Core provider loads relationships with extra queries (no joins), so navigations can't be used inside server-side filters; many-to-many skip navigations, complex types and composite keys aren't supported (see [MANUAL.md](MANUAL.md#entity-framework-core)).
 
