@@ -269,6 +269,33 @@ fn probe_targets(config: &HexConfig) -> Vec<String> {
     targets
 }
 
+/// Every address each target resolves to. A peer can be a name for a group of
+/// hexes (Fly.io's `<app>.internal`, a Kubernetes headless service, round-robin
+/// DNS), and connecting by name would only reach one of them. Addresses stay as
+/// they are; a name that doesn't resolve is kept, so its probe reports it.
+async fn expand_targets(targets: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for target in targets {
+        let host = host_of(&target).trim_start_matches('[').trim_end_matches(']');
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            out.push(target);
+            continue;
+        }
+        let resolved: Vec<String> = match tokio::net::lookup_host(target.as_str()).await {
+            Ok(addrs) => addrs.map(|a| a.to_string()).collect(),
+            Err(_) => Vec::new(),
+        };
+        if resolved.is_empty() {
+            out.push(target);
+        } else {
+            out.extend(resolved);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Send an authenticated hello to one address and verify the reply. A hex
 /// that doesn't answer the current key is tried with previous keys (a
 /// lattice part-way through a secret rotation).
@@ -337,7 +364,7 @@ pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str
             return Vec::new();
         }
     };
-    let probes = probe_targets(config).into_iter().map(|addr| {
+    let probes = expand_targets(probe_targets(config)).await.into_iter().map(|addr| {
         let keys = keys.clone();
         let budget = PROBE_TIMEOUT * keys.len() as u32;
         async move { tokio::time::timeout(budget, probe_peer(addr, keys)).await.ok().flatten() }
@@ -565,6 +592,16 @@ mod tests {
         // A sitting Overseer keeps the role regardless.
         let overseer = hex("c", ROLE_OVERSEER, "auto", 10);
         assert_eq!(elect(&a, &[b, overseer]), ROLE_HARVESTER);
+    }
+
+    #[tokio::test]
+    async fn peer_names_expand_to_every_address() {
+        let targets = expand_targets(vec!["localhost:7702".into(), "10.0.0.5:7702".into(), "no-such-host.invalid:7702".into()]).await;
+        assert!(targets.contains(&"127.0.0.1:7702".to_string()), "{:?}", targets);
+        assert!(targets.contains(&"10.0.0.5:7702".to_string()));
+        // A name that doesn't resolve stays, so its probe reports it.
+        assert!(targets.contains(&"no-such-host.invalid:7702".to_string()));
+        assert!(!targets.contains(&"localhost:7702".to_string()));
     }
 
     #[test]

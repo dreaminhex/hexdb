@@ -135,7 +135,7 @@ With no users, the first start creates the administrator named by `security.admi
 
 ### Docker
 
-The [Dockerfile](Dockerfile) builds an image with the server, the CLI, the admin UI, and Python and Node.js for script functions. It runs as the unprivileged user `hexdb`. Configuration lives in `/etc/hexdb/hexdb.toml` ([docker/hexdb.toml](docker/hexdb.toml)) and data in the volume `/var/lib/hexdb`.
+The [Dockerfile](Dockerfile) builds an image with the server, the CLI, the admin UI, and Python and Node.js for script functions. HexDB runs as the unprivileged user `hexdb`: the entrypoint starts as root only to give the data volume to `hexdb` (some platforms, Fly.io among them, create volumes owned by root), then drops to it. Started with `--user`, it runs as that user. On Fly.io it sets `network.advertise_host` to the machine's private address (`<machine>.vm.<app>.internal`) unless you set it. Configuration lives in `/etc/hexdb/hexdb.toml` ([docker/hexdb.toml](docker/hexdb.toml)) and data in the volume `/var/lib/hexdb`.
 
 ```bash
 docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
@@ -1756,6 +1756,8 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 Every hex runs a TCP discovery listener (`network.discovery_endpoint`, default port 7702). A hex that can't open it (another program has the port) stops at startup with `Failed to bind the discovery endpoint`, as it does for the API port, since an unreachable hex can't replicate, vote or fail over. Every `discovery_interval_seconds` (10), it probes:
 - the seed addresses in `network.peers` (other hexes' discovery endpoints);
 - the local ports 7702-7709, unless `scan_local_ports = false`.
+
+A peer given by name is probed at every address the name resolves to, so one name can stand for a group of hexes: Fly.io's `<app>.internal`, a Kubernetes headless service, or round-robin DNS.
 
 Probes run concurrently with a 500 ms timeout. A peer missing for three rounds is "lost", and it's forgotten after 30.
 
