@@ -75,7 +75,7 @@ impl std::fmt::Debug for KeyRing {
 
 impl KeyRing {
     pub fn new(current: &[u8; ENCRYPTION_KEY_LEN], previous: &[[u8; ENCRYPTION_KEY_LEN]]) -> KeyRing {
-        let entry = |key: &[u8; ENCRYPTION_KEY_LEN]| (Self::key_id(key), Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)));
+        let entry = |key: &[u8; ENCRYPTION_KEY_LEN]| (Self::key_id(key), Aes256Gcm::new(&Key::<Aes256Gcm>::from(*key)));
         KeyRing {
             current: entry(current),
             previous: previous.iter().filter(|k| *k != current).map(entry).collect(),
@@ -109,7 +109,7 @@ impl KeyRing {
         let ciphertext = self
             .current
             .1
-            .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+            .encrypt(&Nonce::from(nonce), Payload { msg: plaintext, aad })
             .map_err(|_| anyhow!("encryption failed"))?;
         let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         out.extend_from_slice(&nonce);
@@ -193,7 +193,7 @@ fn decrypt_with(cipher: &Aes256Gcm, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> 
     }
     let (nonce, ciphertext) = data.split_at(NONCE_LEN);
     cipher
-        .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(&Nonce::try_from(nonce).expect("split at NONCE_LEN"), Payload { msg: ciphertext, aad })
         .map_err(|_| anyhow!("decryption failed (wrong key or corrupt data)"))
 }
 

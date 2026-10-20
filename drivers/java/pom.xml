@@ -32,6 +32,8 @@
 
   <properties>
     <maven.compiler.release>11</maven.compiler.release>
+    <!-- JUnit 6 needs Java 17; the driver itself still targets 11. -->
+    <maven.compiler.testRelease>17</maven.compiler.testRelease>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 

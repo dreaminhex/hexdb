@@ -218,9 +218,9 @@ impl LatticeKeys {
     /// `nonce || AES-256-GCM(data)`, with `aad` authenticated.
     pub fn seal(&self, data: &[u8], aad: &[u8]) -> Vec<u8> {
         use aes_gcm::aead::{Aead, KeyInit, Payload};
-        let cipher = aes_gcm::Aes256Gcm::new(aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&self.sets[0].transfer));
+        let cipher = aes_gcm::Aes256Gcm::new(&aes_gcm::Key::<aes_gcm::Aes256Gcm>::from(self.sets[0].transfer));
         let nonce = crate::crypt::random_bytes(crate::crypt::NONCE_LEN);
-        let sealed = cipher.encrypt(aes_gcm::Nonce::from_slice(&nonce), Payload { msg: data, aad }).expect("AES-GCM encryption of a bounded message");
+        let sealed = cipher.encrypt(&aes_gcm::Nonce::try_from(&nonce[..]).expect("NONCE_LEN bytes"), Payload { msg: data, aad }).expect("AES-GCM encryption of a bounded message");
         [nonce, sealed].concat()
     }
 
@@ -239,8 +239,8 @@ impl LatticeKeys {
         }
         let (nonce, body) = sealed.split_at(crate::crypt::NONCE_LEN);
         self.sets.iter().find_map(|set| {
-            let cipher = aes_gcm::Aes256Gcm::new(aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&set.transfer));
-            cipher.decrypt(aes_gcm::Nonce::from_slice(nonce), Payload { msg: body, aad }).ok()
+            let cipher = aes_gcm::Aes256Gcm::new(&aes_gcm::Key::<aes_gcm::Aes256Gcm>::from(set.transfer));
+            cipher.decrypt(&aes_gcm::Nonce::try_from(nonce).expect("split at NONCE_LEN"), Payload { msg: body, aad }).ok()
         })
     }
 

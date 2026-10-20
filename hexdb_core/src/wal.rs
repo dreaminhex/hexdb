@@ -319,7 +319,7 @@ fn encode_record(cipher: &Aes256Gcm, level: i32, record: &WalRecord) -> Result<V
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::fill(&mut nonce).map_err(|e| anyhow!("Failed to generate nonce: {}", e))?;
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), compressed.as_ref())
+        .encrypt(&Nonce::from(nonce), compressed.as_ref())
         .map_err(|e| anyhow!("WAL encryption failed: {}", e))?;
 
     let len = NONCE_LEN + ciphertext.len();
