@@ -1449,7 +1449,7 @@ impl HexDBEngine {
         }
         if report.corrupt_shards > 0 {
             warn!(
-                "🧽 Scrub: {} chunk(s), {} bad shard(s), {} repaired, {} unrecoverable.",
+                "🧽 Scrub: {} chunk(s), {} bad fragment(s), {} repaired, {} unrecoverable.",
                 report.chunks, report.corrupt_shards, report.repaired_shards, report.unrecoverable
             );
         }

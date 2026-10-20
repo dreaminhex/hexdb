@@ -71,8 +71,8 @@ pub struct ReplicaCursor {
     pub source_id: String,
     /// The Overseer sequence number applied up to.
     pub applied_seq: u64,
-    /// The shards this hex keeps (see `crate::sharding`).
-    pub held_shards: crate::sharding::ShardMask,
+    /// The slices this hex keeps (see `crate::slicing`).
+    pub held_slices: crate::slicing::SliceMask,
 }
 
 fn kind_for(name: &str) -> &'static str {
@@ -166,14 +166,14 @@ impl HexDBEngine {
 
     /// Documents of a tessellation with their versions, in ID order, for
     /// replication snapshots. Includes system tessellations.
-    pub async fn snapshot_page(&self, tess: &str, after: Option<Ulid>, limit: usize, shards: crate::sharding::ShardMask) -> Result<(Vec<(Document, u64)>, Option<Ulid>)> {
-        let filtered = shards != crate::sharding::ALL_SHARDS && self.is_sharded_tessellation(tess);
+    pub async fn snapshot_page(&self, tess: &str, after: Option<Ulid>, limit: usize, slices: crate::slicing::SliceMask) -> Result<(Vec<(Document, u64)>, Option<Ulid>)> {
+        let filtered = slices != crate::slicing::ALL_SLICES && self.is_sliced_tessellation(tess);
         let mut ids: Vec<Ulid> = self
             .versions(tess)
             .await
             .into_iter()
             .filter(|(id, v)| v.visible() && after.is_none_or(|a| *id > a))
-            .filter(|(id, _)| !filtered || crate::sharding::holds(shards, crate::sharding::shard_of(tess, *id)))
+            .filter(|(id, _)| !filtered || crate::slicing::holds(slices, crate::slicing::slice_of(tess, *id)))
             .map(|(id, _)| id)
             .collect();
         ids.sort();
@@ -240,7 +240,7 @@ impl HexDBEngine {
             let mut data = crate::document::CompactFields::new();
             data.insert("source_id".into(), FieldValue::String(cursor.source_id.clone()));
             data.insert("applied_seq".into(), FieldValue::Integer(cursor.applied_seq as i64));
-            data.insert("held_shards".into(), FieldValue::Integer(cursor.held_shards as i64));
+            data.insert("held_slices".into(), FieldValue::Integer(cursor.held_slices as i64));
             let doc = Document { id: cursor_id(), tessellation: REPLICATION_TESSELLATION.into(), data, ttl: None };
             items.push(BatchItem { key: DocKey::new(REPLICATION_TESSELLATION, doc.id), op: WalOp::Put(doc), expected_seq: None });
         }
@@ -253,18 +253,18 @@ impl HexDBEngine {
     }
 
     /// At startup: what the saved cursor says about this hex's data (its
-    /// shards, history and position), for discovery and the status. A hex
-    /// that starts as the Overseer with only some shards marks itself as
+    /// slices, history and position), for discovery and the status. A hex
+    /// that starts as the Overseer with only some slices marks itself as
     /// rebuilding (see `crate::replication`).
     pub async fn restore_replication_state(&self) {
         let Some(cursor) = self.load_replica_cursor().await else { return };
         let writable = self.is_writable();
         let mut status = self.replication.lock().unwrap();
-        status.shards_held = cursor.held_shards;
+        status.slices_held = cursor.held_slices;
         status.history = Some(cursor.source_id.clone());
         status.applied_seq = cursor.applied_seq;
-        if writable && cursor.held_shards != crate::sharding::ALL_SHARDS {
-            status.rebuilding = Some("This hex started as the Overseer with only some of the lattice's shards and is collecting the rest; try again shortly.".into());
+        if writable && cursor.held_slices != crate::slicing::ALL_SLICES {
+            status.rebuilding = Some("This hex started as the Overseer with only some of the lattice's slices and is collecting the rest; try again shortly.".into());
         }
     }
 
@@ -279,7 +279,8 @@ impl HexDBEngine {
             source_id: data.get("source_id")?.as_str()?.to_string(),
             applied_seq: data.get("applied_seq")?.as_u64()?,
             // Saved by 2.1 and later; before that every hex kept everything.
-            held_shards: data.get("held_shards").and_then(|v| v.as_i64()).map_or(crate::sharding::ALL_SHARDS, |v| v as u64),
+            // 2.1.0 saved it as held_shards.
+            held_slices: data.get("held_slices").or_else(|| data.get("held_shards")).and_then(|v| v.as_i64()).map_or(crate::slicing::ALL_SLICES, |v| v as u64),
         })
     }
 

@@ -130,9 +130,9 @@ pub struct LatticeHex {
     pub applied_seq: u64,
     /// Changes behind the Overseer (replicas only, when known).
     pub lag: Option<u64>,
-    /// Whether the hex has `replication.sharding` on, and how many of the 64 shards it keeps.
-    pub sharding: bool,
-    pub shards_held: u32,
+    /// Whether the hex has `replication.slicing` on, and how many of the 64 slices it keeps.
+    pub slicing: bool,
+    pub slices_held: u32,
 }
 
 /// Report structure for the current lattice state.
@@ -196,8 +196,8 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         replication_state: me.replication_state,
         applied_seq: me.applied_seq,
         lag: None,
-        sharding: me.sharding,
-        shards_held: crate::sharding::count(me.shards_held),
+        slicing: me.slicing,
+        slices_held: crate::slicing::count(me.slices_held),
     }];
     for member in engine.peers.lock().await.iter() {
         lattice_hexes.push(LatticeHex {
@@ -214,8 +214,8 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             replication_state: member.hex.replication_state.clone(),
             applied_seq: member.hex.applied_seq,
             lag: None,
-            sharding: member.hex.sharding,
-            shards_held: crate::sharding::count(member.hex.shards_held),
+            slicing: member.hex.slicing,
+            slices_held: crate::slicing::count(member.hex.slices_held),
         });
     }
     // On the Overseer, replicas' positions are exact: each poll for changes
@@ -238,11 +238,11 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         }
     }
 
-    // User documents kept on this hex (a sharded replica keeps only its shards').
-    let mut sharded_documents = 0usize;
+    // User documents kept on this hex (a sliced replica keeps only its slices').
+    let mut sliced_documents = 0usize;
     for (name, _) in engine.tessellation_details() {
-        if engine.is_sharded_tessellation(&name) {
-            sharded_documents += engine.tessellation_stats(&name).await.document_count;
+        if engine.is_sliced_tessellation(&name) {
+            sliced_documents += engine.tessellation_stats(&name).await.document_count;
         }
     }
     HexMeta {
@@ -311,8 +311,8 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             } else {
                 value["lag"] = status.lag().into();
             }
-            value["shards_held_count"] = crate::sharding::count(status.shards_held).into();
-            value["sharded_documents"] = sharded_documents.into();
+            value["slices_held_count"] = crate::slicing::count(status.slices_held).into();
+            value["sliced_documents"] = sliced_documents.into();
             value
         },
         config: engine.lattice_config().status_json(),

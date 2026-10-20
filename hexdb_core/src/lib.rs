@@ -36,7 +36,7 @@ pub mod streams;
 pub mod functions;
 pub mod triggers;
 pub mod sql;
-pub mod sharding;
+pub mod slicing;
 pub mod compress;
 pub mod erasure;
 pub mod blobs;

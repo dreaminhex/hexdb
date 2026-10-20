@@ -1,5 +1,5 @@
-//! Sharded replicas (`replication.sharding`): placement, rebalancing when a
-//! hex joins, reads through a replica, and a failover rebuilt from the shards
+//! Sliced replicas (`replication.slicing`): placement, rebalancing when a
+//! hex joins, reads through a replica, and a failover rebuilt from the slices
 //! the replicas kept.
 
 use anyhow::{bail, Result};
@@ -21,15 +21,15 @@ fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> Result<b
     }
 }
 
-/// Hex `i` of a sharded lattice on `ports`, seeded with every other hex.
+/// Hex `i` of a sliced lattice on `ports`, seeded with every other hex.
 fn hex(ports: &[u16], i: usize, ram_mb: u64) -> TestOptions {
     TestOptions {
-        lattice: Some(format!("sharding-{}", ports[0])),
+        lattice: Some(format!("slicing-{}", ports[0])),
         discovery_port: Some(ports[i]),
         peers: ports.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, p)| format!("127.0.0.1:{}", p)).collect(),
         ram_mb: Some(ram_mb),
         discovery_interval_seconds: Some(1),
-        extra_toml: "\n[replication]\nsharding = true\n".into(),
+        extra_toml: "\n[replication]\nslicing = true\n".into(),
         ..Default::default()
     }
 }
@@ -38,11 +38,11 @@ fn status(server: &TestServer) -> Result<Value> {
     Ok(server.request(Method::GET, "/status", None, &[])?.body)
 }
 
-/// (shards kept, user documents kept) on one hex.
+/// (slices kept, user documents kept) on one hex.
 fn kept(server: &TestServer) -> Result<(u64, u64)> {
     let s = status(server)?;
     let r = &s["replication"];
-    Ok((r["shards_held_count"].as_u64().unwrap_or(0), r["sharded_documents"].as_u64().unwrap_or(0)))
+    Ok((r["slices_held_count"].as_u64().unwrap_or(0), r["sliced_documents"].as_u64().unwrap_or(0)))
 }
 
 fn seed(server: &TestServer, from: usize, count: usize) -> Result<()> {
@@ -53,7 +53,7 @@ fn seed(server: &TestServer, from: usize, count: usize) -> Result<()> {
 }
 
 #[test]
-fn replicas_split_the_shards_and_rebalance() -> Result<()> {
+fn replicas_split_the_slices_and_rebalance() -> Result<()> {
     let ports = [TestServer::free_port()?, TestServer::free_port()?, TestServer::free_port()?];
     let overseer = TestServer::start_with(hex(&ports, 0, 4096))?;
     let first = TestServer::start_with(hex(&ports, 1, 1024))?;
@@ -62,10 +62,10 @@ fn replicas_split_the_shards_and_rebalance() -> Result<()> {
     // One replica: it keeps everything.
     wait_until(Duration::from_secs(60), "the replica to copy everything", || Ok(kept(&first)? == (64, 200)))?;
 
-    // A second replica joins: the two split the shards, and every document
-    // is on exactly one of them (shard_copies = 1), besides the Overseer.
+    // A second replica joins: the two split the slices, and every document
+    // is on exactly one of them (slice_copies = 1), besides the Overseer.
     let second = TestServer::start_with(hex(&ports, 2, 1024))?;
-    wait_until(Duration::from_secs(90), "the replicas to split the shards", || {
+    wait_until(Duration::from_secs(90), "the replicas to split the slices", || {
         let (a, b) = (kept(&first)?, kept(&second)?);
         Ok(a.0 + b.0 == 64 && a.0 > 0 && b.0 > 0 && a.1 + b.1 == 200)
     })?;
@@ -73,7 +73,7 @@ fn replicas_split_the_shards_and_rebalance() -> Result<()> {
     assert!(a.1 < 200 && b.1 < 200, "each replica keeps part: {:?} {:?}", a, b);
     assert_eq!(kept(&overseer)?.1, 200, "the Overseer keeps everything");
 
-    // New writes land on the replica that keeps their shard.
+    // New writes land on the replica that keeps their slice.
     seed(&overseer, 200, 50)?;
     wait_until(Duration::from_secs(30), "new documents on the replicas", || Ok(kept(&first)?.1 + kept(&second)?.1 == 250))?;
 
@@ -84,7 +84,7 @@ fn replicas_split_the_shards_and_rebalance() -> Result<()> {
     assert!(res.headers.get("x-hexdb-forwarded-to").is_some(), "answered by the Overseer");
     let sql = second.request(Method::POST, "/sql", Some(&json!({ "sql": "SELECT COUNT(*) FROM items WHERE n >= 100" })), &[])?;
     assert_eq!(sql.body["rows"], json!([[150]]), "{}", sql.body);
-    // Live feeds aren't proxied: a sharded replica names the Overseer instead.
+    // Live feeds aren't proxied: a sliced replica names the Overseer instead.
     let feed = second.request(Method::GET, "/changes/stream", None, &[])?;
     assert_eq!(feed.status, 421, "{}", feed.body);
     Ok(())
@@ -97,7 +97,7 @@ fn a_failover_rebuilds_from_the_replicas() -> Result<()> {
     let a = TestServer::start_with(hex(&ports, 1, 1024))?;
     let b = TestServer::start_with(hex(&ports, 2, 1024))?;
     seed(&overseer, 0, 150)?;
-    wait_until(Duration::from_secs(90), "the replicas to split the shards", || {
+    wait_until(Duration::from_secs(90), "the replicas to split the slices", || {
         let (x, y) = (kept(&a)?, kept(&b)?);
         Ok(x.0 + y.0 == 64 && x.0 > 0 && y.0 > 0 && x.1 + y.1 == 150)
     })?;
@@ -109,7 +109,7 @@ fn a_failover_rebuilds_from_the_replicas() -> Result<()> {
 
     overseer.kill();
 
-    // A replica is elected, collects the shards it lacks from the other, and
+    // A replica is elected, collects the slices it lacks from the other, and
     // then answers with everything.
     let mut leader: Option<&TestServer> = None;
     wait_until(Duration::from_secs(90), "a new Overseer with every document", || {

@@ -124,7 +124,7 @@ pub fn app_router(
         .route("/lattice/snapshot", get(crate::lattice::snapshot))
         .route("/lattice/catalog", get(crate::lattice::catalog))
         .route("/lattice/snapshot/{tessellation}", get(crate::lattice::snapshot_page))
-        .route("/lattice/shard-snapshot/{tessellation}", get(crate::lattice::shard_snapshot))
+        .route("/lattice/slice-snapshot/{tessellation}", get(crate::lattice::slice_snapshot))
         .route("/lattice/changes", get(crate::lattice::changes))
         .route("/lattice/chunks/{id}", get(crate::lattice::chunk))
         .route("/lattice/revoke", post(crate::lattice::revoke))

@@ -253,7 +253,7 @@ pub struct HexDBEngine {
     pub overseer_endpoint: std::sync::RwLock<Option<String>>,
     /// What this hex's replication is doing.
     pub replication: std::sync::Mutex<crate::replication::ReplicationStatus>,
-    /// A sharded replica's recent changes of every shard (see replication).
+    /// A sliced replica's recent changes of every slice (see replication).
     pub recent_changes: std::sync::Mutex<crate::replication::RecentChanges>,
     /// Loaded plugins and their delivery state.
     pub plugins: crate::plugins::PluginRegistry,
@@ -599,12 +599,12 @@ impl HexDBEngine {
 
     /// Change this hex's lattice role (after an election).
     pub fn set_role(&self, role: &str) {
-        // A sharded replica becoming the Overseer has only part of the data:
+        // A sliced replica becoming the Overseer has only part of the data:
         // it takes no requests until it has collected the rest (see replication).
         if role == crate::network::discovery::ROLE_OVERSEER {
             let mut status = self.replication.lock().unwrap();
-            if status.shards_held != crate::sharding::ALL_SHARDS && status.rebuilding.is_none() {
-                status.rebuilding = Some("This hex just became the Overseer and is collecting shards from the other hexes; try again shortly.".into());
+            if status.slices_held != crate::slicing::ALL_SLICES && status.rebuilding.is_none() {
+                status.rebuilding = Some("This hex just became the Overseer and is collecting slices from the other hexes; try again shortly.".into());
             }
         }
         let previous = std::mem::replace(&mut *self.role.write().unwrap(), role.to_string());
@@ -722,13 +722,13 @@ impl HexDBEngine {
         self.replication.lock().unwrap().rebuilding.clone()
     }
 
-    /// True for a replica that keeps only some shards: it can't answer queries itself.
+    /// True for a replica that keeps only some slices: it can't answer queries itself.
     pub fn is_partial_replica(&self) -> bool {
-        !self.is_writable() && self.replication.lock().unwrap().shards_held != crate::sharding::ALL_SHARDS
+        !self.is_writable() && self.replication.lock().unwrap().slices_held != crate::slicing::ALL_SLICES
     }
 
-    /// True if documents of this tessellation are sharded (user data; system tessellations never are).
-    pub fn is_sharded_tessellation(&self, tess: &str) -> bool {
+    /// True if documents of this tessellation are sliced (user data; system tessellations never are).
+    pub fn is_sliced_tessellation(&self, tess: &str) -> bool {
         !tess.starts_with('_') && !self.is_system_tessellation(tess)
     }
 
@@ -1225,7 +1225,7 @@ impl HexDBEngine {
         }
         if total.corrupt_shards > 0 {
             warn!(
-                "🩹 Vertex check: {} corrupt shard(s), {} repaired, {} document(s) unrecoverable in memory.",
+                "🩹 Vertex check: {} corrupt fragment(s), {} repaired, {} document(s) unrecoverable in memory.",
                 total.corrupt_shards, total.repaired_shards, total.unrecoverable
             );
         }

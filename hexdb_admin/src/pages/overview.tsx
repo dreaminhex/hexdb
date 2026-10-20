@@ -346,7 +346,7 @@ function VertexCard({ vertices }: { vertices: VertexStatus[] }) {
         <CardTitle className="flex items-center gap-2">
           <IconHexagons className="text-muted-foreground size-5" /> Vertices
         </CardTitle>
-        <CardDescription>4 data + 2 parity shards per document; any 2 vertices can be lost.</CardDescription>
+        <CardDescription>4 data + 2 parity fragments per document; any 2 vertices can be lost.</CardDescription>
         <CardAction>
           {repaired.length === 0 ? (
             <Badge variant="outline" className="gap-1">
@@ -369,14 +369,14 @@ function VertexCard({ vertices }: { vertices: VertexStatus[] }) {
             {formatBytes(totalBytes)}
           </text>
           <text x={c} y={c + 12} textAnchor="middle" className="fill-muted-foreground text-[10px]">
-            shards in memory
+            fragments in memory
           </text>
           {vertices.map((v, i) => {
             const p = points[i]
             const warn = v.corrupt_shards_found > 0
             return (
               <g key={v.id}>
-                <title>{`Vertex ${v.id}: ${v.shards} shards, ${formatBytes(v.bytes)}${warn ? `, ${v.corrupt_shards_found} corrupt found, ${v.shards_repaired} repaired` : ""}`}</title>
+                <title>{`Vertex ${v.id}: ${v.shards} fragments, ${formatBytes(v.bytes)}${warn ? `, ${v.corrupt_shards_found} corrupt found, ${v.shards_repaired} repaired` : ""}`}</title>
                 <circle cx={p.x} cy={p.y} r={15} fill="var(--card)" stroke={warn ? "var(--status-warning)" : "var(--status-good)"} strokeWidth={2.5} />
                 <text x={p.x} y={p.y + 4} textAnchor="middle" className="fill-foreground text-[11px] font-semibold">
                   {i < 4 ? `D${i + 1}` : `P${i - 3}`}
@@ -468,8 +468,8 @@ function LatticeCard({ status }: { status: Status }) {
           </p>
         ) : (
           <p className="text-muted-foreground pt-1 text-xs">
-            {lattice.hexes.some((h) => h.role !== "Overseer" && h.shards_held !== undefined && h.shards_held < 64)
-              ? "The Overseer takes writes and keeps every shard; the replicas share the shards (each kept by at least one) and pass queries to the Overseer. Replicants never become Overseer."
+            {lattice.hexes.some((h) => h.role !== "Overseer" && h.slices_held !== undefined && h.slices_held < 64)
+              ? "The Overseer takes writes and keeps every slice; the replicas share the slices (each kept by at least one) and pass queries to the Overseer. Replicants never become Overseer."
               : "The Overseer takes writes; Harvesters and Replicants keep full copies and serve reads. Replicants never become Overseer."}
           </p>
         )}
@@ -480,8 +480,8 @@ function LatticeCard({ status }: { status: Status }) {
 
 function replicationLabel(hex: Status["network"]["lattice"]["hexes"][number]): string {
   const label = replicationState(hex)
-  // A sharded replica keeps part of the data.
-  if (hex.role !== "Overseer" && hex.shards_held !== undefined && hex.shards_held < 64) return `${label} · ${hex.shards_held}/64 shards`
+  // A sliced replica keeps part of the data.
+  if (hex.role !== "Overseer" && hex.slices_held !== undefined && hex.slices_held < 64) return `${label} · ${hex.slices_held}/64 slices`
   return label
 }
 

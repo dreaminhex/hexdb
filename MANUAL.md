@@ -63,13 +63,13 @@ What it doesn't do (yet):
 
 **Hex.** One running HexDB server.
 
-**Vertex.** One of the six regions of a hex's memory. Every document held in memory is split into six shards with Reed-Solomon coding (four data, two parity), one shard per vertex. Any two vertices can be lost or corrupted and the document is still rebuilt. See [Memory and vertices](#memory-and-vertices).
+**Vertex.** One of the six regions of a hex's memory. Every document held in memory is split into six fragments with Reed-Solomon coding (four data, two parity), one fragment per vertex. Any two vertices can be lost or corrupted and the document is still rebuilt. See [Memory and vertices](#memory-and-vertices).
 
 **Tessellation.** A collection of documents, like a table or a MongoDB collection. Roles are granted per tessellation. Names are 1-64 letters, digits, `_` or `-`, unique ignoring case. They can't start with `_` (reserved for system tessellations) or match an API route name (`users`, `roles`, `streams`, `functions`, `settings`, ...).
 
 **Files tessellation.** A tessellation of kind `files`: each document describes a stored file, whose content is in the chunk store. See [Files](#16-files).
 
-**Chunk.** A piece of a file's content (about 2 MB), stored once however many files contain it, and split into six shards across the vertices.
+**Chunk.** A piece of a file's content (about 2 MB), stored once however many files contain it, and split into six fragments across the vertices.
 
 **Document.** A JSON object with an `id`. HexDB generates IDs as ULIDs: 26-character strings that sort by creation time.
 
@@ -191,7 +191,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 **Dashboard** (needs `status`)
 - Cards: documents, tessellations, memory and disk against their budgets, operation rates, uptime.
 - An activity chart: documents per tessellation, operations per minute, or storage, over 15 minutes to 6 hours.
-- Vertex health: a hexagon of the six shards.
+- Vertex health: a hexagon of the six fragments.
 - The lattice card: each hex's role, address, replication state and lag. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
 - A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#23-operations)).
 
@@ -1160,17 +1160,17 @@ curl -X DELETE http://localhost:7700/shares/PVETfyjH -H "Authorization: Bearer $
 1. **Chunks.** A file is cut into content-defined chunks (FastCDC: 512 KB to 8 MB, 2 MB on average), so an edit changes only the chunks around it. A chunk's ID is a keyed BLAKE3 hash of its content, keyed with a random content key kept in the catalog, so identical content is stored once across all files, versions and tessellations, while the ID doesn't reveal a known file's plain hash.
 2. **Compression.** Images, audio and video, lossless or not (WAV, AIFF, FLAC, TIFF, RAW, PSD, JPEG, MP3, MP4, ...), and already-compressed formats (ZIP, gzip, 7z, Office files, EPUB, ...) are stored byte for byte. Other chunks are compressed with Zstandard when that saves at least 5%. Zstandard is lossless either way.
 3. **Encryption.** Each chunk is encrypted with AES-256-GCM under the storage key, with its ID as authenticated data.
-4. **Vertices.** The encrypted chunk is split with the hex's Reed-Solomon code into four data and two parity shards, and shard *n* is appended to vertex *n*'s pack file, with a BLAKE3 hash. Any two vertices can lose or corrupt a chunk's shards and it's still read: the missing shards are rebuilt and written back. `files.vertex_paths` puts the six vertices in six directories, for example on six disks, so a chunk survives losing any two of them.
+4. **Vertices.** The encrypted chunk is split with the hex's Reed-Solomon code into four data and two parity fragments, and fragment *n* is appended to vertex *n*'s pack file, with a BLAKE3 hash. Any two vertices can lose or corrupt a chunk's fragments and it's still read: the missing fragments are rebuilt and written back. `files.vertex_paths` puts the six vertices in six directories, for example on six disks, so a chunk survives losing any two of them.
 5. **Durability.** A file's chunks are written and fsynced before its document commits, so every file in the index has its content. A crash mid-upload leaves unreferenced chunks, which garbage collection removes.
 6. **Manifest.** A file's chunk list is itself stored as a chunk, referenced by `content.manifest`.
 
 **Garbage collection** runs with each compaction (`storage.compaction_frequency`, or `POST /compact`, whose answer includes `chunks`): chunks no file, version, trashed file or upload session references are removed, packs that are mostly dead are rewritten, and chunks still under a previous storage key are re-encrypted. Chunks of uploads in progress are kept.
 
-**Scrubbing** verifies every shard every `files.scrub_hours` (24), or on `POST /scrub` (needs `maintenance`), and rewrites bad ones. A chunk that can't be rebuilt from this hex's vertices is copied from another hex.
+**Scrubbing** verifies every fragment every `files.scrub_hours` (24), or on `POST /scrub` (needs `maintenance`), and rewrites bad ones. A chunk that can't be rebuilt from this hex's vertices is copied from another hex.
 
 **Memory.** The chunk index takes about 80 MB per TB stored. Recently read chunks are cached in `files.cache_mb` (64). File content counts against `storage.disk_mb`: with parity, about 1.5 times the (compressed) content.
 
-`/status` reports `storage.files`: chunks, content and stored bytes, pack files, degraded chunks, chunks on old keys, chunks copied from other hexes, and per-vertex bytes, corrupt shards found and repairs.
+`/status` reports `storage.files`: chunks, content and stored bytes, pack files, degraded chunks, chunks on old keys, chunks copied from other hexes, and per-vertex bytes, corrupt fragments found and repairs.
 
 ### Files in a lattice
 
@@ -1703,7 +1703,7 @@ All data and metadata on disk is encrypted with AES-256-GCM using `storage.encry
 | WAL records | `[length][nonce][ciphertext]`, the record compressed with Zstandard first |
 | SSTable bodies | Each authenticated with its document ID and sequence number, so bodies can't be swapped between entries |
 | SSTable indexes | In chunks of 64 records, each authenticated with its chunk number |
-| File chunks | Each encrypted before it's split into shards, authenticated with its chunk ID and flags; the shards' headers (chunk ID, lengths, key ID, shard hash) are plaintext |
+| File chunks | Each encrypted before it's split into fragments, authenticated with its chunk ID and flags; the fragments' headers (chunk ID, lengths, key ID, fragment hash) are plaintext |
 | Catalog, settings, metrics history, index snapshots | Sealed files: `HXE1` magic, key ID, nonce and ciphertext, authenticated with the file name so files can't be swapped |
 
 Only SSTable headers (format, counts, offsets, key ID) are plaintext. Every nonce is random (96 bits). Documents in memory aren't encrypted.
@@ -1768,7 +1768,7 @@ Every hex runs the same election over the same view, so they agree without a con
 
 ### Replication
 
-Every hex keeps a full copy, unless the lattice shards its data (see [Sharding](#sharding)). A replica:
+Every hex keeps a full copy, unless the lattice splits its data into slices (see [Slicing](#slicing)). A replica:
 
 1. **Full sync.** It reads a consistent snapshot from the Overseer: its sequence number S, its tessellations and index definitions, then every document with its version, page by page. Local data the Overseer doesn't have is removed.
 2. **Streaming.** It follows the Overseer's change feed after S with long polls, applying each batch atomically together with its replication cursor, so a crash can't leave data and cursor out of step. A change older than the snapshot's version of a document is skipped, so changes made during the snapshot apply exactly once.
@@ -1798,25 +1798,25 @@ quorum = 2            # hexes (including itself) the Overseer must see to accept
 - **`min_acks`.** With it set, an acknowledged write exists on at least that many replicas. Writes to system tessellations that don't need it (the audit trail, sign-in throttling, replication state, plugin cursors) don't wait.
 - **`quorum`.** A hex cut off from the rest stops taking writes, with 503 `no_quorum`. With a majority quorum (2 of 3, 3 of 5), a network partition can't leave two Overseers both accepting writes. Startup work that needs to write (creating the first admin) waits for the quorum.
 
-### Sharding
+### Slicing
 
-With `replication.sharding = true` on the Overseer and two or more replicas, the replicas share the data instead of each keeping a full copy, which saves their disk and memory:
+With `replication.slicing = true` on the Overseer and two or more replicas, the replicas share the data instead of each keeping a full copy, which saves their disk and memory:
 
 ```toml
 [replication]
-sharding = true
-shard_copies = 1      # replicas that keep each shard
+slicing = true
+slice_copies = 1      # replicas that keep each slice
 recent_changes = 20000
 ```
 
-- **Shards.** Every document of a user tessellation falls in one of 64 shards, by a hash of its tessellation and ID. System tessellations (users, roles, the audit trail, configuration) aren't sharded: every hex keeps them.
-- **Copies.** The Overseer keeps every shard, and each shard is also kept by `shard_copies` replicas. With the default of 1, any one hex can be lost without losing data. A lattice with a single replica keeps full copies, whatever the setting.
-- **Placement.** Every hex computes the same placement from the live hexes (rendezvous hashing), so a hex that joins or leaves moves only its own shards. A replica copies the shards it gains from the Overseer, and gives up a shard only once another live replica holds it, so no shard has fewer copies while a new hex catches up.
-- **Reads.** A sharded replica doesn't have all the data, so it forwards requests that read data (queries, SQL, GraphQL, documents, files, MCP and the chat) to the Overseer, and answers with what the Overseer returns. Live feeds (`/changes/stream`, `/changes/ws`, stream subscriptions) aren't proxied: a sharded replica answers 421 `sharded_replica`, naming the Overseer to connect to. Health, status, sign-in and the hex's own maintenance stay local.
-- **Failover.** When the Overseer is lost, the replica furthest along its history is elected. Before it serves data or takes writes (data requests get 503 `rebuilding` meanwhile), it collects the shards it lacks from the replicas that keep them, then applies its last `recent_changes` changes to bring each to its own position, so the data is consistent as of one point in history. A shard whose holder is down waits for it to come back; if a holder was further behind than those recent changes reach, the gap is logged and recorded in the audit trail as `lattice.shards_incomplete`. The other replicas then sync their shards from the new Overseer.
-- **Status.** `/status` shows `shards_held_count` and `sharded_documents` (the user documents this hex keeps) under `replication`.
+- **Slices.** Every document of a user tessellation falls in one of 64 slices, by a hash of its tessellation and ID. System tessellations (users, roles, the audit trail, configuration) aren't split into slices: every hex keeps them.
+- **Copies.** The Overseer keeps every slice, and each slice is also kept by `slice_copies` replicas. With the default of 1, any one hex can be lost without losing data. A lattice with a single replica keeps full copies, whatever the setting.
+- **Placement.** Every hex computes the same placement from the live hexes (rendezvous hashing), so a hex that joins or leaves moves only its own slices. A replica copies the slices it gains from the Overseer, and gives up a slice only once another live replica holds it, so no slice has fewer copies while a new hex catches up.
+- **Reads.** A replica holding slices doesn't have all the data, so it forwards requests that read data (queries, SQL, GraphQL, documents, files, MCP and the chat) to the Overseer, and answers with what the Overseer returns. Live feeds (`/changes/stream`, `/changes/ws`, stream subscriptions) aren't proxied: a sliced replica answers 421 `sliced_replica`, naming the Overseer to connect to. Health, status, sign-in and the hex's own maintenance stay local.
+- **Failover.** When the Overseer is lost, the replica furthest along its history is elected. Before it serves data or takes writes (data requests get 503 `rebuilding` meanwhile), it collects the slices it lacks from the replicas that keep them, then applies its last `recent_changes` changes to bring each to its own position, so the data is consistent as of one point in history. A slice whose holder is down waits for it to come back; if a holder was further behind than those recent changes reach, the gap is logged and recorded in the audit trail as `lattice.slices_incomplete`. The other replicas then sync their slices from the new Overseer.
+- **Status.** `/status` shows `slices_held_count` and `sliced_documents` (the user documents this hex keeps) under `replication`.
 
-What sharding doesn't change: the Overseer still keeps everything (it runs every write, transaction and unique index), so a lattice can't hold more than the Overseer can. It saves space on the replicas, not on the Overseer.
+What slicing doesn't change: the Overseer still keeps everything (it runs every write, transaction and unique index), so a lattice can't hold more than the Overseer can. It saves space on the replicas, not on the Overseer.
 
 ### Adding a hex
 
@@ -1899,14 +1899,14 @@ Every acknowledged write is in the WAL or an SSTable at every moment, because WA
 
 ### Memory and vertices
 
-Every document held in memory is split into six shards with Reed-Solomon coding (four data shards, two parity), one per vertex. Each shard carries a BLAKE3 hash.
+Every document held in memory is split into six fragments with Reed-Solomon coding (four data fragments, two parity), one per vertex. Each fragment carries a BLAKE3 hash.
 
-- Reading a document checks the hashes and rebuilds it from any four good shards.
-- A background check (`memory.vertex_integrity_check_frequency`, 300 s) verifies every shard and rewrites corrupt ones in place.
+- Reading a document checks the hashes and rebuilds it from any four good fragments.
+- A background check (`memory.vertex_integrity_check_frequency`, 300 s) verifies every fragment and rewrites corrupt ones in place.
 
-Any two of the six vertices can be lost or corrupted without losing data. The dashboard's vertex hexagon shows each vertex's shards, bytes and repairs. This protects against memory corruption. Durability comes from the WAL and SSTables.
+Any two of the six vertices can be lost or corrupted without losing data. The dashboard's vertex hexagon shows each vertex's fragments, bytes and repairs. This protects against memory corruption. Durability comes from the WAL and SSTables.
 
-A document in memory takes about 1.5 times its JSON size: four data shards plus two parity shards. Shards under 16 KB use a table-driven Reed-Solomon code over GF(256), which has no per-call setup; larger shards use reed-solomon-simd. Shards live only in memory, so the code can change between versions without affecting stored data.
+A document in memory takes about 1.5 times its JSON size: four data fragments plus two parity fragments. Fragments under 16 KB use a table-driven Reed-Solomon code over GF(256), which has no per-call setup; larger fragments use reed-solomon-simd. Fragments live only in memory, so the code can change between versions without affecting stored data.
 
 ### Data layout
 
@@ -1960,22 +1960,22 @@ Versions 2 (unencrypted) and 3 (encrypted bodies, plaintext index) are still rea
 
 **Sealed file.** `HXE1 | key ID (8) | nonce (12) | AES-256-GCM(content)`, authenticated with the file name.
 
-**Pack file** (file content, one series per vertex). An 8-byte header (`HXP1`, version 1, the vertex number), then records appended one after another; a new pack starts at 256 MB. A record is a 98-byte header and one shard:
+**Pack file** (file content, one series per vertex). An 8-byte header (`HXP1`, version 1, the vertex number), then records appended one after another; a new pack starts at 256 MB. A record is a 98-byte header and one fragment:
 
 | Field | Size |
 | --- | --- |
 | Magic `SHRD` | 4 |
 | Chunk ID (keyed BLAKE3 of the plaintext) | 32 |
-| Shard number (0-3 data, 4-5 parity) | 1 |
+| Fragment number (0-3 data, 4-5 parity) | 1 |
 | Flags (bit 0: Zstandard) | 1 |
 | Key ID | 8 |
 | Plaintext length | 4 |
 | Ciphertext length | 4 |
-| Shard length | 4 |
-| BLAKE3 of the shard | 32 |
+| Fragment length | 4 |
+| BLAKE3 of the fragment | 32 |
 | Check (first 8 bytes of BLAKE3 over the fields above) | 8 |
 
-The ciphertext is `nonce (12) | AES-256-GCM(chunk, maybe compressed)` with the chunk ID and flags as authenticated data, padded and split into four equal data shards, plus two Reed-Solomon parity shards. At startup the index is rebuilt from the record headers. Only a vertex's newest pack is appended to; the others are sealed, and the first startup that reads a sealed pack saves its records next to it as `<number>.hxi` (the pack's length, 58 bytes per record, and a BLAKE3 checksum), so later startups read one small file per pack instead of every record header. An index whose checksum or pack length doesn't match is ignored and the pack is read again; reads verify each shard's own header and hash either way, and deleting a pack deletes its index. Backups don't copy the indexes: a restored hex makes them on its first start. A torn record at the end of a vertex's newest pack (a crash mid-write) is cut off; a bad record elsewhere ends that pack's scan, and its shards are rebuilt from the other vertices when read or scrubbed.
+The ciphertext is `nonce (12) | AES-256-GCM(chunk, maybe compressed)` with the chunk ID and flags as authenticated data, padded and split into four equal data fragments, plus two Reed-Solomon parity fragments. At startup the index is rebuilt from the record headers. Only a vertex's newest pack is appended to; the others are sealed, and the first startup that reads a sealed pack saves its records next to it as `<number>.hxi` (the pack's length, 58 bytes per record, and a BLAKE3 checksum), so later startups read one small file per pack instead of every record header. An index whose checksum or pack length doesn't match is ignored and the pack is read again; reads verify each fragment's own header and hash either way, and deleting a pack deletes its index. Backups don't copy the indexes: a restored hex makes them on its first start. A torn record at the end of a vertex's newest pack (a crash mid-write) is cut off; a bad record elsewhere ends that pack's scan, and its fragments are rebuilt from the other vertices when read or scrubbed.
 
 **File manifest** (stored as a chunk). `HXM1 | count (4) | (chunk ID (32) | length (4))*`, the file's chunks in order.
 
@@ -2165,9 +2165,9 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `files.max_file_mb` | 0 (no limit) | Largest file accepted |
 | `files.trash_days` | 30 | Days a deleted file stays in the trash |
 | `files.max_versions`, `version_days` | 10, 0 | Earlier versions kept per file, and for how long (0: until pushed out) |
-| `files.vertex_paths` | `[]` | Six directories for the vertices' shards (default `blobs/vertex-0` ... `vertex-5` in the data directory) |
+| `files.vertex_paths` | `[]` | Six directories for the vertices' fragments (default `blobs/vertex-0` ... `vertex-5` in the data directory) |
 | `files.cache_mb` | 64 | Memory for recently read chunks |
-| `files.scrub_hours` | 24 | Hours between scrubs of every shard (0: never) |
+| `files.scrub_hours` | 24 | Hours between scrubs of every fragment (0: never) |
 | `files.extract` | `true` | Read metadata from uploaded files |
 | `files.extract_max_mb`, `extract_timeout_seconds` | 64, 30 | What extraction may read and how long it may take, per file |
 | `quotas.default_mb`, `default_files` | 0, 0 | Upload quota per user (lattice configuration; 0: none; see [Upload quotas](#upload-quotas)) |
@@ -2189,7 +2189,7 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `tls.ca_file` | empty | Extra CAs trusted for other hexes |
 | `limits.*` | see above | Request and connection limits |
 | `replication.min_acks`, `ack_timeout_ms`, `forward_writes`, `quorum` | 0, 5000, true, 0 | See [Durability options](#durability-options) |
-| `replication.sharding`, `shard_copies`, `recent_changes` | false, 1, 20000 | See [Sharding](#sharding) |
+| `replication.slicing`, `slice_copies`, `recent_changes` | false, 1, 20000 | See [Slicing](#slicing) |
 | `plugins.enabled`, `registry` | true, `plugins.json` | Plugin loading |
 | `functions.scripts`, `python`, `node` | true, `python3`/`python`, `node` | Script runtimes |
 | `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Pre-1.6 query advisor key, used only while the lattice configuration's `ai.provider` is `none` |
@@ -2206,7 +2206,7 @@ curl "http://localhost:7700/status/history?minutes=60"  # a metrics sample every
 curl "http://localhost:7700/logs?level=warn&limit=100"  # recent log records; ?after= tails, ?q= searches, ?target= filters by module
 curl -X POST http://localhost:7700/flush                # write unflushed data to SSTables
 curl -X POST http://localhost:7700/compact              # merge SSTables and collect unreferenced file chunks now
-curl -X POST http://localhost:7700/scrub                # verify every file shard now and repair bad ones
+curl -X POST http://localhost:7700/scrub                # verify every file fragment now and repair bad ones
 curl -X POST http://localhost:7700/backup -d '{"name": "nightly-1"}' -H "Content-Type: application/json"
 curl http://localhost:7700/backups                      # backups in storage.backup_path
 curl http://localhost:7700/plugins

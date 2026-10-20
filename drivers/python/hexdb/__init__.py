@@ -26,7 +26,7 @@ import urllib.request
 from typing import Any, BinaryIO, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 __all__ = ["HexDB", "HexDBError", "Tessellation", "Stream", "Files"]
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 Json = Any
 Document = Dict[str, Any]

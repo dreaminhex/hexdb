@@ -122,11 +122,11 @@ pub async fn catalog(method: Method, uri: Uri, headers: HeaderMap, axum::extract
 pub struct PageParams {
     pub after: Option<String>,
     pub limit: Option<usize>,
-    /// Only documents in these shards (a mask; see hexdb_core::sharding).
-    pub shards: Option<u64>,
+    /// Only documents in these slices (a mask; see hexdb_core::slicing).
+    pub slices: Option<u64>,
 }
 
-/// While a new Overseer collects shards, it has no complete snapshot or feed to offer.
+/// While a new Overseer collects slices, it has no complete snapshot or feed to offer.
 fn not_rebuilding(engine: &hexdb_core::engine::HexDBEngine) -> Result<(), ApiError> {
     match engine.rebuilding() {
         Some(note) => Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "rebuilding", note).with_retry_after(5)),
@@ -153,14 +153,14 @@ pub async fn snapshot_page(
         Some(a) => Some(Ulid::from_string(a).map_err(|_| ApiError::invalid("after must be a document ID."))?),
         None => None,
     };
-    let shards = params.shards.unwrap_or(hexdb_core::sharding::ALL_SHARDS);
-    let (documents, next) = engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000), shards).await?;
+    let slices = params.slices.unwrap_or(hexdb_core::slicing::ALL_SLICES);
+    let (documents, next) = engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000), slices).await?;
     Ok(Json(SnapshotPage { documents, next }).into_response())
 }
 
-/// A replica's documents in some shards, as of its position: what a newly
+/// A replica's documents in some slices, as of its position: what a newly
 /// elected Overseer collects after a failover (see hexdb_core::replication).
-pub async fn shard_snapshot(
+pub async fn slice_snapshot(
     Path(tess): Path<String>,
     params: Result<Query<PageParams>, QueryRejection>,
     method: Method,
@@ -176,20 +176,20 @@ pub async fn shard_snapshot(
         (status.history.clone().unwrap_or_default(), status.applied_seq)
     };
     if engine.is_writable() || source_id.is_empty() {
-        return Err(ApiError::new(StatusCode::CONFLICT, "not_a_replica", "Only a replica serves its shards this way."));
+        return Err(ApiError::new(StatusCode::CONFLICT, "not_a_replica", "Only a replica serves its slices this way."));
     }
     let after = match params.after.as_deref() {
         Some(a) => Some(Ulid::from_string(a).map_err(|_| ApiError::invalid("after must be a document ID."))?),
         None => None,
     };
-    let shards = params.shards.unwrap_or(hexdb_core::sharding::ALL_SHARDS);
+    let slices = params.slices.unwrap_or(hexdb_core::slicing::ALL_SLICES);
     let (documents, next) = if engine.tessellation_exists(&tess) {
-        engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000), shards).await?
+        engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000), slices).await?
     } else {
         (Vec::new(), None)
     };
     let documents = documents.into_iter().map(|(doc, _)| doc).collect();
-    Ok(Json(hexdb_core::replication::ShardPage { source_id, applied_seq, documents, next }).into_response())
+    Ok(Json(hexdb_core::replication::SlicePage { source_id, applied_seq, documents, next }).into_response())
 }
 
 #[derive(Debug, Deserialize)]

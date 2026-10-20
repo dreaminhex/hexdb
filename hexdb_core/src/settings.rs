@@ -72,9 +72,9 @@ pub const SETTINGS: &[SettingDef] = &[
     int("replication.ack_timeout_ms", 100, 600_000, true, "ms", "How long a write waits for min_acks before answering 503 replication_timeout."),
     boolean("replication.forward_writes", false, "Replicas pass writes on to the Overseer instead of refusing them."),
     int("replication.quorum", 0, 64, false, "", "Hexes the Overseer must see to accept writes (0 turns the check off)."),
-    boolean("replication.sharding", false, "With two or more replicas, each keeps only some of the data's shards (the Overseer keeps all)."),
-    int("replication.shard_copies", 1, 16, false, "", "Replicas that keep each shard when sharding is on."),
-    int("replication.recent_changes", 1_000, 10_000_000, false, "", "Recent changes a sharded replica keeps, to bring collected shards up to date after a failover."),
+    boolean("replication.slicing", false, "With two or more replicas, each keeps only some of the data's slices (the Overseer keeps all)."),
+    int("replication.slice_copies", 1, 16, false, "", "Replicas that keep each slice when slicing is on."),
+    int("replication.recent_changes", 1_000, 10_000_000, false, "", "Recent changes a sliced replica keeps, to bring collected slices up to date after a failover."),
     boolean("plugins.enabled", false, "Load plugins at startup."),
 ];
 

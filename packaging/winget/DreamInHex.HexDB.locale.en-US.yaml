@@ -1,5 +1,5 @@
 PackageIdentifier: DreamInHex.HexDB
-PackageVersion: 2.1.0
+PackageVersion: 2.1.1
 PackageLocale: en-US
 Publisher: Dream In Hex
 PublisherUrl: https://dreaminhex.com
@@ -21,6 +21,6 @@ Tags:
   - graphql
   - sql
   - odbc
-ReleaseNotesUrl: https://github.com/dreaminhex/hexdb/releases/tag/v2.1.0
+ReleaseNotesUrl: https://github.com/dreaminhex/hexdb/releases/tag/v2.1.1
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0
