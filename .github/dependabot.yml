@@ -30,6 +30,8 @@ updates:
   - package-ecosystem: maven
     directory: /drivers/java
     schedule: { interval: weekly }
+    groups:
+      jdbc: { patterns: ["*"], update-types: [minor, patch] }
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
