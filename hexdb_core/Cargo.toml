@@ -19,9 +19,9 @@ ulid = { version = "3.0.0", features = ["serde"] }
 rust_decimal = { version = "1.37.1", features = ["serde"] }
 base64 = "0.23.1"
 chrono = { version = "0.4.41", features = ["serde"] }
-aes-gcm = "0.10.3"
+aes-gcm = "0.11.1"
 rand = { version = "0.10.3", features = ["std"] }
-rand_core = "0.9.3"
+rand_core = "0.10.1"
 hex = "0.4.3"
 zstd = "0.14.3"
 getrandom = "0.4.3"
@@ -60,7 +60,7 @@ libc = "0.2"
 seccompiler = "0.5"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [features]
 default = ["video-thumbnails"]

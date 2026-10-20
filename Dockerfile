@@ -28,8 +28,11 @@ COPY hexdb_tests hexdb_tests
 # load the workspace manifest.
 COPY drivers/odbc drivers/odbc
 COPY bench bench
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+# The amd64 and arm64 images build in parallel: they take turns with the
+# shared download cache, and each keeps its own build directory.
+ARG TARGETPLATFORM
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,id=hexdb-target-$TARGETPLATFORM \
     cargo build --locked --release -p hexdb_api -p hexdb_cli \
  && cp target/release/hexdb_api target/release/hexdb /usr/local/bin/
 

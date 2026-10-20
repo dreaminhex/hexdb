@@ -7,22 +7,22 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import { AuthProvider, has, useAuth, type Requirement } from "@/lib/auth"
 import { useRoute } from "@/lib/router"
-import { AccountPage } from "@/pages/account"
-import { AskPage } from "@/pages/ask"
-import { SharesPage } from "@/pages/shares"
 import { ShareView } from "@/pages/share-view"
-import { AuditPage } from "@/pages/audit"
-import { ConfigurationPage } from "@/pages/configuration"
 import { LoginPage } from "@/pages/login"
-import { LogsPage } from "@/pages/logs"
-import { OverviewPage } from "@/pages/overview"
-import { PluginsPage } from "@/pages/plugins"
-import { RolesPage } from "@/pages/roles"
-import { SettingsPage } from "@/pages/settings"
-import { TessellationsPage } from "@/pages/tessellations"
-import { UsersPage } from "@/pages/users"
 
-// Pages with the CodeMirror/GraphQL editor load on first visit.
+// Each page loads on first visit.
+const AccountPage = lazy(() => import("@/pages/account").then((m) => ({ default: m.AccountPage })))
+const AskPage = lazy(() => import("@/pages/ask").then((m) => ({ default: m.AskPage })))
+const SharesPage = lazy(() => import("@/pages/shares").then((m) => ({ default: m.SharesPage })))
+const AuditPage = lazy(() => import("@/pages/audit").then((m) => ({ default: m.AuditPage })))
+const ConfigurationPage = lazy(() => import("@/pages/configuration").then((m) => ({ default: m.ConfigurationPage })))
+const LogsPage = lazy(() => import("@/pages/logs").then((m) => ({ default: m.LogsPage })))
+const OverviewPage = lazy(() => import("@/pages/overview").then((m) => ({ default: m.OverviewPage })))
+const PluginsPage = lazy(() => import("@/pages/plugins").then((m) => ({ default: m.PluginsPage })))
+const RolesPage = lazy(() => import("@/pages/roles").then((m) => ({ default: m.RolesPage })))
+const SettingsPage = lazy(() => import("@/pages/settings").then((m) => ({ default: m.SettingsPage })))
+const TessellationsPage = lazy(() => import("@/pages/tessellations").then((m) => ({ default: m.TessellationsPage })))
+const UsersPage = lazy(() => import("@/pages/users").then((m) => ({ default: m.UsersPage })))
 const QueriesPage = lazy(() => import("@/pages/queries").then((m) => ({ default: m.QueriesPage })))
 const DocumentsPage = lazy(() => import("@/pages/documents").then((m) => ({ default: m.DocumentsPage })))
 const QueuesPage = lazy(() => import("@/pages/queues").then((m) => ({ default: m.QueuesPage })))
