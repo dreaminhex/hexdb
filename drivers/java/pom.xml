@@ -6,7 +6,7 @@
 
   <groupId>com.dreaminhex</groupId>
   <artifactId>hexdb-jdbc</artifactId>
-  <version>2.1.1</version>
+  <version>2.1.2</version>
   <packaging>jar</packaging>
 
   <name>HexDB JDBC driver</name>

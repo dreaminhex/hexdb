@@ -48,10 +48,12 @@ COPY --from=ui /src/hexdb_admin/dist /usr/share/hexdb/ui
 COPY docker/hexdb.toml /etc/hexdb/hexdb.toml
 COPY LICENSE THIRD-PARTY-NOTICES.md /usr/share/doc/hexdb/
 COPY plugins /usr/share/hexdb/plugins
-USER hexdb
+COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/hexdb-entrypoint
+# Starts as root only to give the data volume to the hexdb user, then runs HexDB
+# as hexdb (see docker/entrypoint.sh).
 WORKDIR /var/lib/hexdb
 VOLUME /var/lib/hexdb
 EXPOSE 7700 7702
 ENV HEXDB_CONFIG=/etc/hexdb/hexdb.toml
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s CMD curl -fsS http://127.0.0.1:7700/health || exit 1
-ENTRYPOINT ["hexdb_api"]
+ENTRYPOINT ["hexdb-entrypoint"]
