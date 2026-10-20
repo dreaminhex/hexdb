@@ -325,11 +325,11 @@ fn catalog_info_and_errors() -> Result<()> {
 
         // Errors carry HexDB's message and an SQLSTATE.
         let stmt = odbc.stmt();
-        let bad = wide("SELECT * FROM orders o JOIN customers c ON o.n = c.n");
+        let bad = wide("SELECT n, ROW_NUMBER() OVER (ORDER BY n) FROM orders");
         assert_eq!(SQLExecDirectW(stmt, bad.as_ptr(), SQL_NTS), SQL_ERROR);
         let (state, message) = diag(SQL_HANDLE_STMT, stmt);
         assert_eq!(state, "42000");
-        assert!(message.starts_with("[HexDB][ODBC]") && message.contains("JOIN"), "{}", message);
+        assert!(message.starts_with("[HexDB][ODBC]") && message.contains("window functions"), "{}", message);
         let missing = wide("SELECT * FROM nothing_here");
         assert_eq!(SQLExecDirectW(stmt, missing.as_ptr(), SQL_NTS), SQL_ERROR);
         assert_eq!(diag(SQL_HANDLE_STMT, stmt).0, "42S02");

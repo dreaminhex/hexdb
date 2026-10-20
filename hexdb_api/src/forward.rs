@@ -20,6 +20,11 @@
 //
 // Without a reachable Overseer, the request is handled locally, which refuses
 // writes with 421 `read_only_replica`.
+//
+// A sharded replica (`replication.sharding`) keeps only some of the data, so
+// it forwards reads of user data too, and refuses live feeds (WebSocket and
+// Server-Sent Events) with 421 naming the Overseer. While a newly elected
+// Overseer collects shards, it answers data requests with 503.
 
 use axum::{
     body::{Body, Bytes},
@@ -60,6 +65,37 @@ fn handled_locally(method: &Method, path: &str) -> bool {
         || path == "/mcp"
         // Sharing links only read (download counts go to the Overseer themselves).
         || path.starts_with("/_s/")
+}
+
+/// What a sharded replica (or a rebuilding Overseer) still answers itself:
+/// requests that don't read user data.
+fn answers_without_data(path: &str) -> bool {
+    path.starts_with("/lattice/")
+        || crate::routes::is_ui_path(path)
+        || matches!(
+            path,
+            "/" | "/health"
+                | "/status"
+                | "/status/history"
+                | "/logs"
+                | "/openapi.json"
+                | "/auth/login"
+                | "/auth/logout"
+                | "/auth/me"
+                | "/settings"
+                | "/shutdown"
+                | "/flush"
+                | "/compact"
+                | "/scrub"
+                | "/backup"
+                | "/backups"
+                | "/join"
+        )
+}
+
+/// Long-lived feeds, which forwarding can't carry.
+fn live_feed(path: &str) -> bool {
+    path.ends_with("/ws") || path == "/changes/stream" || (path.starts_with("/streams/") && path.ends_with("/subscribe"))
 }
 
 /// True if a GraphQL request body contains a mutation.
@@ -154,14 +190,44 @@ async fn forward_upload(engine: &Arc<HexDBEngine>, overseer: hexdb_core::network
 /// Forward writes to the Overseer when this hex is a replica.
 pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
-    if engine.is_writable() || !engine.config.replication.forward_writes || handled_locally(request.method(), &path) {
+    if let Some(note) = engine.rebuilding() {
+        if !answers_without_data(&path) {
+            return crate::handlers::ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "rebuilding", note).with_retry_after(5).into_response();
+        }
+    }
+    // A sharded replica only has some of the data: everything that reads it goes to the Overseer.
+    let partial = !engine.is_writable() && engine.is_partial_replica() && !answers_without_data(&path);
+    if !partial && (engine.is_writable() || !engine.config.replication.forward_writes || handled_locally(request.method(), &path)) {
         return next.run(request).await;
     }
     let overseer = {
         let peers = engine.peers.lock().await;
         peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone())
     };
-    let Some(overseer) = overseer else { return next.run(request).await };
+    let Some(overseer) = overseer else {
+        if partial {
+            return crate::handlers::ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overseer_unreachable",
+                "This hex keeps only some of the lattice's shards and no Overseer is reachable to answer; try again shortly.",
+            )
+            .with_retry_after(5)
+            .into_response();
+        }
+        return next.run(request).await;
+    };
+    if partial && live_feed(&path) {
+        return crate::handlers::ApiError::new(
+            StatusCode::MISDIRECTED_REQUEST,
+            "sharded_replica",
+            format!(
+                "This hex keeps only some of the lattice's shards, so it doesn't serve live feeds. Connect to the Overseer '{}' at {}.",
+                overseer.name,
+                hexdb_core::replication::peer_base_url(&overseer)
+            ),
+        )
+        .into_response();
+    }
     if path.contains("/_files/") || (request.method() == Method::PATCH && path.contains("/_uploads/")) {
         return forward_upload(&engine, overseer, request).await;
     }
@@ -171,7 +237,7 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
         Ok(bytes) => bytes,
         Err(_) => return crate::handlers::ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "The request body is too large.").into_response(),
     };
-    if path == "/graphql" && !graphql_mutation(&bytes) {
+    if !partial && path == "/graphql" && !graphql_mutation(&bytes) {
         return next.run(Request::from_parts(parts, Body::from(bytes))).await;
     }
 
@@ -206,13 +272,8 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut out_headers = HeaderMap::new();
     copy_headers(response.headers(), &mut out_headers);
-    let body = match response.bytes().await {
-        Ok(body) => body,
-        Err(e) => {
-            return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", format!("The Overseer's response was cut off: {}", e)).into_response();
-        }
-    };
-    let mut out = Response::new(Body::from(body));
+    // Streamed through, so a forwarded download isn't held in memory.
+    let mut out = Response::new(Body::from_stream(response.bytes_stream()));
     *out.status_mut() = status;
     *out.headers_mut() = out_headers;
     if let Ok(name) = HeaderValue::from_str(&overseer.name) {

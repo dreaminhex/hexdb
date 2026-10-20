@@ -8,7 +8,8 @@
 //   await server.stop()
 //
 // Run as a script, it starts a server, runs the given command with HEXDB_URL
-// and HEXDB_API_KEY set, and stops the server:
+// and HEXDB_API_KEY (and HEXDB_ADMIN_LOGIN / HEXDB_ADMIN_PASSWORD) set, and
+// stops the server:
 //   node drivers/testing/server.mjs python -m unittest discover -s drivers/python/tests
 import { spawn } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -95,7 +96,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const [command, ...args] = process.argv.slice(2)
   const server = await startServer()
   const code = await new Promise((resolveCode) => {
-    const child = spawn(command, args, { stdio: "inherit", env: { ...process.env, HEXDB_URL: server.url, HEXDB_API_KEY: server.apiKey }, shell: process.platform === "win32" })
+    const child = spawn(command, args, { stdio: "inherit", env: { ...process.env, HEXDB_URL: server.url, HEXDB_API_KEY: server.apiKey, HEXDB_ADMIN_LOGIN: server.adminLogin, HEXDB_ADMIN_PASSWORD: server.adminPassword }, shell: process.platform === "win32" })
     child.on("exit", (c) => resolveCode(c ?? 1))
   })
   await server.stop()

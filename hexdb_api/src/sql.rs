@@ -60,7 +60,8 @@ pub struct SqlRequest {
 pub async fn run(State(engine): Engine, Auth(principal): Auth, body: Result<Json<SqlRequest>, JsonRejection>) -> ApiResult {
     let Json(request) = body?;
     let query = SqlQuery::parse(&request.sql, &request.params)?;
-    if let Some(tess) = query.tessellation() {
+    // Every table the statement reads (joins, subqueries, CTEs) needs read permission.
+    for tess in query.tessellations() {
         principal.require(Permission::Read, tess)?;
         existing_tessellation(&engine, tess)?;
     }

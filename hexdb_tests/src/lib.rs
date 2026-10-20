@@ -637,6 +637,21 @@ admin_email = "admin@example.com"
         Ok(ApiResponse { status, headers, body })
     }
 
+    /// An admin request that may take longer than the client's usual 10 seconds
+    /// (a script's first run starts its runtime, slow on a cold CI machine).
+    pub fn request_slow(&self, method: Method, path: &str, body: Option<&Value>, timeout: Duration) -> Result<ApiResponse> {
+        let mut builder = self.client.request(method, self.url(path)).timeout(timeout);
+        if let Some(body) = body {
+            builder = builder.json(body);
+        }
+        let res = builder.send()?;
+        let status = res.status();
+        let headers = res.headers().clone();
+        let text = res.text()?;
+        let body = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap_or(Value::String(text)) };
+        Ok(ApiResponse { status, headers, body })
+    }
+
     /// Insert a document and return its ID.
     pub fn insert(&self, tessellation: &str, doc: &Value) -> Result<String> {
         self.insert_with_query(tessellation, "", doc)

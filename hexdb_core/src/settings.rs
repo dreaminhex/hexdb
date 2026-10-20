@@ -50,6 +50,7 @@ const fn boolean(key: &'static str, live: bool, description: &'static str) -> Se
 pub const SETTINGS: &[SettingDef] = &[
     int("limits.max_document_kb", 1, 65_536, true, "KB", "Largest document HexDB accepts (as JSON). Larger writes get 413."),
     int("limits.max_request_mb", 1, 1_024, false, "MB", "Largest request body for bulk writes, queries, transactions and GraphQL."),
+    int("limits.sql_max_rows", 1, 10_000_000, false, "", "Most documents one table read may return in SQL with joins, subqueries or expressions."),
     int("storage.disk_mb", 64, 1 << 30, true, "MB", "Disk space the data directory may use. Beyond it, writes that add data get 507; deletes still work."),
     int("memory.ram_mb", 64, 1 << 24, false, "MB", "Memory for documents before they are flushed to disk (also ranks hexes in elections)."),
     int("limits.max_connections", 1, 1_000_000, false, "", "Connections the API accepts at once."),
@@ -71,6 +72,9 @@ pub const SETTINGS: &[SettingDef] = &[
     int("replication.ack_timeout_ms", 100, 600_000, true, "ms", "How long a write waits for min_acks before answering 503 replication_timeout."),
     boolean("replication.forward_writes", false, "Replicas pass writes on to the Overseer instead of refusing them."),
     int("replication.quorum", 0, 64, false, "", "Hexes the Overseer must see to accept writes (0 turns the check off)."),
+    boolean("replication.sharding", false, "With two or more replicas, each keeps only some of the data's shards (the Overseer keeps all)."),
+    int("replication.shard_copies", 1, 16, false, "", "Replicas that keep each shard when sharding is on."),
+    int("replication.recent_changes", 1_000, 10_000_000, false, "", "Recent changes a sharded replica keeps, to bring collected shards up to date after a failover."),
     boolean("plugins.enabled", false, "Load plugins at startup."),
 ];
 

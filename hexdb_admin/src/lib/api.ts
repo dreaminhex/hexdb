@@ -192,6 +192,9 @@ export interface LatticeHex {
   applied_seq: number
   /** Changes behind the Overseer (replicas only, when known). */
   lag: number | null
+  /** replication.sharding on this hex, and how many of the 64 shards it keeps. */
+  sharding?: boolean
+  shards_held?: number
 }
 
 export interface ReplicationStatus {

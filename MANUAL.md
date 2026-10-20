@@ -536,7 +536,7 @@ GraphQL: `aggregate(tessellation: "orders", groupBy: ["status"], aggregates: { n
 
 ## 10. SQL
 
-`POST /sql` runs a read-only SQL `SELECT`. It's translated into the query or aggregation the REST API already runs, so indexes, permissions, row filters and field masks all apply the same way. BI tools and the [ODBC driver](#odbc) use it; the `hexdb sql` command prints its results as a table.
+`POST /sql` runs a read-only SQL `SELECT`: joins, subqueries, `UNION`, `WITH`, expressions and functions included. Each table is read through the same query path as the REST API, so indexes, permissions, row filters and field masks apply the same way. BI tools and the [ODBC driver](#odbc) use it; the `hexdb sql` command prints its results as a table.
 
 ```bash
 curl -X POST http://localhost:7700/sql -H "Authorization: Bearer $HEXDB_API_KEY" -H "Content-Type: application/json" -d '{
@@ -562,7 +562,7 @@ HEXDB_TOKEN=... hexdb sql "SELECT customer, total FROM orders WHERE total > ? OR
 - `columns`: each column's name and a type inferred from the page's values: `boolean`, `integer`, `number`, `string`, `json` (objects, arrays, or mixed types) or `null` (no values).
 - `rows`: arrays of values in column order.
 - `next`: a cursor, or null on the last page.
-- `translated`: the filter, sort and aggregation the statement became. Use it to check which index a query can use.
+- `translated`: how the statement runs. A single-table statement becomes one query or aggregation, shown as its filter, sort and aggregation. Anything else shows `"executor": "general"` and the filter sent with each table read (`reads`). Use it to check which index a statement can use.
 
 **Catalog.** SQL clients list tables and columns before they query:
 - `GET /sql/tables` returns the tessellations the caller can read.
@@ -572,7 +572,14 @@ HEXDB_TOKEN=... hexdb sql "SELECT customer, total FROM orders WHERE total > ? OR
   - then, unless the schema forbids other fields, the fields found in the first 100 documents (`source: "sample"`).
 - Hidden fields of the caller's role aren't listed.
 
-**What's supported.**
+**Two ways a statement runs.**
+- **One query.** A `SELECT` from one tessellation in the shape below becomes a single query or aggregation, run where the data is. It uses indexes for its filter and sort, and pages through results with a cursor, so it handles any table size.
+- **The general executor.** Everything else: joins, subqueries, `UNION` / `INTERSECT` / `EXCEPT`, `WITH`, and expressions over fields. Each table is read once through the query path, with the conditions in `WHERE` and `ON` that compare one table's field with a value sent along as that read's filter (so indexes apply). The rest runs in memory: hash joins on equality conditions, then filters, grouping, sorting and limits.
+  - One read may return at most `limits.sql_max_rows` documents (100,000). A larger read is refused with a message, never cut short: narrow it with `WHERE`.
+  - The same limit, times 100, bounds the work a statement may do (rows read, compared and produced), which stops runaway joins without an equality condition.
+  - Pages after the first run the statement again and skip the rows already returned.
+
+The single-query shape:
 
 | Clause | Supported |
 | --- | --- |
@@ -596,8 +603,9 @@ Notes:
   - `SUM` of no values is NULL;
   - a missing field reads as NULL.
 - **LIKE patterns.**
-  - `%` may appear only at the start or end, giving an exact, prefix, suffix or substring match. Matching is case-sensitive.
-  - `_` isn't supported. To match a literal `_`, escape it: `LIKE 'a!_%' ESCAPE '!'`.
+  - `%` matches any run of characters and `_` one character. `ESCAPE` makes the next character literal: `LIKE 'a!_%' ESCAPE '!'`.
+  - Matching is case-sensitive; `ILIKE` ignores case.
+  - Patterns with `%` only at the start or end become an index-friendly prefix, suffix or substring filter. Other patterns are checked in the general executor.
 - **Aggregates.**
   - They follow [Aggregations](#9-aggregations), including the 100,000-group limit.
   - `HAVING` is evaluated over every group before paging.
@@ -608,10 +616,51 @@ Notes:
   - Filtering, grouping or sorting by a hidden field is refused with 403, as in the REST API.
 - **Replicas.** `POST /sql` is a read, so a replica answers it itself instead of forwarding it to the Overseer.
 
-**Not supported.** These are refused with a message naming the part that isn't supported:
-- joins, subqueries, `UNION`, `WITH`;
-- expressions over fields (`total * 2`, `UPPER(name)`, `CASE`), comparing two fields, `ILIKE`;
-- window functions;
+### Joins, subqueries and expressions
+
+```sql
+-- Revenue per customer country, for paid orders, with customers who ordered nothing.
+SELECT c.country, COUNT(o.id) AS orders, COALESCE(SUM(o.total + o.shipping), 0) AS revenue
+FROM customers c
+LEFT JOIN orders o ON o.customer = c.code AND o.status = 'paid'
+GROUP BY c.country
+HAVING COUNT(o.id) > 0
+ORDER BY revenue DESC
+
+-- Customers whose largest order is above their country's average.
+WITH by_country AS (SELECT country, AVG(total) AS average FROM orders GROUP BY country)
+SELECT name FROM customers c
+WHERE (SELECT MAX(total) FROM orders o WHERE o.customer = c.code)
+    > (SELECT average FROM by_country b WHERE b.country = c.country)
+```
+
+**Joins.**
+- `[INNER] JOIN`, `LEFT [OUTER] JOIN`, `RIGHT [OUTER] JOIN`, `FULL [OUTER] JOIN` and `CROSS JOIN`, with `ON` or `USING (field, ...)`, and parenthesized joins. A comma join with its condition in `WHERE` (`FROM a, b WHERE a.x = b.y`) is an inner join.
+- Equality conditions between the two sides make a hash join. Other conditions are checked pair by pair, which the work limit bounds.
+- Every table in `FROM` needs a distinct name or alias. `alias.field` reads a table's field. An unqualified name reads the only table in `FROM`, or, with several, the one whose document has that field (two having it is an error: qualify it).
+- `SELECT *` lists each table's columns in turn; `alias.*` lists one table's.
+
+**Subqueries and set operations.**
+- `x IN (SELECT ...)`, `EXISTS (SELECT ...)`, `x > ANY (SELECT ...)` / `ALL (...)`, and a subquery as a value (it must return at most one row and one column).
+- Subqueries may refer to the outer query's tables by alias (correlated). Uncorrelated subqueries run once.
+- Subqueries in `FROM` need an alias: `FROM (SELECT ...) AS t`, optionally naming its columns, `AS t (a, b)`.
+- `WITH name [(columns)] AS (SELECT ...)` defines a table for the statement; each runs once. `WITH RECURSIVE` isn't supported.
+- `UNION`, `INTERSECT` and `EXCEPT` (`MINUS`), each with or without `ALL`. Both sides need the same number of columns. A trailing `ORDER BY` names result columns or positions.
+
+**Expressions,** anywhere a value can go (`SELECT`, `WHERE`, `ON`, `GROUP BY`, `HAVING`, `ORDER BY`):
+- arithmetic `+ - * / %` (integers stay exact; `7 / 2` is `3.5`; dividing by zero is an error), `||` to join text;
+- comparisons between fields, `IS [NOT] DISTINCT FROM`, `CASE`, `CAST(x AS type)` (integer, number, string, boolean, date, timestamp, json; `TRY_CAST` gives NULL instead of an error);
+- text: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`, `TRIM` / `LTRIM` / `RTRIM`, `CONCAT`, `REPLACE`, `LEFT`, `RIGHT`, `POSITION`, `LOCATE`;
+- numbers: `ABS`, `ROUND`, `TRUNCATE`, `FLOOR`, `CEIL`, `MOD`, `POWER`, `SQRT`, `SIGN`, `EXP`, `LOG` (natural), `LOG10`, `PI`;
+- NULLs: `COALESCE`, `IFNULL`, `NULLIF`;
+- dates (ISO 8601 strings): `EXTRACT(part FROM x)` and `YEAR`, `QUARTER`, `MONTH`, `WEEK`, `DAY`, `DAYOFWEEK` (1 = Sunday), `DAYOFYEAR`, `HOUR`, `MINUTE`, `SECOND`, `DAYNAME`, `MONTHNAME`; `CURRENT_DATE`, `CURRENT_TIME`, `NOW()`.
+- Aggregates take expressions (`SUM(price * quantity)`), and `DISTINCT` (`SUM(DISTINCT x)`). `GROUP BY` takes expressions too. In a grouped query, every selected expression must be grouped or inside an aggregate.
+- `ORDER BY` takes expressions and `NULLS FIRST` / `NULLS LAST`. NULLs sort first ascending and last descending by default.
+
+**Access.** Each table a statement reads, in joins, subqueries and `WITH` included, needs read permission, and each is read with the caller's row filters and hidden fields. A hidden field reads as NULL in expressions, and a filter on it sent with a read is refused with 403. System tessellations can't be read.
+
+**Not supported.** These are refused with a message naming the part:
+- window functions (`OVER`), `WITH RECURSIVE`, `NATURAL` joins, `LATERAL`;
 - statements other than `SELECT` (SQL is read-only; write through the REST API or transactions).
 
 ## 11. Transactions
@@ -1719,7 +1768,7 @@ Every hex runs the same election over the same view, so they agree without a con
 
 ### Replication
 
-Every hex keeps a full copy. A replica:
+Every hex keeps a full copy, unless the lattice shards its data (see [Sharding](#sharding)). A replica:
 
 1. **Full sync.** It reads a consistent snapshot from the Overseer: its sequence number S, its tessellations and index definitions, then every document with its version, page by page. Local data the Overseer doesn't have is removed.
 2. **Streaming.** It follows the Overseer's change feed after S with long polls, applying each batch atomically together with its replication cursor, so a crash can't leave data and cursor out of step. A change older than the snapshot's version of a document is skipped, so changes made during the snapshot apply exactly once.
@@ -1748,6 +1797,26 @@ quorum = 2            # hexes (including itself) the Overseer must see to accept
 
 - **`min_acks`.** With it set, an acknowledged write exists on at least that many replicas. Writes to system tessellations that don't need it (the audit trail, sign-in throttling, replication state, plugin cursors) don't wait.
 - **`quorum`.** A hex cut off from the rest stops taking writes, with 503 `no_quorum`. With a majority quorum (2 of 3, 3 of 5), a network partition can't leave two Overseers both accepting writes. Startup work that needs to write (creating the first admin) waits for the quorum.
+
+### Sharding
+
+With `replication.sharding = true` on the Overseer and two or more replicas, the replicas share the data instead of each keeping a full copy, which saves their disk and memory:
+
+```toml
+[replication]
+sharding = true
+shard_copies = 1      # replicas that keep each shard
+recent_changes = 20000
+```
+
+- **Shards.** Every document of a user tessellation falls in one of 64 shards, by a hash of its tessellation and ID. System tessellations (users, roles, the audit trail, configuration) aren't sharded: every hex keeps them.
+- **Copies.** The Overseer keeps every shard, and each shard is also kept by `shard_copies` replicas. With the default of 1, any one hex can be lost without losing data. A lattice with a single replica keeps full copies, whatever the setting.
+- **Placement.** Every hex computes the same placement from the live hexes (rendezvous hashing), so a hex that joins or leaves moves only its own shards. A replica copies the shards it gains from the Overseer, and gives up a shard only once another live replica holds it, so no shard has fewer copies while a new hex catches up.
+- **Reads.** A sharded replica doesn't have all the data, so it forwards requests that read data (queries, SQL, GraphQL, documents, files, MCP and the chat) to the Overseer, and answers with what the Overseer returns. Live feeds (`/changes/stream`, `/changes/ws`, stream subscriptions) aren't proxied: a sharded replica answers 421 `sharded_replica`, naming the Overseer to connect to. Health, status, sign-in and the hex's own maintenance stay local.
+- **Failover.** When the Overseer is lost, the replica furthest along its history is elected. Before it serves data or takes writes (data requests get 503 `rebuilding` meanwhile), it collects the shards it lacks from the replicas that keep them, then applies its last `recent_changes` changes to bring each to its own position, so the data is consistent as of one point in history. A shard whose holder is down waits for it to come back; if a holder was further behind than those recent changes reach, the gap is logged and recorded in the audit trail as `lattice.shards_incomplete`. The other replicas then sync their shards from the new Overseer.
+- **Status.** `/status` shows `shards_held_count` and `sharded_documents` (the user documents this hex keeps) under `replication`.
+
+What sharding doesn't change: the Overseer still keeps everything (it runs every write, transaction and unique index), so a lattice can't hold more than the Overseer can. It saves space on the replicas, not on the Overseer.
 
 ### Adding a hex
 
@@ -1918,6 +1987,7 @@ The ciphertext is `nonce (12) | AES-256-GCM(chunk, maybe compressed)` with the c
 | --- | --- | --- |
 | Document size | 1 MB of JSON | `limits.max_document_kb` (live) |
 | Bulk, query, transaction and GraphQL bodies | 32 MB | `limits.max_request_mb` |
+| Documents one table read returns in SQL with joins, subqueries or expressions | 100,000 | `limits.sql_max_rows` |
 | Single-document writes (`POST /{tessellation}`, `PUT` and `PATCH` of `/{tessellation}/{id}`) | The larger of 32 MB and `limits.max_document_kb` | Follows those two settings, as they are at startup |
 | Other request bodies | 2 MB | fixed |
 | Documents per bulk request | 10,000 | fixed |
@@ -2119,6 +2189,7 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `tls.ca_file` | empty | Extra CAs trusted for other hexes |
 | `limits.*` | see above | Request and connection limits |
 | `replication.min_acks`, `ack_timeout_ms`, `forward_writes`, `quorum` | 0, 5000, true, 0 | See [Durability options](#durability-options) |
+| `replication.sharding`, `shard_copies`, `recent_changes` | false, 1, 20000 | See [Sharding](#sharding) |
 | `plugins.enabled`, `registry` | true, `plugins.json` | Plugin loading |
 | `functions.scripts`, `python`, `node` | true, `python3`/`python`, `node` | Script runtimes |
 | `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Pre-1.6 query advisor key, used only while the lattice configuration's `ai.provider` is `none` |
@@ -2175,6 +2246,7 @@ A hex that didn't shut down cleanly leaves its runtime file behind, and the next
 | .NET | [drivers/dotnet](drivers/dotnet) | `dotnet add package HexDB.Client` (.NET 8+) |
 | Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 8+, EF Core 9) |
 | ODBC | [drivers/odbc](drivers/odbc) | Release archives (`odbc/`), or `cargo build --release -p hexdb_odbc` |
+| JDBC | [drivers/java](drivers/java) | `com.dreaminhex:hexdb-jdbc` from Maven Central, or the release's `hexdb-jdbc-<version>.jar` (Java 11+, no dependencies) |
 
 The Node.js, Python and .NET drivers each cover:
 - documents, queries, counts, aggregations and upserts;
@@ -2184,7 +2256,7 @@ The Node.js, Python and .NET drivers each cover:
 - functions and GraphQL;
 - files: `files(name)` (`Files(name)` in .NET) uploads (resumable from 16 MB), downloads by path or ID (whole, streamed or a byte range), lists folders, searches, and handles versions, the trash, thumbnails and re-extraction.
 
-The Entity Framework Core provider and the ODBC driver, described below, build on them or on SQL. The three client drivers authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
+The Entity Framework Core provider and the ODBC and JDBC drivers, described below, build on them or on SQL. The three client drivers authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
 
 ### Entity Framework Core
 
@@ -2230,6 +2302,8 @@ var big = await db.Orders.Where(o => o.Total > 10).OrderByDescending(o => o.Tota
   - `JsonNode` and `JsonElement` for free-form JSON.
 - Value converters apply as usual.
 - `decimal` is stored as a JSON number, which the server reads as a 64-bit float, so it keeps about 15 significant digits.
+- **Inheritance** (table-per-hierarchy): a hierarchy shares its root type's tessellation, and a discriminator field (`Discriminator`, or as configured) names each document's type. Querying a derived type's `DbSet`, or `OfType<T>()`, filters on the discriminator values of that type and its subtypes; each document is read as its own type.
+- **Owned types** (`OwnsOne`, `OwnsMany`) are stored inside the owner's document: a nested object or an array of objects, named after the navigation (`.ToJsonProperty("name")` on the owned navigation renames it). Owned types may own types. They have no `id` of their own and are always loaded with their owner. Filters can use their properties: `Where(i => i.Billing.City == "Oslo")` becomes a filter on `Billing.City`.
 
 **Queries.** LINQ is translated into one `_query` request: filters, sorting and paging run on the server. Results come back a page at a time and are tracked and identity-resolved like any EF Core query. Supported:
 - `Where`, with:
@@ -2251,10 +2325,17 @@ A query HexDB can't answer throws `InvalidOperationException` instead of loading
 - `GroupBy` and `Join`;
 - `Where` after `Skip`, `Take` or `Select`.
 
-**Saving.** `SaveChanges` sends every added, modified and deleted entity as one `POST /transactions`, so the save is atomic: if one operation fails, none apply.
-- Added entities are inserted.
-- Modified entities are patched with only the changed properties; a property set to `null` removes the field.
+**Relationships.** One-to-many and one-to-one relationships between entity types work as in EF Core: navigations, foreign key properties (stored as fields), fixup when you add a graph, and cascade deletes of the dependents you've loaded. HexDB itself doesn't enforce foreign keys or cascade on the server.
+- `Include`, `ThenInclude`, string includes (`Include("Books.Reviews")`) and `AutoInclude` load related entities. Each included navigation is one more query on the related tessellation per page of results, with the page's keys in an `$in` filter, so index the foreign key fields you include by.
+- Tracked queries connect entities through EF Core's change tracker; `AsNoTracking` queries connect them directly, in both directions.
+- Filter and sort on foreign key properties (`Where(b => b.AuthorId == id)`), not through navigations: `Where(b => b.Author.Name == "...")` would need a join and throws.
+
+**Saving.** `SaveChanges` sends every added, modified and deleted document as one `POST /transactions`, so the save is atomic: if one operation fails, none apply.
+- Added entities are inserted, with their owned entities.
+- Modified entities are patched with only the changed properties; a property set to `null` removes the field. A changed owned navigation is written whole: its object, or its array.
 - Deleted entities are deleted.
+
+**Transactions.** `BeginTransaction` groups several `SaveChanges` into one HexDB transaction: each save's operations wait, `Commit` sends them all atomically (up to 1,000 operations), and `Rollback`, or disposing the transaction without committing, discards them. Reads inside the transaction don't see its own uncommitted writes, and a concurrency conflict surfaces at `Commit` as `DbUpdateConcurrencyException`. Transactions don't nest.
 
 Concurrency tokens (`[ConcurrencyCheck]` or `.IsConcurrencyToken()`) become an `if_match` precondition on their original values. A document changed or deleted since it was read raises `DbUpdateConcurrencyException`. Any other refusal, such as a unique-index conflict, raises `DbUpdateException` with HexDB's status and message.
 
@@ -2265,16 +2346,16 @@ Concurrency tokens (`[ConcurrencyCheck]` or `.IsConcurrencyToken()`) become an `
 - Indexes, schemas and permissions aren't created from the model. Set them up through the API, the CLI or the admin UI.
 
 **Not supported yet.**
-- Navigations and relationships: store related ids as properties and query them separately.
-- Owned types and complex types: use a property of a JSON-serializable type instead.
-- Inheritance.
+- Many-to-many skip navigations: map the join entity, with a navigation to each side.
+- Filtered includes (`Include(a => a.Books.Where(...))`), and navigations inside server-side filters and sorts.
+- Complex types (`ComplexProperty`): use owned types.
+- Table-per-type and table-per-concrete-type inheritance (table-per-hierarchy works).
 - Composite keys.
-- Explicit transactions: `BeginTransaction` throws, because each `SaveChanges` is already one transaction.
 - Migrations.
 
 ### ODBC
 
-The ODBC driver ([drivers/odbc](drivers/odbc)) lets applications that read data through ODBC (reporting tools, spreadsheets, pyodbc, R) query HexDB. It sends SQL to [`POST /sql`](#10-sql) over HTTP or HTTPS, so it supports what HexDB's SQL supports and nothing more: read-only `SELECT`s on one tessellation. Permissions, row filters and field masks apply as for any other client.
+The ODBC driver ([drivers/odbc](drivers/odbc)) lets applications that read data through ODBC (reporting tools, spreadsheets, pyodbc, R) query HexDB. It sends SQL to [`POST /sql`](#10-sql) over HTTP or HTTPS, so it supports what HexDB's SQL supports: read-only `SELECT`s with joins, subqueries, `UNION`, `WITH` and expressions. `SQLGetInfo` reports those capabilities, so tools that read them can send joins and functions to the server. Permissions, row filters and field masks apply as for any other client.
 
 Build it with `cargo build --release -p hexdb_odbc` (release archives include it in `odbc/`), then register it:
 - **Windows:** run `drivers/odbc/install-windows.ps1` from an elevated PowerShell.
@@ -2299,12 +2380,25 @@ Driver={HexDB};Server=http://127.0.0.1:7700;ApiKey=hxk_...
   - Objects and arrays are `SQL_WLONGVARCHAR` holding JSON.
   - A column's type comes from the tessellation's schema when there is one, otherwise from the first page of results.
 - **Catalog.** Tessellations are tables in no catalog or schema, and `id` is each one's primary key.
-- **Escapes.** ODBC escape sequences for dates and timestamps become string literals.
+- **Escapes.** ODBC escape sequences for dates and timestamps become string literals, `{fn ...}` becomes the function call, and `{oj ...}` becomes the join inside it.
 - **Cursors.** Forward-only and read-only.
 
 See [drivers/odbc/README.md](drivers/odbc/README.md) for installation on each platform, every connection key, conversions and limits.
 
-The driver is tested with pyodbc through unixODBC on Linux and through the Windows driver manager (in CI). Desktop tools such as Excel and Power BI haven't been tested with it yet. There's no JDBC driver.
+The driver is tested with pyodbc through unixODBC on Linux and through the Windows driver manager (in CI). Desktop tools such as Excel and Power BI haven't been tested with it yet.
+
+### JDBC
+
+The JDBC driver ([drivers/java](drivers/java)) is for Java tools and applications: DBeaver, IntelliJ and DataGrip, Spark, reporting tools, and plain JDBC code. Like the ODBC driver, it sends SQL to [`POST /sql`](#10-sql), so permissions, row filters and field masks apply. It needs Java 11 or later and has no dependencies.
+
+```java
+Connection db = DriverManager.getConnection("jdbc:hexdb://127.0.0.1:7700?apiKey=" + System.getenv("HEXDB_API_KEY"));
+```
+
+- **URLs and properties.** `jdbc:hexdb://host:port` (add `?ssl=true` for HTTPS, or write `jdbc:hexdb:https://host:port`), with `apiKey`, or `user` and `password`, plus `caFile`, `pageSize` and `timeout`.
+- **Behavior.** Results are forward-only and read-only, fetched a page at a time. Types and the catalog follow the ODBC driver: booleans, `BIGINT`, `DOUBLE`, `VARCHAR`, and JSON text for objects and arrays; tessellations are tables in no catalog or schema, with `id` as the primary key. JDBC escape sequences are rewritten like ODBC's. There are no transactions: autocommit stays on, and `commit` and `rollback` do nothing.
+
+See [drivers/java/README.md](drivers/java/README.md) for every property, conversions, errors and limits.
 
 ## 25. FAQ
 

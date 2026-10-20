@@ -1,5 +1,6 @@
 // How entity types map to HexDB: each entity type is a tessellation (named
-// after its DbSet, or ToTessellation), each property a field of the document
+// after its DbSet, or ToTessellation; a hierarchy shares its root type's, with
+// a discriminator field naming each document's type), each property a field of the document
 // (named after the property, or ToJsonProperty), and the key is the
 // document's `id`, a ULID. String keys get a new ULID when an entity is added;
 // Guid keys are stored as the ULID with the same 128 bits.
@@ -48,7 +49,10 @@ namespace HexDB.EntityFrameworkCore.Metadata
             var sets = _dependencies.SetFinder.FindSets(_dependencies.ContextType);
             foreach (var entityType in modelBuilder.Metadata.GetEntityTypes())
             {
-                if (entityType.FindAnnotation(HexDBAnnotationNames.Tessellation) is null)
+                // Owned types live inside their owner's document.
+                if (entityType.IsOwned()) continue;
+                // Derived types are stored with their root type (one tessellation per hierarchy).
+                if (entityType.BaseType is null && entityType.FindAnnotation(HexDBAnnotationNames.Tessellation) is null)
                 {
                     var set = sets.Where(s => s.Type == entityType.ClrType).Select(s => s.Name).FirstOrDefault();
                     entityType.Builder.HasAnnotation(HexDBAnnotationNames.Tessellation, set ?? entityType.ClrType.Name);
@@ -83,12 +87,19 @@ namespace HexDB.EntityFrameworkCore.Metadata
             foreach (var entityType in model.GetEntityTypes())
             {
                 var name = entityType.DisplayName();
-                if (entityType.IsOwned())
-                    throw new InvalidOperationException($"'{name}' is an owned entity type; the HexDB provider doesn't support owned types yet. Map nested data as a property of a JSON-serializable type instead.");
-                if (entityType.BaseType is not null || entityType.GetDirectlyDerivedTypes().Any())
-                    throw new InvalidOperationException($"'{name}' is part of an inheritance hierarchy; the HexDB provider doesn't support inheritance yet.");
-                if (entityType.GetNavigations().Any() || entityType.GetSkipNavigations().Any())
-                    throw new InvalidOperationException($"'{name}' has navigation properties; the HexDB provider doesn't support relationships yet. Store related ids as properties and query them separately.");
+                // Owned types are stored in their owner's document; their keys come from it.
+                if (entityType.IsOwned()) continue;
+                if (entityType.BaseType is not null && entityType.FindAnnotation(HexDBAnnotationNames.Tessellation) is { Value: string own } && own != entityType.GetRootType().GetTessellation())
+                    throw new InvalidOperationException($"'{name}' derives from '{entityType.GetRootType().DisplayName()}', so it's stored in that type's tessellation ('{entityType.GetRootType().GetTessellation()}'); call ToTessellation on the root type only.");
+                if ((entityType.BaseType is not null || entityType.GetDirectlyDerivedTypes().Any()) && entityType.FindDiscriminatorProperty() is null)
+                    throw new InvalidOperationException($"'{name}' is part of an inheritance hierarchy without a discriminator; HexDB stores a hierarchy in one tessellation and needs one to tell the types apart.");
+                if (entityType.GetDeclaredSkipNavigations().FirstOrDefault() is { } skip)
+                    throw new InvalidOperationException($"'{name}.{skip.Name}' is a many-to-many navigation; the HexDB provider doesn't support those. Map the join entity (with a navigation to each side) instead.");
+                foreach (var foreignKey in entityType.GetDeclaredForeignKeys().Where(f => !f.IsOwnership))
+                {
+                    if (foreignKey.Properties.Count != 1)
+                        throw new InvalidOperationException($"The relationship from '{name}' to '{foreignKey.PrincipalEntityType.DisplayName()}' has a composite foreign key; HexDB relationships use one foreign key property.");
+                }
                 var key = entityType.FindPrimaryKey()
                     ?? throw new InvalidOperationException($"'{name}' has no key. HexDB documents have an id: give the entity a string or Guid key.");
                 if (key.Properties.Count != 1 || (key.Properties[0].ClrType != typeof(string) && key.Properties[0].ClrType != typeof(Guid)))
@@ -122,9 +133,24 @@ namespace Microsoft.EntityFrameworkCore
             return builder;
         }
 
-        /// <summary>The tessellation an entity type is stored in.</summary>
-        public static string GetTessellation(this IReadOnlyEntityType entityType) =>
-            entityType.FindAnnotation(HexDBAnnotationNames.Tessellation)?.Value as string ?? entityType.ClrType.Name;
+        /// <summary>The tessellation an entity type is stored in (its root type's, in a hierarchy).</summary>
+        public static string GetTessellation(this IReadOnlyEntityType entityType)
+        {
+            var root = entityType.GetRootType();
+            return root.FindAnnotation(HexDBAnnotationNames.Tessellation)?.Value as string ?? root.ClrType.Name;
+        }
+
+        /// <summary>Store an owned navigation under another name in the document (default: the navigation's name).</summary>
+        public static OwnedNavigationBuilder<TOwner, TDependent> ToJsonProperty<TOwner, TDependent>(this OwnedNavigationBuilder<TOwner, TDependent> builder, string name)
+            where TOwner : class where TDependent : class
+        {
+            builder.Metadata.PrincipalToDependent!.SetAnnotation(HexDBAnnotationNames.JsonPropertyName, name);
+            return builder;
+        }
+
+        /// <summary>The document field an owned navigation is stored in.</summary>
+        public static string GetJsonPropertyName(this IReadOnlyNavigationBase navigation) =>
+            navigation.FindAnnotation(HexDBAnnotationNames.JsonPropertyName)?.Value as string ?? navigation.Name;
 
         /// <summary>The document field a property is stored in (`id` for the key).</summary>
         public static string GetJsonPropertyName(this IReadOnlyProperty property) =>

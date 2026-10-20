@@ -26,11 +26,21 @@
 // acknowledged but no replica received yet is lost if the Overseer fails
 // before it comes back.
 //
+// Sharding (`replication.sharding`, see `crate::sharding`): with two or more
+// replicas, each keeps only its shards. A full sync and the change feed are
+// filtered to them; when the placement changes, a replica copies the shards it
+// gains from the Overseer and gives up the ones it loses once another replica
+// holds them. A sharded replica also keeps the last `replication.recent_changes`
+// changes of every shard. If the Overseer fails, the most up-to-date replica
+// is elected; before taking requests it collects the shards it lacks from the
+// other replicas and brings them to its own position with those changes.
+//
 // Internal endpoints require a fresh, single-use request signature made with
 // the lattice key (see `network::lattice_auth`), so only hexes configured with
 // the same lattice secret can replicate from each other, and captured requests
 // can't be replayed. With `[tls]` configured, replication uses HTTPS.
 
+use crate::sharding::{self, ShardMask, ALL_SHARDS};
 use crate::{
     catalog::TessellationInfo,
     changes::{Change, ChangeKind},
@@ -143,7 +153,7 @@ pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_jso
 }
 
 /// What replication is doing on this hex, for `/status` and the dashboard.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ReplicationStatus {
     /// "leading" (this hex is the Overseer), "waiting" (no Overseer reachable),
     /// "syncing" (full sync in progress), "streaming", or "error".
@@ -159,6 +169,33 @@ pub struct ReplicationStatus {
     pub synced_documents: u64,
     pub last_sync: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
+    /// The shards this hex keeps (all of them unless it's a sharded replica).
+    pub shards_held: crate::sharding::ShardMask,
+    /// The shards it should keep, by the current placement.
+    pub shards_wanted: crate::sharding::ShardMask,
+    /// The history (Overseer) this hex's data follows.
+    pub history: Option<String>,
+    /// Set while a newly elected Overseer collects shards from replicas.
+    pub rebuilding: Option<String>,
+}
+
+impl Default for ReplicationStatus {
+    fn default() -> Self {
+        ReplicationStatus {
+            state: String::new(),
+            source_id: None,
+            source_name: None,
+            applied_seq: 0,
+            source_seq: 0,
+            synced_documents: 0,
+            last_sync: None,
+            last_error: None,
+            shards_held: crate::sharding::ALL_SHARDS,
+            shards_wanted: crate::sharding::ALL_SHARDS,
+            history: None,
+            rebuilding: None,
+        }
+    }
 }
 
 impl ReplicationStatus {
@@ -171,6 +208,16 @@ impl ReplicationStatus {
 // ---------------------------------------------------------------------------
 // Wire format (shared with the API handlers)
 // ---------------------------------------------------------------------------
+
+/// `GET /lattice/shard-snapshot/{tessellation}`: a replica's documents in some
+/// shards, as of its position in its history (for a rebuild after a failover).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardPage {
+    pub source_id: String,
+    pub applied_seq: u64,
+    pub documents: Vec<Document>,
+    pub next: Option<Ulid>,
+}
 
 /// `GET /lattice/snapshot`: where a full sync starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +327,33 @@ struct Session {
     last_catalog: std::time::Instant,
     /// The Overseer's catalog fingerprint as of the last catalog sync.
     catalog_seen: String,
+    /// The shards this hex keeps.
+    held: ShardMask,
+    /// Whether the Overseer shards the data (recent changes are kept then).
+    sharded: bool,
+}
+
+/// How often a sharded replica re-checks the placement for shards to copy or give up.
+const REBALANCE_EVERY: Duration = Duration::from_secs(5);
+
+/// The last changes of every shard, kept by a sharded replica (see the module comment).
+#[derive(Default)]
+pub struct RecentChanges {
+    source: String,
+    entries: std::collections::VecDeque<Change>,
+}
+
+impl RecentChanges {
+    fn push(&mut self, source: &str, change: &Change, limit: usize) {
+        if self.source != source {
+            self.source = source.to_string();
+            self.entries.clear();
+        }
+        self.entries.push_back(change.clone());
+        while self.entries.len() > limit.max(1) {
+            self.entries.pop_front();
+        }
+    }
 }
 
 struct Follower {
@@ -289,6 +363,7 @@ struct Follower {
     was_leading: Option<bool>,
     /// The lattice key the Overseer last accepted (0 is the current key).
     key_index: std::sync::atomic::AtomicUsize,
+    last_rebalance: std::time::Instant,
 }
 
 impl Follower {
@@ -297,7 +372,14 @@ impl Follower {
             warn!("⚠️ Replication client: {:#}. Using system certificates only.", e);
             crate::crypt::http_client().build().unwrap_or_default()
         });
-        Follower { engine, client, session: None, was_leading: None, key_index: std::sync::atomic::AtomicUsize::new(0) }
+        Follower {
+            engine,
+            client,
+            session: None,
+            was_leading: None,
+            key_index: std::sync::atomic::AtomicUsize::new(0),
+            last_rebalance: std::time::Instant::now(),
+        }
     }
 
     fn set_status(&self, update: impl FnOnce(&mut ReplicationStatus)) {
@@ -308,6 +390,16 @@ impl Follower {
     /// Do one unit of work; returns how long to wait before the next.
     async fn step(&mut self) -> Duration {
         if self.engine.role() == ROLE_OVERSEER {
+            if self.engine.rebuilding().is_some() {
+                return match self.rebuild().await {
+                    Ok(true) => Duration::ZERO,
+                    Ok(false) => Duration::from_secs(2),
+                    Err(e) => {
+                        warn!("⚠️ Collecting shards after the failover failed: {:#}", e);
+                        Duration::from_secs(2)
+                    }
+                };
+            }
             if self.was_leading != Some(true) {
                 if self.was_leading == Some(false) {
                     info!("🎖️ This hex is now the Overseer; replication stops and writes are accepted.");
@@ -322,6 +414,7 @@ impl Follower {
                 self.set_status(|s| {
                     *s = ReplicationStatus { state: "leading".into(), ..Default::default() };
                 });
+                self.engine.recent_changes.lock().unwrap().entries.clear();
             }
             return Duration::from_secs(1);
         }
@@ -342,8 +435,21 @@ impl Follower {
         // its ID across restarts but can come back on another address; then the
         // session starts again, resuming from the saved cursor (no full sync).
         let base = peer_base_url(&overseer.hex);
+        let wanted = self.wanted_shards(&overseer).await;
+        self.set_status(|s| s.shards_wanted = wanted);
+        if let Some(session) = self.session.as_mut() {
+            session.sharded = overseer.hex.sharding;
+        }
         let result = match &self.session {
-            Some(session) if session.overseer_id == overseer.hex.id && session.base == base => self.stream().await,
+            Some(session) if session.overseer_id == overseer.hex.id && session.base == base => {
+                if session.held != wanted && self.last_rebalance.elapsed() >= REBALANCE_EVERY {
+                    self.last_rebalance = std::time::Instant::now();
+                    if let Err(e) = self.rebalance(wanted, &overseer).await {
+                        warn!("⚠️ Moving shards failed: {:#}", e);
+                    }
+                }
+                self.stream().await
+            }
             _ => self.start(&overseer).await,
         };
         match result {
@@ -371,6 +477,12 @@ impl Follower {
             let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
             if cursor.source_id == meta.source_id && cursor.applied_seq >= meta.available_after && cursor.applied_seq <= meta.seq {
                 info!("🔁 Resuming replication from '{}' after sequence {}.", overseer.hex.name, cursor.applied_seq);
+                let held = cursor.held_shards;
+                self.set_status(|s| {
+                    s.shards_held = held;
+                    s.history = Some(cursor.source_id.clone());
+                    s.applied_seq = cursor.applied_seq;
+                });
                 self.session = Some(Session {
                     source_id: cursor.source_id,
                     overseer_id: overseer.hex.id.clone(),
@@ -379,6 +491,8 @@ impl Follower {
                     guard: HashMap::new(),
                     last_catalog: std::time::Instant::now() - CATALOG_EVERY,
                     catalog_seen: String::new(),
+                    held,
+                    sharded: overseer.hex.sharding,
                 });
                 return Ok(Duration::ZERO);
             }
@@ -444,6 +558,7 @@ impl Follower {
 
         let engine = self.engine.clone();
         engine.adopt_content_key(&meta.content_key)?;
+        let shards = self.wanted_shards(overseer).await;
         let wanted: HashSet<&str> = meta.tessellations.iter().map(|(n, _)| n.as_str()).collect();
         for (name, _) in engine.tessellation_details() {
             if name != REPLICATION_TESSELLATION && !wanted.contains(name.as_str()) {
@@ -458,14 +573,21 @@ impl Follower {
             engine.set_replicated_kind(name, &info.kind)?;
             let mut seen: HashSet<Ulid> = HashSet::new();
             let mut after: Option<Ulid> = None;
+            let filtered = shards != ALL_SHARDS && engine.is_sharded_tessellation(name);
             loop {
                 let mut url = format!("{}/lattice/snapshot/{}?limit={}", base, name, PAGE);
                 if let Some(a) = after {
                     url.push_str(&format!("&after={}", a));
                 }
+                if filtered {
+                    url.push_str(&format!("&shards={}", shards));
+                }
                 let page: SnapshotPage = self.get_ok(&url).await?;
                 let mut writes = Vec::with_capacity(page.documents.len());
                 for (doc, seq) in page.documents {
+                    if filtered && !sharding::holds(shards, sharding::shard_of(name, doc.id)) {
+                        continue;
+                    }
                     seen.insert(doc.id);
                     if seq > meta.seq {
                         guard.insert(DocKey::new(name, doc.id), seq);
@@ -496,8 +618,9 @@ impl Follower {
             engine.set_schemas_unchecked(name, &info.schemas)?;
         }
 
-        let cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: meta.seq };
+        let cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: meta.seq, held_shards: shards };
         engine.apply_replicated(Vec::new(), Some(&cursor)).await?;
+        self.engine.recent_changes.lock().unwrap().entries.clear();
         info!("✅ Full sync from '{}' complete: {} documents in {} tessellations.", meta.source_name, copied, meta.tessellations.len());
         // Fetch the content of every file the snapshot brought.
         engine.request_chunk_catch_up();
@@ -507,6 +630,8 @@ impl Follower {
             s.source_seq = s.source_seq.max(meta.seq);
             s.synced_documents = copied;
             s.last_sync = Some(Utc::now());
+            s.shards_held = shards;
+            s.history = Some(meta.source_id.clone());
         });
         self.session = Some(Session {
             source_id: meta.source_id,
@@ -516,6 +641,8 @@ impl Follower {
             guard,
             last_catalog: std::time::Instant::now(),
             catalog_seen: String::new(),
+            held: shards,
+            sharded: overseer.hex.sharding,
         });
         Ok(())
     }
@@ -557,7 +684,23 @@ impl Follower {
 
         let engine = self.engine.clone();
         let mut writes = Vec::new();
+        let (held, sharded) = (session.held, session.sharded);
+        if sharded {
+            let limit = engine.config.replication.recent_changes;
+            let mut recent = engine.recent_changes.lock().unwrap();
+            for change in &batch.changes {
+                if change.id.is_some() && engine.is_sharded_tessellation(&change.tessellation) {
+                    recent.push(&session.source_id, change, limit);
+                }
+            }
+        }
         for change in &batch.changes {
+            if held != ALL_SHARDS
+                && engine.is_sharded_tessellation(&change.tessellation)
+                && change.id.is_some_and(|id| !sharding::holds(held, sharding::shard_of(&change.tessellation, id)))
+            {
+                continue;
+            }
             let key = change.id.map(|id| DocKey::new(&change.tessellation, id));
             if let Some(key) = &key {
                 if session.guard.get(key).is_some_and(|snap| change.seq <= *snap) {
@@ -577,13 +720,13 @@ impl Follower {
                 }
                 ChangeKind::DropTessellation => {
                     // Apply what came before, then drop.
-                    let cursor = ReplicaCursor { source_id: session.source_id.clone(), applied_seq: change.seq.saturating_sub(1) };
+                    let cursor = ReplicaCursor { source_id: session.source_id.clone(), applied_seq: change.seq.saturating_sub(1), held_shards: held };
                     engine.apply_replicated(std::mem::take(&mut writes), Some(&cursor)).await?;
                     engine.drop_replicated_tessellation(&change.tessellation).await?;
                 }
             }
         }
-        let cursor = ReplicaCursor { source_id: session.source_id.clone(), applied_seq: batch.last_seq };
+        let cursor = ReplicaCursor { source_id: session.source_id.clone(), applied_seq: batch.last_seq, held_shards: held };
         if !writes.is_empty() || batch.last_seq != session.cursor {
             engine.apply_replicated(writes, Some(&cursor)).await?;
         }
@@ -598,6 +741,266 @@ impl Follower {
             s.last_error = None;
         });
         Ok(Duration::ZERO)
+    }
+
+    /// The shards this hex should keep: its share of the Overseer's placement,
+    /// or all of them (no sharding, or fewer than two replicas).
+    async fn wanted_shards(&self, overseer: &LatticeMember) -> ShardMask {
+        if !overseer.hex.sharding {
+            return ALL_SHARDS;
+        }
+        let me = self.engine.id.to_string();
+        let mut replicas: Vec<String> = {
+            let peers = self.engine.peers.lock().await;
+            peers.iter().filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.id != me).map(|p| p.hex.id.clone()).collect()
+        };
+        replicas.push(me.clone());
+        if replicas.len() < 2 {
+            return ALL_SHARDS;
+        }
+        sharding::placement(&replicas, overseer.hex.shard_copies.max(1)).get(&me).copied().unwrap_or(ALL_SHARDS)
+    }
+
+    /// Copy shards this hex gains from the Overseer; give up the ones it loses
+    /// once enough other replicas hold them.
+    async fn rebalance(&mut self, wanted: ShardMask, overseer: &LatticeMember) -> Result<()> {
+        let Some(session) = self.session.as_ref() else { return Ok(()) };
+        let (base, held, cursor, source) = (session.base.clone(), session.held, session.cursor, session.source_id.clone());
+        let engine = self.engine.clone();
+        let tessellations: Vec<String> = engine.tessellation_details().into_iter().map(|(n, _)| n).filter(|n| engine.is_sharded_tessellation(n)).collect();
+
+        let gained = wanted & !held;
+        if gained != 0 {
+            info!("📥 Copying {} shard(s) from the Overseer.", sharding::count(gained));
+            // Anything left over from an earlier time with these shards is stale.
+            self.delete_shards(&tessellations, gained).await?;
+            let mut guard = HashMap::new();
+            for name in &tessellations {
+                let mut after: Option<Ulid> = None;
+                loop {
+                    let mut url = format!("{}/lattice/snapshot/{}?limit={}&shards={}", base, name, PAGE, gained);
+                    if let Some(a) = after {
+                        url.push_str(&format!("&after={}", a));
+                    }
+                    let page: SnapshotPage = match self.get(&url).await? {
+                        Ok(page) => page,
+                        Err(status) if status == reqwest::StatusCode::NOT_FOUND => break,
+                        Err(status) => bail!("GET {} returned {}", url, status),
+                    };
+                    let mut writes = Vec::new();
+                    for (doc, seq) in page.documents {
+                        if !sharding::holds(gained, sharding::shard_of(name, doc.id)) {
+                            continue;
+                        }
+                        // The feed (from `cursor`) skips changes this copy already has.
+                        if seq > cursor {
+                            guard.insert(DocKey::new(name, doc.id), seq);
+                        }
+                        writes.push(ReplicaWrite::Put(doc));
+                    }
+                    engine.apply_replicated(writes, None).await?;
+                    match page.next {
+                        Some(next) => after = Some(next),
+                        None => break,
+                    }
+                }
+            }
+            let held = held | gained;
+            engine.apply_replicated(Vec::new(), Some(&ReplicaCursor { source_id: source.clone(), applied_seq: cursor, held_shards: held })).await?;
+            if let Some(s) = self.session.as_mut() {
+                s.held = held;
+                s.guard.extend(guard);
+            }
+            self.set_status(|s| s.shards_held = held);
+            engine.request_chunk_catch_up();
+            info!("✅ Now keeping {} of {} shards.", sharding::count(held), sharding::SHARDS);
+        }
+
+        let held = self.session.as_ref().map_or(held, |s| s.held);
+        let lost = held & !wanted;
+        if lost != 0 {
+            // Give up a shard only when enough other live replicas hold it.
+            let copies = overseer.hex.shard_copies.max(1);
+            let me = engine.id.to_string();
+            let others: Vec<ShardMask> = {
+                let peers = engine.peers.lock().await;
+                peers
+                    .iter()
+                    .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.id != me && p.hex.replication_source == source)
+                    .map(|p| p.hex.shards_held)
+                    .collect()
+            };
+            let safe: ShardMask = sharding::list(lost)
+                .into_iter()
+                .filter(|shard| others.iter().filter(|m| sharding::holds(**m, *shard)).count() >= copies)
+                .fold(0, |mask, shard| mask | (1u64 << shard));
+            if safe != 0 {
+                let held = held & !safe;
+                // Record the smaller set first: a crash in between leaves extra documents, never missing ones.
+                engine.apply_replicated(Vec::new(), Some(&ReplicaCursor { source_id: source.clone(), applied_seq: cursor, held_shards: held })).await?;
+                if let Some(s) = self.session.as_mut() {
+                    s.held = held;
+                }
+                self.set_status(|s| s.shards_held = held);
+                self.delete_shards(&tessellations, safe).await?;
+                info!("📤 Gave up {} shard(s) other replicas now keep; keeping {} of {}.", sharding::count(safe), sharding::count(held), sharding::SHARDS);
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete this hex's documents in some shards.
+    async fn delete_shards(&self, tessellations: &[String], shards: ShardMask) -> Result<()> {
+        for name in tessellations {
+            let doomed: Vec<ReplicaWrite> = self
+                .engine
+                .visible_ids(name)
+                .await
+                .into_iter()
+                .filter(|id| sharding::holds(shards, sharding::shard_of(name, *id)))
+                .map(|id| ReplicaWrite::Delete { tessellation: name.clone(), id })
+                .collect();
+            for chunk in doomed.chunks(PAGE) {
+                self.engine.apply_replicated(chunk.to_vec(), None).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A newly elected Overseer that kept only some shards collects the rest
+    /// from the replicas that kept them (from the same history), and brings
+    /// each to its own position with its recent changes. Returns true when done.
+    async fn rebuild(&mut self) -> Result<bool> {
+        let engine = self.engine.clone();
+        let Some(cursor) = engine.load_replica_cursor().await else {
+            // Nothing was ever replicated here: there's nothing to rebuild.
+            self.finish_rebuild(None).await?;
+            return Ok(true);
+        };
+        let mut held = cursor.held_shards;
+        if held == ALL_SHARDS {
+            self.finish_rebuild(Some(&cursor)).await?;
+            return Ok(true);
+        }
+        self.set_status(|s| s.state = "rebuilding".into());
+        let me = engine.id.to_string();
+        let holders: Vec<crate::network::discovery::PeerHex> = {
+            let peers = engine.peers.lock().await;
+            peers
+                .iter()
+                .filter(|p| p.status == "active" && p.hex.id != me && p.hex.replication_source == cursor.source_id)
+                .map(|p| p.hex.clone())
+                .collect()
+        };
+        let tessellations: Vec<String> = engine.tessellation_details().into_iter().map(|(n, _)| n).filter(|n| engine.is_sharded_tessellation(n)).collect();
+        // For each missing shard, the holder furthest along.
+        let mut plan: HashMap<String, (crate::network::discovery::PeerHex, ShardMask)> = HashMap::new();
+        for shard in sharding::list(!held) {
+            if let Some(best) = holders.iter().filter(|h| sharding::holds(h.shards_held, shard)).max_by_key(|h| h.applied_seq) {
+                plan.entry(best.id.clone()).or_insert_with(|| (best.clone(), 0)).1 |= 1u64 << shard;
+            }
+        }
+        for (holder, shards) in plan.into_values() {
+            info!("📥 Collecting {} shard(s) from '{}'.", sharding::count(shards), holder.name);
+            let base = peer_base_url(&holder);
+            let mut position: Option<u64> = None;
+            for name in &tessellations {
+                let mut after: Option<Ulid> = None;
+                loop {
+                    let mut url = format!("{}/lattice/shard-snapshot/{}?limit={}&shards={}", base, name, PAGE, shards);
+                    if let Some(a) = after {
+                        url.push_str(&format!("&after={}", a));
+                    }
+                    let page: ShardPage = self.get_ok(&url).await?;
+                    if page.source_id != cursor.source_id {
+                        bail!("'{}' follows another history now", holder.name);
+                    }
+                    if *position.get_or_insert(page.applied_seq) != page.applied_seq {
+                        bail!("'{}' moved on while its shards were being copied", holder.name);
+                    }
+                    let writes: Vec<ReplicaWrite> = page.documents.into_iter().map(ReplicaWrite::Put).collect();
+                    engine.apply_replicated(writes, None).await?;
+                    match page.next {
+                        Some(next) => after = Some(next),
+                        None => break,
+                    }
+                }
+            }
+            // Bring these shards from the holder's position to this hex's.
+            let from = position.unwrap_or(holder.applied_seq);
+            let (changes, covered) = {
+                let recent = engine.recent_changes.lock().unwrap();
+                let same = recent.source == cursor.source_id;
+                let oldest = recent.entries.front().map(|c| c.seq);
+                let covered = from >= cursor.applied_seq || (same && oldest.is_some_and(|o| o <= from + 1));
+                let changes: Vec<Change> = if same {
+                    recent
+                        .entries
+                        .iter()
+                        .filter(|c| c.seq > from && c.seq <= cursor.applied_seq)
+                        .filter(|c| c.id.is_some_and(|id| sharding::holds(shards, sharding::shard_of(&c.tessellation, id))))
+                        .cloned()
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                (changes, covered)
+            };
+            if !covered {
+                warn!(
+                    "⚠️ '{}' was further behind ({}) than this hex's recent changes reach; its shards may miss changes up to {}.",
+                    holder.name, from, cursor.applied_seq
+                );
+                engine
+                    .audit(
+                        "system",
+                        "lattice.shards_incomplete",
+                        &holder.name,
+                        serde_json::json!({ "shards": sharding::list(shards), "holder_seq": from, "overseer_seq": cursor.applied_seq }),
+                    )
+                    .await;
+            }
+            let writes: Vec<ReplicaWrite> = changes
+                .iter()
+                .filter_map(|c| match c.kind {
+                    ChangeKind::Put => c.document.clone().map(ReplicaWrite::Put),
+                    ChangeKind::Delete => c.id.map(|id| ReplicaWrite::Delete { tessellation: c.tessellation.clone(), id }),
+                    ChangeKind::DropTessellation => None,
+                })
+                .collect();
+            engine.apply_replicated(writes, None).await?;
+            held |= shards;
+            engine
+                .apply_replicated(Vec::new(), Some(&ReplicaCursor { source_id: cursor.source_id.clone(), applied_seq: cursor.applied_seq, held_shards: held }))
+                .await?;
+            self.set_status(|s| s.shards_held = held);
+        }
+        if held != ALL_SHARDS {
+            let missing = sharding::count(!held);
+            self.set_status(|s| {
+                s.rebuilding = Some(format!(
+                    "This hex just became the Overseer and is collecting shards; {} shard(s) are on hexes that aren't reachable yet. Writes and queries resume when they're back.",
+                    missing
+                ))
+            });
+            return Ok(false);
+        }
+        let done = ReplicaCursor { held_shards: ALL_SHARDS, ..cursor };
+        self.finish_rebuild(Some(&done)).await?;
+        Ok(true)
+    }
+
+    async fn finish_rebuild(&mut self, cursor: Option<&ReplicaCursor>) -> Result<()> {
+        if let Some(cursor) = cursor {
+            self.engine.apply_replicated(Vec::new(), Some(&ReplicaCursor { held_shards: ALL_SHARDS, ..cursor.clone() })).await?;
+        }
+        self.engine.request_chunk_catch_up();
+        self.set_status(|s| {
+            s.shards_held = ALL_SHARDS;
+            s.rebuilding = None;
+        });
+        info!("✅ This hex has every shard; it takes writes and queries as the Overseer.");
+        Ok(())
     }
 
     /// Pick up tessellations and index definitions created on the Overseer.

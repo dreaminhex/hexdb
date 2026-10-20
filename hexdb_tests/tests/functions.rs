@@ -11,7 +11,8 @@ fn run(server: &TestServer, token: Option<&str>, name: &str, params: Value) -> R
     let body = json!({ "params": params });
     match token {
         Some(t) => server.request_as(Some(t), Method::POST, &path, Some(&body), &[]),
-        None => server.request(Method::POST, &path, Some(&body), &[]),
+        // Scripts start a runtime (Python, Node.js), which can take a while on a cold machine.
+        None => server.request_slow(Method::POST, &path, Some(&body), Duration::from_secs(60)),
     }
 }
 

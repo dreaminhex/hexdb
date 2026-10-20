@@ -78,7 +78,8 @@ The completed connection string the driver returns to applications leaves out `A
   - Any statement `POST /sql` accepts (see the [manual](../../MANUAL.md#10-sql)), with `?` parameters bound through `SQLBindParameter`.
   - Results arrive a page at a time as the application fetches.
   - Forward-only cursors; `SQLFetch` and `SQLFetchScroll(SQL_FETCH_NEXT)` with row arrays (column-wise or row-wise binding); `SQLGetData` in pieces for long values.
-- **ODBC escape sequences:** `{d '...'}`, `{t '...'}` and `{ts '...'}` become string literals, because HexDB stores dates as text; `{fn f(...)}` becomes `f(...)`; `{escape 'c'}` becomes `ESCAPE 'c'`.
+  - Joins (inner, left, right, full and cross, including `{oj ...}`), subqueries, `UNION` / `INTERSECT` / `EXCEPT`, `WITH`, and expressions. `SQLGetInfo` reports them (outer join capabilities, subqueries, unions, and the ODBC scalar functions HexDB implements), so tools that read those capabilities can push joins and functions to the server instead of fetching whole tables.
+- **ODBC escape sequences:** `{d '...'}`, `{t '...'}` and `{ts '...'}` become string literals, because HexDB stores dates as text; `{fn f(...)}` becomes `f(...)` (string functions such as `UCASE`, `LOCATE` and `SUBSTRING`, numeric ones such as `ROUND` and `TRUNCATE`, and date ones such as `YEAR`, `MONTH` and `DAYOFWEEK`); `{oj ...}` becomes the join inside it; `{escape 'c'}` becomes `ESCAPE 'c'`.
 - **Types.**
 
   | HexDB values | Reported as |

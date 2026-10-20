@@ -468,7 +468,9 @@ function LatticeCard({ status }: { status: Status }) {
           </p>
         ) : (
           <p className="text-muted-foreground pt-1 text-xs">
-            The Overseer takes writes; Harvesters and Replicants keep full copies and serve reads. Replicants never become Overseer.
+            {lattice.hexes.some((h) => h.role !== "Overseer" && h.shards_held !== undefined && h.shards_held < 64)
+              ? "The Overseer takes writes and keeps every shard; the replicas share the shards (each kept by at least one) and pass queries to the Overseer. Replicants never become Overseer."
+              : "The Overseer takes writes; Harvesters and Replicants keep full copies and serve reads. Replicants never become Overseer."}
           </p>
         )}
       </CardContent>
@@ -477,6 +479,13 @@ function LatticeCard({ status }: { status: Status }) {
 }
 
 function replicationLabel(hex: Status["network"]["lattice"]["hexes"][number]): string {
+  const label = replicationState(hex)
+  // A sharded replica keeps part of the data.
+  if (hex.role !== "Overseer" && hex.shards_held !== undefined && hex.shards_held < 64) return `${label} · ${hex.shards_held}/64 shards`
+  return label
+}
+
+function replicationState(hex: Status["network"]["lattice"]["hexes"][number]): string {
   switch (hex.replication_state) {
     case "leading":
       return `writes · seq ${formatNumber(hex.applied_seq)}`

@@ -18,6 +18,7 @@ Client libraries for HexDB's REST API, plus an Entity Framework Core provider an
 | .NET (C#, F#) | [dotnet](dotnet) | `HexDB.Client` (NuGet) | .NET 8+ |
 | Entity Framework Core | [dotnet/HexDB.EntityFrameworkCore](dotnet/HexDB.EntityFrameworkCore) | `HexDB.EntityFrameworkCore` (NuGet) | .NET 8+, EF Core 9 |
 | ODBC | [odbc](odbc) | release archives (`odbc/`) | 64-bit Windows, Linux (unixODBC) |
+| JDBC | [java](java) | `com.dreaminhex:hexdb-jdbc` (Maven), release jar | Java 11+; no dependencies |
 
 The three drivers authenticate with an API key (create one on the admin UI's Account page) or by signing in with a login and password. They retry `429` and `503` answers for reads, and for writes that carry an idempotency key.
 

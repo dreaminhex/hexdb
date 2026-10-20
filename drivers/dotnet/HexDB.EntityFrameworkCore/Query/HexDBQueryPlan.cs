@@ -164,9 +164,25 @@ public sealed class HexDBQueryExpression : Expression, IPrintableExpression
     {
         EntityType = entityType;
         Tessellation = entityType.GetTessellation();
+        if (entityType.BaseType is not null) Filters.Add(TypeFilter(entityType));
     }
 
-    public IEntityType EntityType { get; }
+    /// <summary>Documents of a type in a hierarchy: its discriminator values and its subtypes'.</summary>
+    public static FilterNode TypeFilter(IEntityType entityType)
+    {
+        var discriminator = entityType.FindDiscriminatorProperty()!;
+        var values = entityType.GetDerivedTypesInclusive().Where(t => !t.IsAbstract()).Select(t => t.GetDiscriminatorValue()).ToList();
+        return new FieldCondition(discriminator.GetJsonPropertyName(), "$in", ValueSource.From(Expression.Constant(values)), discriminator);
+    }
+
+    /// <summary>Narrow the query to a derived type (OfType).</summary>
+    public void NarrowTo(IEntityType derived)
+    {
+        EntityType = derived;
+        Filters.Add(TypeFilter(derived));
+    }
+
+    public IEntityType EntityType { get; private set; }
     public string Tessellation { get; }
     public List<FilterNode> Filters { get; } = new();
     public List<(string Field, bool Descending)> Orderings { get; } = new();
@@ -285,15 +301,37 @@ public sealed class HexDBQueryExpression : Expression, IPrintableExpression
 
     private int? _bufferLength;
 
-    /// <summary>A document's fields, by property index, as EF Core's materializer reads them.</summary>
-    public ValueBuffer ToValueBuffer(JsonObject json)
+    /// <summary>
+    /// A document's fields, by property index, as EF Core's materializer reads
+    /// them. In a hierarchy the discriminator picks the document's type, whose
+    /// properties set the layout (sibling types share indexes).
+    /// </summary>
+    public ValueBuffer ToValueBuffer(JsonObject json) => Buffer(EntityType, json, ref _bufferLength);
+
+    internal static ValueBuffer Buffer(IEntityType queried, JsonObject json, ref int? length)
     {
-        var properties = EntityType.GetProperties();
-        var values = new object?[_bufferLength ??= properties.Max(p => p.GetIndex()) + 1];
+        var type = ConcreteType(queried, json);
+        var properties = type.GetProperties();
+        // The last slot holds the document, for its owned entities.
+        var values = new object?[length ??= queried.GetDerivedTypesInclusive().SelectMany(t => t.GetProperties()).Max(p => p.GetIndex()) + 2];
         foreach (var property in properties)
         {
             values[property.GetIndex()] = JsonValues.FromJson(json[property.GetJsonPropertyName()], property);
         }
+        values[^1] = json;
         return new ValueBuffer(values);
+    }
+
+    /// <summary>The type a document holds: the one its discriminator names, or the queried type.</summary>
+    internal static IEntityType ConcreteType(IEntityType queried, JsonObject json)
+    {
+        var discriminator = queried.FindDiscriminatorProperty();
+        if (discriminator is null || !queried.GetDirectlyDerivedTypes().Any()) return queried;
+        var value = JsonValues.FromJson(json[discriminator.GetJsonPropertyName()], discriminator);
+        foreach (var type in queried.GetDerivedTypesInclusive())
+        {
+            if (Equals(type.GetDiscriminatorValue(), value)) return type;
+        }
+        return queried;
     }
 }

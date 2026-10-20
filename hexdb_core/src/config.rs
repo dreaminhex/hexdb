@@ -229,15 +229,44 @@ pub struct ReplicationConfig {
     /// Overseers accepting conflicting writes. 0 turns the check off.
     #[serde(default)]
     pub quorum: usize,
+    /// With two or more replicas, each keeps only some of the data's 64
+    /// shards (see `crate::sharding`); the Overseer keeps all of them. The
+    /// Overseer's setting applies to the lattice.
+    #[serde(default)]
+    pub sharding: bool,
+    /// Replicas that keep each shard (the Overseer keeps every shard too).
+    #[serde(default = "default_shard_copies")]
+    pub shard_copies: usize,
+    /// Recent changes a sharded replica keeps from the Overseer's feed, for
+    /// every shard: if it becomes the Overseer, they bring the shards it
+    /// collects from other replicas up to the same point.
+    #[serde(default = "default_recent_changes")]
+    pub recent_changes: usize,
 }
 
 fn default_ack_timeout_ms() -> u64 {
     5000
 }
 
+fn default_shard_copies() -> usize {
+    1
+}
+
+fn default_recent_changes() -> usize {
+    20_000
+}
+
 impl Default for ReplicationConfig {
     fn default() -> Self {
-        ReplicationConfig { min_acks: 0, ack_timeout_ms: default_ack_timeout_ms(), forward_writes: true, quorum: 0 }
+        ReplicationConfig {
+            min_acks: 0,
+            ack_timeout_ms: default_ack_timeout_ms(),
+            forward_writes: true,
+            quorum: 0,
+            sharding: false,
+            shard_copies: default_shard_copies(),
+            recent_changes: default_recent_changes(),
+        }
     }
 }
 
@@ -374,6 +403,15 @@ pub struct LimitsConfig {
     /// Largest request body for bulk writes, queries, transactions and GraphQL, in MB.
     #[serde(default = "default_max_request_mb")]
     pub max_request_mb: u64,
+    /// Most documents one table read may return in SQL that joins, nests
+    /// queries or computes expressions (see `sql::exec`). It also scales
+    /// how much work such a statement may do.
+    #[serde(default = "default_sql_max_rows")]
+    pub sql_max_rows: usize,
+}
+
+fn default_sql_max_rows() -> usize {
+    crate::sql::DEFAULT_SQL_MAX_ROWS
 }
 
 fn default_max_document_kb() -> u64 {
@@ -409,6 +447,7 @@ impl Default for LimitsConfig {
             header_timeout_seconds: default_header_timeout(),
             max_document_kb: default_max_document_kb(),
             max_request_mb: default_max_request_mb(),
+            sql_max_rows: default_sql_max_rows(),
         }
     }
 }

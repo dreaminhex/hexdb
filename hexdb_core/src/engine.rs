@@ -253,6 +253,8 @@ pub struct HexDBEngine {
     pub overseer_endpoint: std::sync::RwLock<Option<String>>,
     /// What this hex's replication is doing.
     pub replication: std::sync::Mutex<crate::replication::ReplicationStatus>,
+    /// A sharded replica's recent changes of every shard (see replication).
+    pub recent_changes: std::sync::Mutex<crate::replication::RecentChanges>,
     /// Loaded plugins and their delivery state.
     pub plugins: crate::plugins::PluginRegistry,
     /// Failed sign-ins, for throttling.
@@ -515,6 +517,7 @@ impl HexDBEngine {
             indexes: std::sync::RwLock::new(crate::index::Indexes::default()),
             overseer_endpoint: std::sync::RwLock::new(None),
             replication: std::sync::Mutex::new(crate::replication::ReplicationStatus::default()),
+            recent_changes: std::sync::Mutex::new(crate::replication::RecentChanges::default()),
             plugins: crate::plugins::PluginRegistry::default(),
             login_throttle,
             lattice_keys,
@@ -596,6 +599,14 @@ impl HexDBEngine {
 
     /// Change this hex's lattice role (after an election).
     pub fn set_role(&self, role: &str) {
+        // A sharded replica becoming the Overseer has only part of the data:
+        // it takes no requests until it has collected the rest (see replication).
+        if role == crate::network::discovery::ROLE_OVERSEER {
+            let mut status = self.replication.lock().unwrap();
+            if status.shards_held != crate::sharding::ALL_SHARDS && status.rebuilding.is_none() {
+                status.rebuilding = Some("This hex just became the Overseer and is collecting shards from the other hexes; try again shortly.".into());
+            }
+        }
         let previous = std::mem::replace(&mut *self.role.write().unwrap(), role.to_string());
         // A hex that (re)gains leadership reloads queue state another Overseer may have changed.
         if previous != role {
@@ -706,6 +717,21 @@ impl HexDBEngine {
     }
 
     /// True if this hex accepts writes (it is the Overseer of its lattice).
+    /// Why this hex can't serve data right now, while it rebuilds after becoming the Overseer.
+    pub fn rebuilding(&self) -> Option<String> {
+        self.replication.lock().unwrap().rebuilding.clone()
+    }
+
+    /// True for a replica that keeps only some shards: it can't answer queries itself.
+    pub fn is_partial_replica(&self) -> bool {
+        !self.is_writable() && self.replication.lock().unwrap().shards_held != crate::sharding::ALL_SHARDS
+    }
+
+    /// True if documents of this tessellation are sharded (user data; system tessellations never are).
+    pub fn is_sharded_tessellation(&self, tess: &str) -> bool {
+        !tess.starts_with('_') && !self.is_system_tessellation(tess)
+    }
+
     pub fn is_writable(&self) -> bool {
         self.role() == crate::network::discovery::ROLE_OVERSEER
     }
@@ -713,6 +739,9 @@ impl HexDBEngine {
     /// Fail with `EngineError::ReadOnly` unless this hex accepts writes.
     pub fn ensure_writable(&self) -> Result<()> {
         if self.is_writable() {
+            if let Some(note) = self.rebuilding() {
+                return Err(EngineError::Unavailable(note).into());
+            }
             return self.check_quorum();
         }
         let overseer = self.overseer_endpoint.read().unwrap().clone();

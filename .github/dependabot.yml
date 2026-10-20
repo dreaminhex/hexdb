@@ -27,6 +27,9 @@ updates:
   - package-ecosystem: nuget
     directory: /drivers/dotnet
     schedule: { interval: weekly }
+  - package-ecosystem: maven
+    directory: /drivers/java
+    schedule: { interval: weekly }
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
