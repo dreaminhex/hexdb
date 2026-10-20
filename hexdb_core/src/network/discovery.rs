@@ -92,6 +92,21 @@ pub struct PeerHex {
     /// then refuse unsigned answers from it.
     #[serde(default)]
     pub signs_responses: bool,
+    /// `replication.sharding` and `replication.shard_copies` (the Overseer's apply).
+    #[serde(default)]
+    pub sharding: bool,
+    #[serde(default)]
+    pub shard_copies: usize,
+    /// The shards this hex keeps (all of them unless it's a sharded replica).
+    #[serde(default = "all_shards")]
+    pub shards_held: crate::sharding::ShardMask,
+    /// The history (Overseer) this hex's data follows: its applied_seq counts in it.
+    #[serde(default)]
+    pub replication_source: String,
+}
+
+fn all_shards() -> crate::sharding::ShardMask {
+    crate::sharding::ALL_SHARDS
 }
 
 fn default_preference() -> String {
@@ -151,6 +166,10 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         let status = engine.replication.lock().unwrap();
         (status.state.clone(), status.applied_seq)
     };
+    let (shards_held, replication_source) = {
+        let status = engine.replication.lock().unwrap();
+        (status.shards_held, if engine.is_writable() { engine.history_id() } else { status.history.clone().unwrap_or_default() })
+    };
     PeerHex {
         id: engine.id.to_string(),
         name: engine.name.clone(),
@@ -170,6 +189,10 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         config_sha256: lattice_config.sha256.clone(),
         config_state: lattice_config.state().to_string(),
         signs_responses: true,
+        sharding: config.replication.sharding,
+        shard_copies: config.replication.shard_copies.max(1),
+        shards_held,
+        replication_source,
     }
 }
 
@@ -419,8 +442,14 @@ pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
 
     // A sitting Overseer keeps the role; among several, the best-ranked wins.
     let sitting: Vec<&PeerHex> = candidates.iter().copied().filter(|h| h.role == ROLE_OVERSEER).collect();
-    let pool = if sitting.is_empty() { candidates } else { sitting };
-    let leader = pool.into_iter().min_by(|a, b| rank(a, b));
+    let leader = if sitting.is_empty() && local.sharding {
+        // Sharded replicas each hold part of the data; the one furthest along
+        // the old Overseer's history rebuilds the rest most completely.
+        candidates.into_iter().min_by(|a, b| b.applied_seq.cmp(&a.applied_seq).then(rank(a, b)))
+    } else {
+        let pool = if sitting.is_empty() { candidates } else { sitting };
+        pool.into_iter().min_by(|a, b| rank(a, b))
+    };
 
     match leader {
         Some(leader) if leader.id == local.id => ROLE_OVERSEER.into(),
@@ -515,7 +544,26 @@ mod tests {
             config_sha256: String::new(),
             config_state: String::new(),
             signs_responses: false,
+            sharding: false,
+            shard_copies: 1,
+            shards_held: crate::sharding::ALL_SHARDS,
+            replication_source: String::new(),
         }
+    }
+
+    #[test]
+    fn sharded_lattices_elect_the_most_up_to_date_replica() {
+        let mut a = hex("a", ROLE_HARVESTER, "auto", 8000);
+        let mut b = hex("b", ROLE_HARVESTER, "auto", 1000);
+        a.applied_seq = 10;
+        b.applied_seq = 50;
+        // Without sharding, RAM decides; with it, the furthest replica leads.
+        assert_eq!(elect(&a, std::slice::from_ref(&b)), ROLE_OVERSEER);
+        a.sharding = true;
+        assert_eq!(elect(&a, std::slice::from_ref(&b)), ROLE_HARVESTER);
+        // A sitting Overseer keeps the role regardless.
+        let overseer = hex("c", ROLE_OVERSEER, "auto", 10);
+        assert_eq!(elect(&a, &[b, overseer]), ROLE_HARVESTER);
     }
 
     fn names() -> Vec<String> {

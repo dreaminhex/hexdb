@@ -57,13 +57,20 @@ pub async fn sign_responses(
     axum::response::Response::from_parts(parts, axum::body::Body::from(bytes))
 }
 
-fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &Uri, body: &[u8]) -> Result<(), ApiError> {
+/// A fresh lattice signature, from any hex of this lattice.
+fn verify_signature(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &Uri, body: &[u8]) -> Result<(), ApiError> {
     let presented = headers.get(LATTICE_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
     let target = uri.path_and_query().map(|p| p.as_str()).unwrap_or(uri.path());
     if !engine.lattice_keys.verify_request(presented, method.as_str(), target, body, &engine.lattice_nonces) {
         tracing::warn!("🚫 Rejected a lattice request to {} without a valid signature.", uri.path());
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "A valid lattice signature is required."));
     }
+    Ok(())
+}
+
+/// A signed request to an endpoint only the Overseer serves.
+fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &Uri, body: &[u8]) -> Result<(), ApiError> {
+    verify_signature(engine, headers, method, uri, body)?;
     if !engine.is_writable() {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -99,12 +106,14 @@ pub async fn chunk(Path(id): Path<String>, method: Method, uri: Uri, headers: He
 /// Where a full sync starts.
 pub async fn snapshot(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, b"")?;
+    not_rebuilding(&engine)?;
     Ok(Json(engine.snapshot_meta()).into_response())
 }
 
 /// Tessellations and index definitions (replicas poll this for new ones).
 pub async fn catalog(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, b"")?;
+    not_rebuilding(&engine)?;
     Ok(Json(engine.snapshot_meta()).into_response())
 }
 
@@ -113,6 +122,16 @@ pub async fn catalog(method: Method, uri: Uri, headers: HeaderMap, axum::extract
 pub struct PageParams {
     pub after: Option<String>,
     pub limit: Option<usize>,
+    /// Only documents in these shards (a mask; see hexdb_core::sharding).
+    pub shards: Option<u64>,
+}
+
+/// While a new Overseer collects shards, it has no complete snapshot or feed to offer.
+fn not_rebuilding(engine: &hexdb_core::engine::HexDBEngine) -> Result<(), ApiError> {
+    match engine.rebuilding() {
+        Some(note) => Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "rebuilding", note).with_retry_after(5)),
+        None => Ok(()),
+    }
 }
 
 /// One page of a tessellation's documents with their versions.
@@ -125,6 +144,7 @@ pub async fn snapshot_page(
     axum::extract::State(engine): Engine,
 ) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, b"")?;
+    not_rebuilding(&engine)?;
     let Query(params) = params?;
     if !engine.tessellation_exists(&tess) {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", format!("Tessellation '{}' not found.", tess)));
@@ -133,8 +153,43 @@ pub async fn snapshot_page(
         Some(a) => Some(Ulid::from_string(a).map_err(|_| ApiError::invalid("after must be a document ID."))?),
         None => None,
     };
-    let (documents, next) = engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000)).await?;
+    let shards = params.shards.unwrap_or(hexdb_core::sharding::ALL_SHARDS);
+    let (documents, next) = engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000), shards).await?;
     Ok(Json(SnapshotPage { documents, next }).into_response())
+}
+
+/// A replica's documents in some shards, as of its position: what a newly
+/// elected Overseer collects after a failover (see hexdb_core::replication).
+pub async fn shard_snapshot(
+    Path(tess): Path<String>,
+    params: Result<Query<PageParams>, QueryRejection>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    axum::extract::State(engine): Engine,
+) -> ApiResult {
+    // Served by replicas: no Overseer check.
+    verify_signature(&engine, &headers, &method, &uri, b"")?;
+    let Query(params) = params?;
+    let (source_id, applied_seq) = {
+        let status = engine.replication.lock().unwrap();
+        (status.history.clone().unwrap_or_default(), status.applied_seq)
+    };
+    if engine.is_writable() || source_id.is_empty() {
+        return Err(ApiError::new(StatusCode::CONFLICT, "not_a_replica", "Only a replica serves its shards this way."));
+    }
+    let after = match params.after.as_deref() {
+        Some(a) => Some(Ulid::from_string(a).map_err(|_| ApiError::invalid("after must be a document ID."))?),
+        None => None,
+    };
+    let shards = params.shards.unwrap_or(hexdb_core::sharding::ALL_SHARDS);
+    let (documents, next) = if engine.tessellation_exists(&tess) {
+        engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000), shards).await?
+    } else {
+        (Vec::new(), None)
+    };
+    let documents = documents.into_iter().map(|(doc, _)| doc).collect();
+    Ok(Json(hexdb_core::replication::ShardPage { source_id, applied_seq, documents, next }).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +211,7 @@ pub async fn changes(
     axum::extract::State(engine): Engine,
 ) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, b"")?;
+    not_rebuilding(&engine)?;
     let Query(params) = params?;
     let limit = params.limit.unwrap_or(1000).clamp(1, 10_000);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(params.wait.unwrap_or(0).min(30));

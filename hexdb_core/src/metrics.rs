@@ -231,6 +231,13 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         }
     }
 
+    // User documents kept on this hex (a sharded replica keeps only its shards').
+    let mut sharded_documents = 0usize;
+    for (name, _) in engine.tessellation_details() {
+        if engine.is_sharded_tessellation(&name) {
+            sharded_documents += engine.tessellation_stats(&name).await.document_count;
+        }
+    }
     HexMeta {
         id: engine.id,
         name: engine.name.clone(),
@@ -297,6 +304,8 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             } else {
                 value["lag"] = status.lag().into();
             }
+            value["shards_held_count"] = crate::sharding::count(status.shards_held).into();
+            value["sharded_documents"] = sharded_documents.into();
             value
         },
         config: engine.lattice_config().status_json(),
