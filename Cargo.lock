@@ -1669,7 +1669,7 @@ dependencies = [
  "openh264",
  "quick-xml",
  "rand 0.10.3",
- "rand_core 0.9.5",
+ "rand_core 0.10.1",
  "reed-solomon-simd",
  "reqwest",
  "rust_decimal",

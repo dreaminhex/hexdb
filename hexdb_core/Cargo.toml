@@ -21,7 +21,7 @@ base64 = "0.23.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 aes-gcm = "0.10.3"
 rand = { version = "0.10.3", features = ["std"] }
-rand_core = "0.9.3"
+rand_core = "0.10.1"
 hex = "0.4.3"
 zstd = "0.14.3"
 getrandom = "0.4.3"
