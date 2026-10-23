@@ -285,6 +285,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, and "Add a hex" for joining new servers; flush and back up |
 | Queries | GraphQL and SQL consoles with completion, examples and history |
 | Tessellations | Create and delete tessellations; manage indexes (with analyzer choice and index suggestions) and schemas (with version history and rollback) |
+| Schemas | Every tessellation's schema: version history, rollback, migration progress, and a JSON editor for the next version, saved to apply now or later |
 | Documents | Browse with filters and sorting; create, edit and delete documents (files tessellations too, to filter on their metadata) |
 | Files | Folders, thumbnails, search, uploads, previews and an audio player, metadata and AI tags, versions and the trash |
 | Streams | Create streams, publish, read messages, and watch consumer groups and deliveries |
