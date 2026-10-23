@@ -42,7 +42,7 @@ What it provides:
 
 | Area | Features |
 | --- | --- |
-| Data | Documents with generated, time-sortable IDs; replace, merge-patch, delete; bulk writes; upserts; update-by-filter; per-document TTLs; idempotency keys; optional versioned schemas |
+| Data | Documents with generated, time-sortable IDs; replace, merge-patch, delete; bulk writes; upserts; update-by-filter; per-document TTLs; idempotency keys; optional versioned schemas, inferred from existing documents and saved to apply now or later |
 | Files | Any binary file, deduplicated, compressed when that helps, encrypted and split across the six vertices; metadata (EXIF, IPTC, XMP, ID3, Vorbis, QuickTime, Matroska, Broadcast WAV, PDF, Office, ...) extracted and searchable; thumbnails; versions with rollback; a trash; resumable uploads; ranged downloads |
 | AI | Your own provider and key (Claude, OpenAI, GitHub Models, Azure OpenAI, local OpenAI-compatible servers): AI tags and descriptions for files, AI-chosen video thumbnails, a second opinion from the index advisor; token estimates, usage per feature and a monthly budget |
 | Configuration | Lattice-wide settings in the admin UI and `hexdb config`: encrypted, versioned, audited, checked on every hex, with rollback and write-only secrets |
@@ -51,13 +51,12 @@ What it provides:
 | Performance | Field, composite, unique and text indexes; an index advisor; an LRU memory cache; SSTables with Bloom filters; Zstandard compression |
 | Change data | An ordered change feed with an on-disk history; streams (publish/subscribe) with consumer groups; plugins for Kafka, Kinesis, OpenTelemetry and more |
 | Logic | Functions (saved queries, aggregations, transactions, scripts in Python, TypeScript or JavaScript), schedules, and triggers that run code before or after writes |
-| Distribution | Several servers form a lattice with automatic discovery, election, replication and failover. Synchronous acknowledgements, a quorum, and write forwarding are optional |
-| Security | Sessions, API keys, TOTP MFA, built-in and custom roles with row filters, field masks and folder limits for files, an audit trail, AES-256-GCM encryption at rest, TLS, authenticated hex-to-hex traffic |
+| Distribution | Several servers form a lattice with automatic discovery, election, replication and failover, built to stay up on slow and shared CPUs. Slicing spreads the data across the replicas. Synchronous acknowledgements, a quorum, and write forwarding are optional. Each hex checks for new releases; HexDB Enterprise updates a lattice one hex at a time |
+| Security | Sessions, API keys, TOTP MFA, built-in and custom roles with row filters, hidden and masked fields (PCI DSS-style card-number masking) and folder limits for files, an audit trail, AES-256-GCM encryption at rest, TLS, authenticated hex-to-hex traffic |
 
 What it doesn't do (yet):
 
-- Partition data across hexes. Every hex holds a full copy.
-- Join tessellations or write through SQL. SQL is read-only and reads one tessellation at a time.
+- Write through SQL. SQL is read-only; writes go through REST, GraphQL, gRPC and the drivers.
 
 ## 2. Terminology
 
@@ -1646,7 +1645,7 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 
 **Writes:**
 - A document must match the filter before (replace, patch, delete) and after (every write) the change. Writes that would move a document out of reach are refused with 403.
-- Writes can't set or remove hidden or masked fields, and a full replace keeps their stored values.
+- Writes can't set or remove hidden or masked fields, and a full replace keeps their stored values. A full replace may send a masked field back exactly as it was shown (`************1111`), so a document can be read, edited and written back; any other value for it is refused with 403. A replace that turns a masked field's parent into something other than an object is refused too, since it would drop the stored value.
 - Update-by-filter only touches matching documents.
 - An upsert whose key matches a document outside the filter fails with 409.
 
@@ -1772,16 +1771,16 @@ Probes run concurrently with a 3-second timeout. A peer that doesn't answer thre
 
 Discovery is answered from a thread of its own, with the hex's identity as of its last round, so a hex busy enough to be slow (a throttled cloud CPU, a burst of catch-up work) keeps answering its lattice instead of being voted out. It stops answering only if the rest of the hex hasn't run for a minute, which means it's stuck, not busy.
 
-**Elections.** A sitting Overseer keeps its role. Otherwise, in a sliced lattice, the hex furthest along the change history wins, then among those equally far along the one holding the most slices, so a hex with every slice is preferred to one that would have to collect them first; then RAM and disk decide. A hex that restarts reports where its data really is: an Overseer that restarts reports its last write and every slice, so it gets its role back instead of passing it to a replica that would rebuild.
-
-**Background work runs at a lower priority.** Flushing, compaction, TTL sweeps, file extraction and AI tagging, copying file content between hexes, scrubbing, vertex checks, and serving catch-up copies (snapshots, slice snapshots, file chunks) to other hexes run on a pool of their own at a lower operating-system priority (nice 10 on Linux, below normal on Windows). On a throttled CPU, requests, `/health`, discovery and the change feed go first; the background work still gets about a tenth of a busy CPU and all of an idle one.
-
 Every hex runs the same election over the same view, so they agree without a consensus round:
 
 1. Candidates are live hexes whose `identity.role` is `auto` or `overseer`. If any prefer `overseer`, only those count.
 2. A hex that is already Overseer keeps the role while it's alive, so leadership doesn't flap when a larger hex joins. If two claim it (after a partition heals), the better-ranked one wins.
-3. Otherwise candidates are ranked by RAM, then disk, then ID.
+3. Otherwise, in a sliced lattice, the hex furthest along the change history wins, and among those equally far along, the one holding the most slices, so a hex with every slice is preferred to one that would have to collect them first. Then (and in a lattice without slicing) candidates are ranked by RAM, then disk, then ID.
 4. Every other hex is a Harvester, or a Replicant if it prefers that. `harvester` and `replicant` hexes never lead.
+
+A hex that restarts reports where its data really is: an Overseer that restarts reports its last write and every slice, so it gets its role back instead of passing it to a replica that would rebuild.
+
+**Background work runs at a lower priority.** Flushing, compaction, TTL sweeps, file extraction and AI tagging, copying file content between hexes, scrubbing, vertex checks, and serving catch-up copies (snapshots, slice snapshots, file chunks) to other hexes run on a pool of their own at a lower operating-system priority (nice 10 on Linux, below normal on Windows). On a throttled CPU, requests, `/health`, discovery and the change feed go first; the background work still gets about a tenth of a busy CPU and all of an idle one.
 
 ### Replication
 
