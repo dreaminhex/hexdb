@@ -116,6 +116,7 @@ ROUTES = [
     ("get", "/tessellations/{name}/schemas", "Schemas", "Schema versions and migration progress", {"parameters": [NAME], "responses": ok()}),
     ("post", "/tessellations/{name}/schemas", "Schemas", "Register a schema version (manage)", {"parameters": [NAME], "requestBody": body(description="{\"fields\": {...}, \"additional_fields\": true, \"migration\": [...]}"), "responses": ok("Created", status="201")}),
     ("delete", "/tessellations/{name}/schemas", "Schemas", "Remove every schema version (manage)", {"parameters": [NAME], "responses": no_content()}),
+    ("get", "/tessellations/{name}/schemas/infer", "Schemas", "A first schema inferred from up to 1,000 documents: their fields and types, nothing required", {"parameters": [NAME], "responses": ok()}),
     ("post", "/tessellations/{name}/schemas/check", "Schemas", "Check a schema without registering it", {"parameters": [NAME], "requestBody": body(), "responses": ok()}),
     ("post", "/tessellations/{name}/schemas/rollback", "Schemas", "Roll back to an earlier version (a new version with its fields and the inverse migration)", {"parameters": [NAME], "requestBody": body({"type": "object", "required": ["to"], "properties": {"to": {"type": "integer"}, "migration": {"type": "array", "items": OBJ}}}), "responses": ok("Created", status="201")}),
     ("get", "/updates", "Server", "Versions, the newest release, and a hosted lattice's rolling update (admin; answered by the Overseer)", {"responses": ok()}),

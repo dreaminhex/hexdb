@@ -213,3 +213,30 @@ fn a_version_saved_for_later_waits_until_applied() -> Result<()> {
     assert_eq!(server.request(Method::GET, "/tessellations/people/schemas", None, &[])?.body["current"], 2);
     Ok(())
 }
+
+#[test]
+fn an_inferred_schema_fits_the_existing_documents() -> Result<()> {
+    let server = TestServer::start()?;
+    server.insert("things", &json!({ "name": "a", "count": 1, "price": 2.5, "tags": ["x"], "meta": { "k": 1 }, "maybe": null }))?;
+    server.insert("things", &json!({ "name": "b", "count": 2, "price": 3, "mixed": "s" }))?;
+    server.insert("things", &json!({ "name": "c", "count": 3, "mixed": 4 }))?;
+
+    let inferred = server.request(Method::GET, "/tessellations/things/schemas/infer", None, &[])?;
+    assert_eq!(inferred.status, 200, "{}", inferred.body);
+    let fields = &inferred.body["fields"];
+    assert_eq!(fields["name"]["type"], "string");
+    assert_eq!(fields["count"]["type"], "integer");
+    assert_eq!(fields["price"]["type"], "number");
+    assert_eq!(fields["mixed"]["type"], "any");
+    assert_eq!(inferred.body["sampled"], 3);
+    assert_eq!(inferred.body["present"]["name"], 3);
+    assert!(fields.as_object().unwrap().values().all(|r| r["required"] == false));
+
+    // Checked and registered as it is, every document fits and writes keep working.
+    let schema = json!({ "fields": inferred.body["fields"], "additional_fields": inferred.body["additional_fields"] });
+    let check = server.request(Method::POST, "/tessellations/things/schemas/check", Some(&schema), &[])?;
+    assert_eq!((check.body["compatible"].clone(), check.body["would_not_fit"].clone()), (json!(true), json!(0)), "{}", check.body);
+    assert_eq!(server.request(Method::POST, "/tessellations/things/schemas", Some(&schema), &[])?.status, 201);
+    assert!(server.request(Method::POST, "/things", Some(&json!({ "name": "d", "extra": true })), &[])?.status.is_success());
+    Ok(())
+}

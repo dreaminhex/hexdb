@@ -459,6 +459,16 @@ export interface Schemas {
   migration: SchemaMigration | null
 }
 
+/** A first schema read from a tessellation's documents (GET .../schemas/infer). */
+export interface InferredSchema {
+  fields: Record<string, Record<string, unknown>>
+  additional_fields: boolean
+  /** Documents read (up to 1,000). */
+  sampled: number
+  /** How many of them have each field (not null). */
+  present: Record<string, number>
+}
+
 export interface SchemaCheck {
   compatible: boolean
   error?: string
@@ -1075,6 +1085,7 @@ export const api = {
   advice: (tess: string, ai = false) => request<Advice>("GET", `/tessellations/${enc(tess)}/advice${ai ? "?ai=true" : ""}`),
   schemas: (tess: string) => request<Schemas>("GET", `/tessellations/${enc(tess)}/schemas`),
   addSchema: (tess: string, schema: unknown) => request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas`, schema),
+  inferSchema: (tess: string) => request<InferredSchema>("GET", `/tessellations/${enc(tess)}/schemas/infer`),
   checkSchema: (tess: string, schema: unknown) => request<SchemaCheck>("POST", `/tessellations/${enc(tess)}/schemas/check`, schema),
   dropSchemas: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas`),
   savePendingSchema: (tess: string, schema: unknown) => request<Schemas>("PUT", `/tessellations/${enc(tess)}/schemas/pending`, schema),

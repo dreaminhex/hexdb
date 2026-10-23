@@ -10,27 +10,22 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { usePoll } from "@/hooks/use-poll"
-import { api, errorMessage, type PendingSchema, type SchemaCheck, type SchemaVersion } from "@/lib/api"
+import { api, errorMessage, type InferredSchema, type PendingSchema, type SchemaCheck, type SchemaVersion } from "@/lib/api"
 import { formatNumber } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
-const EXAMPLE = `{
-  "fields": {
-    "email": { "type": "string", "required": true, "max_length": 320 },
-    "status": { "type": "string", "enum": ["active", "closed"], "default": "active" },
-    "age": { "type": "integer", "min": 0, "nullable": true }
-  },
-  "additional_fields": true
-}`
+/** The next version's starting point: exactly the current version, which every document already fits. */
+function draftFrom(current: SchemaVersion): string {
+  return JSON.stringify({ fields: current.fields, additional_fields: current.additional_fields }, null, 2)
+}
 
-/** The next version's starting point: the current fields, with an example migration step to edit. */
-function draftFrom(current: SchemaVersion | undefined): string {
-  if (!current) return EXAMPLE
-  return JSON.stringify(
-    { fields: current.fields, additional_fields: current.additional_fields, migration: [{ rename: { from: "old_name", to: "new_name" } }] },
-    null,
-    2,
+/** A first version read from the documents: their fields and types, nothing required. */
+function draftFromInferred(inferred: InferredSchema): string {
+  // Only what a field rule needs: false and empty settings are the defaults.
+  const fields = Object.fromEntries(
+    Object.entries(inferred.fields).map(([name, rule]) => [name, Object.fromEntries(Object.entries(rule).filter(([, v]) => v !== false && v !== ""))]),
   )
+  return JSON.stringify({ fields, additional_fields: inferred.additional_fields }, null, 2)
 }
 
 type Action = "check" | "save" | "later" | "apply" | "discard" | "drop" | "rollback"
@@ -83,18 +78,41 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
   const [rollbackTo, setRollbackTo] = useState<string>("")
   const [rollbackSteps, setRollbackSteps] = useState("")
   const [error, setError] = useState<string>()
+  const [inferred, setInferred] = useState<InferredSchema>()
+  // Saving when some existing documents wouldn't fit waits for a second click.
+  const [unfit, setUnfit] = useState<{ what: "save" | "later"; check: SchemaCheck }>()
 
   const versions = schemas.data?.versions ?? []
   const current = versions[versions.length - 1]
   const pending = schemas.data?.pending ?? null
-  // Start from the saved version if there is one, so editing it carries on where it was left.
+  // Start from the saved version if there is one, so editing it carries on where it was left; else
+  // from the current version; with no schema, from what the documents already look like.
+  const loaded = !!schemas.data
+  const savedPending = schemas.data?.pending
   useEffect(() => {
-    if (schemas.data && draft === undefined) setDraft(schemas.data.pending ? draftFromPending(schemas.data.pending) : draftFrom(current))
-  }, [schemas.data, current, draft])
+    if (!loaded || draft !== undefined) return
+    if (savedPending) setDraft(draftFromPending(savedPending))
+    else if (current) setDraft(draftFrom(current))
+    else {
+      let cancelled = false
+      api
+        .inferSchema(tessellation)
+        .then((i) => {
+          if (cancelled) return
+          setInferred(i)
+          setDraft(draftFromInferred(i))
+        })
+        .catch((e) => !cancelled && setError(errorMessage(e)))
+      return () => {
+        cancelled = true
+      }
+    }
+  }, [loaded, savedPending, current, draft, tessellation])
 
-  const run = async (what: Action) => {
+  const run = async (what: Action, anyway = false) => {
     setBusy(what)
     setError(undefined)
+    setUnfit(undefined)
     try {
       if (what === "rollback") {
         const steps = rollbackSteps.trim() ? parseJson<unknown[]>(rollbackSteps, "The extra steps") : []
@@ -106,7 +124,8 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
       } else if (what === "drop") {
         await api.dropSchemas(tessellation)
         toast.success(`'${tessellation}' is schemaless again.`)
-        setDraft(EXAMPLE)
+        setInferred(undefined)
+        setDraft(undefined)
       } else if (what === "apply") {
         const version = await api.applyPendingSchema(tessellation)
         toast.success(`Version ${version.version} is current. Existing documents are being migrated.`)
@@ -114,12 +133,22 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
       } else if (what === "discard") {
         await api.discardPendingSchema(tessellation)
         toast.success("The saved version was discarded.")
-        setDraft(draftFrom(current))
+        setDraft(current ? draftFrom(current) : undefined)
       } else {
         const body = parseJson(draft ?? "{}", "The schema")
         if (what === "check") {
           setCheck(await api.checkSchema(tessellation, body))
-        } else if (what === "later") {
+          return
+        }
+        // Check before saving: refuse what can't be registered, and ask before leaving documents behind.
+        const checked = await api.checkSchema(tessellation, body)
+        setCheck(checked)
+        if (!checked.compatible) throw new Error(`Not saved. This version isn't compatible: ${checked.error}`)
+        if (checked.would_not_fit && !anyway) {
+          setUnfit({ what, check: checked })
+          return
+        }
+        if (what === "later") {
           const saved = await api.savePendingSchema(tessellation, body)
           toast.success(`Version ${saved.pending?.version ?? ""} is saved. Writes follow ${current ? `version ${current.version}` : "no schema"} until you apply it.`)
           setCheck(undefined)
@@ -286,6 +315,44 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
               ))}
             </>
           )}
+        </div>
+      )}
+      {inferred && !current && draft !== undefined && (
+        <p className="text-muted-foreground rounded-md border px-3 py-2 text-xs">
+          {inferred.sampled === 0 ? (
+            <>No documents yet, so there are no fields to start from. Describe the fields documents should have.</>
+          ) : (
+            <>
+              Read from {formatNumber(inferred.sampled)} existing document{inferred.sampled === 1 ? "" : "s"}: each field with its type, nothing
+              required, other fields allowed, so it accepts every document there today.
+              {(() => {
+                const everywhere = Object.entries(inferred.present).filter(([, n]) => n === inferred.sampled).map(([f]) => f)
+                return everywhere.length > 0 ? (
+                  <>
+                    {" "}
+                    In every one: <span className="text-foreground font-mono">{everywhere.join(", ")}</span>. Add{" "}
+                    <code>"required": true</code> to those every document must have.
+                  </>
+                ) : null
+              })()}
+            </>
+          )}
+        </p>
+      )}
+      {unfit && (
+        <div className="border-status-warning/50 bg-status-warning/10 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm">
+          <span className="flex-1">
+            {formatNumber(unfit.check.would_not_fit ?? 0)} of {formatNumber(unfit.check.checked ?? 0)} existing documents wouldn't fit this version.
+            {unfit.what === "save"
+              ? " Their migration would fail and they'd stay as they are, and writes like them would be refused."
+              : " Saved, it changes nothing yet; applied, they'd fail to migrate and writes like them would be refused."}
+          </span>
+          <Button size="sm" variant="outline" onClick={() => setUnfit(undefined)}>
+            Cancel
+          </Button>
+          <Button size="sm" variant="destructive" onClick={() => void run(unfit.what, true)}>
+            {unfit.what === "save" ? "Save and apply anyway" : "Save anyway"}
+          </Button>
         </div>
       )}
       {error && <p className="text-destructive text-sm whitespace-pre-wrap">{error}</p>}

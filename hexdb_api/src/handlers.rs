@@ -696,6 +696,18 @@ pub async fn check_schema(
     Ok(Json(json!({ "compatible": true, "version": candidate.version, "checked": checked, "would_not_fit": failing, "errors": errors })).into_response())
 }
 
+/// A first schema inferred from up to 1,000 of the tessellation's documents:
+/// every field with its type, nothing required, other fields allowed, so it
+/// accepts every document there today. `present` counts the documents with
+/// each field, for deciding what to make required.
+pub async fn infer_schema(Path(name): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require(Permission::Manage, &name)?;
+    existing_tessellation(&engine, &name)?;
+    let page = engine.list_documents(&name, None, 1000).await?;
+    let docs: Vec<serde_json::Map<String, Value>> = page.documents.iter().map(|d| d.data_json().as_object().cloned().unwrap_or_default()).collect();
+    Ok(Json(json!(hexdb_core::schema::infer(&docs))).into_response())
+}
+
 /// Options for `POST /tessellations/{name}/schemas/rollback`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

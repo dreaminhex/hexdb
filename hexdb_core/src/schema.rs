@@ -392,6 +392,71 @@ impl SchemaVersion {
 }
 
 /// Check a new schema against the current one and number it.
+/// A first schema read from existing documents, for a tessellation that has none.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Inferred {
+    pub fields: BTreeMap<String, FieldRule>,
+    pub additional_fields: bool,
+    /// Documents read.
+    pub sampled: usize,
+    /// How many of them have each field (not null).
+    pub present: BTreeMap<String, usize>,
+}
+
+/// Infer a schema every one of `docs` fits: each top-level field with the one
+/// type its values share (integers and other numbers make `number`, anything
+/// more mixed `any`), nullable where a null was seen. Nothing is required and
+/// other fields stay allowed, so applying it changes no write that works today;
+/// `present` shows which fields every document has, to make required by hand.
+pub fn infer(docs: &[Map<String, Value>]) -> Inferred {
+    #[derive(Default)]
+    struct Seen {
+        kinds: std::collections::BTreeSet<&'static str>,
+        nulls: bool,
+        present: usize,
+    }
+    let mut seen: BTreeMap<String, Seen> = BTreeMap::new();
+    for doc in docs {
+        for (name, value) in doc {
+            if name == "id" || name.starts_with('_') {
+                continue;
+            }
+            let s = seen.entry(name.clone()).or_default();
+            let kind = match value {
+                Value::Null => {
+                    s.nulls = true;
+                    continue;
+                }
+                Value::Bool(_) => "boolean",
+                Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+            };
+            s.kinds.insert(kind);
+            s.present += 1;
+        }
+    }
+    let mut inferred = Inferred { additional_fields: true, sampled: docs.len(), ..Default::default() };
+    for (name, s) in seen {
+        let kind = match s.kinds.iter().copied().collect::<Vec<_>>().as_slice() {
+            ["boolean"] => FieldType::Boolean,
+            ["integer"] => FieldType::Integer,
+            ["number"] | ["integer", "number"] => FieldType::Number,
+            ["string"] => FieldType::String,
+            ["array"] => FieldType::Array,
+            ["object"] => FieldType::Object,
+            _ => FieldType::Any,
+        };
+        // A field that's only ever null, or missing, could be anything.
+        let nullable = s.nulls && kind != FieldType::Any;
+        inferred.present.insert(name.clone(), s.present);
+        inferred.fields.insert(name, FieldRule { kind, nullable, ..Default::default() });
+    }
+    inferred
+}
+
 pub fn new_version(current: &[SchemaVersion], input: SchemaInput) -> Result<SchemaVersion> {
     for (field, rule) in &input.fields {
         if field.is_empty() || field == "id" || field.starts_with('_') || field.split('.').any(str::is_empty) {
@@ -623,5 +688,29 @@ mod tests {
         assert_eq!(convert(&json!("yes"), FieldType::Boolean), Some(json!(true)));
         assert_eq!(convert(&json!(3), FieldType::String), Some(json!("3")));
         assert_eq!(convert(&json!("abc"), FieldType::Number), None);
+    }
+
+    #[test]
+    fn an_inferred_schema_accepts_the_documents_it_came_from() {
+        let docs: Vec<Map<String, Value>> = [
+            serde_json::json!({ "name": "ada", "age": 36, "score": 1, "tags": ["x"], "note": null, "mixed": 1, "_schema": 1 }),
+            serde_json::json!({ "name": "grace", "age": 85, "score": 2.5, "address": { "city": "NYC" }, "note": "hi", "mixed": "one" }),
+        ]
+        .into_iter()
+        .map(|v| v.as_object().cloned().unwrap())
+        .collect();
+        let inferred = infer(&docs);
+        let kind = |f: &str| inferred.fields[f].kind;
+        assert_eq!((kind("name"), kind("age"), kind("score"), kind("tags"), kind("address"), kind("mixed")), (FieldType::String, FieldType::Integer, FieldType::Number, FieldType::Array, FieldType::Object, FieldType::Any));
+        assert!(inferred.fields["note"].nullable && !inferred.fields["name"].nullable);
+        assert!(inferred.fields.values().all(|r| !r.required) && inferred.additional_fields);
+        assert!(!inferred.fields.contains_key("_schema"));
+        assert_eq!((inferred.present["name"], inferred.present["address"], inferred.present["note"]), (2, 1, 1));
+        let version = new_version(&[], SchemaInput { fields: inferred.fields, additional_fields: true, migration: Vec::new() }).unwrap();
+        for doc in &docs {
+            let mut doc = doc.clone();
+            doc.remove(SCHEMA_FIELD);
+            assert!(version.validate(&doc).is_empty(), "{:?}", version.validate(&doc));
+        }
     }
 }

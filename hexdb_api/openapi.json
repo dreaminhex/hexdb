@@ -3506,6 +3506,49 @@
         }
       }
     },
+    "/tessellations/{name}/schemas/infer": {
+      "get": {
+        "tags": [
+          "Schemas"
+        ],
+        "summary": "A first schema inferred from up to 1,000 documents: their fields and types, nothing required",
+        "operationId": "get_tessellations_name_schemas_infer",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Name",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/tessellations/{name}/schemas/check": {
       "post": {
         "tags": [
