@@ -263,7 +263,8 @@ fn parse_filter_param(filter: Option<&str>) -> Result<Value, ApiError> {
 /// Parse `"-views,title"` into sort keys.
 pub(crate) fn parse_sort_text(text: &str) -> Result<Vec<SortKey>, ApiError> {
     text.split(',')
-        .map(str::trim)
+        // Quotes around a key are dropped: callers (and models) sometimes copy them from JSON examples.
+        .map(|part| part.trim().trim_matches(|c| c == '"' || c == '\'' || c == '`').trim())
         .filter(|part| !part.is_empty())
         .map(|part| {
             // "-total", "+total", or "total desc" / "total asc" (as SQL writes it).
@@ -1912,6 +1913,7 @@ mod sort_tests {
         let keys = |s: &str| parse_sort_text(s).unwrap().into_iter().map(|k| (k.field, k.descending)).collect::<Vec<_>>();
         assert_eq!(keys("-total, name"), vec![("total".to_string(), true), ("name".to_string(), false)]);
         assert_eq!(keys("revenue desc, country ASC"), vec![("revenue".to_string(), true), ("country".to_string(), false)]);
+        assert_eq!(keys("\"count desc\""), vec![("count".to_string(), true)]);
         // A field may be called "desc": only " desc" after a field name means descending.
         assert_eq!(keys("desc"), vec![("desc".to_string(), false)]);
     }

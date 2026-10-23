@@ -88,7 +88,7 @@ pub fn tools() -> Vec<AiTool> {
         tool("count", "Count the documents matching a filter.", schema(json!({ "tessellation": tess, "filter": filter }), &["tessellation"])),
         tool(
             "aggregate",
-            "Group and summarize documents: {\"group_by\": [\"country\"], \"aggregates\": {\"revenue\": {\"$sum\": \"total\"}, \"orders\": {\"$count\": {}}}, \"filter\", \"sort\": \"revenue desc\", \"limit\"}. Aggregates: $sum $avg $min $max $count $first $last.",
+            "Group and summarize documents: {\"group_by\": [\"country\"], \"aggregates\": {\"revenue\": {\"$sum\": \"total\"}, \"orders\": {\"$count\": {}}}, \"filter\", \"sort\": \"revenue desc\", \"limit\"}. sort is plain text naming a group or aggregate: revenue desc, or -revenue. Aggregates: $sum $avg $min $max $count $first $last.",
             schema(
                 json!({
                     "tessellation": tess,
@@ -130,22 +130,22 @@ fn shorten(value: &mut Value) {
     }
 }
 
-/// A result as a model sees it: shortened, and cut to `MAX_RESULT` by dropping documents from the end.
-fn finish(mut result: Value) -> String {
+/// A result as a model sees it: shortened, and cut to `cap` bytes by dropping documents from the end.
+fn finish(mut result: Value, cap: usize) -> String {
     shorten(&mut result);
     let mut text = result.to_string();
-    if text.len() <= MAX_RESULT {
+    if text.len() <= cap {
         return text;
     }
     for key in ["documents", "rows"] {
-        while text.len() > MAX_RESULT && result[key].as_array().is_some_and(|a| a.len() > 1) {
+        while text.len() > cap && result[key].as_array().is_some_and(|a| a.len() > 1) {
             result[key].as_array_mut().unwrap().pop();
             result["truncated"] = json!(true);
             text = result.to_string();
         }
     }
-    if text.len() > MAX_RESULT {
-        text = format!("{}… (cut: the result was too large; ask for fewer fields or documents)", &text[..text.floor_char_boundary(MAX_RESULT)]);
+    if text.len() > cap {
+        text = format!("{}… (cut: the result was too large; ask for fewer fields or documents)", &text[..text.floor_char_boundary(cap)]);
     }
     text
 }
@@ -166,10 +166,15 @@ fn filter_arg(input: &Value) -> Result<Filter, String> {
 
 /// Run one tool as `principal`: the result (as JSON text for the model) or an error to show it.
 pub async fn call_tool(engine: &HexDBEngine, principal: &Principal, name: &str, input: &Value) -> Result<String, String> {
+    call_tool_capped(engine, principal, name, input, MAX_RESULT).await
+}
+
+/// [`call_tool`], with results cut to `cap` bytes (the chat sizes it to fit its allowance).
+async fn call_tool_capped(engine: &HexDBEngine, principal: &Principal, name: &str, input: &Value, cap: usize) -> Result<String, String> {
     // The request's caller scope is already set; this makes it explicit, so row
     // filters and field masks apply wherever this runs.
     let caller = Arc::new(principal.clone());
-    hexdb_core::access::as_caller(caller, run_tool(engine, principal, name, input)).await.map(finish)
+    hexdb_core::access::as_caller(caller, run_tool(engine, principal, name, input)).await.map(|result| finish(result, cap))
 }
 
 async fn run_tool(engine: &HexDBEngine, principal: &Principal, name: &str, input: &Value) -> Result<Value, String> {
@@ -503,7 +508,7 @@ pub async fn chat(
                 )
                 .with_retry_after(seconds));
             }
-            break "This question needed more lookups than its allowance covers; here is what was found so far. Try a narrower question.".to_string();
+            break "This question used up its allowance before an answer would fit. Try a narrower question, such as one about a single tessellation or field.".to_string();
         }
         // Without lookups the model must answer now: tell it, or it may announce another try.
         let system = if offer_tools {
@@ -537,7 +542,14 @@ No more lookups are available for this question. Answer now from what the lookup
             let outcome = if calls_made > limits.max_tool_calls {
                 Err("No more lookups are allowed for this question; answer with what you have.".to_string())
             } else {
-                call_tool(&engine, &principal, name, input).await
+                // Each result gets a share of the question's allowance (about 4 bytes a token),
+                // so the lookups leave room for the answer.
+                let cap = if limits.max_per_question == 0 {
+                    MAX_RESULT
+                } else {
+                    ((limits.max_per_question as usize * 4) / (2 * (limits.max_tool_calls as usize + 1))).clamp(2048, MAX_RESULT)
+                };
+                call_tool_capped(&engine, &principal, name, input, cap).await
             };
             steps.push(json!({ "tool": name, "input": input, "ok": outcome.is_ok() }));
             let (content, is_error) = match outcome {
