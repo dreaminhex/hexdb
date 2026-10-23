@@ -266,9 +266,17 @@ pub(crate) fn parse_sort_text(text: &str) -> Result<Vec<SortKey>, ApiError> {
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .map(|part| {
-            let (descending, field) = match part.strip_prefix('-') {
-                Some(field) => (true, field),
-                None => (false, part.strip_prefix('+').unwrap_or(part)),
+            // "-total", "+total", or "total desc" / "total asc" (as SQL writes it).
+            let lower = part.to_ascii_lowercase();
+            let (descending, field) = if lower.ends_with(" desc") {
+                (true, part[..part.len() - 5].trim_end())
+            } else if lower.ends_with(" asc") {
+                (false, part[..part.len() - 4].trim_end())
+            } else {
+                match part.strip_prefix('-') {
+                    Some(field) => (true, field),
+                    None => (false, part.strip_prefix('+').unwrap_or(part)),
+                }
             };
             if field.is_empty() {
                 return Err(ApiError::invalid(format!("sort: invalid key '{}'.", part)));
@@ -1892,5 +1900,19 @@ mod log_tests {
         assert_eq!(mask_addresses("'playground' signed in from 66.177.89.188."), "'playground' signed in from 66.177.x.x.");
         assert_eq!(mask_addresses("client 2a09:8280:1::4f:2"), "client 2a09:8280:…");
         assert_eq!(mask_addresses("at 19:08:44 on 1.6.0, chunk ab12cd, 6 entries"), "at 19:08:44 on 1.6.0, chunk ab12cd, 6 entries");
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::parse_sort_text;
+
+    #[test]
+    fn sort_text_takes_minus_and_desc_forms() {
+        let keys = |s: &str| parse_sort_text(s).unwrap().into_iter().map(|k| (k.field, k.descending)).collect::<Vec<_>>();
+        assert_eq!(keys("-total, name"), vec![("total".to_string(), true), ("name".to_string(), false)]);
+        assert_eq!(keys("revenue desc, country ASC"), vec![("revenue".to_string(), true), ("country".to_string(), false)]);
+        // A field may be called "desc": only " desc" after a field name means descending.
+        assert_eq!(keys("desc"), vec![("desc".to_string(), false)]);
     }
 }

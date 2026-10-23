@@ -505,10 +505,18 @@ pub async fn chat(
             }
             break "This question needed more lookups than its allowance covers; here is what was found so far. Try a narrower question.".to_string();
         }
+        // Without lookups the model must answer now: tell it, or it may announce another try.
+        let system = if offer_tools {
+            CHAT_SYSTEM.to_string()
+        } else {
+            format!("{}
+
+No more lookups are available for this question. Answer now from what the lookups already returned; if that isn't enough for a full answer, give what it shows and say what's missing.", CHAT_SYSTEM)
+        };
         let reply = engine
             .ai_chat(ChatRequest {
                 feature: "chat".into(),
-                system: CHAT_SYSTEM.into(),
+                system,
                 turns: turns.clone(),
                 tools: offered,
                 max_tokens: limits.max_tokens,
