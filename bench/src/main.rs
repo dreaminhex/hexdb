@@ -4,6 +4,9 @@
 //!   cargo run --release -p hexdb_bench            everything (about 5 minutes)
 //!   cargo run --release -p hexdb_bench -- quick   smaller data sets, no failover
 //!
+//! HEXDB_BENCH_LABEL (for example "debian-docker") names the environment in the
+//! report and in its file name, so runs on several systems don't overwrite each other.
+//!
 //! It builds release binaries, runs in-process measurements (encryption,
 //! compression, Reed-Solomon encoding and repair) and starts real release
 //! servers in temporary directories for the rest (reads, writes, queries,
@@ -252,7 +255,12 @@ fn machine() -> String {
     }
     .unwrap_or_else(|| "unknown CPU".into());
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
-    format!("{} ({} threads), {} {}", cpu, threads, std::env::consts::OS, std::env::consts::ARCH)
+    let label = label().map(|l| format!(" ({})", l)).unwrap_or_default();
+    format!("{} ({} threads), {} {}{}", cpu, threads, std::env::consts::OS, std::env::consts::ARCH, label)
+}
+
+fn label() -> Option<String> {
+    std::env::var("HEXDB_BENCH_LABEL").ok().filter(|l| !l.trim().is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -738,7 +746,8 @@ fn main() -> Result<()> {
     let text = header + &report.text;
     let dir = workspace().join("bench").join("results");
     std::fs::create_dir_all(&dir)?;
-    let file = dir.join(format!("{}-{}.md", std::env::consts::OS, if quick { "quick" } else { "full" }));
+    let system = label().unwrap_or_else(|| std::env::consts::OS.to_string());
+    let file = dir.join(format!("{}-{}.md", system, if quick { "quick" } else { "full" }));
     std::fs::write(&file, &text)?;
     println!("\nWrote {}", file.display());
     Ok(())
