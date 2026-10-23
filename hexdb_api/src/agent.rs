@@ -303,6 +303,22 @@ fn today() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
+/// Seconds until the daily allowances reset (midnight UTC).
+fn until_tomorrow_utc() -> u64 {
+    let now = chrono::Utc::now();
+    let midnight = (now.date_naive() + chrono::Days::new(1)).and_hms_opt(0, 0, 0).map(|t| t.and_utc()).unwrap_or(now);
+    (midnight - now).num_seconds().max(1) as u64
+}
+
+/// "in about 5 hours", "in about 40 minutes".
+fn in_about(seconds: u64) -> String {
+    match seconds {
+        s if s >= 5400 => format!("in about {} hours", (s + 1800) / 3600),
+        s if s >= 3600 => "in about an hour".to_string(),
+        s => format!("in about {} minutes", s.div_ceil(60).max(1)),
+    }
+}
+
 struct ChatLimits {
     max_tokens: u64,
     max_per_question: u64,
@@ -359,7 +375,13 @@ fn tokens_left(user: &str, client: &str, limits: &ChatLimits) -> Result<(Option<
     let user_left = left(c.tokens.get(&format!("user:{}", user)).copied().unwrap_or(0), limits.user_daily);
     let client_left = left(c.tokens.get(&format!("client:{}", client)).copied().unwrap_or(0), limits.client_daily);
     if user_left == Some(0) || client_left == Some(0) {
-        return Err(ApiError::new(axum::http::StatusCode::TOO_MANY_REQUESTS, "chat_limit", "Today's chat allowance is used up. Try again tomorrow."));
+        let seconds = until_tomorrow_utc();
+        return Err(ApiError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "chat_limit",
+            format!("Today's chat allowance is used up. It resets at midnight UTC, {}.", in_about(seconds)),
+        )
+        .with_retry_after(seconds));
     }
     Ok((user_left, client_left))
 }
@@ -462,8 +484,10 @@ pub async fn chat(
     let mut steps: Vec<Value> = Vec::new();
     let mut model = limits.model.clone().unwrap_or_default();
     let answer = loop {
-        // Out of lookups: the model must answer with what it has.
-        let offer_tools = calls_made < limits.max_tool_calls;
+        // Out of lookups, or past half the question's allowance: the model must
+        // answer with what it has. Each step resends the conversation, so the
+        // other half is kept for that answer.
+        let offer_tools = calls_made < limits.max_tool_calls && (limits.max_per_question == 0 || (input_tokens + output_tokens) * 2 < limits.max_per_question);
         let offered = if offer_tools { tools.clone() } else { Vec::new() };
         // This step must fit in what's left: of the question's allowance, and the user's and address's today.
         let estimate = estimate_tokens(CHAT_SYSTEM, &turns, &offered, limits.max_tokens);
@@ -471,7 +495,13 @@ pub async fn chat(
         let room = [Some(limits.max_per_question.saturating_sub(input_tokens + output_tokens)), user_left, client_left].into_iter().flatten().min().unwrap_or(u64::MAX);
         if estimate > room {
             if input_tokens + output_tokens == 0 {
-                return Err(ApiError::new(axum::http::StatusCode::TOO_MANY_REQUESTS, "chat_limit", "This question needs more of the chat allowance than is left today. Ask something shorter, or try again tomorrow."));
+                let seconds = until_tomorrow_utc();
+                return Err(ApiError::new(
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    "chat_limit",
+                    format!("This question needs more of the chat allowance than is left today. Ask something shorter, or try again after midnight UTC ({}).", in_about(seconds)),
+                )
+                .with_retry_after(seconds));
             }
             break "This question needed more lookups than its allowance covers; here is what was found so far. Try a narrower question.".to_string();
         }

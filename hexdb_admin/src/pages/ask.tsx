@@ -225,8 +225,8 @@ export function AskPage() {
         </div>
         {remaining.length > 0 && (
           <div className="text-muted-foreground text-xs">
-            <Badge variant="outline" className="font-normal">
-              {formatNumber(Math.min(...remaining))} tokens left today
+            <Badge variant="outline" className="font-normal" title="Daily allowances reset at midnight UTC.">
+              {formatNumber(Math.min(...remaining))} tokens left today · resets at midnight UTC
             </Badge>
           </div>
         )}

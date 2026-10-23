@@ -279,9 +279,10 @@ impl HexDBEngine {
         let used = self.ai_month_usage().await?;
         let total = used["input_tokens"].as_u64().unwrap_or(0) + used["output_tokens"].as_u64().unwrap_or(0);
         if total >= budget {
+            let (resets, seconds) = next_month_utc();
             return Err(EngineError::RateLimited(
-                format!("This month's AI token budget ({} tokens) is used up; raise ai.monthly_token_budget or wait for next month.", budget),
-                0,
+                format!("This month's AI token budget ({} tokens) is used up. It resets on {} (UTC); an administrator can also raise ai.monthly_token_budget.", budget, resets),
+                seconds,
             )
             .into());
         }
@@ -604,6 +605,15 @@ async fn call_chat_completions(provider: &Provider, request: &AiRequest, max_tok
         _ => String::new(),
     };
     Ok((answer, input, output))
+}
+
+/// When the monthly budget resets: the first of next month (UTC), as "November 1", and the seconds until then.
+pub fn next_month_utc() -> (String, u64) {
+    use chrono::{Datelike, TimeZone, Utc};
+    let now = Utc::now();
+    let (year, month) = if now.month() == 12 { (now.year() + 1, 1) } else { (now.year(), now.month() + 1) };
+    let first = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single().unwrap_or(now);
+    (first.format("%B %-d").to_string(), (first - now).num_seconds().max(1) as u64)
 }
 
 #[cfg(test)]
