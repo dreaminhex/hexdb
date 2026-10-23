@@ -332,8 +332,10 @@ impl HexDBEngine {
                 return Err(EngineError::Forbidden(at(format!("document {} is outside what your role may change in '{}'.", id, op.tessellation))).into());
             }
             if let Some(Value::Object(data)) = &op.data {
-                if matches!(op.kind, TxOpKind::Insert | TxOpKind::Replace | TxOpKind::Patch) {
-                    write.check_writable(data.keys().map(String::as_str))?;
+                match op.kind {
+                    TxOpKind::Replace => write.check_replace(op.data.as_ref().unwrap_or(&Value::Null), slot.current.as_ref())?,
+                    TxOpKind::Insert | TxOpKind::Patch => write.check_writable(data.keys().map(String::as_str))?,
+                    _ => {}
                 }
             }
 

@@ -166,3 +166,50 @@ fn function_steps_migrate_in_batches_and_versions_roll_back() -> Result<()> {
     assert!(people(&server)?.iter().all(|d| d["name"] == "unknown" && d["_schema"] == 5));
     Ok(())
 }
+
+#[test]
+fn a_version_saved_for_later_waits_until_applied() -> Result<()> {
+    let server = TestServer::start()?;
+    server.insert("people", &json!({ "name": "first" }))?;
+    let v1 = json!({ "fields": { "name": { "type": "string", "required": true }, "age": { "type": "string" } } });
+    assert_eq!(server.request(Method::POST, "/tessellations/people/schemas", Some(&v1), &[])?.status, 201);
+
+    // Saved, not applied: writes still follow version 1.
+    let v2 = json!({
+        "fields": { "name": { "type": "string", "required": true }, "age": { "type": "integer" } },
+        "migration": [{ "convert": { "field": "age", "to": "integer" } }],
+    });
+    let saved = server.request(Method::PUT, "/tessellations/people/schemas/pending", Some(&v2), &[])?;
+    assert_eq!(saved.status, 200, "{}", saved.body);
+    assert_eq!(saved.body["current"], 1);
+    assert_eq!(saved.body["pending"]["version"], 2);
+    assert_eq!(saved.body["pending"]["based_on"], 1);
+    assert!(server.request(Method::POST, "/people", Some(&json!({ "name": "ada", "age": "36" })), &[])?.status.is_success());
+    let list = server.request(Method::GET, "/tessellations", None, &[])?.body;
+    let people = list["tessellations"].as_array().unwrap().iter().find(|t| t["name"] == "people").cloned().unwrap();
+    assert_eq!((people["schema_version"].clone(), people["schema_pending"].clone()), (json!(1), json!(true)));
+
+    // An incompatible version can't be saved either.
+    let bad = json!({ "fields": { "name": { "type": "integer", "required": true } } });
+    assert_eq!(server.request(Method::PUT, "/tessellations/people/schemas/pending", Some(&bad), &[])?.status, 409);
+
+    // Applying registers it and migrates; the saved version is gone.
+    let applied = server.request(Method::POST, "/tessellations/people/schemas/pending/apply", None, &[])?;
+    assert_eq!(applied.status, 201, "{}", applied.body);
+    assert_eq!(applied.body["version"], 2);
+    wait_for_migration(&server, "people", 2)?;
+    let after = server.request(Method::GET, "/tessellations/people/schemas", None, &[])?.body;
+    assert_eq!(after["current"], 2);
+    assert!(after["pending"].is_null(), "{}", after);
+    let refused = server.request(Method::POST, "/people", Some(&json!({ "name": "grace", "age": "85" })), &[])?;
+    assert_eq!(refused.status, 422, "{}", refused.body);
+
+    // Discarding: saved, then dropped without changing anything.
+    let v3 = json!({ "fields": { "name": { "type": "string", "required": true }, "age": { "type": "integer" }, "city": { "type": "string" } } });
+    assert_eq!(server.request(Method::PUT, "/tessellations/people/schemas/pending", Some(&v3), &[])?.status, 200);
+    assert_eq!(server.request(Method::DELETE, "/tessellations/people/schemas/pending", None, &[])?.status, 204);
+    assert_eq!(server.request(Method::DELETE, "/tessellations/people/schemas/pending", None, &[])?.status, 404);
+    assert_eq!(server.request(Method::POST, "/tessellations/people/schemas/pending/apply", None, &[])?.status, 404);
+    assert_eq!(server.request(Method::GET, "/tessellations/people/schemas", None, &[])?.body["current"], 2);
+    Ok(())
+}

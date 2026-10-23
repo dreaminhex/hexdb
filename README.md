@@ -21,7 +21,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 - **Replication.** Automatic discovery and Overseer election, snapshot plus change-stream replication, and failover. Optional synchronous acknowledgements, a write quorum, and write forwarding from replicas.
 - **Security.**
   - Authentication: sessions, API keys and TOTP multi-factor authentication.
-  - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region) and hidden fields per role. Uploading, deleting and restoring files are separate permissions that can be limited to folders.
+  - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region), hidden fields, and masked fields per role (a card number can read as `************1234`, for PCI DSS). Uploading, deleting and restoring files are separate permissions that can be limited to folders.
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon coding that repairs corrupted memory.
@@ -289,7 +289,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | Files | Folders, thumbnails, search, uploads, previews and an audio player, metadata and AI tags, versions and the trash |
 | Streams | Create streams, publish, read messages, and watch consumer groups and deliveries |
 | Functions | Create and run functions; manage schedules and triggers |
-| Users, Roles | Accounts, role grants, user attributes, custom roles with row filters and hidden fields, MFA resets |
+| Users, Roles | Accounts, role grants, user attributes, custom roles with row filters, hidden and masked fields, MFA resets |
 | Audit Trail | Security events, filterable by user, action and time |
 | Plugins | Loaded plugins, their state and deliveries |
 | Logs | The server log, tailed live |

@@ -570,7 +570,7 @@ HEXDB_TOKEN=... hexdb sql "SELECT customer, total FROM orders WHERE total > ? OR
   - `id` comes first;
   - then the current schema's fields (`source: "schema"`; a nested rule such as `dims.width` lists `dims` as a `json` column);
   - then, unless the schema forbids other fields, the fields found in the first 100 documents (`source: "sample"`).
-- Hidden fields of the caller's role aren't listed.
+- Hidden fields of the caller's role aren't listed; masked ones are listed as strings.
 
 **Two ways a statement runs.**
 - **One query.** A `SELECT` from one tessellation in the shape below becomes a single query or aggregation, run where the data is. It uses indexes for its filter and sort, and pages through results with a cursor, so it handles any table size.
@@ -612,7 +612,7 @@ Notes:
   - `COUNT(*)` without `GROUP BY` uses the exact count, so it doesn't read the documents.
 - **Access.**
   - Reading needs read permission on the tessellation.
-  - A restricted role sees only its rows, and its hidden fields come back as NULL.
+  - A restricted role sees only its rows; its hidden fields come back as NULL and its masked fields masked.
   - Filtering, grouping or sorting by a hidden field is refused with 403, as in the REST API.
 - **Replicas.** `POST /sql` is a read, so a replica answers it itself instead of forwarding it to the Overseer.
 
@@ -657,7 +657,7 @@ WHERE (SELECT MAX(total) FROM orders o WHERE o.customer = c.code)
 - Aggregates take expressions (`SUM(price * quantity)`), and `DISTINCT` (`SUM(DISTINCT x)`). `GROUP BY` takes expressions too. In a grouped query, every selected expression must be grouped or inside an aggregate.
 - `ORDER BY` takes expressions and `NULLS FIRST` / `NULLS LAST`. NULLs sort first ascending and last descending by default.
 
-**Access.** Each table a statement reads, in joins, subqueries and `WITH` included, needs read permission, and each is read with the caller's row filters and hidden fields. A hidden field reads as NULL in expressions, and a filter on it sent with a read is refused with 403. System tessellations can't be read.
+**Access.** Each table a statement reads, in joins, subqueries and `WITH` included, needs read permission, and each is read with the caller's row filters, hidden fields and field masks. A hidden field reads as NULL in expressions and a masked one as its masked string, and a filter on either sent with a read is refused with 403. System tessellations can't be read.
 
 **Not supported.** These are refused with a message naming the part:
 - window functions (`OVER`), `WITH RECURSIVE`, `NATURAL` joins, `LATERAL`;
@@ -815,6 +815,8 @@ A function can change anything, so HexDB can't prove a version with a function s
 **Compatibility.** Like a schema registry, HexDB requires each version to be compatible with the previous one: every document valid under the old version, once migrated, must be valid under the new one. Changing a field's type needs a `convert` step. Adding a required field needs a `default` or a `set_default` step. An incompatible version is refused with an explanation. `POST .../schemas/check` checks a candidate without registering it. It reports compatibility and how many existing documents wouldn't fit after migrating (checking up to 100,000), with examples.
 
 **Migration.** After a version is registered, HexDB rewrites existing documents in the background, in batches. `GET /tessellations/{name}/schemas` shows all versions and the migration's progress (migrated, unchanged, failed, with examples of failures). A migration interrupted by a restart resumes. Until it finishes, a document not yet migrated is upgraded when it's written, and reads can return documents of either version (check `_schema`). Documents written without `_schema` count as the current version.
+
+**Saving a version to apply later.** `PUT /tessellations/{name}/schemas/pending`, with the same body as registering a version, checks it the same way and keeps it without applying it: writes keep following the current version and no migration starts. Saving again replaces it. `GET .../schemas` shows it as `pending`, with the version number it would get and, if a version registered since makes it no longer fit, why. `POST .../schemas/pending/apply` registers it and starts its migration (its migration functions run as whoever applies it); `DELETE .../schemas/pending` discards it. The admin UI's Schemas page does the same with **Save version**, choosing **Apply now** or **Apply later**.
 
 **Rollback.** `POST /tessellations/{name}/schemas/rollback` with `{"to": 2}` registers a new version that restores version 2's fields. Its migration is the inverse of every version after 2, newest first:
 
@@ -1612,6 +1614,7 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 **The parts:**
 - `filter` (the filter language) limits the documents the role can see and write. `{"$user": "login"}`, `{"$user": "id"}`, `{"$user": "email"}` and `{"$user": "attributes.<name>"}` stand for the caller's values. Users' attributes are set by administrators: a JSON object of up to 50 entries. A missing attribute makes the filter match nothing, never everything.
 - `hide` lists fields (dotted paths) the role can't see or change.
+- `mask` lists fields the role sees masked, for card numbers, account numbers and other values a role needs to recognize but not read (PCI DSS requirement 3.4). Each field says how many characters stay: `show_first` (up to 6) and `show_last` (up to 4), both 0 by default. `{"card_number": {"show_last": 4}}` makes `4111111111111111` read as `************1111`. Strings and numbers keep their length; a value that would keep fewer than 4 characters masked is masked whole; objects, arrays and booleans read as `********`; null stays null. A field can't be both hidden and masked by one role.
 - `folders` (files tessellations) limits the role to files in these folders and their subfolders, e.g. `["/inbox/", "/shared/2026/"]`: the same as a filter on `path`, and both must match when a role has both.
 
 Restrictions belong to the role, so each of its permissions is narrowed the same way. To let someone upload only into one folder while reading everything, grant two roles:
@@ -1626,18 +1629,19 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 **Combining grants.** When several of a user's grants allow an action on a tessellation:
 - an unrestricted grant makes access unrestricted;
 - otherwise the user sees the documents any of their filters allows;
-- a field is hidden only if every grant hides it.
+- a field is hidden only if every grant hides it;
+- a field every grant hides or masks, and at least one masks, is masked, showing as many characters as the most revealing of those masks.
 
 **Reads:**
 - Queries, counts, aggregations, `GET /tessellations/{name}`, GraphQL, the change feed and functions only see matching documents. Other documents read as not found.
-- Hidden fields are removed from every document returned.
-- Filtering, sorting, grouping or aggregating on a hidden field is refused with 403, so values can't be probed. So is `$text` unless the text index covers no hidden field.
+- Hidden fields are removed from every document returned, and masked fields are masked: in REST, GraphQL, SQL (where a masked column is a string), the change feed, functions and MCP.
+- Filtering, sorting, grouping or aggregating on a hidden or masked field is refused with 403, so values can't be probed. So is `$text` unless the text index covers no such field.
 - The query plan's `scanned` count reports only visible documents.
 - Delete events in the change feed carry no document, so they're shown by ID.
 
 **Writes:**
 - A document must match the filter before (replace, patch, delete) and after (every write) the change. Writes that would move a document out of reach are refused with 403.
-- Writes can't set or remove hidden fields, and a full replace keeps their stored values.
+- Writes can't set or remove hidden or masked fields, and a full replace keeps their stored values.
 - Update-by-filter only touches matching documents.
 - An upsert whose key matches a document outside the filter fails with 409.
 
@@ -1746,7 +1750,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 - **Secrets** in the [lattice configuration](#lattice-configuration) are sealed with the lattice transfer key, bound to their setting name. They're never returned, logged or written to the audit trail; reads show a keyed fingerprint. Every hex holds them decrypted in memory to use them. A change sent to a replica is forwarded to the Overseer like any write, so without TLS between hexes it crosses the network in the clear (see Transport).
 - **Who can change what.** The configuration, its history and rollback, AI usage and estimates, tagging existing files and the storage test are for administrators. `POST /ai/complete` needs the `ai` permission and draws on the lattice's monthly budget, which caps what a holder can spend. The chat needs the `chat` permission and stays within its own limits per user and per client address (see [The AI chat](#the-ai-chat)); its lookups run as the asking user. The MCP server and the chat only read: there is no tool that writes.
 - **What leaves the hex.** AI calls send what `ai.tagging.send` allows to the configured provider at the configured URL; an `http://` URL (fine for a local model server) sends the key unencrypted. AI base URLs can't name the well-known cloud metadata services (169.254.169.254, `metadata.google.internal`, ...); a host name that resolves to one isn't caught.
-- **Field masks.** Fields any role hides in a files tessellation are left out of what AI tagging sends, so an AI description can't reveal them to that role. Images are sent as they are when `thumbnail` or `image` is allowed.
+- **Field masks.** Fields any role hides or masks in a files tessellation are left out of what AI tagging sends, so an AI description can't reveal them to that role. Images are sent as they are when `thumbnail` or `image` is allowed.
 - **Prompt injection.** A file's contents can try to steer its own AI tags and description; the instructions tell the model to treat them as data, and the AI only writes the `ai` field of that file. Treat AI tags as suggestions, not trusted labels.
 
 ## 20. Lattices and replication

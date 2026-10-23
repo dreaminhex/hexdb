@@ -585,6 +585,8 @@ fn tessellation_json(name: &str, info: &TessellationInfo) -> Value {
         "kind": info.kind,
         "created": millis_to_rfc3339(info.created),
         "indexes": info.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
+        "schema_version": info.schemas.last().map(|s| s.version),
+        "schema_pending": info.pending_schema.is_some(),
     })
 }
 
@@ -594,10 +596,19 @@ fn tessellation_json(name: &str, info: &TessellationInfo) -> Value {
 
 fn schemas_json(engine: &HexDBEngine, name: &str) -> Value {
     let versions = engine.schemas(name);
+    // The saved version, with the number it would get now, or why it no longer fits.
+    let pending = engine.pending_schema(name).map(|p| {
+        let check = hexdb_core::schema::new_version(&versions, p.schema.clone());
+        let mut value = json!(p);
+        value["version"] = json!(check.as_ref().ok().map(|v| v.version));
+        value["error"] = json!(check.err().map(|e| format!("{:#}", e)));
+        value
+    });
     json!({
         "tessellation": name,
         "current": versions.last().map(|v| v.version),
         "versions": versions,
+        "pending": pending,
         "migration": engine.schema_migration(name),
     })
 }
@@ -713,6 +724,45 @@ pub async fn rollback_schema(
     let tess = name.clone();
     tokio::spawn(async move { migrating.migrate_schema(&tess).await });
     Ok((StatusCode::CREATED, Json(json!(version))).into_response())
+}
+
+/// Save the next version to apply later (same body as registering one). It
+/// replaces any version saved before; writes keep following the current version.
+pub async fn save_pending_schema(
+    Path(name): Path<String>,
+    State(engine): Engine,
+    Auth(principal): Auth,
+    body: Result<Json<hexdb_core::schema::SchemaInput>, JsonRejection>,
+) -> ApiResult {
+    principal.require(Permission::Manage, &name)?;
+    let Json(input) = body?;
+    existing_tessellation(&engine, &name)?;
+    let (_, version) = engine.save_pending_schema(&name, input, &principal).await?;
+    engine.audit(&principal.login, "schema.save", &name, json!({ "version": version })).await;
+    Ok(Json(schemas_json(&engine, &name)).into_response())
+}
+
+/// Apply the saved version: register it and migrate existing documents in the background.
+pub async fn apply_pending_schema(Path(name): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require(Permission::Manage, &name)?;
+    existing_tessellation(&engine, &name)?;
+    let version = engine.apply_pending_schema(&name, &principal).await?;
+    engine.audit(&principal.login, "schema.create", &name, json!({ "version": version.version, "saved": true })).await;
+    let migrating = engine.clone();
+    let tess = name.clone();
+    tokio::spawn(async move { migrating.migrate_schema(&tess).await });
+    Ok((StatusCode::CREATED, Json(json!(version))).into_response())
+}
+
+/// Discard the saved version.
+pub async fn discard_pending_schema(Path(name): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require(Permission::Manage, &name)?;
+    existing_tessellation(&engine, &name)?;
+    if !engine.discard_pending_schema(&name)? {
+        return Err(ApiError::not_found(format!("'{}' has no schema version waiting to be applied.", name)));
+    }
+    engine.audit(&principal.login, "schema.discard", &name, json!({})).await;
+    Ok(no_content(false))
 }
 
 /// Remove every schema version (the tessellation becomes schemaless).

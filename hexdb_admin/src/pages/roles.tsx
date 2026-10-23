@@ -124,11 +124,12 @@ function RoleDialog({
               onChange={(e) => setRestrictions(e.target.value)}
               className="min-h-28 font-mono text-xs"
               spellCheck={false}
-              placeholder={'{\n  "orders": {\n    "filter": { "region": { "$user": "attributes.region" } },\n    "hide": ["cost"]\n  }\n}'}
+              placeholder={'{\n  "orders": {\n    "filter": { "region": { "$user": "attributes.region" } },\n    "hide": ["cost"],\n    "mask": { "card_number": { "show_last": 4 } }\n  }\n}'}
             />
             <p className="text-muted-foreground text-xs">
               Per tessellation (or <code>*</code>): <code>filter</code> limits the documents this role can see and write, <code>hide</code> lists fields it
-              can't see or change, and <code>folders</code> (files tessellations) limits its files to folders, e.g.{" "}
+              can't see or change, <code>mask</code> shows fields masked (<code>{'{"card_number": {"show_last": 4}}'}</code> reads as{" "}
+              <code>************1234</code>; at most the first 6 and last 4 characters stay, as PCI DSS allows), and <code>folders</code> (files tessellations) limits its files to folders, e.g.{" "}
               <code>{'{"media": {"folders": ["/inbox/"]}}'}</code>. <code>{'{"$user": "login"}'}</code> or <code>{'{"$user": "attributes.region"}'}</code> stand for the user's values
               (set attributes on the Users page). Restricted grants can't manage tessellations.
             </p>

@@ -41,6 +41,9 @@ pub struct TessellationInfo {
     /// Schema versions, oldest first (none: schemaless).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schemas: Vec<crate::schema::SchemaVersion>,
+    /// A next version saved to apply later, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_schema: Option<crate::schema::PendingSchema>,
 }
 
 impl TessellationInfo {
@@ -182,7 +185,7 @@ mod tests {
         assert!(Catalog::load(&dir, &keys).unwrap().is_none());
 
         let mut catalog = Catalog::default();
-        catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1, indexes: Vec::new(), schemas: Vec::new() });
+        catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1, indexes: Vec::new(), schemas: Vec::new(), pending_schema: None });
         catalog.dropped.insert("old".into(), 42);
         catalog.save(&dir, &keys).unwrap();
         assert!(!fs::read(Catalog::path(&dir)).unwrap().windows(8).any(|w| w == b"Articles"), "encrypted");

@@ -324,6 +324,10 @@ export interface Tessellation {
   document_count?: number
   /** Names of the tessellation's secondary indexes. */
   indexes: string[]
+  /** The current schema version (null: schemaless). */
+  schema_version?: number | null
+  /** A schema version is saved, waiting to be applied. */
+  schema_pending?: boolean
 }
 
 export interface IndexInfo {
@@ -401,10 +405,23 @@ export interface SchemaMigration {
   finished: number | null
 }
 
+/** A next version saved to apply later. */
+export interface PendingSchema {
+  schema: { fields: Record<string, Record<string, unknown>>; additional_fields?: boolean; migration?: Record<string, unknown>[] }
+  /** The current version when it was saved (0: none). */
+  based_on: number
+  saved: number
+  saved_by_login?: string
+  /** The number it would get now; null when it no longer fits (see `error`). */
+  version: number | null
+  error: string | null
+}
+
 export interface Schemas {
   tessellation: string
   current: number | null
   versions: SchemaVersion[]
+  pending: PendingSchema | null
   migration: SchemaMigration | null
 }
 
@@ -826,6 +843,9 @@ export interface QuotaView {
 export interface Restriction {
   filter?: Record<string, unknown>
   hide?: string[]
+  /** Fields shown masked, e.g. `{ "card": { "show_last": 4 } }` reads as `************1234`. */
+  mask?: Record<string, { show_first?: number; show_last?: number }>
+  folders?: string[]
 }
 
 export interface Role {
@@ -1023,6 +1043,9 @@ export const api = {
   addSchema: (tess: string, schema: unknown) => request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas`, schema),
   checkSchema: (tess: string, schema: unknown) => request<SchemaCheck>("POST", `/tessellations/${enc(tess)}/schemas/check`, schema),
   dropSchemas: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas`),
+  savePendingSchema: (tess: string, schema: unknown) => request<Schemas>("PUT", `/tessellations/${enc(tess)}/schemas/pending`, schema),
+  applyPendingSchema: (tess: string) => request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas/pending/apply`),
+  discardPendingSchema: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas/pending`),
   rollbackSchema: (tess: string, to: number, migration: unknown[] = []) =>
     request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas/rollback`, { to, migration }),
 

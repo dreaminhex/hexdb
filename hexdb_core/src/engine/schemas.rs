@@ -14,12 +14,16 @@
 // function gets `documents` and returns them migrated; it runs as whoever
 // registered the version). A rollback registers a new version that restores
 // an earlier one's fields with the inverse steps (see `schema::rollback_input`).
+//
+// A next version can also be saved to apply later: it's checked like a
+// registration and kept in the catalog (replicated with it) until it's
+// applied, which registers it and starts its migration, or discarded.
 
 use super::{writes::BatchItem, EngineError, HexDBEngine};
 use crate::{
     document::{CompactFields, FieldValue},
     hex::DocKey,
-    schema::{self, SchemaInput, SchemaVersion, SCHEMA_FIELD},
+    schema::{self, PendingSchema, SchemaInput, SchemaVersion, SCHEMA_FIELD},
     wal::WalOp,
 };
 use anyhow::Result;
@@ -89,8 +93,8 @@ impl HexDBEngine {
         self.register_schema(tess, input, by, Some(to)).await
     }
 
-    async fn register_schema(&self, tess: &str, input: SchemaInput, by: &crate::auth::Principal, restores: Option<u32>) -> Result<SchemaVersion> {
-        self.ensure_writable()?;
+    /// Refuse a migration that names a function that doesn't exist.
+    async fn check_migration_functions(&self, input: &SchemaInput) -> Result<()> {
         for step in &input.migration {
             if let schema::Step::Function { name, undo } = step {
                 for f in std::iter::once(name).chain(undo.iter()) {
@@ -100,6 +104,63 @@ impl HexDBEngine {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Save the next version to apply later, replacing any saved before. It's
+    /// checked as a registration would be, and returns the version number it
+    /// would get now. Writes keep following the current version until it's applied.
+    pub async fn save_pending_schema(&self, tess: &str, input: SchemaInput, by: &crate::auth::Principal) -> Result<(PendingSchema, u32)> {
+        self.ensure_writable()?;
+        self.check_migration_functions(&input).await?;
+        let mut catalog = self.catalog.lock().unwrap();
+        let info = catalog.tessellations.get_mut(tess).ok_or_else(|| EngineError::NotFound(format!("Tessellation '{}' not found.", tess)))?;
+        if !info.is_user_data() {
+            return Err(EngineError::Invalid(format!("'{}' is a system tessellation; it can't have a schema.", tess)).into());
+        }
+        let version = schema::new_version(&info.schemas, input.clone()).map_err(|e| EngineError::Conflict(format!("{:#}", e)))?.version;
+        let pending = PendingSchema {
+            schema: input,
+            based_on: info.schemas.last().map_or(0, |s| s.version),
+            saved: chrono::Utc::now().timestamp_millis(),
+            saved_by: by.user_id.clone(),
+            saved_by_login: by.login.clone(),
+        };
+        info.pending_schema = Some(pending.clone());
+        catalog.save(&self.storage_dir, &self.keys)?;
+        info!("📐 Schema version {} saved for '{}', to apply later.", version, tess);
+        Ok((pending, version))
+    }
+
+    /// The version saved to apply later, if any.
+    pub fn pending_schema(&self, tess: &str) -> Option<PendingSchema> {
+        self.catalog.lock().unwrap().tessellations.get(tess).and_then(|i| i.pending_schema.clone())
+    }
+
+    /// Register the saved version, by `by` (whom its migration functions run as),
+    /// and forget it. The caller starts the migration as for [`HexDBEngine::add_schema`].
+    pub async fn apply_pending_schema(&self, tess: &str, by: &crate::auth::Principal) -> Result<SchemaVersion> {
+        let pending = self.pending_schema(tess).ok_or_else(|| EngineError::NotFound(format!("'{}' has no schema version waiting to be applied.", tess)))?;
+        let version = self.register_schema(tess, pending.schema, by, None).await?;
+        self.discard_pending_schema(tess)?;
+        Ok(version)
+    }
+
+    /// Forget the version saved to apply later. False if there was none.
+    pub fn discard_pending_schema(&self, tess: &str) -> Result<bool> {
+        self.ensure_writable()?;
+        let mut catalog = self.catalog.lock().unwrap();
+        let Some(info) = catalog.tessellations.get_mut(tess) else { return Ok(false) };
+        if info.pending_schema.take().is_none() {
+            return Ok(false);
+        }
+        catalog.save(&self.storage_dir, &self.keys)?;
+        Ok(true)
+    }
+
+    async fn register_schema(&self, tess: &str, input: SchemaInput, by: &crate::auth::Principal, restores: Option<u32>) -> Result<SchemaVersion> {
+        self.ensure_writable()?;
+        self.check_migration_functions(&input).await?;
         let mut catalog = self.catalog.lock().unwrap();
         let info = catalog.tessellations.get_mut(tess).ok_or_else(|| EngineError::NotFound(format!("Tessellation '{}' not found.", tess)))?;
         if !info.is_user_data() {
@@ -121,21 +182,24 @@ impl HexDBEngine {
         self.ensure_writable()?;
         let mut catalog = self.catalog.lock().unwrap();
         let Some(info) = catalog.tessellations.get_mut(tess) else { return Ok(false) };
-        if info.schemas.is_empty() {
+        if info.schemas.is_empty() && info.pending_schema.is_none() {
             return Ok(false);
         }
         info.schemas.clear();
+        info.pending_schema = None;
         catalog.save(&self.storage_dir, &self.keys)?;
         self.schema_jobs.lock().unwrap().remove(tess);
         Ok(true)
     }
 
-    /// Replace a tessellation's schemas with the Overseer's (replication).
-    pub(crate) fn set_schemas_unchecked(&self, tess: &str, schemas: &[SchemaVersion]) -> Result<()> {
+    /// Replace a tessellation's schemas (and the version waiting to be applied)
+    /// with the Overseer's (replication).
+    pub(crate) fn set_schemas_unchecked(&self, tess: &str, schemas: &[SchemaVersion], pending: Option<&PendingSchema>) -> Result<()> {
         let mut catalog = self.catalog.lock().unwrap();
         if let Some(info) = catalog.tessellations.get_mut(tess) {
-            if info.schemas != schemas {
+            if info.schemas != schemas || info.pending_schema.as_ref() != pending {
                 info.schemas = schemas.to_vec();
+                info.pending_schema = pending.cloned();
                 catalog.save(&self.storage_dir, &self.keys)?;
             }
         }

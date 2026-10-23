@@ -278,6 +278,11 @@ fn not_found_ids(tess: &str, missing: &[String]) -> anyhow::Error {
     .into()
 }
 
+/// A document's fields as one JSON object.
+fn fields_json(fields: &CompactFields) -> Value {
+    Value::Object(fields.iter().map(|(k, v)| (k.clone(), v.to_json())).collect())
+}
+
 fn outside_scope(tess: &str) -> anyhow::Error {
     EngineError::Forbidden(format!("The document would be outside what your role may write in '{}'.", tess)).into()
 }
@@ -600,7 +605,6 @@ impl HexDBEngine {
         let mut items = Vec::with_capacity(prepared.len());
         let write = self.caller_scope(tess, Action::Write);
         for (filter, fields, described) in prepared {
-            write.check_writable(fields.keys().map(String::as_str))?;
             let matches = self.matching_documents(tess, filter).await?;
             if matches.len() > 1 {
                 return Err(EngineError::Conflict(format!(
@@ -616,6 +620,7 @@ impl HexDBEngine {
                     if !write.allows(&existing) {
                         return Err(EngineError::Conflict(format!("A document with the key {} exists in '{}' outside what your role may change.", described, tess)).into());
                     }
+                    write.check_replace(&fields_json(fields), Some(&existing))?;
                     let key = DocKey::new(tess, existing.id);
                     let (_, seq) = self.read_latest(&key).await?;
                     summary.replaced += 1;
@@ -627,6 +632,7 @@ impl HexDBEngine {
                     doc.with_expected(seq, &mut items)
                 }
                 None => {
+                    write.check_writable(fields.keys().map(String::as_str))?;
                     summary.inserted += 1;
                     let doc = Document { id: Ulid::generate(), tessellation: tess.to_string(), data: fields.clone(), ttl };
                     if !write.allows(&doc) {
@@ -816,7 +822,7 @@ impl HexDBEngine {
             }
             match modification {
                 Modification::Replace(fields) => {
-                    write.check_writable(fields.keys().map(String::as_str))?;
+                    write.check_replace(&fields_json(fields), Some(&doc))?;
                     let old = doc.clone();
                     doc.data = fields.clone();
                     write.restore_hidden(&mut doc, &old);
@@ -1312,9 +1318,9 @@ impl HexDBEngine {
     }
 
     /// Refuse a query that tests, sorts, groups or aggregates on a field the
-    /// caller can't see, or searches text that includes such fields.
+    /// caller can't see (or sees masked), or searches text that includes such fields.
     pub(crate) fn check_scope_fields(&self, tess: &str, scope: &crate::access::Scope, filter: &Filter, others: &[&str]) -> Result<()> {
-        if scope.hidden.is_empty() {
+        if !scope.protects_fields() {
             return Ok(());
         }
         let (mut paths, all_text) = filter.referenced_paths();
@@ -1323,7 +1329,7 @@ impl HexDBEngine {
                 Some((fields, _)) => paths.extend(fields),
                 None => {
                     return Err(EngineError::Forbidden(format!(
-                        "Full-text search in '{}' without a text index searches every field, including fields hidden from your role.",
+                        "Full-text search in '{}' without a text index searches every field, including fields hidden from or masked for your role.",
                         tess
                     ))
                     .into())
