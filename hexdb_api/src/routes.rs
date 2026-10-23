@@ -157,6 +157,8 @@ pub fn app_router(
         .route("/tessellations/{name}/schemas/rollback", post(rollback_schema))
         .route("/tessellations/{name}/schemas/pending", put(save_pending_schema).delete(discard_pending_schema))
         .route("/tessellations/{name}/schemas/pending/apply", post(apply_pending_schema))
+        .route("/updates", get(get_updates))
+        .route("/updates/rollout", post(start_rollout))
         .route("/analyzers", get(list_analyzers))
         .route("/analyzers/_analyze", post(analyze))
 

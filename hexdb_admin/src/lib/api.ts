@@ -195,6 +195,39 @@ export interface LatticeHex {
   /** replication.slicing on this hex, and how many of the 64 slices it keeps. */
   slicing?: boolean
   slices_held?: number
+  /** The HexDB version the hex runs. */
+  version?: string
+}
+
+/** The newest HexDB release, from the hex's last check (updates.check). */
+export interface ReleaseCheck {
+  latest: string | null
+  url: string | null
+  checked: number | null
+  error: string | null
+  enabled: boolean
+  /** A hosted lattice, which can update its hexes from the admin UI. */
+  hosted: boolean
+}
+
+/** A rolling update of a hosted lattice, as the Overseer running it reports. */
+export interface Rollout {
+  state: "running" | "done" | "failed"
+  target: string
+  started_by: string
+  started: number
+  finished: number | null
+  steps: { hex: string; id: string; from: string; state: "waiting" | "updating" | "handing over" | "done" | "failed" }[]
+  error: string | null
+}
+
+export interface Updates {
+  running: string
+  release: ReleaseCheck
+  hosted: boolean
+  /** What the hosting service would install (hosted lattices). */
+  offer: { version: string; image?: string } | { error: string } | null
+  rollout: Rollout | null
 }
 
 export interface ReplicationStatus {
@@ -257,6 +290,7 @@ export interface Status {
     next_sequence: number
   }
   operations: { reads_total: number; writes_total: number; queries_total: number }
+  updates?: ReleaseCheck
   network: {
     api_endpoint: string
     discovery_endpoint: string
@@ -1046,6 +1080,8 @@ export const api = {
   savePendingSchema: (tess: string, schema: unknown) => request<Schemas>("PUT", `/tessellations/${enc(tess)}/schemas/pending`, schema),
   applyPendingSchema: (tess: string) => request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas/pending/apply`),
   discardPendingSchema: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas/pending`),
+  updates: () => request<Updates>("GET", "/updates"),
+  startRollout: () => request<Rollout>("POST", "/updates/rollout"),
   rollbackSchema: (tess: string, to: number, migration: unknown[] = []) =>
     request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas/rollback`, { to, migration }),
 

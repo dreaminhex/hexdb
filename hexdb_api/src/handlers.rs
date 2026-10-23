@@ -776,6 +776,43 @@ pub async fn drop_schemas(Path(name): Path<String>, State(engine): Engine, Auth(
     Ok(no_content(false))
 }
 
+// ---------------------------------------------------------------------------
+// Updates
+// ---------------------------------------------------------------------------
+
+/// The newest release, this hex's version, and on a hosted lattice what the
+/// hosting service would install and the rolling update's progress. Replicas
+/// pass this to the Overseer, which runs rollouts.
+pub async fn get_updates(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    let config = &engine.config.updates;
+    let offer = if config.hosted() {
+        match hexdb_core::updates::offer(&engine, config).await {
+            Ok(offer) => json!(offer),
+            Err(e) => json!({ "error": format!("{:#}", e) }),
+        }
+    } else {
+        Value::Null
+    };
+    Ok(Json(json!({
+        "running": engine.version,
+        "release": hexdb_core::updates::ReleaseCheck { hosted: config.hosted(), ..hexdb_core::updates::last_check() },
+        "hosted": config.hosted(),
+        "offer": offer,
+        "rollout": hexdb_core::updates::rollout(),
+    }))
+    .into_response())
+}
+
+/// Start a rolling update of a hosted lattice to the release the hosting service offers.
+pub async fn start_rollout(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    let rollout = hexdb_core::updates::start_rollout(engine.clone(), engine.config.updates.clone(), &principal.login)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::CONFLICT, "update_refused", format!("{:#}", e)))?;
+    Ok((StatusCode::ACCEPTED, Json(json!(rollout))).into_response())
+}
+
 /// Text analyzers: the built-in ones and those defined in hexdb.toml.
 pub async fn list_analyzers(State(engine): Engine, Auth(_principal): Auth) -> ApiResult {
     let analyzers: Vec<Value> = hexdb_core::analysis::all(&engine.config.analyzers)

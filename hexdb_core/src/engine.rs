@@ -742,6 +742,9 @@ impl HexDBEngine {
             if let Some(note) = self.rebuilding() {
                 return Err(EngineError::Unavailable(note).into());
             }
+            if crate::updates::stepping_down() {
+                return Err(EngineError::Unavailable("This Overseer is handing its role to another hex for an update; try again in a few seconds.".into()).into());
+            }
             return self.check_quorum();
         }
         let overseer = self.overseer_endpoint.read().unwrap().clone();

@@ -282,7 +282,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 
 | Page | What it does |
 | --- | --- |
-| Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, and "Add a hex" for joining new servers; flush and back up |
+| Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, with each hex's version and a mark on those that need an update, and "Add a hex" for joining new servers; flush and back up; on HexDB Enterprise, rolling updates one hex at a time |
 | Queries | GraphQL and SQL consoles with completion, examples and history |
 | Tessellations | Create and delete tessellations; manage indexes (with analyzer choice and index suggestions) and schemas (with version history and rollback) |
 | Schemas | Every tessellation's schema: version history, rollback, migration progress, and a JSON editor for the next version, saved to apply now or later |

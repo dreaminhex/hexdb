@@ -48,6 +48,9 @@ pub struct HexConfig {
     /// Custom text analyzers (see `crate::analysis`).
     #[serde(default)]
     pub analyzers: std::collections::BTreeMap<String, crate::analysis::AnalyzerConfig>,
+    /// Checking for new HexDB releases (see `crate::updates`).
+    #[serde(default)]
+    pub updates: UpdatesConfig,
 
     /// The config file this configuration was loaded from, if any.
     #[serde(skip)]
@@ -457,6 +460,41 @@ pub struct CompressionConfig {
     pub compression_level: i32,
 }
 
+/// Checking for new HexDB releases (see `crate::updates`).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UpdatesConfig {
+    /// Ask `url` for the newest release a minute after starting, then daily.
+    #[serde(default = "default_true")]
+    pub check: bool,
+    /// Where to ask: an endpoint answering like GitHub's latest-release API (`tag_name`, `html_url`).
+    #[serde(default = "default_updates_url")]
+    pub url: String,
+    /// Hosted lattices (HexDB Enterprise): the service that replaces a hex's machine with a new
+    /// release, for rolling updates from the admin UI. Empty: updates are installed by hand.
+    #[serde(default)]
+    pub control_url: String,
+    /// The lattice's token for `control_url`. Never shown or logged.
+    #[serde(default, skip_serializing)]
+    pub control_token: String,
+}
+
+impl UpdatesConfig {
+    /// True for a hosted lattice that can update its hexes itself.
+    pub fn hosted(&self) -> bool {
+        !self.control_url.trim().is_empty() && !self.control_token.trim().is_empty()
+    }
+}
+
+fn default_updates_url() -> String {
+    "https://api.github.com/repos/dreaminhex/hexdb/releases/latest".into()
+}
+
+impl Default for UpdatesConfig {
+    fn default() -> Self {
+        UpdatesConfig { check: true, url: default_updates_url(), control_url: String::new(), control_token: String::new() }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UiConfig {
     /// Built admin UI (Vite `dist`) directory. Relative paths are resolved against the config file's directory.
@@ -603,6 +641,7 @@ impl Default for HexConfig {
             analyzers: Default::default(),
             ai: Default::default(),
             functions: Default::default(),
+            updates: UpdatesConfig::default(),
             source: None,
         }
     }

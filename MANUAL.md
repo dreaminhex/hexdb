@@ -192,7 +192,8 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - Cards: documents, tessellations, memory and disk against their budgets, operation rates, uptime.
 - An activity chart: documents per tessellation, operations per minute, or storage, over 15 minutes to 6 hours.
 - Vertex health: a hexagon of the six fragments.
-- The lattice card: each hex's role, address, replication state and lag. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
+- The lattice card: each hex's role, version, address, replication state and lag, with an arrow on hexes that need an update. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
+- A banner when a newer release is out or the hexes run different versions, naming the hexes behind and linking the release notes; on HexDB Enterprise it has the button for a rolling update, and shows its progress hex by hex (see [Operations](#23-operations)).
 - A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#23-operations)).
 
 **Files.** Browse a files tessellation by folder, as a grid with thumbnails or as a list, or pick a type (audio, images, video, documents, archives) to list those files from every folder below. Upload by dropping files or with the Upload button (large files resume after a dropped connection), and search names, tags and metadata. Audio files have a play button in the grid and the list; they play in a bar at the bottom of the page (one at a time, streamed with Range requests, so long WAV masters start at once and can be seeked). When a search finds nothing, the page looks for close matches instead, so a typo such as "tatoo" still finds "tattooed". Videos without a server thumbnail show a frame the browser decodes itself. Open a file to preview it (images, audio, video), read its metadata, edit its name, folder, tags and description, download or restore earlier versions, or move it to the trash. The Trash view restores or deletes trashed files.
@@ -2204,6 +2205,9 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `analyzers.<name>` | none | Custom text analyzers |
 | `ui.path` | `../hexdb_admin/dist` | Built admin UI |
 | `ui.notice` | empty | A short notice the admin UI shows above every page and on the sign-in screen (also returned by `GET /health`, to everyone) |
+| `updates.check` | true | Ask `updates.url` for the newest release a minute after starting, then daily (see Operations) |
+| `updates.url` | GitHub's latest-release API for dreaminhex/hexdb | Where to ask; anything answering with `tag_name` and `html_url` |
+| `updates.control_url`, `updates.control_token` | empty | Set by HexDB Enterprise: the service that runs rolling updates, and the lattice's token for it |
 
 ## 23. Operations
 
@@ -2219,6 +2223,7 @@ curl -X POST http://localhost:7700/backup -d '{"name": "nightly-1"}' -H "Content
 curl http://localhost:7700/backups                      # backups in storage.backup_path
 curl http://localhost:7700/plugins
 curl http://localhost:7700/openapi.json                 # the REST API as OpenAPI 3.1
+curl http://localhost:7700/updates                      # versions, the newest release, and a hosted lattice's rolling update
 ```
 
 **Logging.** The server keeps its last 5,000 log records in memory for `/logs` and the Logs page. `RUST_LOG` sets the level for the console and the in-memory log. Writes, errors and background tasks log at info; reads at debug; refused requests at warn.
@@ -2236,6 +2241,10 @@ Restoring: stop the hex (or start a new one), point `storage.path` at the backup
 Hard-linked backups share disk blocks with the live data, so they don't protect against losing the disk: copy backup folders to other storage. Back up `storage.encryption_key` separately too; the data is useless without it. A Replicant is another option: a live copy you can back up while it's stopped.
 
 **Upgrades.** Stop the hex, replace the binaries and the UI, and start it. Data in older formats is read and rewritten by compaction. In a lattice, upgrade replicas first, then the Overseer. A failover moves the Overseer role while it's down.
+
+**Knowing when to upgrade.** A minute after starting, then daily, each hex asks GitHub for the newest HexDB release (`updates.url`; a plain GET that sends nothing about the hex). `GET /status` reports it as `updates`, and each hex's version is in `network.lattice.hexes`. The first time a hex sees a release newer than its own, it logs a warning and records an `update.available` audit event. The admin UI's dashboard shows every hex's version, marks those that need an update (a newer release, or newer hexes beside them) and says which release is available, with its notes. `updates.check = false` turns the check off, for hexes without internet access; the dashboard still marks hexes behind the rest of the lattice.
+
+**Rolling updates (HexDB Enterprise).** A hosted lattice updates itself from the dashboard: an administrator presses **Update to** the release the hosting service offers, and the Overseer updates the lattice one hex at a time. For each replica (Replicants first), it has the hosting service move the hex's machine to the new release, then waits until the hex is back on it and caught up (up to 15 minutes) before going on. Then it hands its own role over: it stops taking writes (they get 503 with a retry hint for a few seconds), waits until every replica has applied everything it published, and stops being a candidate, so the next election picks an updated hex. Last, its own machine is updated, and it rejoins as a replica. Reads keep working throughout. A step that fails stops the rollout, leaves the remaining hexes on their version and says why; the dashboard shows the progress hex by hex, and every step is in the audit trail (`update.started`, `update.hex`, `update.done`, `update.failed`). `GET /updates` reports the version, the newest release, what the hosting service offers and the rollout (any hex answers, by asking the Overseer); `POST /updates/rollout` starts one. Both need an administrator. The hosting service only ever moves the lattice's own machines, and only to the release it deploys.
 
 **Crashes and restarts.** Every write is in the write-ahead log before it's acknowledged, so a crash (a kill, a power cut, a panic that ends the process) loses nothing acknowledged: the next start replays the log. Something has to start it again:
 - `hexdb start -s` runs the server under a small supervisor (`hexdb supervise`, in the same log) that restarts it after a crash: at once, then waiting longer (up to 60 s) while it keeps crashing soon after starting, and not at all after five crashes in ten minutes. It doesn't restart a server that `hexdb stop` stopped (even with `--force`), that exited cleanly, or whose first start failed (a bad configuration or a taken port: `hexdb start` reports it). `hexdb start -s --no-restart` runs the server alone.

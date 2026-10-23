@@ -33,6 +33,8 @@ pub struct HexMeta {
     pub config: serde_json::Value,
     /// Unclean shutdowns this hex recovered from, and panics since it started (see `crate::crashes`).
     pub restarts: serde_json::Value,
+    /// The newest HexDB release, from the last check (see `crate::updates`).
+    pub updates: crate::updates::ReleaseCheck,
 }
 
 /// Represents the metadata of a vertex in the HexDB engine.
@@ -133,6 +135,8 @@ pub struct LatticeHex {
     /// Whether the hex has `replication.slicing` on, and how many of the 64 slices it keeps.
     pub slicing: bool,
     pub slices_held: u32,
+    /// The HexDB version the hex runs.
+    pub version: String,
 }
 
 /// Report structure for the current lattice state.
@@ -198,6 +202,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         lag: None,
         slicing: me.slicing,
         slices_held: crate::slicing::count(me.slices_held),
+        version: me.version,
     }];
     for member in engine.peers.lock().await.iter() {
         lattice_hexes.push(LatticeHex {
@@ -216,6 +221,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             lag: None,
             slicing: member.hex.slicing,
             slices_held: crate::slicing::count(member.hex.slices_held),
+            version: member.hex.version.clone(),
         });
     }
     // On the Overseer, replicas' positions are exact: each poll for changes
@@ -317,6 +323,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         },
         config: engine.lattice_config().status_json(),
         restarts: crate::crashes::status(&engine.config.storage_dir()),
+        updates: crate::updates::ReleaseCheck { hosted: engine.config.updates.hosted(), ..crate::updates::last_check() },
     }
 }
 

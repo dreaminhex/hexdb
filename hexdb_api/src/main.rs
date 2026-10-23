@@ -187,6 +187,7 @@ async fn server() -> anyhow::Result<()> {
         slice_copies: config.replication.slice_copies.max(1),
         slices_held: hexdb_core::slicing::ALL_SLICES,
         replication_source: String::new(),
+        machine_id: hexdb_core::updates::machine_id(),
     };
     let role = elect(&provisional, &peers);
     match peers.iter().find(|p| p.role == ROLE_OVERSEER) {
@@ -327,6 +328,9 @@ async fn server() -> anyhow::Result<()> {
         Duration::from_secs(hexdb_core::metrics::HISTORY_INTERVAL_SECONDS),
         shutdown_rx.clone(),
     );
+
+    // Look for newer HexDB releases (updates.check).
+    hexdb_core::updates::spawn_update_check(engine.clone(), config.updates.clone(), shutdown_rx.clone());
 
     // The runtime file lets the CLI find this process and stop it gracefully.
     let tls = config.tls.enabled();

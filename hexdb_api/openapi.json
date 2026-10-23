@@ -3630,6 +3630,70 @@
         }
       }
     },
+    "/updates": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Versions, the newest release, and a hosted lattice's rolling update (admin; answered by the Overseer)",
+        "operationId": "get_updates",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/updates/rollout": {
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Start a rolling update of a hosted lattice to the release its hosting service offers (admin)",
+        "operationId": "post_updates_rollout",
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/tessellations/{name}/schemas/pending": {
       "put": {
         "tags": [
