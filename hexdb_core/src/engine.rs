@@ -400,7 +400,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new() },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None },
                 );
                 catalog_changed = true;
             }
@@ -446,7 +446,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new() },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None },
                 );
                 catalog_changed = true;
             }
@@ -742,6 +742,9 @@ impl HexDBEngine {
             if let Some(note) = self.rebuilding() {
                 return Err(EngineError::Unavailable(note).into());
             }
+            if crate::updates::stepping_down() {
+                return Err(EngineError::Unavailable("This Overseer is handing its role to another hex for an update; try again in a few seconds.".into()).into());
+            }
             return self.check_quorum();
         }
         let overseer = self.overseer_endpoint.read().unwrap().clone();
@@ -804,7 +807,7 @@ impl HexDBEngine {
         if !catalog.tessellations.contains_key(name) {
             catalog.tessellations.insert(
                 name.to_string(),
-                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new() },
+                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None },
             );
             catalog.save(&self.storage_dir, &self.keys)?;
         }
@@ -842,7 +845,7 @@ impl HexDBEngine {
         }
         catalog.tessellations.insert(
             name.to_string(),
-            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new() },
+            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None },
         );
         catalog.save(&self.storage_dir, &self.keys)?;
         info!("🧩 Created tessellation '{}' ({}).", name, kind);

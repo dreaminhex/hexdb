@@ -32,7 +32,7 @@
 
     <Icon Id="HexDBIcon" SourceFile="hexdb.ico" />
     <Property Id="ARPPRODUCTICON" Value="HexDBIcon" />
-    <Property Id="ARPURLINFOABOUT" Value="https://hexdb-website.vercel.app" />
+    <Property Id="ARPURLINFOABOUT" Value="https://hexdb.app" />
     <Property Id="ARPHELPLINK" Value="https://github.com/dreaminhex/hexdb/issues" />
     <Property Id="ARPURLUPDATEINFO" Value="https://github.com/dreaminhex/hexdb/releases" />
     <Property Id="ARPCOMMENTS" Value="Run `hexdb start` in a new terminal, then open http://127.0.0.1:7700/ui/" />

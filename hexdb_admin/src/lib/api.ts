@@ -195,6 +195,39 @@ export interface LatticeHex {
   /** replication.slicing on this hex, and how many of the 64 slices it keeps. */
   slicing?: boolean
   slices_held?: number
+  /** The HexDB version the hex runs. */
+  version?: string
+}
+
+/** The newest HexDB release, from the hex's last check (updates.check). */
+export interface ReleaseCheck {
+  latest: string | null
+  url: string | null
+  checked: number | null
+  error: string | null
+  enabled: boolean
+  /** A hosted lattice, which can update its hexes from the admin UI. */
+  hosted: boolean
+}
+
+/** A rolling update of a hosted lattice, as the Overseer running it reports. */
+export interface Rollout {
+  state: "running" | "done" | "failed"
+  target: string
+  started_by: string
+  started: number
+  finished: number | null
+  steps: { hex: string; id: string; from: string; state: "waiting" | "updating" | "handing over" | "done" | "failed" }[]
+  error: string | null
+}
+
+export interface Updates {
+  running: string
+  release: ReleaseCheck
+  hosted: boolean
+  /** What the hosting service would install (hosted lattices). */
+  offer: { version: string; image?: string } | { error: string } | null
+  rollout: Rollout | null
 }
 
 export interface ReplicationStatus {
@@ -257,6 +290,7 @@ export interface Status {
     next_sequence: number
   }
   operations: { reads_total: number; writes_total: number; queries_total: number }
+  updates?: ReleaseCheck
   network: {
     api_endpoint: string
     discovery_endpoint: string
@@ -324,6 +358,10 @@ export interface Tessellation {
   document_count?: number
   /** Names of the tessellation's secondary indexes. */
   indexes: string[]
+  /** The current schema version (null: schemaless). */
+  schema_version?: number | null
+  /** A schema version is saved, waiting to be applied. */
+  schema_pending?: boolean
 }
 
 export interface IndexInfo {
@@ -401,10 +439,23 @@ export interface SchemaMigration {
   finished: number | null
 }
 
+/** A next version saved to apply later. */
+export interface PendingSchema {
+  schema: { fields: Record<string, Record<string, unknown>>; additional_fields?: boolean; migration?: Record<string, unknown>[] }
+  /** The current version when it was saved (0: none). */
+  based_on: number
+  saved: number
+  saved_by_login?: string
+  /** The number it would get now; null when it no longer fits (see `error`). */
+  version: number | null
+  error: string | null
+}
+
 export interface Schemas {
   tessellation: string
   current: number | null
   versions: SchemaVersion[]
+  pending: PendingSchema | null
   migration: SchemaMigration | null
 }
 
@@ -826,6 +877,9 @@ export interface QuotaView {
 export interface Restriction {
   filter?: Record<string, unknown>
   hide?: string[]
+  /** Fields shown masked, e.g. `{ "card": { "show_last": 4 } }` reads as `************1234`. */
+  mask?: Record<string, { show_first?: number; show_last?: number }>
+  folders?: string[]
 }
 
 export interface Role {
@@ -1023,6 +1077,11 @@ export const api = {
   addSchema: (tess: string, schema: unknown) => request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas`, schema),
   checkSchema: (tess: string, schema: unknown) => request<SchemaCheck>("POST", `/tessellations/${enc(tess)}/schemas/check`, schema),
   dropSchemas: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas`),
+  savePendingSchema: (tess: string, schema: unknown) => request<Schemas>("PUT", `/tessellations/${enc(tess)}/schemas/pending`, schema),
+  applyPendingSchema: (tess: string) => request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas/pending/apply`),
+  discardPendingSchema: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas/pending`),
+  updates: () => request<Updates>("GET", "/updates"),
+  startRollout: () => request<Rollout>("POST", "/updates/rollout"),
   rollbackSchema: (tess: string, to: number, migration: unknown[] = []) =>
     request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas/rollback`, { to, migration }),
 

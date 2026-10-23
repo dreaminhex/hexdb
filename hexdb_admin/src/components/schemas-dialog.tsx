@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { IconArrowBackUp, IconCheck, IconLoader2, IconTrash } from "@tabler/icons-react"
+import { type Completion } from "@codemirror/autocomplete"
+import { IconArrowBackUp, IconCheck, IconClockPause, IconEdit, IconLoader2, IconPlayerPlay, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { JsonEditor, parseJson } from "@/components/json-editor"
@@ -9,8 +10,9 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { usePoll } from "@/hooks/use-poll"
-import { api, errorMessage, type SchemaCheck, type SchemaVersion } from "@/lib/api"
+import { api, errorMessage, type PendingSchema, type SchemaCheck, type SchemaVersion } from "@/lib/api"
 import { formatNumber } from "@/lib/format"
+import { cn } from "@/lib/utils"
 
 const EXAMPLE = `{
   "fields": {
@@ -31,6 +33,26 @@ function draftFrom(current: SchemaVersion | undefined): string {
   )
 }
 
+type Action = "check" | "save" | "later" | "apply" | "discard" | "drop" | "rollback"
+
+/** A saved version, as editor text. */
+function draftFromPending(pending: PendingSchema): string {
+  return JSON.stringify(pending.schema, null, 2)
+}
+
+/** What the schema editor offers while typing inside quotes. */
+const SCHEMA_KEYWORDS: Completion[] = [
+  ...["fields", "additional_fields", "migration"].map((label) => ({ label, type: "property", detail: "schema" })),
+  ...["type", "required", "nullable", "default", "enum", "min", "max", "min_length", "max_length", "description"].map((label) => ({
+    label,
+    type: "property",
+    detail: "field rule",
+  })),
+  ...["string", "number", "integer", "boolean", "object", "array", "any"].map((label) => ({ label, type: "enum", detail: "type" })),
+  ...["rename", "copy", "remove", "set_default", "convert", "function"].map((label) => ({ label, type: "keyword", detail: "migration step" })),
+  ...["from", "to", "field", "value", "name", "undo"].map((label) => ({ label, type: "property", detail: "step option" })),
+]
+
 /** A tessellation's schema versions, a checked editor for the next one, and migration progress. */
 export function SchemasDialog({ tessellation, onOpenChange }: { tessellation: string | null; onOpenChange: (open: boolean) => void }) {
   return (
@@ -49,22 +71,28 @@ export function SchemasDialog({ tessellation, onOpenChange }: { tessellation: st
   )
 }
 
-function SchemaManager({ tessellation }: { tessellation: string }) {
+/**
+ * Versions, the saved (pending) version, rollback, migration progress and an editor for the next
+ * version, saved to apply now or later. `roomy` gives the editor more height (the Schemas page).
+ */
+export function SchemaManager({ tessellation, roomy = false }: { tessellation: string; roomy?: boolean }) {
   const schemas = usePoll(() => api.schemas(tessellation), 3000, [tessellation])
   const [draft, setDraft] = useState<string>()
   const [check, setCheck] = useState<SchemaCheck>()
-  const [busy, setBusy] = useState<"check" | "save" | "drop" | "rollback">()
+  const [busy, setBusy] = useState<Action>()
   const [rollbackTo, setRollbackTo] = useState<string>("")
   const [rollbackSteps, setRollbackSteps] = useState("")
   const [error, setError] = useState<string>()
 
   const versions = schemas.data?.versions ?? []
   const current = versions[versions.length - 1]
+  const pending = schemas.data?.pending ?? null
+  // Start from the saved version if there is one, so editing it carries on where it was left.
   useEffect(() => {
-    if (schemas.data && draft === undefined) setDraft(draftFrom(current))
+    if (schemas.data && draft === undefined) setDraft(schemas.data.pending ? draftFromPending(schemas.data.pending) : draftFrom(current))
   }, [schemas.data, current, draft])
 
-  const run = async (what: "check" | "save" | "drop" | "rollback") => {
+  const run = async (what: Action) => {
     setBusy(what)
     setError(undefined)
     try {
@@ -79,10 +107,22 @@ function SchemaManager({ tessellation }: { tessellation: string }) {
         await api.dropSchemas(tessellation)
         toast.success(`'${tessellation}' is schemaless again.`)
         setDraft(EXAMPLE)
+      } else if (what === "apply") {
+        const version = await api.applyPendingSchema(tessellation)
+        toast.success(`Version ${version.version} is current. Existing documents are being migrated.`)
+        setDraft(draftFrom(version))
+      } else if (what === "discard") {
+        await api.discardPendingSchema(tessellation)
+        toast.success("The saved version was discarded.")
+        setDraft(draftFrom(current))
       } else {
         const body = parseJson(draft ?? "{}", "The schema")
         if (what === "check") {
           setCheck(await api.checkSchema(tessellation, body))
+        } else if (what === "later") {
+          const saved = await api.savePendingSchema(tessellation, body)
+          toast.success(`Version ${saved.pending?.version ?? ""} is saved. Writes follow ${current ? `version ${current.version}` : "no schema"} until you apply it.`)
+          setCheck(undefined)
         } else {
           const version = await api.addSchema(tessellation, body)
           toast.success(`Version ${version.version} is current. Existing documents are being migrated.`)
@@ -131,6 +171,38 @@ function SchemaManager({ tessellation }: { tessellation: string }) {
               </span>
             </div>
           ))}
+        </div>
+      )}
+      {pending && (
+        <div className={cn("grid gap-2 rounded-md border p-3 text-sm", pending.error ? "border-status-warning/50 bg-status-warning/10" : "border-primary/40 bg-primary/5")}>
+          <div className="flex flex-wrap items-center gap-2">
+            <IconClockPause className="text-primary size-4" aria-hidden />
+            <span className="font-medium">{pending.version ? `Version ${pending.version}` : "A version"} is saved, waiting to be applied</span>
+            <span className="text-muted-foreground text-xs">
+              {new Date(pending.saved).toLocaleString()}
+              {pending.saved_by_login ? ` · ${pending.saved_by_login}` : ""} · based on {pending.based_on ? `version ${pending.based_on}` : "no schema"}
+            </span>
+          </div>
+          {pending.error && <p className="text-xs">It no longer fits the current version: {pending.error}. Edit it and save it again, or discard it.</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={!!busy || !!pending.error} onClick={() => void run("apply")}>
+              {busy === "apply" ? <IconLoader2 className="animate-spin" /> : <IconPlayerPlay />} Apply now
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!!busy}
+              onClick={() => {
+                setDraft(draftFromPending(pending))
+                setCheck(undefined)
+              }}
+            >
+              <IconEdit /> Edit
+            </Button>
+            <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" disabled={!!busy} onClick={() => void run("discard")}>
+              {busy === "discard" ? <IconLoader2 className="animate-spin" /> : <IconTrash />} Discard
+            </Button>
+          </div>
         </div>
       )}
       {versions.length > 1 && (
@@ -188,7 +260,8 @@ function SchemaManager({ tessellation }: { tessellation: string }) {
             setCheck(undefined)
           }}
           label="Schema"
-          className="h-72"
+          className={roomy ? "h-[28rem]" : "h-72"}
+          keywords={SCHEMA_KEYWORDS}
         />
         <p className="text-muted-foreground text-xs">
           Field rules: type (string, number, integer, boolean, object, array, any), required, nullable, default, enum, min, max, min_length,
@@ -220,9 +293,12 @@ function SchemaManager({ tessellation }: { tessellation: string }) {
         <Button variant="outline" disabled={!!busy || !draft} onClick={() => void run("check")}>
           {busy === "check" ? <IconLoader2 className="animate-spin" /> : <IconCheck />} Check
         </Button>
+        <Button variant="outline" disabled={!!busy || !draft} onClick={() => void run("later")}>
+          {busy === "later" ? <IconLoader2 className="animate-spin" /> : <IconClockPause />} Save, apply later
+        </Button>
         <Button disabled={!!busy || !draft} onClick={() => void run("save")}>
           {busy === "save" && <IconLoader2 className="animate-spin" />}
-          {current ? `Save version ${current.version + 1}` : "Save schema"}
+          {current ? `Save version ${current.version + 1} and apply now` : "Save schema and apply now"}
         </Button>
       </div>
     </div>

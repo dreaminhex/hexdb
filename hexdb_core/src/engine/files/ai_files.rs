@@ -256,7 +256,7 @@ impl HexDBEngine {
         }
     }
 
-    /// Every field some role hides in `tess` (field masks of all roles, by tessellation or `*`).
+    /// Every field some role hides or masks in `tess` (field restrictions of all roles, by tessellation or `*`).
     async fn fields_hidden_by_any_role(&self, tess: &str) -> Vec<String> {
         let Ok(definitions) = crate::users::role_definitions(self).await else { return Vec::new() };
         let mut out: Vec<String> = definitions
@@ -264,7 +264,7 @@ impl HexDBEngine {
             .values()
             .flat_map(|rules| [rules.restrictions.get(tess), rules.restrictions.get("*")])
             .flatten()
-            .flat_map(|r| r.hide.iter().map(|h| h.trim().to_string()))
+            .flat_map(|r| r.hide.iter().chain(r.mask.keys()).map(|h| h.trim().to_string()))
             .collect();
         out.sort();
         out.dedup();

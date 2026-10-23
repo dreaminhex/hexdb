@@ -3,7 +3,7 @@ name = "hexdb_api"
 version = "2.1.2"
 license = "Apache-2.0"
 edition = "2021"
-homepage = "https://hexdb-website.vercel.app"
+homepage = "https://hexdb.app"
 repository = "https://github.com/dreaminhex/hexdb"
 description = "HexDB server: a document database with REST, GraphQL, replication and an admin UI"
 

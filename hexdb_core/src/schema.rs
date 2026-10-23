@@ -153,15 +153,29 @@ fn yes() -> bool {
 }
 
 /// A schema as submitted (the version number is assigned).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaInput {
     #[serde(default)]
     pub fields: BTreeMap<String, FieldRule>,
     #[serde(default = "yes")]
     pub additional_fields: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub migration: Vec<Step>,
+}
+
+/// A next version saved to apply later: checked when saved, and again when
+/// applied (another version may have been registered in between).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingSchema {
+    pub schema: SchemaInput,
+    /// The current version when it was saved (0: none).
+    pub based_on: u32,
+    pub saved: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub saved_by: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub saved_by_login: String,
 }
 
 /// One reason a document doesn't fit a schema.

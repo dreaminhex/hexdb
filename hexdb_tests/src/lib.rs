@@ -377,6 +377,8 @@ admin_email = "admin@example.com"
                 cmd.env_remove(&key);
             }
         }
+        // Test servers don't ask GitHub for new releases.
+        cmd.env("HEXDB_UPDATES__CHECK", "false");
 
         let spawned = Instant::now();
         self.child = Some(cmd.spawn().context("Failed to start hexdb_api")?);

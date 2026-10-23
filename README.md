@@ -21,7 +21,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 - **Replication.** Automatic discovery and Overseer election, snapshot plus change-stream replication, and failover. Optional synchronous acknowledgements, a write quorum, and write forwarding from replicas.
 - **Security.**
   - Authentication: sessions, API keys and TOTP multi-factor authentication.
-  - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region) and hidden fields per role. Uploading, deleting and restoring files are separate permissions that can be limited to folders.
+  - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region), hidden fields, and masked fields per role (a card number can read as `************1234`, for PCI DSS). Uploading, deleting and restoring files are separate permissions that can be limited to folders.
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon coding that repairs corrupted memory.
@@ -29,23 +29,52 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 
 ## Performance
 
-Measured with `cargo run --release -p hexdb_bench` on a laptop (Intel Core i9-12900H, Windows 11, Samsung 980 PRO NVMe SSD), with one server and its client on the same machine. Every write is in the write-ahead log and fsynced before it's acknowledged. The full report, with how each number is taken, is in [bench/results/windows-full.md](bench/results/windows-full.md); run the benchmark to measure your own hardware.
+### Size
 
-| Area | Result |
-| --- | --- |
-| **Size** | 38 MB server, 9 MB CLI, 3 MB ODBC driver, 2 MB admin UI (52 MB in all) |
-| **Writes** | 31,000 documents/s in bulk (1,000 per request); single writes 2.5 ms median, 1,700/s from 8 clients |
-| **Reads** | 0.18 ms median by ID; 13,600/s from 8 clients |
-| **Queries** | Indexed lookup in 100,000 documents: 0.8 ms median. `SELECT COUNT(*)`: 0.4 ms |
-| **Memory** | 1.5x the JSON size: four data and two parity fragments per document |
-| **Disk** | Structured JSON compresses to 16% of its size (a 10 MB document takes 1.6 MB); small documents average 81% after encryption and per-document overhead |
-| **Encryption** | AES-256-GCM: 890 MB/s encrypting, 1,150 MB/s decrypting, on one core |
-| **10 MB documents** | Written in 600 ms and read in 190 ms (structured JSON); 94 ms and 28 ms for data that doesn't compress |
-| **Vertex failure** | Documents stay readable with two of six vertices lost; rebuilding a lost vertex for 100,000 documents takes 0.4 s |
-| **Crash recovery** | Restart after a kill: 0.5 s with data in SSTables; 2.6 s replaying 100,000 unflushed writes from the WAL |
-| **Failover** | A new Overseer takes writes 2.6 s after the old one dies with `network.discovery_interval_seconds = 1`, or 31 s with the default of 10 s (a hex is declared lost after three missed rounds) |
+What version 2.1.2 downloads and installs. Installed is the server (storage engine, REST, GraphQL, gRPC, SQL and replication), the CLI, the ODBC driver and the admin UI.
+
+| Platform | Download | Installed | Server | CLI | ODBC | Admin UI |
+| --- | --- | --- | --- | --- | --- | --- |
+| Windows x64 | 18.4 MB installer (23.0 MB zip) | 65.2 MB | 50.2 MB | 9.3 MB | 2.9 MB | 2.7 MB |
+| macOS, Apple silicon | 22.9 MB | 61.7 MB | 46.7 MB | 9.0 MB | 3.1 MB | 2.7 MB |
+| macOS, Intel | 24.4 MB | 65.5 MB | 49.9 MB | 9.5 MB | 3.3 MB | 2.7 MB |
+| Linux x64 | 15.4 MB Debian package (23.6 MB archive) | 57.9 MB | 43.0 MB | 9.0 MB | 3.0 MB | 2.7 MB |
+| Linux arm64, Raspberry Pi | 13.3 MB Debian package (21.7 MB archive) | 51.2 MB | 37.6 MB | 8.1 MB | 2.6 MB | 2.7 MB |
+
+The macOS installer (`hexdb-macos-universal.dmg`, 46 MB) holds both Mac builds. The Docker image is 100 MB, because it also carries Python and Node.js for script functions.
+
+### Speed
+
+Measured with `cargo run --release -p hexdb_bench` on one laptop (Intel Core i9-12900H, 20 threads, 64 GB, Samsung 980 PRO NVMe SSD): natively on Windows 11, and on Debian 13 in Docker on the same machine. Server and client run on the same machine. Every write is in the write-ahead log and fsynced before it's acknowledged.
+
+| Area | Windows 11 | Debian 13 (Docker) |
+| --- | --- | --- |
+| **Bulk writes** (1,000 per request) | 32,700 documents/s | 21,500 documents/s |
+| **Single write**, median | 2.3 ms; 1,940/s from 8 clients | 5.3 ms; 810/s from 8 clients |
+| **Read by ID**, median | 0.12 ms; 17,600/s from 8 clients | 0.18 ms; 12,700/s from 8 clients |
+| **Indexed lookup** in 100,000 documents, median | 0.65 ms | 1.0 ms |
+| **`SELECT COUNT(*)`**, median | 0.24 ms | 0.32 ms |
+| **`GROUP BY`** with `SUM` and `AVG` over 100,000 documents | 1.1 s | 1.6 s |
+| **AES-256-GCM**, one core | 1,100 MB/s encrypting, 1,500 MB/s decrypting | 1,930 MB/s encrypting, 2,170 MB/s decrypting |
+| **10 MB document**, structured JSON | written in 551 ms, read in 163 ms | written in 796 ms, read in 168 ms |
+| **10 MB document**, incompressible | written in 84 ms, read in 24 ms | written in 59 ms, read in 13 ms |
+| **Rebuild a lost vertex** (100,000 documents) | 0.36 s | 0.36 s |
+| **Restart after a crash** | 0.5 s with data in SSTables; 3.1 s replaying 100,000 unflushed writes | 0.06 s; 2.7 s |
+| **Failover**, discovery every second | new Overseer takes writes after 2.5 s | 2.8 s |
+| **Failover**, default 10 s discovery | 31 s | 30 s |
+
+Writes are slower in the Linux column because Docker on Windows keeps its data on WSL2's virtual disk, which adds to every fsync. Ubuntu 24.04 in the same setup measured within a few percent of Debian. The full reports, with how each number is taken, are in [bench/results](bench/results): [Windows](bench/results/windows-full.md), [Debian](bench/results/debian-docker-full.md) and [Ubuntu](bench/results/ubuntu-docker-full.md). Run the benchmark to measure your own hardware.
+
+Some results don't depend on the machine:
+
+- **Memory:** 1.5 times the JSON size, as four data and two parity fragments per document.
+- **Disk:** structured JSON compresses to 16% of its size (a 10 MB document takes 1.6 MB). Small documents average 81%, after encryption and per-document overhead.
+- **Vertex failure:** documents stay readable with two of the six vertices lost.
+- **Failover timing:** a hex is declared lost after three missed discovery rounds, so failover takes about three times `network.discovery_interval_seconds`.
 
 Documents over 1 MB need `limits.max_document_kb` raised (up to 64 MB).
+
+For the hosted sizes of HexDB Enterprise (2 or 4 shared or dedicated vCPUs), [bench/results/enterprise-sizes.md](bench/results/enterprise-sizes.md) has the same benchmark run under each size's CPU and memory limits.
 
 ## Quick start
 
@@ -253,14 +282,15 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 
 | Page | What it does |
 | --- | --- |
-| Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, and "Add a hex" for joining new servers; flush and back up |
+| Dashboard | Live document, memory, disk and operation figures; activity charts; vertex health; the lattice, with each hex's version and a mark on those that need an update, and "Add a hex" for joining new servers; flush and back up; on HexDB Enterprise, rolling updates one hex at a time |
 | Queries | GraphQL and SQL consoles with completion, examples and history |
 | Tessellations | Create and delete tessellations; manage indexes (with analyzer choice and index suggestions) and schemas (with version history and rollback) |
+| Schemas | Every tessellation's schema: version history, rollback, migration progress, and a JSON editor for the next version, saved to apply now or later |
 | Documents | Browse with filters and sorting; create, edit and delete documents (files tessellations too, to filter on their metadata) |
 | Files | Folders, thumbnails, search, uploads, previews and an audio player, metadata and AI tags, versions and the trash |
 | Streams | Create streams, publish, read messages, and watch consumer groups and deliveries |
 | Functions | Create and run functions; manage schedules and triggers |
-| Users, Roles | Accounts, role grants, user attributes, custom roles with row filters and hidden fields, MFA resets |
+| Users, Roles | Accounts, role grants, user attributes, custom roles with row filters, hidden and masked fields, MFA resets |
 | Audit Trail | Security events, filterable by user, action and time |
 | Plugins | Loaded plugins, their state and deliveries |
 | Logs | The server log, tailed live |

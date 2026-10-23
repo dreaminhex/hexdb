@@ -37,6 +37,7 @@ pub mod functions;
 pub mod triggers;
 pub mod sql;
 pub mod slicing;
+pub mod updates;
 pub mod compress;
 pub mod erasure;
 pub mod blobs;

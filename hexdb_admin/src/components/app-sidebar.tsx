@@ -4,6 +4,7 @@ import {
   IconDashboard,
   IconFileCode2,
   IconFolders,
+  IconFileDescription,
   IconHexagon3d,
   IconListCheck,
   IconMathFunction,
@@ -63,6 +64,7 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
     label: "Database",
     items: [
       { title: "Tessellations", route: "/tessellations", icon: IconHexagon3d },
+      { title: "Schemas", route: "/schemas", icon: IconFileDescription },
       { title: "Documents", route: "/documents", icon: IconFileCode2 },
       { title: "Files", route: "/files", icon: IconFolders },
       { title: "Shared links", route: "/shares", icon: IconLink, requires: "share" },

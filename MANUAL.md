@@ -192,7 +192,8 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - Cards: documents, tessellations, memory and disk against their budgets, operation rates, uptime.
 - An activity chart: documents per tessellation, operations per minute, or storage, over 15 minutes to 6 hours.
 - Vertex health: a hexagon of the six fragments.
-- The lattice card: each hex's role, address, replication state and lag. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
+- The lattice card: each hex's role, version, address, replication state and lag, with an arrow on hexes that need an update. Administrators get "Add a hex", which shows the settings a new server needs to join; see [Adding a hex](#adding-a-hex).
+- A banner when a newer release is out or the hexes run different versions, naming the hexes behind and linking the release notes; on HexDB Enterprise it has the button for a rolling update, and shows its progress hex by hex (see [Operations](#23-operations)).
 - A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#23-operations)).
 
 **Files.** Browse a files tessellation by folder, as a grid with thumbnails or as a list, or pick a type (audio, images, video, documents, archives) to list those files from every folder below. Upload by dropping files or with the Upload button (large files resume after a dropped connection), and search names, tags and metadata. Audio files have a play button in the grid and the list; they play in a bar at the bottom of the page (one at a time, streamed with Range requests, so long WAV masters start at once and can be seeked). When a search finds nothing, the page looks for close matches instead, so a typo such as "tatoo" still finds "tattooed". Videos without a server thumbnail show a frame the browser decodes itself. Open a file to preview it (images, audio, video), read its metadata, edit its name, folder, tags and description, download or restore earlier versions, or move it to the trash. The Trash view restores or deletes trashed files.
@@ -203,6 +204,8 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - Create and delete tessellations and see their sizes.
 - The key button opens the indexes dialog. It lists indexes, creates field or text indexes (choosing an analyzer for text), and has a Suggestions section. "From recent queries" runs the rule-based advisor; "Ask Claude" adds the configured AI provider's suggestions. Each suggestion has a button to apply it.
 - The document button opens the schema dialog. It shows the version history and any migration in progress, and edits the next version. Check reports compatibility and how many existing documents wouldn't fit (running migration functions on them); Save registers the version. "Roll back to" restores an earlier version's fields.
+
+**Schemas.** Every tessellation with its schema version, and a mark on those with a version waiting to be applied. Pick one to see its version history, migration progress and rollback, and to edit the next version in a JSON editor that marks errors as you type and completes schema keywords. Check reports compatibility and how many existing documents would fit. **Save, apply later** keeps the version without applying it (writes follow the current version until then); **Save and apply now** registers it and migrates existing documents in the background. A saved version can be applied, edited or discarded. The same editor is in the schema dialog on the Tessellations page.
 
 **Documents.** Pick a tessellation, filter with JSON, sort and page. Files tessellations are listed too: each file is a document whose `meta` holds its extracted metadata, so `{"meta.artist": "Ashes Gone"}` filters files (files are added on the Files page, not here). A side panel creates, edits (with an optional TTL) and deletes documents. The footer shows which index answered the query.
 
@@ -570,7 +573,7 @@ HEXDB_TOKEN=... hexdb sql "SELECT customer, total FROM orders WHERE total > ? OR
   - `id` comes first;
   - then the current schema's fields (`source: "schema"`; a nested rule such as `dims.width` lists `dims` as a `json` column);
   - then, unless the schema forbids other fields, the fields found in the first 100 documents (`source: "sample"`).
-- Hidden fields of the caller's role aren't listed.
+- Hidden fields of the caller's role aren't listed; masked ones are listed as strings.
 
 **Two ways a statement runs.**
 - **One query.** A `SELECT` from one tessellation in the shape below becomes a single query or aggregation, run where the data is. It uses indexes for its filter and sort, and pages through results with a cursor, so it handles any table size.
@@ -612,7 +615,7 @@ Notes:
   - `COUNT(*)` without `GROUP BY` uses the exact count, so it doesn't read the documents.
 - **Access.**
   - Reading needs read permission on the tessellation.
-  - A restricted role sees only its rows, and its hidden fields come back as NULL.
+  - A restricted role sees only its rows; its hidden fields come back as NULL and its masked fields masked.
   - Filtering, grouping or sorting by a hidden field is refused with 403, as in the REST API.
 - **Replicas.** `POST /sql` is a read, so a replica answers it itself instead of forwarding it to the Overseer.
 
@@ -657,7 +660,7 @@ WHERE (SELECT MAX(total) FROM orders o WHERE o.customer = c.code)
 - Aggregates take expressions (`SUM(price * quantity)`), and `DISTINCT` (`SUM(DISTINCT x)`). `GROUP BY` takes expressions too. In a grouped query, every selected expression must be grouped or inside an aggregate.
 - `ORDER BY` takes expressions and `NULLS FIRST` / `NULLS LAST`. NULLs sort first ascending and last descending by default.
 
-**Access.** Each table a statement reads, in joins, subqueries and `WITH` included, needs read permission, and each is read with the caller's row filters and hidden fields. A hidden field reads as NULL in expressions, and a filter on it sent with a read is refused with 403. System tessellations can't be read.
+**Access.** Each table a statement reads, in joins, subqueries and `WITH` included, needs read permission, and each is read with the caller's row filters, hidden fields and field masks. A hidden field reads as NULL in expressions and a masked one as its masked string, and a filter on either sent with a read is refused with 403. System tessellations can't be read.
 
 **Not supported.** These are refused with a message naming the part:
 - window functions (`OVER`), `WITH RECURSIVE`, `NATURAL` joins, `LATERAL`;
@@ -815,6 +818,8 @@ A function can change anything, so HexDB can't prove a version with a function s
 **Compatibility.** Like a schema registry, HexDB requires each version to be compatible with the previous one: every document valid under the old version, once migrated, must be valid under the new one. Changing a field's type needs a `convert` step. Adding a required field needs a `default` or a `set_default` step. An incompatible version is refused with an explanation. `POST .../schemas/check` checks a candidate without registering it. It reports compatibility and how many existing documents wouldn't fit after migrating (checking up to 100,000), with examples.
 
 **Migration.** After a version is registered, HexDB rewrites existing documents in the background, in batches. `GET /tessellations/{name}/schemas` shows all versions and the migration's progress (migrated, unchanged, failed, with examples of failures). A migration interrupted by a restart resumes. Until it finishes, a document not yet migrated is upgraded when it's written, and reads can return documents of either version (check `_schema`). Documents written without `_schema` count as the current version.
+
+**Saving a version to apply later.** `PUT /tessellations/{name}/schemas/pending`, with the same body as registering a version, checks it the same way and keeps it without applying it: writes keep following the current version and no migration starts. Saving again replaces it. `GET .../schemas` shows it as `pending`, with the version number it would get and, if a version registered since makes it no longer fit, why. `POST .../schemas/pending/apply` registers it and starts its migration (its migration functions run as whoever applies it); `DELETE .../schemas/pending` discards it. The admin UI's Schemas page does the same with **Save version**, choosing **Apply now** or **Apply later**.
 
 **Rollback.** `POST /tessellations/{name}/schemas/rollback` with `{"to": 2}` registers a new version that restores version 2's fields. Its migration is the inverse of every version after 2, newest first:
 
@@ -1612,6 +1617,7 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 **The parts:**
 - `filter` (the filter language) limits the documents the role can see and write. `{"$user": "login"}`, `{"$user": "id"}`, `{"$user": "email"}` and `{"$user": "attributes.<name>"}` stand for the caller's values. Users' attributes are set by administrators: a JSON object of up to 50 entries. A missing attribute makes the filter match nothing, never everything.
 - `hide` lists fields (dotted paths) the role can't see or change.
+- `mask` lists fields the role sees masked, for card numbers, account numbers and other values a role needs to recognize but not read (PCI DSS requirement 3.4). Each field says how many characters stay: `show_first` (up to 6) and `show_last` (up to 4), both 0 by default. `{"card_number": {"show_last": 4}}` makes `4111111111111111` read as `************1111`. Strings and numbers keep their length; a value that would keep fewer than 4 characters masked is masked whole; objects, arrays and booleans read as `********`; null stays null. A field can't be both hidden and masked by one role.
 - `folders` (files tessellations) limits the role to files in these folders and their subfolders, e.g. `["/inbox/", "/shared/2026/"]`: the same as a filter on `path`, and both must match when a role has both.
 
 Restrictions belong to the role, so each of its permissions is narrowed the same way. To let someone upload only into one folder while reading everything, grant two roles:
@@ -1626,18 +1632,19 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 **Combining grants.** When several of a user's grants allow an action on a tessellation:
 - an unrestricted grant makes access unrestricted;
 - otherwise the user sees the documents any of their filters allows;
-- a field is hidden only if every grant hides it.
+- a field is hidden only if every grant hides it;
+- a field every grant hides or masks, and at least one masks, is masked, showing as many characters as the most revealing of those masks.
 
 **Reads:**
 - Queries, counts, aggregations, `GET /tessellations/{name}`, GraphQL, the change feed and functions only see matching documents. Other documents read as not found.
-- Hidden fields are removed from every document returned.
-- Filtering, sorting, grouping or aggregating on a hidden field is refused with 403, so values can't be probed. So is `$text` unless the text index covers no hidden field.
+- Hidden fields are removed from every document returned, and masked fields are masked: in REST, GraphQL, SQL (where a masked column is a string), the change feed, functions and MCP.
+- Filtering, sorting, grouping or aggregating on a hidden or masked field is refused with 403, so values can't be probed. So is `$text` unless the text index covers no such field.
 - The query plan's `scanned` count reports only visible documents.
 - Delete events in the change feed carry no document, so they're shown by ID.
 
 **Writes:**
 - A document must match the filter before (replace, patch, delete) and after (every write) the change. Writes that would move a document out of reach are refused with 403.
-- Writes can't set or remove hidden fields, and a full replace keeps their stored values.
+- Writes can't set or remove hidden or masked fields, and a full replace keeps their stored values.
 - Update-by-filter only touches matching documents.
 - An upsert whose key matches a document outside the filter fails with 409.
 
@@ -1746,7 +1753,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 - **Secrets** in the [lattice configuration](#lattice-configuration) are sealed with the lattice transfer key, bound to their setting name. They're never returned, logged or written to the audit trail; reads show a keyed fingerprint. Every hex holds them decrypted in memory to use them. A change sent to a replica is forwarded to the Overseer like any write, so without TLS between hexes it crosses the network in the clear (see Transport).
 - **Who can change what.** The configuration, its history and rollback, AI usage and estimates, tagging existing files and the storage test are for administrators. `POST /ai/complete` needs the `ai` permission and draws on the lattice's monthly budget, which caps what a holder can spend. The chat needs the `chat` permission and stays within its own limits per user and per client address (see [The AI chat](#the-ai-chat)); its lookups run as the asking user. The MCP server and the chat only read: there is no tool that writes.
 - **What leaves the hex.** AI calls send what `ai.tagging.send` allows to the configured provider at the configured URL; an `http://` URL (fine for a local model server) sends the key unencrypted. AI base URLs can't name the well-known cloud metadata services (169.254.169.254, `metadata.google.internal`, ...); a host name that resolves to one isn't caught.
-- **Field masks.** Fields any role hides in a files tessellation are left out of what AI tagging sends, so an AI description can't reveal them to that role. Images are sent as they are when `thumbnail` or `image` is allowed.
+- **Field masks.** Fields any role hides or masks in a files tessellation are left out of what AI tagging sends, so an AI description can't reveal them to that role. Images are sent as they are when `thumbnail` or `image` is allowed.
 - **Prompt injection.** A file's contents can try to steer its own AI tags and description; the instructions tell the model to treat them as data, and the AI only writes the `ai` field of that file. Treat AI tags as suggestions, not trusted labels.
 
 ## 20. Lattices and replication
@@ -2198,6 +2205,9 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `analyzers.<name>` | none | Custom text analyzers |
 | `ui.path` | `../hexdb_admin/dist` | Built admin UI |
 | `ui.notice` | empty | A short notice the admin UI shows above every page and on the sign-in screen (also returned by `GET /health`, to everyone) |
+| `updates.check` | true | Ask `updates.url` for the newest release a minute after starting, then daily (see Operations) |
+| `updates.url` | GitHub's latest-release API for dreaminhex/hexdb | Where to ask; anything answering with `tag_name` and `html_url` |
+| `updates.control_url`, `updates.control_token` | empty | Set by HexDB Enterprise: the service that runs rolling updates, and the lattice's token for it |
 
 ## 23. Operations
 
@@ -2213,6 +2223,7 @@ curl -X POST http://localhost:7700/backup -d '{"name": "nightly-1"}' -H "Content
 curl http://localhost:7700/backups                      # backups in storage.backup_path
 curl http://localhost:7700/plugins
 curl http://localhost:7700/openapi.json                 # the REST API as OpenAPI 3.1
+curl http://localhost:7700/updates                      # versions, the newest release, and a hosted lattice's rolling update
 ```
 
 **Logging.** The server keeps its last 5,000 log records in memory for `/logs` and the Logs page. `RUST_LOG` sets the level for the console and the in-memory log. Writes, errors and background tasks log at info; reads at debug; refused requests at warn.
@@ -2230,6 +2241,10 @@ Restoring: stop the hex (or start a new one), point `storage.path` at the backup
 Hard-linked backups share disk blocks with the live data, so they don't protect against losing the disk: copy backup folders to other storage. Back up `storage.encryption_key` separately too; the data is useless without it. A Replicant is another option: a live copy you can back up while it's stopped.
 
 **Upgrades.** Stop the hex, replace the binaries and the UI, and start it. Data in older formats is read and rewritten by compaction. In a lattice, upgrade replicas first, then the Overseer. A failover moves the Overseer role while it's down.
+
+**Knowing when to upgrade.** A minute after starting, then daily, each hex asks GitHub for the newest HexDB release (`updates.url`; a plain GET that sends nothing about the hex). `GET /status` reports it as `updates`, and each hex's version is in `network.lattice.hexes`. The first time a hex sees a release newer than its own, it logs a warning and records an `update.available` audit event. The admin UI's dashboard shows every hex's version, marks those that need an update (a newer release, or newer hexes beside them) and says which release is available, with its notes. `updates.check = false` turns the check off, for hexes without internet access; the dashboard still marks hexes behind the rest of the lattice.
+
+**Rolling updates (HexDB Enterprise).** A hosted lattice updates itself from the dashboard: an administrator presses **Update to** the release the hosting service offers, and the Overseer updates the lattice one hex at a time. For each replica (Replicants first), it has the hosting service move the hex's machine to the new release, then waits until the hex is back on it and caught up (up to 15 minutes) before going on. Then it hands its own role over: it stops taking writes (they get 503 with a retry hint for a few seconds), waits until every replica has applied everything it published, and stops being a candidate, so the next election picks an updated hex. Last, its own machine is updated, and it rejoins as a replica. Reads keep working throughout. A step that fails stops the rollout, leaves the remaining hexes on their version and says why; the dashboard shows the progress hex by hex, and every step is in the audit trail (`update.started`, `update.hex`, `update.done`, `update.failed`). `GET /updates` reports the version, the newest release, what the hosting service offers and the rollout (any hex answers, by asking the Overseer); `POST /updates/rollout` starts one. Both need an administrator. The hosting service only ever moves the lattice's own machines, and only to the release it deploys.
 
 **Crashes and restarts.** Every write is in the write-ahead log before it's acknowledged, so a crash (a kill, a power cut, a panic that ends the process) loses nothing acknowledged: the next start replays the log. Something has to start it again:
 - `hexdb start -s` runs the server under a small supervisor (`hexdb supervise`, in the same log) that restarts it after a crash: at once, then waiting longer (up to 60 s) while it keeps crashing soon after starting, and not at all after five crashes in ten minutes. It doesn't restart a server that `hexdb stop` stopped (even with `--force`), that exited cleanly, or whose first start failed (a bad configuration or a taken port: `hexdb start` reports it). `hexdb start -s --no-restart` runs the server alone.

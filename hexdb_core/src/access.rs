@@ -1,4 +1,4 @@
-// HexDB Core Access: row filters and field masks
+// HexDB Core Access: row filters, hidden fields and field masks
 //
 // A role's grant covers whole tessellations; `restrictions` narrow it. Per
 // tessellation (or "*" for every tessellation the role is granted on), a
@@ -10,6 +10,10 @@
 //           values, e.g. {"region": {"$user": "attributes.region"}}. A missing
 //           attribute matches nothing (never everything).
 //   hide    fields the role can't see (dotted paths), e.g. ["salary", "ssn"].
+//   mask    fields the role sees masked, with at most the first 6 and last 4
+//           characters left, e.g. {"card": {"show_last": 4}} reads as
+//           "************1234" (PCI DSS 3.4). Like hidden fields, they can't
+//           be queried on or written.
 //   folders for files tessellations: the folders (and their subfolders) the
 //           role's files must be in, e.g. ["/inbox/", "/shared/2026/"]. The
 //           same as a filter on `path`; with a filter too, both must match.
@@ -21,18 +25,20 @@
 // A user may hold several grants that allow an action on a tessellation. If
 // any of them is unrestricted, access is unrestricted. Otherwise the user sees
 // the documents any of their filters allows (the filters are combined with
-// $or), and a field is hidden only if every one of those grants hides it.
+// $or), and a field is hidden only if every one of those grants hides it. A
+// field every grant hides or masks, and at least one masks, is masked, showing
+// as many characters as the most revealing of those masks.
 //
 // Reads: queries, counts and aggregations are narrowed to the filter;
 // documents outside it read as not found; hidden fields are removed from
-// every document returned (REST, GraphQL, the change feed, functions). A
-// query, sort, group or aggregate on a hidden field is refused (otherwise
-// values could be probed), and so is a `$text` search unless the text index
-// covers no hidden field.
+// every document returned (REST, GraphQL, SQL, the change feed, functions),
+// and masked ones replaced. A query, sort, group or aggregate on a hidden or
+// masked field is refused (otherwise values could be probed), and so is a
+// `$text` search unless the text index covers no such field.
 //
 // Writes: a document must match the filter before (replace, patch, delete)
-// and after (every write) the change; writes can't set or remove hidden
-// fields, and a full replace keeps their stored values.
+// and after (every write) the change; writes can't set or remove hidden or
+// masked fields, and a full replace keeps their stored values.
 //
 // Managing a tessellation (indexes, schemas, deletion) needs an unrestricted
 // grant. Administrators are never restricted. Restrictions apply to user
@@ -52,7 +58,11 @@ use crate::{
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::{collections::BTreeSet, future::Future, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    sync::Arc,
+};
 
 tokio::task_local! {
     static CALLER: Arc<Principal>;
@@ -90,9 +100,63 @@ pub struct Restriction {
     /// Fields the role can't see or change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hide: Vec<String>,
+    /// Fields the role sees masked (`************1234`) and can't change or query on.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mask: BTreeMap<String, FieldMask>,
     /// Files tessellations: folders (with their subfolders) the role's files must be in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<String>,
+}
+
+/// How much of a masked field stays readable. The defaults mask every character.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldMask {
+    /// Leading characters left as they are (at most 6, PCI DSS's limit for card numbers).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub show_first: u8,
+    /// Trailing characters left as they are (at most 4, PCI DSS's limit for card numbers).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub show_last: u8,
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
+}
+
+impl FieldMask {
+    pub const MAX_FIRST: u8 = 6;
+    pub const MAX_LAST: u8 = 4;
+    /// What a masked object, array or boolean reads as: no hint of its shape or size.
+    const OPAQUE: &str = "********";
+    /// Fewest characters left masked; a value too short for that is masked whole.
+    const MIN_MASKED: usize = 4;
+
+    /// The value as the role sees it: strings and numbers keep their length, with every character
+    /// but the shown ones replaced by `*`. A value that would keep fewer than 4 characters masked is
+    /// masked whole. Null stays null.
+    pub fn apply(&self, value: &Value) -> Value {
+        let text = match value {
+            Value::Null => return Value::Null,
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => return Value::String(Self::OPAQUE.into()),
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let (first, last) = (self.show_first as usize, self.show_last as usize);
+        let shown = if chars.len() < first + last + Self::MIN_MASKED { (0, 0) } else { (first, last) };
+        let masked: String = chars
+            .iter()
+            .enumerate()
+            .map(|(i, c)| if i < shown.0 || i >= chars.len() - shown.1 { *c } else { '*' })
+            .collect();
+        Value::String(masked)
+    }
+
+    /// The more revealing of two masks (a field masked by two grants shows what either allows).
+    fn wider(self, other: FieldMask) -> FieldMask {
+        FieldMask { show_first: self.show_first.max(other.show_first), show_last: self.show_last.max(other.show_last) }
+    }
 }
 
 impl Restriction {
@@ -103,17 +167,36 @@ impl Restriction {
             let sample = substitute_sample(filter);
             Filter::parse(&sample).map_err(|e| invalid(format!("restrictions.{}.filter: {:#}", key, e)))?;
         }
+        let field = |path: &str| !(path.is_empty() || path.starts_with('.') || path.ends_with('.') || path == "id");
         for path in &self.hide {
             let path = path.trim();
-            if path.is_empty() || path.starts_with('.') || path.ends_with('.') || path == "id" {
+            if !field(path) {
                 return Err(invalid(format!("restrictions.{}.hide: '{}' isn't a field that can be hidden.", key, path)));
+            }
+        }
+        for (path, mask) in &self.mask {
+            let path = path.trim();
+            if !field(path) {
+                return Err(invalid(format!("restrictions.{}.mask: '{}' isn't a field that can be masked.", key, path)));
+            }
+            if self.hide.iter().any(|h| overlaps(h.trim(), path)) {
+                return Err(invalid(format!("restrictions.{}.mask: '{}' is also hidden; give it one or the other.", key, path)));
+            }
+            if mask.show_first > FieldMask::MAX_FIRST || mask.show_last > FieldMask::MAX_LAST {
+                return Err(invalid(format!(
+                    "restrictions.{}.mask.{}: show at most the first {} and last {} characters.",
+                    key,
+                    path,
+                    FieldMask::MAX_FIRST,
+                    FieldMask::MAX_LAST
+                )));
             }
         }
         for folder in &self.folders {
             crate::files::normalize_path(folder).map_err(|e| invalid(format!("restrictions.{}.folders: '{}': {:#}", key, folder, e)))?;
         }
-        if self.filter.is_none() && self.hide.is_empty() && self.folders.is_empty() {
-            return Err(invalid(format!("restrictions.{}: give a filter, fields to hide, folders, or a combination.", key)));
+        if self.filter.is_none() && self.hide.is_empty() && self.mask.is_empty() && self.folders.is_empty() {
+            return Err(invalid(format!("restrictions.{}: give a filter, fields to hide or mask, folders, or a combination.", key)));
         }
         Ok(())
     }
@@ -149,6 +232,8 @@ pub struct Scope {
     pub filter: Option<Filter>,
     /// Fields removed from what the caller sees.
     pub hidden: Vec<String>,
+    /// Fields the caller sees masked.
+    pub masked: Vec<(String, FieldMask)>,
 }
 
 impl Scope {
@@ -158,7 +243,12 @@ impl Scope {
     }
 
     pub fn is_full(&self) -> bool {
-        self.filter.is_none() && self.hidden.is_empty()
+        self.filter.is_none() && !self.protects_fields()
+    }
+
+    /// True if some fields are hidden or masked.
+    pub fn protects_fields(&self) -> bool {
+        !self.hidden.is_empty() || !self.masked.is_empty()
     }
 
     /// True if the caller may see (and write) this document.
@@ -174,35 +264,48 @@ impl Scope {
         }
     }
 
-    /// The document without the hidden fields.
+    /// The document as the caller sees it: hidden fields removed, masked ones masked.
     pub fn mask(&self, mut doc: Document) -> Document {
-        if self.hidden.is_empty() {
+        if !self.protects_fields() {
             return doc;
         }
         let mut json = doc.data_json();
-        for path in &self.hidden {
-            remove_path(&mut json, path);
-        }
+        self.mask_json(&mut json);
         doc.data = crate::document::infer_fields_from_json(&json);
         doc
     }
 
-    /// A JSON document (as returned by the API) without the hidden fields.
+    /// A JSON document (as returned by the API) as the caller sees it.
     pub fn mask_json(&self, json: &mut Value) {
         for path in &self.hidden {
             remove_path(json, path);
         }
+        for (path, mask) in &self.masked {
+            if let Some(value) = get_path_mut(json, path) {
+                *value = mask.apply(value);
+            }
+        }
     }
 
-    /// Copy the hidden fields' stored values from `old` into `doc` (a full
-    /// replace by a caller who can't see them keeps them).
+    /// The mask on a SQL column or top-level field, if it's masked.
+    pub fn mask_of(&self, path: &str) -> Option<FieldMask> {
+        self.masked.iter().find(|(m, _)| m == path).map(|(_, mask)| *mask)
+    }
+
+    /// Hidden and masked fields together: what the caller can't query on or write.
+    fn protected(&self) -> impl Iterator<Item = (&str, &'static str)> {
+        self.hidden.iter().map(|h| (h.as_str(), "hidden from")).chain(self.masked.iter().map(|(m, _)| (m.as_str(), "masked for")))
+    }
+
+    /// Copy the hidden and masked fields' stored values from `old` into `doc`
+    /// (a full replace by a caller who can't see them keeps them).
     pub fn restore_hidden(&self, doc: &mut Document, old: &Document) {
-        if self.hidden.is_empty() {
+        if !self.protects_fields() {
             return;
         }
         let old_json = old.data_json();
         let mut json = doc.data_json();
-        for path in &self.hidden {
+        for (path, _) in self.protected() {
             remove_path(&mut json, path);
             if let Some(value) = get_path(&old_json, path) {
                 set_path(&mut json, path, value.clone());
@@ -211,29 +314,64 @@ impl Scope {
         doc.data = crate::document::infer_fields_from_json(&json);
     }
 
-    /// Refuse a write that sets or removes a hidden field.
+    /// Refuse a write that sets or removes a hidden or masked field.
     pub fn check_writable<'a>(&self, fields: impl IntoIterator<Item = &'a str>) -> Result<()> {
         for field in fields {
-            if self.touches_hidden(field) {
-                return Err(EngineError::Forbidden(format!("'{}' is hidden from your role, so it can't be written.", field)).into());
+            if let Some(how) = self.touching(field) {
+                return Err(EngineError::Forbidden(format!("'{}' is {} your role, so it can't be written.", field, how)).into());
             }
         }
         Ok(())
     }
 
-    /// True if `path` is hidden, or inside or around a hidden field.
-    pub fn touches_hidden(&self, path: &str) -> bool {
-        self.hidden.iter().any(|h| overlaps(h, path))
+    /// Refuse a full replace (`submitted`, the whole new document) of `old` that would change a
+    /// hidden or masked field. A masked field sent back exactly as the caller was shown it counts
+    /// as unchanged, so a document can be read, edited and written back; [`Scope::restore_hidden`]
+    /// then keeps the stored value.
+    pub fn check_replace(&self, submitted: &Value, old: Option<&Document>) -> Result<()> {
+        if !self.protects_fields() {
+            return Ok(());
+        }
+        if let Value::Object(map) = submitted {
+            for key in map.keys() {
+                if self.hidden.iter().any(|h| overlaps(h, key)) {
+                    return Err(EngineError::Forbidden(format!("'{}' is hidden from your role, so it can't be written.", key)).into());
+                }
+            }
+        }
+        let old_json = old.map(|d| d.data_json());
+        for (path, mask) in &self.masked {
+            let refuse = || EngineError::Forbidden(format!("'{}' is masked for your role, so it can't be written.", path));
+            if let Some(sent) = get_path(submitted, path) {
+                let shown = old_json.as_ref().and_then(|o| get_path(o, path)).map(|v| mask.apply(v));
+                if shown.as_ref() != Some(sent) {
+                    return Err(refuse().into());
+                }
+            }
+            // A parent that's no longer an object would drop the stored value.
+            let parts: Vec<&str> = path.split('.').collect();
+            for depth in 1..parts.len() {
+                if get_path(submitted, &parts[..depth].join(".")).is_some_and(|v| !v.is_object()) {
+                    return Err(refuse().into());
+                }
+            }
+        }
+        Ok(())
     }
 
-    /// Refuse a query, sort, group or aggregate that uses a hidden field.
+    /// How `path` is protected ("hidden from", "masked for") if it is, or is inside or around such a field.
+    fn touching(&self, path: &str) -> Option<&'static str> {
+        self.protected().find(|(p, _)| overlaps(p, path)).map(|(_, how)| how)
+    }
+
+    /// Refuse a query, sort, group or aggregate that uses a hidden or masked field.
     pub fn check_fields<'a>(&self, paths: impl IntoIterator<Item = &'a str>) -> Result<()> {
-        if self.hidden.is_empty() {
+        if !self.protects_fields() {
             return Ok(());
         }
         for path in paths {
-            if self.touches_hidden(path) {
-                return Err(EngineError::Forbidden(format!("'{}' is hidden from your role, so it can't be used in queries.", path)).into());
+            if let Some(how) = self.touching(path) {
+                return Err(EngineError::Forbidden(format!("'{}' is {} your role, so it can't be used in queries.", path, how)).into());
             }
         }
         Ok(())
@@ -267,6 +405,10 @@ fn remove_path(json: &mut Value, path: &str) {
 
 fn get_path<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(json, |current, part| current.get(part))
+}
+
+fn get_path_mut<'a>(json: &'a mut Value, path: &str) -> Option<&'a mut Value> {
+    path.split('.').try_fold(json, |current, part| current.get_mut(part))
 }
 
 fn set_path(json: &mut Value, path: &str, value: Value) {
@@ -335,7 +477,8 @@ impl Principal {
         }
         let mut filters = Vec::new();
         let mut all_rows = false;
-        let mut hidden: Option<BTreeSet<String>> = None;
+        // Each field some grant hides or masks: None while hidden by all so far, Some(mask) once one masks it.
+        let mut protected: Option<BTreeMap<String, Option<FieldMask>>> = None;
         let mut any = false;
         for grant in &self.grants {
             if !grant.permissions.contains(&action) || !grant.tessellations.iter().any(|t| t == "*" || t == tessellation) {
@@ -353,19 +496,38 @@ impl Principal {
                     _ => filters.push(Filter::none()),
                 },
             }
-            let fields: BTreeSet<String> = restriction.hide.iter().map(|h| h.trim().to_string()).collect();
-            hidden = Some(match hidden {
+            let fields: BTreeMap<String, Option<FieldMask>> = restriction
+                .hide
+                .iter()
+                .map(|h| (h.trim().to_string(), None))
+                .chain(restriction.mask.iter().map(|(m, mask)| (m.trim().to_string(), Some(*mask))))
+                .collect();
+            // A field stays protected only if every grant protects it, and is masked if any grant masks it.
+            protected = Some(match protected {
                 None => fields,
-                Some(h) => h.intersection(&fields).cloned().collect(),
+                Some(so_far) => so_far
+                    .into_iter()
+                    .filter_map(|(path, a)| {
+                        let b = *fields.get(&path)?;
+                        Some((path, match (a, b) {
+                            (Some(a), Some(b)) => Some(a.wider(b)),
+                            (a, b) => a.or(b),
+                        }))
+                    })
+                    .collect(),
             });
         }
         if !any {
             return Scope::full();
         }
-        Scope {
-            filter: if all_rows { None } else { Some(Filter::any(filters)) },
-            hidden: hidden.unwrap_or_default().into_iter().collect(),
+        let (mut hidden, mut masked) = (Vec::new(), Vec::new());
+        for (path, mask) in protected.unwrap_or_default() {
+            match mask {
+                None => hidden.push(path),
+                Some(mask) => masked.push((path, mask)),
+            }
         }
+        Scope { filter: if all_rows { None } else { Some(Filter::any(filters)) }, hidden, masked }
     }
 
     /// True if some grant allowing `action` on `tessellation` is unrestricted.
@@ -430,6 +592,73 @@ mod tests {
         assert!(scope.allows(&doc(json!({ "region": "US", "flagged": true }))));
         assert!(!scope.allows(&doc(json!({ "region": "US" }))));
         assert_eq!(scope.hidden, vec!["margin"]);
+    }
+
+    #[test]
+    fn masks_keep_the_shown_characters_and_the_length() {
+        let last4 = FieldMask { show_first: 0, show_last: 4 };
+        assert_eq!(last4.apply(&json!("4111111111111111")), json!("************1111"));
+        assert_eq!(FieldMask { show_first: 6, show_last: 4 }.apply(&json!("4111111111111111")), json!("411111******1111"));
+        assert_eq!(FieldMask::default().apply(&json!("123-45-6789")), json!("***********"));
+        assert_eq!(last4.apply(&json!("123456789")), json!("*****6789"));
+        // Numbers become masked strings; too short to keep 4 characters masked, masked whole.
+        assert_eq!(last4.apply(&json!(4111111111111111u64)), json!("************1111"));
+        assert_eq!(last4.apply(&json!("1234567")), json!("*******"));
+        assert_eq!(last4.apply(&json!("12345678")), json!("****5678"));
+        // Objects, arrays and booleans don't reveal their shape; null stays null.
+        assert_eq!(last4.apply(&json!({ "a": 1 })), json!("********"));
+        assert_eq!(last4.apply(&json!(true)), json!("********"));
+        assert_eq!(last4.apply(&Value::Null), Value::Null);
+    }
+
+    #[test]
+    fn masked_fields_are_masked_on_read_and_refused_in_queries_and_writes() {
+        let p = principal(
+            vec![("clerk", vec![Action::Read, Action::Write], json!({ "orders": { "mask": { "card": { "show_last": 4 }, "billing.ssn": {} } } }))],
+            json!({}),
+        );
+        let scope = p.scope("orders", Action::Read);
+        let seen = scope.mask(doc(json!({ "card": "4111111111111111", "billing": { "ssn": "123456789", "zip": "02139" }, "total": 9 })));
+        assert_eq!(seen.data_json(), json!({ "card": "************1111", "billing": { "ssn": "*********", "zip": "02139" }, "total": 9 }));
+        assert!(scope.check_fields(["total", "billing.zip"]).is_ok());
+        assert!(scope.check_fields(["card"]).is_err());
+        assert!(scope.check_fields(["billing"]).is_err());
+        let write = p.scope("orders", Action::Write);
+        assert!(write.check_writable(["card"]).is_err());
+        // A full replace keeps the stored value it couldn't see.
+        let mut replaced = doc(json!({ "card": "************1111", "total": 10 }));
+        write.restore_hidden(&mut replaced, &doc(json!({ "card": "4111111111111111", "total": 9 })));
+        assert_eq!(replaced.data_json()["card"], json!("4111111111111111"));
+    }
+
+    #[test]
+    fn grants_combine_hide_and_mask_toward_the_more_revealing() {
+        let p = principal(
+            vec![
+                ("a", vec![Action::Read], json!({ "*": { "hide": ["card", "ssn"], "mask": { "phone": { "show_last": 2 } } } })),
+                ("b", vec![Action::Read], json!({ "*": { "mask": { "card": { "show_last": 4 }, "phone": { "show_first": 3 } } } })),
+            ],
+            json!({}),
+        );
+        let scope = p.scope("orders", Action::Read);
+        // ssn: hidden by one grant, visible to the other. card: hidden or masked, so masked. phone: both masks' characters.
+        assert!(scope.hidden.is_empty());
+        assert_eq!(
+            scope.masked,
+            vec![("card".to_string(), FieldMask { show_first: 0, show_last: 4 }), ("phone".to_string(), FieldMask { show_first: 3, show_last: 2 })]
+        );
+    }
+
+    #[test]
+    fn masks_are_validated() {
+        let mask = |m: Value| Restriction { mask: serde_json::from_value(m).unwrap(), ..Default::default() };
+        assert!(mask(json!({ "card": { "show_last": 4 } })).validate("orders").is_ok());
+        assert!(mask(json!({ "card": { "show_last": 5 } })).validate("orders").is_err());
+        assert!(mask(json!({ "card": { "show_first": 7 } })).validate("orders").is_err());
+        assert!(mask(json!({ "id": {} })).validate("orders").is_err());
+        let both = Restriction { hide: vec!["card".into()], ..mask(json!({ "card": {} })) };
+        assert!(both.validate("orders").is_err());
+        assert!(serde_json::from_value::<Restriction>(json!({ "mask": { "card": { "show_middle": 1 } } })).is_err());
     }
 
     #[test]

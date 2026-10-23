@@ -104,6 +104,9 @@ pub struct PeerHex {
     /// The history (Overseer) this hex's data follows: its applied_seq counts in it.
     #[serde(default)]
     pub replication_source: String,
+    /// The Fly.io Machine the hex runs on (`FLY_MACHINE_ID`), for hosted rolling updates.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub machine_id: String,
 }
 
 fn all_slices() -> crate::slicing::SliceMask {
@@ -180,7 +183,12 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         api_endpoint: advertised(config, &config.network.api_endpoint),
         ram_mb: config.memory.ram_mb,
         disk_mb: config.storage.disk_mb,
-        preference: parse_preference(&config.identity.role).unwrap_or_else(|_| "auto".into()),
+        // An Overseer handing over its role for an update stops being a candidate.
+        preference: if crate::updates::stepping_down() {
+            "replicant".into()
+        } else {
+            parse_preference(&config.identity.role).unwrap_or_else(|_| "auto".into())
+        },
         last_seq: engine.stats().await.next_seq.saturating_sub(1),
         version: engine.version.clone(),
         replication_state: replication.0,
@@ -194,6 +202,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         slice_copies: config.replication.slice_copies.max(1),
         slices_held,
         replication_source,
+        machine_id: crate::updates::machine_id(),
     }
 }
 
@@ -576,6 +585,7 @@ mod tests {
             slice_copies: 1,
             slices_held: crate::slicing::ALL_SLICES,
             replication_source: String::new(),
+            machine_id: String::new(),
         }
     }
 

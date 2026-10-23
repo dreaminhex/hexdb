@@ -26,6 +26,7 @@ const UsersPage = lazy(() => import("@/pages/users").then((m) => ({ default: m.U
 const QueriesPage = lazy(() => import("@/pages/queries").then((m) => ({ default: m.QueriesPage })))
 const DocumentsPage = lazy(() => import("@/pages/documents").then((m) => ({ default: m.DocumentsPage })))
 const QueuesPage = lazy(() => import("@/pages/queues").then((m) => ({ default: m.QueuesPage })))
+const SchemasPage = lazy(() => import("@/pages/schemas").then((m) => ({ default: m.SchemasPage })))
 const StreamsPage = lazy(() => import("@/pages/streams").then((m) => ({ default: m.StreamsPage })))
 const FunctionsPage = lazy(() => import("@/pages/functions").then((m) => ({ default: m.FunctionsPage })))
 const FilesPage = lazy(() => import("@/pages/files").then((m) => ({ default: m.FilesPage })))
@@ -42,6 +43,7 @@ const PAGES: Record<string, Page> = {
   "/queries": { title: "Query Console", element: QueriesPage },
   "/ask": { title: "Ask", element: AskPage, requires: "chat" },
   "/tessellations": { title: "Tessellations", element: TessellationsPage },
+  "/schemas": { title: "Schemas", element: SchemasPage },
   "/documents": { title: "Documents", element: DocumentsPage },
   "/files": { title: "Files", element: FilesPage },
   "/shares": { title: "Shared links", element: SharesPage, requires: "share" },

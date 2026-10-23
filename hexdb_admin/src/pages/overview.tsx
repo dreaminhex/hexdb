@@ -3,7 +3,9 @@ import { Area, AreaChart, CartesianGrid, Line, LineChart, XAxis, YAxis } from "r
 import {
   IconAlertTriangle,
   IconArchive,
+  IconCircleArrowUp,
   IconCircleCheck,
+  IconExternalLink,
   IconDatabase,
   IconDeviceFloppy,
   IconHexagon,
@@ -15,6 +17,7 @@ import {
 } from "@tabler/icons-react"
 import { toast } from "sonner"
 
+import { ConfirmDialog } from "@/components/confirm-dialog"
 import { JoinDialog } from "@/components/join-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -31,11 +34,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { usePoll } from "@/hooks/use-poll"
-import { api, errorMessage, type MetricsSample, type Status, type VertexStatus } from "@/lib/api"
+import { api, errorMessage, type MetricsSample, type Status, type Updates, type VertexStatus } from "@/lib/api"
 import { has, useAuth } from "@/lib/auth"
 import { formatBytes, formatDuration, formatNumber, formatPercent } from "@/lib/format"
 import { href, linkHandler } from "@/lib/router"
 import { cn } from "@/lib/utils"
+import { compareVersions, isNewer } from "@/lib/version"
 
 const SERIES = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)", "var(--series-5)"]
 /** Tessellations beyond this many fold into "Other". */
@@ -436,15 +440,21 @@ function LatticeCard({ status }: { status: Status }) {
               title={hex.status}
             />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">
+              <div className="flex items-center gap-1.5 truncate text-sm font-medium">
                 {hex.name}
-                {hex.is_self && <span className="text-muted-foreground ml-1.5 text-xs font-normal">(this hex)</span>}
-                {hex.status !== "active" && <span className="text-muted-foreground ml-1.5 text-xs font-normal">· {hex.status}</span>}
+                {hex.status === "active" && updateReason(status, hex.version) && (
+                  <IconCircleArrowUp className="text-status-warning size-4 shrink-0" role="img" aria-label="Needs an update">
+                    <title>{updateReason(status, hex.version)}</title>
+                  </IconCircleArrowUp>
+                )}
+                {hex.is_self && <span className="text-muted-foreground text-xs font-normal">(this hex)</span>}
+                {hex.status !== "active" && <span className="text-muted-foreground text-xs font-normal">· {hex.status}</span>}
               </div>
               <div
                 className="text-muted-foreground truncate font-mono text-xs"
                 title={`Discovery ${hex.ip}. ${hex.is_self ? "" : "Replication figures are as of the last discovery round."}`}
               >
+                {hex.version ? `v${hex.version} · ` : ""}
                 {hex.api_endpoint || hex.ip}
                 {hex.status === "active" && <> · {replicationLabel(hex)}</>}
                 {!hex.is_self && hex.last_seen && <> · seen {formatAgo(hex.last_seen)}</>}
@@ -503,6 +513,113 @@ function replicationState(hex: Status["network"]["lattice"]["hexes"][number]): s
 }
 
 /** Shown on replicas: this hex is read-only and follows the Overseer. */
+/** Why a hex needs an update, if it does: a newer release, or newer hexes beside it. */
+function updateReason(status: Status, version: string | undefined): string | null {
+  if (!version) return null
+  const latest = status.updates?.latest
+  if (isNewer(latest, version)) return `HexDB ${latest} is available; this hex runs ${version}.`
+  const newest = newestVersion(status)
+  if (isNewer(newest, version)) return `Other hexes in the lattice run ${newest}; this one runs ${version}.`
+  return null
+}
+
+/** The newest version any active hex runs. */
+function newestVersion(status: Status): string | undefined {
+  return status.network.lattice.hexes
+    .filter((h) => h.status === "active" && h.version)
+    .map((h) => h.version as string)
+    .sort(compareVersions)
+    .pop()
+}
+
+/**
+ * A newer release, or hexes on different versions: which hexes need an update, and the release notes.
+ * On a hosted lattice, administrators can roll the update out from here, one hex at a time.
+ */
+function UpdateBanner({ status }: { status: Status }) {
+  const { me } = useAuth()
+  const [confirming, setConfirming] = useState(false)
+  const hosted = !!status.updates?.hosted && has(me, "admin")
+  const updates = usePoll(() => (hosted ? api.updates() : Promise.resolve(null)), 3000, [hosted])
+  const rollout = updates.data?.rollout
+  const hexes = status.network.lattice.hexes.filter((h) => h.status === "active")
+  const behind = hexes.filter((h) => updateReason(status, h.version) !== null)
+  if (rollout && (rollout.state !== "done" || behind.length > 0)) return <RolloutProgress rollout={rollout} />
+  if (behind.length === 0) return null
+  const offer = updates.data?.offer && "version" in updates.data.offer ? updates.data.offer.version : null
+  const canRoll = hosted && !!offer && behind.some((h) => isNewer(offer, h.version))
+  const latest = status.updates?.latest
+  const target = isNewer(latest, newestVersion(status)) ? latest : newestVersion(status)
+  return (
+    <div role="status" className="border-status-warning/40 bg-status-warning/10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-4 py-3 text-sm">
+      <IconCircleArrowUp className="text-status-warning size-5 shrink-0" aria-hidden />
+      <span>
+        <span className="font-medium">HexDB {target} is available.</span>{" "}
+        {behind.length === hexes.length
+          ? `Every hex runs an older version (${[...new Set(behind.map((h) => h.version))].join(", ")}).`
+          : `${behind.map((h) => `${h.name} (${h.version})`).join(", ")} ${behind.length === 1 ? "runs" : "run"} an older version than the rest.`}
+      </span>
+      <span className="ml-auto flex items-center gap-3">
+        {status.updates?.url && isNewer(latest, behind[0]?.version) && (
+          <a href={status.updates.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-medium underline underline-offset-4">
+            Release notes <IconExternalLink className="size-3.5" aria-hidden />
+          </a>
+        )}
+        {canRoll && (
+          <Button size="sm" onClick={() => setConfirming(true)}>
+            <IconCircleArrowUp /> Update to {offer}
+          </Button>
+        )}
+      </span>
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title={`Update the lattice to HexDB ${offer}?`}
+        description={
+          <>
+            Each hex is updated in turn, and the next waits until it's back and caught up. The Overseer goes last: it hands its role to an
+            updated hex first, so writes pause for a few seconds, once. Reads keep working throughout. It takes a few minutes per hex.
+          </>
+        }
+        confirmLabel="Update"
+        onConfirm={async () => {
+          await api.startRollout()
+          toast.success(`Updating the lattice to HexDB ${offer}.`)
+          await updates.refresh()
+        }}
+      />
+    </div>
+  )
+}
+
+/** A rolling update's progress, hex by hex. */
+function RolloutProgress({ rollout }: { rollout: NonNullable<Updates["rollout"]> }) {
+  return (
+    <div role="status" className={cn("rounded-lg border px-4 py-3 text-sm", rollout.state === "failed" ? "border-destructive/40 bg-destructive/10" : "bg-muted/50")}>
+      <div className="flex flex-wrap items-center gap-2">
+        {rollout.state === "running" ? <IconLoader2 className="size-4 animate-spin" aria-hidden /> : <IconCircleArrowUp className="size-4" aria-hidden />}
+        <span className="font-medium">
+          {rollout.state === "running" && `Updating the lattice to HexDB ${rollout.target}`}
+          {rollout.state === "done" && `The lattice is updated to HexDB ${rollout.target}`}
+          {rollout.state === "failed" && `The update to HexDB ${rollout.target} stopped`}
+        </span>
+        <span className="text-muted-foreground text-xs">started by {rollout.started_by}</span>
+      </div>
+      {rollout.error && <p className="mt-1 text-xs">{rollout.error}. The hexes not yet updated keep running their version.</p>}
+      <ol className="mt-2 flex flex-wrap gap-2">
+        {rollout.steps.map((s) => (
+          <li key={s.id}>
+            <Badge variant={s.state === "done" ? "default" : s.state === "failed" ? "destructive" : "outline"} className="gap-1 font-normal">
+              {(s.state === "updating" || s.state === "handing over") && <IconLoader2 className="size-3 animate-spin" aria-hidden />}
+              {s.hex}: {s.state}
+            </Badge>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )
+}
+
 function ReplicaBanner({ status }: { status: Status }) {
   const r = status.replication
   if (!r || r.state === "leading") return null
@@ -710,6 +827,9 @@ export function OverviewPage() {
             </Button>
           </>
         )}
+      </div>
+      <div className="px-4 lg:px-6 empty:hidden">
+        <UpdateBanner status={status.data} />
       </div>
       {status.data.replication && status.data.replication.state !== "leading" && (
         <div className="px-4 lg:px-6">

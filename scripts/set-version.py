@@ -72,10 +72,13 @@ def main() -> None:
     for proj in ["HexDB.Client", "HexDB.EntityFrameworkCore"]:
         sub(f"drivers/dotnet/{proj}/{proj}.csproj", r"<Version>[^<]+</Version>", f"<Version>{v}</Version>", count=1)
     sub("drivers/java/pom.xml", r"(<artifactId>hexdb-jdbc</artifactId>\s*<version>)[^<]+(</version>)", rf"\g<1>{v}\g<2>", count=1)
+    sub("drivers/java/README.md", r"(<artifactId>hexdb-jdbc</artifactId>\s*<version>)[^<]+(</version>)", rf"\g<1>{v}\g<2>", count=1)
     sub("hexdb_api/openapi.json", r'("info": \{[^}]*?"version": )"[^"]+"', rf'\g<1>"{v}"', count=1, flags=re.S)
     sub("scripts/openapi.py", r'("version": )"[^"]+"', rf'\g<1>"{v}"', count=1)
     sub("packaging/homebrew/hexdb.rb", r'^  version "[^"]+"$', f'  version "{v}"', count=1)
     sub("packaging/chocolatey/hexdb.nuspec", r"<version>[^<]+</version>", f"<version>{v}</version>", count=1)
+    sub("packaging/chocolatey/hexdb.nuspec", r"hexdb@v[^/]+/", f"hexdb@v{v}/")
+    sub("packaging/chocolatey/hexdb.nuspec", r"releases/tag/v[^<]+<", f"releases/tag/v{v}<")
     sub("packaging/chocolatey/tools/chocolateyinstall.ps1", r"download/v[^/]+/", f"download/v{v}/")
     for f in ["DreamInHex.HexDB.yaml", "DreamInHex.HexDB.installer.yaml", "DreamInHex.HexDB.locale.en-US.yaml"]:
         sub(f"packaging/winget/{f}", r"^PackageVersion: .*$", f"PackageVersion: {v}")

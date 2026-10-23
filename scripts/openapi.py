@@ -118,6 +118,11 @@ ROUTES = [
     ("delete", "/tessellations/{name}/schemas", "Schemas", "Remove every schema version (manage)", {"parameters": [NAME], "responses": no_content()}),
     ("post", "/tessellations/{name}/schemas/check", "Schemas", "Check a schema without registering it", {"parameters": [NAME], "requestBody": body(), "responses": ok()}),
     ("post", "/tessellations/{name}/schemas/rollback", "Schemas", "Roll back to an earlier version (a new version with its fields and the inverse migration)", {"parameters": [NAME], "requestBody": body({"type": "object", "required": ["to"], "properties": {"to": {"type": "integer"}, "migration": {"type": "array", "items": OBJ}}}), "responses": ok("Created", status="201")}),
+    ("get", "/updates", "Server", "Versions, the newest release, and a hosted lattice's rolling update (admin; answered by the Overseer)", {"responses": ok()}),
+    ("post", "/updates/rollout", "Server", "Start a rolling update of a hosted lattice to the release its hosting service offers (admin)", {"responses": ok("Accepted", status="202")}),
+    ("put", "/tessellations/{name}/schemas/pending", "Schemas", "Save the next version to apply later (same body as registering; replaces any saved before)", {"parameters": [NAME], "requestBody": body(), "responses": ok()}),
+    ("delete", "/tessellations/{name}/schemas/pending", "Schemas", "Discard the version saved to apply later", {"parameters": [NAME], "responses": no_content()}),
+    ("post", "/tessellations/{name}/schemas/pending/apply", "Schemas", "Apply the saved version: register it and migrate existing documents", {"parameters": [NAME], "responses": ok("Created", status="201")}),
     # Documents
     ("get", "/{tessellation}", "Documents", "List documents (?filter=&sort=&limit=&offset=&after=&fields=&total=)", {"parameters": [TESS] + [param(n, "query") for n in ("filter", "sort", "limit", "offset", "after", "fields", "total")], "responses": ok()}),
     ("post", "/{tessellation}", "Documents", "Insert a document", {"parameters": [TESS, TTL, IDEM], "requestBody": body(), "responses": ok("Created", status="201")}),

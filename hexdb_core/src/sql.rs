@@ -1589,7 +1589,7 @@ impl HexDBEngine {
     /// The columns a SELECT * on `tess` returns, as the caller sees them: `id`,
     /// the current schema's fields, then (if the schema allows other fields,
     /// or there is none) the fields found in the first documents. Hidden
-    /// fields of the caller's role are left out.
+    /// fields of the caller's role are left out; masked ones read as strings.
     pub async fn sql_columns(&self, tess: &str) -> Result<Vec<SqlColumnInfo>> {
         let scope = self.caller_scope(tess, crate::auth::Action::Read);
         let visible = |name: &str| !scope.hidden.iter().any(|h| h == name || name.starts_with(&format!("{}.", h)));
@@ -1630,6 +1630,11 @@ impl HexDBEngine {
                     k => k,
                 };
                 columns.push(SqlColumnInfo { name, kind, nullable: true, source: "sample" });
+            }
+        }
+        for column in columns.iter_mut() {
+            if scope.mask_of(&column.name).is_some() {
+                column.kind = "string";
             }
         }
         Ok(columns)
