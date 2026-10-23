@@ -1,6 +1,15 @@
 // HexDB Core Background Tasks
 // Periodic maintenance: flushing to SSTables, compaction, TTL sweeps, and
 // vertex integrity checks. Each task stops when the shutdown channel fires.
+//
+// The heavy, deferrable work (flushing, compaction, TTL sweeps, file
+// extraction and AI tagging, copying file content between hexes, scrubbing,
+// vertex checks) runs on a runtime of its own whose threads have a lower OS
+// priority (nice 10 on Linux, below normal on Windows). On a throttled CPU
+// (a cloud VM's CPU quota, a shared vCPU), requests, discovery and
+// replication then get the CPU first, so a hex busy catching up keeps
+// answering instead of looking gone to its lattice. The work still gets
+// about a tenth of a busy CPU and all of an idle one.
 
 use crate::HexDBEngine;
 use std::{future::Future, sync::Arc, time::Duration};
@@ -16,8 +25,78 @@ where
     F: Fn() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let name = name.into();
-    tokio::spawn(async move {
+    supervise_on(&tokio::runtime::Handle::current(), name.into(), shutdown_rx, start);
+}
+
+/// [`supervise`], on the low-priority background runtime (see the module comment).
+pub fn supervise_background<F, Fut>(name: impl Into<String>, shutdown_rx: watch::Receiver<()>, start: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    supervise_on(&background(), name.into(), shutdown_rx, start);
+}
+
+/// Run `work` on the low-priority background runtime and wait for it: for
+/// bulk work done on request, such as serving a catching-up replica its
+/// snapshot pages, that mustn't crowd out `/health` and clients.
+pub async fn in_background<F>(work: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match background().spawn(work).await {
+        Ok(output) => output,
+        Err(e) => match e.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_) => panic!("background work was cancelled"),
+        },
+    }
+}
+
+/// The background runtime: half the CPUs (at least one) for work, a few
+/// blocking threads each, every thread at a lower priority. Made on first use.
+fn background() -> tokio::runtime::Handle {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            let workers = (cpus / 2).max(1);
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(workers)
+                .max_blocking_threads((workers * 4).max(4))
+                .thread_name("hexdb-background")
+                .on_thread_start(lower_this_threads_priority)
+                .enable_all()
+                .build()
+                .expect("the background runtime")
+        })
+        .handle()
+        .clone()
+}
+
+/// Lower the calling thread's scheduling priority (Linux and Windows; on
+/// macOS a nice value is per process, so it's left alone).
+fn lower_this_threads_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: setpriority with PRIO_PROCESS and 0 changes only the calling thread on Linux.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+    #[cfg(windows)]
+    // SAFETY: GetCurrentThread returns a pseudo-handle that's always valid for the calling thread.
+    unsafe {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
+fn supervise_on<F, Fut>(runtime: &tokio::runtime::Handle, name: String, shutdown_rx: watch::Receiver<()>, start: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    runtime.spawn(async move {
         let mut delay = Duration::from_secs(1);
         loop {
             crate::crashes::task_started(&name);
@@ -55,7 +134,7 @@ where
 /// Flush unflushed writes to SSTables every `interval`, or sooner when enough
 /// data accumulates. Also keeps memory use within budget.
 pub fn spawn_flush_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_rx: watch::Receiver<()>) {
-    crate::tasks::supervise("flush", shutdown_rx.clone(), move || {
+    crate::tasks::supervise_background("flush", shutdown_rx.clone(), move || {
         let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
         async move {
             loop {
@@ -78,7 +157,7 @@ pub fn spawn_flush_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_r
 
 /// Compact SSTables, and remove file content nothing references, every `interval`.
 pub fn spawn_compaction_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_rx: watch::Receiver<()>) {
-    crate::tasks::supervise("compaction", shutdown_rx.clone(), move || {
+    crate::tasks::supervise_background("compaction", shutdown_rx.clone(), move || {
         let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
         async move {
             loop {
@@ -103,7 +182,7 @@ pub fn spawn_compaction_task(engine: Arc<HexDBEngine>, interval: Duration, shutd
 
 /// Evict expired documents from memory every `interval`.
 pub fn spawn_ttl_sweep_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_rx: watch::Receiver<()>) {
-    crate::tasks::supervise("TTL sweep", shutdown_rx.clone(), move || {
+    crate::tasks::supervise_background("TTL sweep", shutdown_rx.clone(), move || {
         let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
         async move {
             loop {
@@ -125,16 +204,16 @@ pub fn spawn_ttl_sweep_task(engine: Arc<HexDBEngine>, interval: Duration, shutdo
 /// content from other hexes.
 pub fn spawn_extraction_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
     let (e, rx) = (engine.clone(), shutdown_rx.clone());
-    supervise("extraction", shutdown_rx.clone(), move || e.clone().run_extraction(rx.clone()));
+    supervise_background("extraction", shutdown_rx.clone(), move || e.clone().run_extraction(rx.clone()));
     let (e, rx) = (engine.clone(), shutdown_rx.clone());
-    supervise("AI files", shutdown_rx.clone(), move || e.clone().run_ai_files(rx.clone()));
+    supervise_background("AI files", shutdown_rx.clone(), move || e.clone().run_ai_files(rx.clone()));
     let rx = shutdown_rx.clone();
-    supervise("file sync", shutdown_rx, move || engine.clone().run_file_sync(rx.clone()));
+    supervise_background("file sync", shutdown_rx, move || engine.clone().run_file_sync(rx.clone()));
 }
 
 /// Verify every shard in the chunk store and repair bad ones every `interval`.
 pub fn spawn_scrub_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_rx: watch::Receiver<()>) {
-    crate::tasks::supervise("scrub", shutdown_rx.clone(), move || {
+    crate::tasks::supervise_background("scrub", shutdown_rx.clone(), move || {
         let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
         async move {
             loop {
@@ -156,7 +235,7 @@ pub fn spawn_scrub_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_r
 
 /// Verify vertex shards and repair corrupt ones every `interval`.
 pub fn spawn_vertex_monitoring_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_rx: watch::Receiver<()>) {
-    crate::tasks::supervise("vertex monitoring", shutdown_rx.clone(), move || {
+    crate::tasks::supervise_background("vertex monitoring", shutdown_rx.clone(), move || {
         let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
         async move {
             loop {

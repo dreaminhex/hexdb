@@ -622,6 +622,16 @@ function RolloutProgress({ rollout }: { rollout: NonNullable<Updates["rollout"]>
 
 function ReplicaBanner({ status }: { status: Status }) {
   const r = status.replication
+  // A new Overseer still collecting slices: say what it's waiting for.
+  if (r?.rebuilding) {
+    return (
+      <div role="status" className="border-status-warning/40 bg-status-warning/10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-4 py-3 text-sm">
+        <IconLoader2 className="text-status-warning size-4 shrink-0 animate-spin" aria-hidden />
+        <span className="min-w-0 flex-1">{r.rebuilding}</span>
+        {!!r.waiting_for?.length && <Badge variant="outline">waiting for {r.waiting_for.join(", ")}</Badge>}
+      </div>
+    )
+  }
   if (!r || r.state === "leading") return null
   const overseer = status.network.lattice.hexes.find((h) => h.role === "Overseer" && h.status === "active")
   return (
@@ -642,7 +652,7 @@ function ReplicaBanner({ status }: { status: Status }) {
       <span className="text-muted-foreground ml-auto text-xs">
         {r.state === "streaming" && (r.lag ? `${formatNumber(r.lag)} changes behind` : "in sync")}
         {r.state === "syncing" && "full sync in progress"}
-        {r.state === "waiting" && "waiting for an Overseer"}
+        {r.state === "waiting" && (r.last_error ?? "waiting for an Overseer")}
         {r.state === "error" && (r.last_error ?? "replication error")}
       </span>
     </div>
@@ -831,7 +841,7 @@ export function OverviewPage() {
       <div className="px-4 lg:px-6 empty:hidden">
         <UpdateBanner status={status.data} />
       </div>
-      {status.data.replication && status.data.replication.state !== "leading" && (
+      {status.data.replication && (status.data.replication.state !== "leading" || status.data.replication.rebuilding) && (
         <div className="px-4 lg:px-6">
           <ReplicaBanner status={status.data} />
         </div>

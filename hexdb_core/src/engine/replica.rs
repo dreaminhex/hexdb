@@ -257,7 +257,23 @@ impl HexDBEngine {
     /// that starts as the Overseer with only some slices marks itself as
     /// rebuilding (see `crate::replication`).
     pub async fn restore_replication_state(&self) {
-        let Some(cursor) = self.load_replica_cursor().await else { return };
+        let own = self.history_id();
+        let cursor = self.load_replica_cursor().await;
+        // A hex that led its own history (the Overseer since the start, or one
+        // promoted since its last cursor) has every write of it: it reports its
+        // last one and every slice, so a restart doesn't make it look behind.
+        let led = match &cursor {
+            Some(c) => c.source_id == own,
+            None => self.changes.published_seq() > 0,
+        };
+        if led {
+            let mut status = self.replication.lock().unwrap();
+            status.slices_held = crate::slicing::ALL_SLICES;
+            status.history = Some(own);
+            status.applied_seq = self.changes.published_seq();
+            return;
+        }
+        let Some(cursor) = cursor else { return };
         let writable = self.is_writable();
         let mut status = self.replication.lock().unwrap();
         status.slices_held = cursor.held_slices;

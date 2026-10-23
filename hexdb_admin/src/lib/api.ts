@@ -240,6 +240,10 @@ export interface ReplicationStatus {
   last_sync: string | null
   last_error: string | null
   lag?: number
+  /** Set while a newly elected Overseer collects slices from the replicas. */
+  rebuilding?: string | null
+  /** While rebuilding: unreachable hexes holding slices no reachable hex has. */
+  waiting_for?: string[]
 }
 
 export interface CrashReport {

@@ -177,6 +177,29 @@ pub struct ReplicationStatus {
     pub history: Option<String>,
     /// Set while a newly elected Overseer collects slices from replicas.
     pub rebuilding: Option<String>,
+    /// While rebuilding: the hexes, not reachable now, that hold slices no reachable hex has.
+    pub waiting_for: Vec<String>,
+}
+
+/// The Overseer answered 503: it's still collecting slices after a failover.
+#[derive(Debug)]
+struct OverseerRebuilding;
+
+impl std::fmt::Display for OverseerRebuilding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the Overseer is collecting slices after a failover")
+    }
+}
+
+impl std::error::Error for OverseerRebuilding {}
+
+/// "Carl", "Carl and Donut", "Carl, Donut and Katia".
+fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {}", rest.join(", "), last),
+    }
 }
 
 impl Default for ReplicationStatus {
@@ -194,6 +217,7 @@ impl Default for ReplicationStatus {
             slices_wanted: crate::slicing::ALL_SLICES,
             history: None,
             rebuilding: None,
+            waiting_for: Vec::new(),
         }
     }
 }
@@ -401,6 +425,12 @@ impl Follower {
                 };
             }
             if self.was_leading != Some(true) {
+                // Remember that this hex leads its own history now, so after a
+                // restart it reports where it really is (see restore_replication_state).
+                let led = ReplicaCursor { source_id: self.engine.history_id(), applied_seq: self.engine.changes.published_seq(), held_slices: ALL_SLICES };
+                if let Err(e) = self.engine.apply_replicated(Vec::new(), Some(&led)).await {
+                    warn!("⚠️ Couldn't record that this hex leads the lattice: {:#}", e);
+                }
                 if self.was_leading == Some(false) {
                     info!("🎖️ This hex is now the Overseer; replication stops and writes are accepted.");
                     // A promoted replica makes sure the default roles and admin exist.
@@ -426,7 +456,10 @@ impl Follower {
         };
         let Some(overseer) = overseer else {
             *self.engine.overseer_endpoint.write().unwrap() = None;
-            self.set_status(|s| s.state = "waiting".into());
+            self.set_status(|s| {
+                s.state = "waiting".into();
+                s.last_error = None;
+            });
             return Duration::from_secs(1);
         };
         *self.engine.overseer_endpoint.write().unwrap() = Some(overseer.hex.api_endpoint.clone());
@@ -454,6 +487,15 @@ impl Follower {
         };
         match result {
             Ok(pause) => pause,
+            // Not a failure: a new Overseer is collecting slices, and serves them when it has.
+            Err(e) if e.downcast_ref::<OverseerRebuilding>().is_some() => {
+                let note = format!("The Overseer '{}' is collecting slices after a failover; this hex follows it once it has them.", overseer.hex.name);
+                self.set_status(|s| {
+                    s.state = "waiting".into();
+                    s.last_error = Some(note.clone());
+                });
+                Duration::from_secs(3)
+            }
             Err(e) => {
                 warn!("⚠️ Replication from '{}' failed: {:#}", overseer.hex.name, e);
                 self.set_status(|s| {
@@ -540,6 +582,7 @@ impl Follower {
             Err(status) if status == reqwest::StatusCode::UNAUTHORIZED => {
                 bail!("the Overseer refused this hex's lattice signature; every hex in a lattice needs the same network.lattice_secret (or, without one, the same storage.encryption_key), and clocks within a minute of each other")
             }
+            Err(status) if status == reqwest::StatusCode::SERVICE_UNAVAILABLE => Err(OverseerRebuilding.into()),
             Err(status) => bail!("GET {} returned {}", url, status),
         }
     }
@@ -977,11 +1020,36 @@ impl Follower {
         }
         if held != ALL_SLICES {
             let missing = slicing::count(!held);
-            self.set_status(|s| {
-                s.rebuilding = Some(format!(
+            // Who has them: hexes discovery knows but can't reach now, holding a missing slice.
+            let waiting_for: Vec<String> = {
+                let peers = engine.peers.lock().await;
+                let mut names: Vec<String> = peers
+                    .iter()
+                    .filter(|p| p.status != "active" && p.hex.replication_source == cursor.source_id && p.hex.slices_held & !held != 0)
+                    .map(|p| p.hex.name.clone())
+                    .collect();
+                names.sort();
+                names
+            };
+            let note = match waiting_for.as_slice() {
+                [] => format!(
                     "This hex just became the Overseer and is collecting slices; {} slice(s) are on hexes that aren't reachable yet. Writes and queries resume when they're back.",
                     missing
-                ))
+                ),
+                names => format!(
+                    "This hex just became the Overseer and is collecting slices; {} slice(s) are only on {}, which {} reachable. Writes and queries resume when {} back.",
+                    missing,
+                    join_names(names),
+                    if names.len() == 1 { "isn't" } else { "aren't" },
+                    if names.len() == 1 { "it's" } else { "one of them is" }
+                ),
+            };
+            if self.engine.replication.lock().unwrap().rebuilding.as_deref() != Some(note.as_str()) {
+                warn!("⏳ {}", note);
+            }
+            self.set_status(|s| {
+                s.rebuilding = Some(note);
+                s.waiting_for = waiting_for;
             });
             return Ok(false);
         }
@@ -998,6 +1066,7 @@ impl Follower {
         self.set_status(|s| {
             s.slices_held = ALL_SLICES;
             s.rebuilding = None;
+            s.waiting_for.clear();
         });
         info!("✅ This hex has every slice; it takes writes and queries as the Overseer.");
         Ok(())

@@ -213,6 +213,9 @@ pub struct HexDBEngine {
     pub start_datetime: DateTime<Utc>,
     /// Other hexes in the lattice, as last seen by discovery.
     pub peers: Arc<Mutex<Vec<LatticeMember>>>,
+    /// This hex's identity as of the last discovery round, for answering
+    /// discovery when building a fresh one takes too long (see discovery).
+    pub(crate) identity_cache: std::sync::RwLock<Option<crate::network::discovery::PeerHex>>,
 
     storage_dir: PathBuf,
     wal_dir: PathBuf,
@@ -490,6 +493,7 @@ impl HexDBEngine {
             version: env!("CARGO_PKG_VERSION").to_string(),
             start_datetime: Utc::now(),
             peers: Arc::new(Mutex::new(Vec::new())),
+            identity_cache: std::sync::RwLock::new(None),
             config,
             storage_dir,
             wal_dir,
@@ -606,6 +610,11 @@ impl HexDBEngine {
             if status.slices_held != crate::slicing::ALL_SLICES && status.rebuilding.is_none() {
                 status.rebuilding = Some("This hex just became the Overseer and is collecting slices from the other hexes; try again shortly.".into());
             }
+        } else {
+            // No longer the Overseer: a collection it had started is another hex's job now.
+            let mut status = self.replication.lock().unwrap();
+            status.rebuilding = None;
+            status.waiting_for.clear();
         }
         let previous = std::mem::replace(&mut *self.role.write().unwrap(), role.to_string());
         // A hex that (re)gains leadership reloads queue state another Overseer may have changed.

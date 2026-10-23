@@ -1768,7 +1768,13 @@ Every hex runs a TCP discovery listener (`network.discovery_endpoint`, default p
 
 A peer given by name is probed at every address the name resolves to, so one name can stand for a group of hexes: Fly.io's `<app>.internal`, a Kubernetes headless service, or round-robin DNS.
 
-Probes run concurrently with a 500 ms timeout. A peer missing for three rounds is "lost", and it's forgotten after 30.
+Probes run concurrently with a 3-second timeout. A peer that doesn't answer three consecutive rounds is "lost", and it's forgotten after 30. A round that starts well after it was due (this hex was short of CPU) counts against no one, since the peers may simply not have been asked in time; the log says so.
+
+Discovery is answered from a thread of its own, with the hex's identity as of its last round, so a hex busy enough to be slow (a throttled cloud CPU, a burst of catch-up work) keeps answering its lattice instead of being voted out. It stops answering only if the rest of the hex hasn't run for a minute, which means it's stuck, not busy.
+
+**Elections.** A sitting Overseer keeps its role. Otherwise, in a sliced lattice, the hex furthest along the change history wins, then among those equally far along the one holding the most slices, so a hex with every slice is preferred to one that would have to collect them first; then RAM and disk decide. A hex that restarts reports where its data really is: an Overseer that restarts reports its last write and every slice, so it gets its role back instead of passing it to a replica that would rebuild.
+
+**Background work runs at a lower priority.** Flushing, compaction, TTL sweeps, file extraction and AI tagging, copying file content between hexes, scrubbing, vertex checks, and serving catch-up copies (snapshots, slice snapshots, file chunks) to other hexes run on a pool of their own at a lower operating-system priority (nice 10 on Linux, below normal on Windows). On a throttled CPU, requests, `/health`, discovery and the change feed go first; the background work still gets about a tenth of a busy CPU and all of an idle one.
 
 Every hex runs the same election over the same view, so they agree without a consensus round:
 
@@ -1824,7 +1830,7 @@ recent_changes = 20000
 - **Copies.** The Overseer keeps every slice, and each slice is also kept by `slice_copies` replicas. With the default of 1, any one hex can be lost without losing data. A lattice with a single replica keeps full copies, whatever the setting.
 - **Placement.** Every hex computes the same placement from the live hexes (rendezvous hashing), so a hex that joins or leaves moves only its own slices. A replica copies the slices it gains from the Overseer, and gives up a slice only once another live replica holds it, so no slice has fewer copies while a new hex catches up.
 - **Reads.** A replica holding slices doesn't have all the data, so it forwards requests that read data (queries, SQL, GraphQL, documents, files, MCP and the chat) to the Overseer, and answers with what the Overseer returns. Live feeds (`/changes/stream`, `/changes/ws`, stream subscriptions) aren't proxied: a sliced replica answers 421 `sliced_replica`, naming the Overseer to connect to. Health, status, sign-in and the hex's own maintenance stay local.
-- **Failover.** When the Overseer is lost, the replica furthest along its history is elected. Before it serves data or takes writes (data requests get 503 `rebuilding` meanwhile), it collects the slices it lacks from the replicas that keep them, then applies its last `recent_changes` changes to bring each to its own position, so the data is consistent as of one point in history. A slice whose holder is down waits for it to come back; if a holder was further behind than those recent changes reach, the gap is logged and recorded in the audit trail as `lattice.slices_incomplete`. The other replicas then sync their slices from the new Overseer.
+- **Failover.** When the Overseer is lost, the replica furthest along its history is elected (among equals, the one with the most slices). Before it serves data or takes writes (data requests get 503 `rebuilding` meanwhile), it collects the slices it lacks from the replicas that keep them, then applies its last `recent_changes` changes to bring each to its own position, so the data is consistent as of one point in history. A slice whose holder is down waits for it to come back: the dashboard, `/status` (`replication.rebuilding` and `waiting_for`) and the log name the hexes it's waiting for, and the other replicas show "waiting" with the reason rather than an error; if a holder was further behind than those recent changes reach, the gap is logged and recorded in the audit trail as `lattice.slices_incomplete`. The other replicas then sync their slices from the new Overseer.
 - **Status.** `/status` shows `slices_held_count` and `sliced_documents` (the user documents this hex keeps) under `replication`.
 
 What slicing doesn't change: the Overseer still keeps everything (it runs every write, transaction and unique index), so a lattice can't hold more than the Overseer can. It saves space on the replicas, not on the Overseer.
@@ -2134,7 +2140,7 @@ Limits, so a public deployment's users can't spend its owner's tokens:
 | `ai.chat.client_daily_tokens` | 50,000 | Per client address per day; separates visitors who share a login |
 | `ai.chat.client_questions_per_minute` | 6 | Per client address; 429 with `Retry-After` |
 
-All of it is also bounded by `ai.monthly_token_budget`. Chat requests sent to a replica run on the Overseer, which keeps the counters in memory (they restart with it; the monthly budget doesn't).
+All of it is also bounded by `ai.monthly_token_budget`. Chat requests sent to a replica run on the Overseer, which keeps the counters in memory (they restart with it; the monthly budget doesn't). When a limit is reached, the 429 says when it resets: the daily allowances at midnight UTC (with `Retry-After`), the monthly budget on the first of next month. A question stops offering lookups once half its allowance is spent, so the model always has room to answer with what it found.
 
 ### MCP server
 

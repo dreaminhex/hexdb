@@ -95,9 +95,15 @@ pub async fn chunk(Path(id): Path<String>, method: Method, uri: Uri, headers: He
     if !engine.blobs().contains(&id) {
         return Err(missing());
     }
-    let data = engine.read_local_chunk(id).await.map_err(|_| missing())?;
-    let compressed = engine.blobs().is_compressed(&id).unwrap_or(false);
-    let sealed = engine.lattice_keys.seal(&data, &id);
+    // Copying file content to another hex is catch-up work: low priority (see hexdb_core::tasks).
+    let reading = engine.clone();
+    let (sealed, compressed) = hexdb_core::tasks::in_background(async move {
+        let data = reading.read_local_chunk(id).await?;
+        let compressed = reading.blobs().is_compressed(&id).unwrap_or(false);
+        anyhow::Ok((reading.lattice_keys.seal(&data, &id), compressed))
+    })
+    .await
+    .map_err(|_| missing())?;
     let mut response = sealed.into_response();
     response.headers_mut().insert("x-hexdb-compress", axum::http::HeaderValue::from_static(if compressed { "1" } else { "0" }));
     Ok(response)
@@ -154,7 +160,9 @@ pub async fn snapshot_page(
         None => None,
     };
     let slices = params.slices.unwrap_or(hexdb_core::slicing::ALL_SLICES);
-    let (documents, next) = engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000), slices).await?;
+    // A full sync is catch-up work: low priority, so clients and /health go first.
+    let (reading, limit) = (engine.clone(), params.limit.unwrap_or(500).clamp(1, 5000));
+    let (documents, next) = hexdb_core::tasks::in_background(async move { reading.snapshot_page(&tess, after, limit, slices).await }).await?;
     Ok(Json(SnapshotPage { documents, next }).into_response())
 }
 
@@ -184,7 +192,8 @@ pub async fn slice_snapshot(
     };
     let slices = params.slices.unwrap_or(hexdb_core::slicing::ALL_SLICES);
     let (documents, next) = if engine.tessellation_exists(&tess) {
-        engine.snapshot_page(&tess, after, params.limit.unwrap_or(500).clamp(1, 5000), slices).await?
+        let (reading, limit) = (engine.clone(), params.limit.unwrap_or(500).clamp(1, 5000));
+        hexdb_core::tasks::in_background(async move { reading.snapshot_page(&tess, after, limit, slices).await }).await?
     } else {
         (Vec::new(), None)
     };

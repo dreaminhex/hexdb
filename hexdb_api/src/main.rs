@@ -9,7 +9,7 @@ use hexdb_core::{
     config::CONFIG_FILE_NAME, discover_peers, init_logging, load_config_from,
     spawn_compaction_task, spawn_extraction_task, spawn_flush_task, spawn_scrub_task, spawn_ttl_sweep_task,
     elect, parse_preference, spawn_discovery_task, spawn_metrics_task, spawn_vertex_monitoring_task,
-    bind_discovery, start_discovery_listener, LatticeMember, NameSource, ROLE_OVERSEER,
+    bind_discovery, LatticeMember, NameSource, ROLE_OVERSEER,
     HexDBEngine, HexIdentity, PeerHex, RuntimeInfo,
 };
 use std::{collections::HashSet, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -225,6 +225,18 @@ async fn server() -> anyhow::Result<()> {
     // A sliced replica's slices, history and position; one starting as the
     // Overseer with only some slices collects the rest before serving data.
     engine.restore_replication_state().await;
+    // The election above ran before storage was open, so it couldn't know how
+    // far along this hex is or which slices it holds. Run it again with what
+    // was restored: a restarted Overseer that holds everything gets its role
+    // back instead of handing it to a replica that would have to rebuild.
+    {
+        let local = hexdb_core::network::discovery::local_identity(&engine).await;
+        let role = elect(&local, &peers);
+        if role != engine.role() {
+            info!("🎖️ With its data loaded, this hex starts as {} (not {}).", role, engine.role());
+            engine.set_role(&role);
+        }
+    }
     // The previous process's runtime file is still here if it didn't shut down cleanly.
     if let Some(report) = hexdb_core::crashes::detect(&storage_dir, opening.elapsed().as_millis() as u64) {
         let cause = match (&report.panic, &report.exit) {
@@ -245,7 +257,7 @@ async fn server() -> anyhow::Result<()> {
         let mut known = engine.peers.lock().await;
         *known = peers
             .into_iter()
-            .map(|hex| LatticeMember { hex, last_seen: now, status: "active".into() })
+            .map(|hex| LatticeMember { hex, last_seen: now, status: "active".into(), missed: 0 })
             .collect();
     }
 
@@ -256,7 +268,7 @@ async fn server() -> anyhow::Result<()> {
     // Bound here, so a hex that can't be reached stops instead of running without its lattice.
     let discovery = bind_discovery(&config.network.discovery_endpoint).await?;
     let listening = engine.clone();
-    hexdb_core::tasks::supervise("discovery listener", shutdown_rx.clone(), move || start_discovery_listener(listening.clone(), discovery.clone()));
+    hexdb_core::network::discovery::spawn_discovery_lifeline(listening, discovery)?;
 
     // Initialize security settings & create defaults if not present.
     info!("🔐 Initializing security settings...");

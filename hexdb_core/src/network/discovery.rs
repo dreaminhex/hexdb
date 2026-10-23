@@ -32,16 +32,20 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::watch,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub const ROLE_OVERSEER: &str = "Overseer";
 pub const ROLE_HARVESTER: &str = "Harvester";
 pub const ROLE_REPLICANT: &str = "Replicant";
 
 const LOCAL_PORTS: std::ops::Range<u16> = 7702..7710;
-/// How long to wait for one peer to connect and identify itself.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
-/// A peer not seen for this many discovery rounds is marked lost...
+/// How long to wait for one peer to connect and identify itself. Generous: a
+/// hex on a throttled shared CPU is slow, not gone, and probes run in parallel.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a probe's answer may take to build before the last round's
+/// identity is sent instead (see `answer_identity`).
+const FRESH_IDENTITY_TIMEOUT: Duration = Duration::from_millis(250);
+/// A peer that didn't answer this many consecutive rounds is marked lost...
 const LOST_AFTER_ROUNDS: u32 = 3;
 /// ...and forgotten after this many.
 const FORGET_AFTER_ROUNDS: u32 = 30;
@@ -125,6 +129,9 @@ pub struct LatticeMember {
     pub last_seen: DateTime<Utc>,
     /// "active", or "lost" when it hasn't answered for a few rounds.
     pub status: String,
+    /// Consecutive rounds, run on time, in which it didn't answer.
+    #[serde(skip)]
+    pub missed: u32,
 }
 
 /// Normalize and check a configured role preference.
@@ -213,10 +220,10 @@ const MAX_HANDSHAKES: usize = 64;
 /// Bind the discovery endpoint. The server does this at startup and stops if
 /// it can't: a hex that can't be reached can't take part in its lattice
 /// (no replication, elections or failover), so running on would only hide it.
-pub async fn bind_discovery(addr: &str) -> anyhow::Result<Arc<TcpListener>> {
+pub async fn bind_discovery(addr: &str) -> anyhow::Result<std::net::TcpListener> {
     TcpListener::bind(addr)
         .await
-        .map(Arc::new)
+        .and_then(|l| l.into_std())
         .map_err(|e| anyhow::anyhow!("Failed to bind the discovery endpoint {} (network.discovery_endpoint): {}", addr, e))
 }
 
@@ -247,7 +254,11 @@ pub async fn start_discovery_listener(engine: Arc<HexDBEngine>, listener: Arc<Tc
                         debug!("📡 Ignored an unauthenticated discovery hello.");
                         return;
                     };
-                    let identity = local_identity(&engine).await;
+                    if !main_runtime_alive() {
+                        warn!("⏱️ Not answering discovery: this hex's main runtime hasn't run for over {} s.", STUCK_AFTER_SECONDS);
+                        return;
+                    }
+                    let identity = answer_identity(&engine).await;
                     if let Ok(json) = serde_json::to_string(&identity) {
                         let reply = engine.lattice_keys.identity_reply(key_index, &nonce, &json);
                         let _ = socket.write_all(format!("{}\n", reply).as_bytes()).await;
@@ -257,6 +268,80 @@ pub async fn start_discovery_listener(engine: Arc<HexDBEngine>, listener: Arc<Tc
             Err(e) => warn!(%e, "❗ Discovery accept failed."),
         }
     }
+}
+
+/// The identity to answer a probe with: the last round's, with the current
+/// role, so answering never waits for anything the rest of the hex is busy
+/// with; before the first round, a fresh one. A busy hex stays visible to its
+/// lattice instead of looking gone.
+async fn answer_identity(engine: &HexDBEngine) -> PeerHex {
+    let cached = engine.identity_cache.read().unwrap().clone();
+    match cached {
+        Some(mut identity) => {
+            identity.role = engine.role();
+            if crate::updates::stepping_down() {
+                identity.preference = "replicant".into();
+            }
+            identity
+        }
+        None => match tokio::time::timeout(FRESH_IDENTITY_TIMEOUT * 20, local_identity(engine)).await {
+            Ok(fresh) => fresh,
+            Err(_) => local_identity(engine).await,
+        },
+    }
+}
+
+/// When the main runtime last ran its heartbeat (epoch seconds; 0: not yet).
+static HEARTBEAT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// The lifeline stops answering once the heartbeat is this old: the hex is stuck, not just busy.
+const STUCK_AFTER_SECONDS: i64 = 60;
+
+/// Answer discovery from a thread of its own (the lifeline), with its own
+/// small runtime, so a hex whose main runtime is saturated (a throttled CPU,
+/// a burst of work) still answers its lattice and isn't voted out for being
+/// slow. It answers only while the main runtime's heartbeat, ticked every
+/// second, is under a minute old: a hex that's truly stuck still drops out.
+/// Call it from the main runtime, which runs the heartbeat.
+pub fn spawn_discovery_lifeline(engine: Arc<HexDBEngine>, listener: std::net::TcpListener) -> anyhow::Result<()> {
+    tokio::spawn(async {
+        loop {
+            HEARTBEAT.store(Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+    listener.set_nonblocking(true)?;
+    std::thread::Builder::new().name("hexdb-lifeline".into()).spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                error!("❌ The discovery lifeline couldn't start: {}", e);
+                return;
+            }
+        };
+        let listener = match runtime.block_on(async { TcpListener::from_std(listener) }) {
+            Ok(listener) => Arc::new(listener),
+            Err(e) => {
+                error!("❌ The discovery lifeline couldn't take the discovery socket: {}", e);
+                return;
+            }
+        };
+        // Like a supervised task: started again if it ever panics.
+        loop {
+            let run = std::panic::AssertUnwindSafe(start_discovery_listener(engine.clone(), listener.clone()));
+            if let Err(panic) = runtime.block_on(futures::FutureExt::catch_unwind(run)) {
+                let message = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
+                error!("❌ The discovery lifeline panicked ({}); restarting it.", message);
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    })?;
+    Ok(())
+}
+
+/// False once the main runtime's heartbeat is a minute old (see `spawn_discovery_lifeline`).
+fn main_runtime_alive() -> bool {
+    let beat = HEARTBEAT.load(std::sync::atomic::Ordering::Relaxed);
+    beat == 0 || Utc::now().timestamp() - beat < STUCK_AFTER_SECONDS
 }
 
 /// Discovery addresses to probe: configured seeds, plus local ports if enabled.
@@ -481,8 +566,15 @@ pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
     let sitting: Vec<&PeerHex> = candidates.iter().copied().filter(|h| h.role == ROLE_OVERSEER).collect();
     let leader = if sitting.is_empty() && local.slicing {
         // Sliced replicas each hold part of the data; the one furthest along
-        // the old Overseer's history rebuilds the rest most completely.
-        candidates.into_iter().min_by(|a, b| b.applied_seq.cmp(&a.applied_seq).then(rank(a, b)))
+        // the old Overseer's history rebuilds the rest most completely. Among
+        // those equally far along, the one holding the most slices has the
+        // least to collect (none, if it holds them all), so writes resume sooner.
+        candidates.into_iter().min_by(|a, b| {
+            b.applied_seq
+                .cmp(&a.applied_seq)
+                .then(crate::slicing::count(b.slices_held).cmp(&crate::slicing::count(a.slices_held)))
+                .then(rank(a, b))
+        })
     } else {
         let pool = if sitting.is_empty() { candidates } else { sitting };
         pool.into_iter().min_by(|a, b| rank(a, b))
@@ -500,6 +592,7 @@ pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, shutdo
     crate::tasks::supervise("discovery", shutdown_rx.clone(), move || {
         let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
         async move {
+            let mut last_round = std::time::Instant::now();
             loop {
                 tokio::select! {
                     _ = shutdown_rx.changed() => {
@@ -508,21 +601,34 @@ pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, shutdo
                     }
                     _ = tokio::time::sleep(interval) => {}
                 }
-                discovery_round(&engine, interval).await;
+                // A round that starts much later than planned means this hex was
+                // starved of CPU: peers that "didn't answer" may simply not have
+                // been asked in time, so this round doesn't count against them.
+                let on_time = last_round.elapsed() <= interval * 2 + PROBE_TIMEOUT;
+                if !on_time {
+                    warn!("⏱️ This hex's discovery round ran {:.1} s late (the hex is short of CPU); peers that miss it aren't counted as lost.", (last_round.elapsed() - interval).as_secs_f64());
+                }
+                last_round = std::time::Instant::now();
+                discovery_round(&engine, interval, on_time).await;
             }
         }
     });
 }
 
-/// One discovery round: probe, update members, and re-elect.
-pub async fn discovery_round(engine: &HexDBEngine, interval: Duration) {
+/// One discovery round: probe, update members, and re-elect. A peer is lost
+/// after `LOST_AFTER_ROUNDS` consecutive rounds it didn't answer; rounds that
+/// weren't `on_time` (this hex was starved) count no misses.
+pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: bool) {
+    let started = std::time::Instant::now();
     let found = discover_peers(&engine.config, &engine.id.to_string(), &engine.name).await;
+    // Probing itself took far longer than its timeout allows: this hex was starved while asking.
+    let on_time = on_time && started.elapsed() <= PROBE_TIMEOUT * 2 + Duration::from_secs(1);
     let now = Utc::now();
-    let lost_after = chrono::Duration::from_std(interval * LOST_AFTER_ROUNDS).unwrap_or_default();
     let forget_after = chrono::Duration::from_std(interval * FORGET_AFTER_ROUNDS).unwrap_or_default();
 
     let live: Vec<PeerHex> = {
         let mut members = engine.peers.lock().await;
+        let answered: Vec<String> = found.iter().map(|p| p.id.clone()).collect();
         for peer in found {
             match members.iter_mut().find(|m| m.hex.id == peer.id) {
                 Some(member) => {
@@ -532,16 +638,20 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration) {
                     member.hex = peer;
                     member.last_seen = now;
                     member.status = "active".into();
+                    member.missed = 0;
                 }
                 None => {
                     info!("🤝 Discovered hex '{}' ({}) at {}.", peer.name, peer.role, peer.api_endpoint);
-                    members.push(LatticeMember { hex: peer, last_seen: now, status: "active".into() });
+                    members.push(LatticeMember { hex: peer, last_seen: now, status: "active".into(), missed: 0 });
                 }
             }
         }
-        for member in members.iter_mut() {
-            if member.status == "active" && now - member.last_seen > lost_after {
-                warn!("⚠️ Lost contact with hex '{}'.", member.hex.name);
+        for member in members.iter_mut().filter(|m| !answered.contains(&m.hex.id)) {
+            if on_time {
+                member.missed += 1;
+            }
+            if member.status == "active" && member.missed >= LOST_AFTER_ROUNDS {
+                warn!("⚠️ Lost contact with hex '{}' ({} rounds without an answer).", member.hex.name, member.missed);
                 member.status = "lost".into();
             }
         }
@@ -550,6 +660,7 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration) {
     };
 
     let local = local_identity(engine).await;
+    *engine.identity_cache.write().unwrap() = Some(local.clone());
     let role = elect(&local, &live);
     if role != local.role {
         info!("🎖️ Role changed: {} -> {}.", local.role, role);
@@ -602,6 +713,24 @@ mod tests {
         // A sitting Overseer keeps the role regardless.
         let overseer = hex("c", ROLE_OVERSEER, "auto", 10);
         assert_eq!(elect(&a, &[b, overseer]), ROLE_HARVESTER);
+    }
+
+    #[test]
+    fn sliced_lattices_prefer_the_hex_with_the_most_slices_among_the_most_up_to_date() {
+        // Equally far along: the hex holding every slice leads, though it has less RAM.
+        let mut partial = hex("partial", ROLE_HARVESTER, "auto", 8000);
+        let mut full = hex("full", ROLE_HARVESTER, "auto", 1000);
+        partial.slicing = true;
+        full.slicing = true;
+        partial.applied_seq = 50;
+        full.applied_seq = 50;
+        partial.slices_held = (1u64 << 41) - 1;
+        full.slices_held = crate::slicing::ALL_SLICES;
+        assert_eq!(elect(&partial, std::slice::from_ref(&full)), ROLE_HARVESTER);
+        assert_eq!(elect(&full, std::slice::from_ref(&partial)), ROLE_OVERSEER);
+        // Further along still wins: electing a hex that's behind would lose acknowledged writes.
+        partial.applied_seq = 51;
+        assert_eq!(elect(&partial, std::slice::from_ref(&full)), ROLE_OVERSEER);
     }
 
     #[tokio::test]
