@@ -31,7 +31,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 
 ### Size
 
-What version 2.1.2 downloads and installs. Installed is the server (storage engine, REST, GraphQL, gRPC, SQL and replication), the CLI, the ODBC driver and the admin UI.
+What version 2.1.3 downloads and installs. Installed is the server (storage engine, REST, GraphQL, gRPC, SQL and replication), the CLI, the ODBC driver and the admin UI.
 
 | Platform | Download | Installed | Server | CLI | ODBC | Admin UI |
 | --- | --- | --- | --- | --- | --- | --- |
