@@ -7,7 +7,8 @@ edition = "2021"
 [dependencies]
 config = "0.15.11"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# float_roundtrip: parse every float exactly, so values round-trip bit for bit.
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 tokio = { version = "1.37", features = ["full"] }
 anyhow = "1.0"
 tracing = "0.1"

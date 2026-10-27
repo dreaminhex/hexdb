@@ -664,3 +664,18 @@ fn upserts_match_on_key_fields() -> Result<()> {
     assert_eq!(upsert(json!([{ "sku": "A-1", "price": 12 }]))?.status, 409);
     Ok(())
 }
+
+#[test]
+fn floats_round_trip_exactly() -> Result<()> {
+    // Values serde_json's default fast float parser rounds one ulp off.
+    let values = [1000.2769842236127_f64, 1000.510684301424, 1000.1974196337469, 0.1, 5e-324, f64::MAX];
+    let mut server = TestServer::start()?;
+    let id = server.insert("floats", &json!({ "values": values }))?;
+    server.crash_and_restart()?;
+    let doc = server.get_doc("floats", &id)?.expect("document exists");
+    let back: Vec<f64> = doc["values"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    for (sent, got) in values.iter().zip(&back) {
+        assert_eq!(sent.to_bits(), got.to_bits(), "sent {sent}, got {got}");
+    }
+    Ok(())
+}
