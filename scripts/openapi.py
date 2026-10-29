@@ -227,7 +227,7 @@ def build():
         "openapi": "3.1.0",
         "info": {
             "title": "HexDB REST API",
-            "version": "2.1.3",
+            "version": "2.2.0",
             "description": "HexDB's REST API. Authenticate with `Authorization: Bearer <API key or session token>` or the `hexdb_session` cookie (admin UI). Errors are `{\"error\": {\"code\", \"message\"}}`. See MANUAL.md for filters, aggregations, permissions and everything else.",
         },
         "servers": [{"url": "http://127.0.0.1:7700"}],
