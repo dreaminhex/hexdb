@@ -103,7 +103,7 @@ fn status_reports_the_sealed_fields() -> Result<()> {
     assert!(server.request(Method::POST, "/roles", Some(&role), &[])?.status.is_success());
     let status = server.request(Method::GET, "/status", None, &[])?.body;
     assert_eq!(status["memory_protection"]["sealed_fields"], json!({ "payments": ["card"], "*": ["ssn"] }), "{}", status["memory_protection"]);
-    if cfg!(target_os = "linux") {
+    if cfg!(unix) {
         assert_eq!(status["memory_protection"]["core_dumps"], false, "core dumps are off by default");
     }
     Ok(())

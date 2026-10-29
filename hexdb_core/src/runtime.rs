@@ -147,11 +147,12 @@ fn restrict_windows_acl(path: &Path) -> Result<()> {
 }
 
 /// Keep the operating system from writing core dumps of this process, which
-/// would hold its memory (keys and opened documents). On Linux the process is
-/// also made non-dumpable, which core dump handlers such as systemd-coredump
-/// respect (they ignore RLIMIT_CORE) and which stops other processes of the
-/// same user from attaching to it. Elsewhere (Windows) nothing changes:
-/// Windows writes full dumps only when an administrator configures it.
+/// would hold its memory (keys and opened documents): RLIMIT_CORE is set to 0,
+/// which the kernel honors for core files and dump handlers such as
+/// systemd-coredump and apport honor for the crashing process. (Making the
+/// process non-dumpable would also hide /proc/<pid>/exe, which `hexdb stop`
+/// and `hexdb reset-password` use to recognize the server.) On Windows nothing
+/// changes: it writes full dumps only when an administrator configures it.
 pub fn disable_core_dumps() -> Result<()> {
     #[cfg(unix)]
     {
@@ -161,24 +162,18 @@ pub fn disable_core_dumps() -> Result<()> {
             anyhow::bail!("setrlimit(RLIMIT_CORE): {}", std::io::Error::last_os_error());
         }
     }
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: prctl(PR_SET_DUMPABLE, 0) takes no pointers.
-        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
-            anyhow::bail!("prctl(PR_SET_DUMPABLE): {}", std::io::Error::last_os_error());
-        }
-    }
     Ok(())
 }
 
-/// True if this process may be dumped (Linux; elsewhere, unknown: None).
+/// True if this process may write a core dump (Unix; elsewhere, unknown: None).
 pub fn core_dumps_allowed() -> Option<bool> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        // SAFETY: prctl(PR_GET_DUMPABLE) takes no pointers.
-        Some(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } != 0)
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: getrlimit writes into a valid rlimit.
+        (unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut limit) } == 0).then_some(limit.rlim_cur > 0)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         None
     }
