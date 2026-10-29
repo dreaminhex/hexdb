@@ -76,6 +76,13 @@ async fn server() -> anyhow::Result<()> {
         "⚙️  Effective configuration"
     );
 
+    // Before any key or document is in memory: no core dumps (they'd hold both).
+    if config.security.core_dumps {
+        warn!("⚠️ security.core_dumps is on: a crash may write this process's memory, keys and open documents included, to disk.");
+    } else if let Err(e) = hexdb_core::runtime::disable_core_dumps() {
+        warn!("⚠️ Couldn't turn off core dumps: {:#}", e);
+    }
+
     // The storage key ring (current and previous keys) and the lattice key must be valid.
     let keys = Arc::new(config.key_ring().unwrap_or_else(|e| {
         error!("❌ {:#}", e);

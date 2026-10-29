@@ -146,6 +146,44 @@ fn restrict_windows_acl(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Keep the operating system from writing core dumps of this process, which
+/// would hold its memory (keys and opened documents). On Linux the process is
+/// also made non-dumpable, which core dump handlers such as systemd-coredump
+/// respect (they ignore RLIMIT_CORE) and which stops other processes of the
+/// same user from attaching to it. Elsewhere (Windows) nothing changes:
+/// Windows writes full dumps only when an administrator configures it.
+pub fn disable_core_dumps() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let none = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: setrlimit with a valid, initialized rlimit.
+        if unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) } != 0 {
+            anyhow::bail!("setrlimit(RLIMIT_CORE): {}", std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: prctl(PR_SET_DUMPABLE, 0) takes no pointers.
+        if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+            anyhow::bail!("prctl(PR_SET_DUMPABLE): {}", std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// True if this process may be dumped (Linux; elsewhere, unknown: None).
+pub fn core_dumps_allowed() -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: prctl(PR_GET_DUMPABLE) takes no pointers.
+        Some(unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) } != 0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Turn a configured bind address into a URL a local client can connect to.
 /// Wildcard hosts (0.0.0.0, [::]) are replaced with loopback addresses.
 pub fn local_base_url(endpoint: &str) -> String {

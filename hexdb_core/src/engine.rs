@@ -53,6 +53,7 @@ pub use replica::{ReplicaCursor, ReplicaWrite, REPLICATION_TESSELLATION, SKIP_AC
 pub use schemas::MigrationStatus;
 pub use history::ChangeReader;
 mod transactions;
+mod sealing;
 pub(crate) mod writes;
 pub use transactions::{parse_transaction, TransactionResult, TxOpKind, TxOperation, TxResult, MAX_TRANSACTION_OPS};
 pub use writes::{
@@ -264,6 +265,11 @@ pub struct HexDBEngine {
     pub login_throttle: crate::auth::LoginThrottle,
     /// Keys that authenticate hexes to each other.
     pub lattice_keys: crate::network::lattice_auth::LatticeKeys,
+    /// Seals masked fields in memory (see `crate::sealed`).
+    pub(crate) sealer: crate::sealed::Sealer,
+    pub(crate) seal_policy: std::sync::RwLock<Arc<crate::sealed::SealPolicy>>,
+    /// The next policy refresh also seals what WAL replay put in the hex.
+    seal_pending: std::sync::atomic::AtomicBool,
     /// Nonces of discovery hellos and replication requests already seen.
     pub lattice_nonces: crate::network::lattice_auth::NonceCache,
     /// Bumped by every change to stored data (the role cache keys on it).
@@ -340,6 +346,8 @@ impl HexDBEngine {
     pub async fn open(config: HexConfig, identity: HexIdentity, keys: Arc<crate::crypt::KeyRing>) -> Result<Self> {
         let storage_dir = config.storage_dir();
         let wal_dir = storage_dir.join("wal");
+        // Before anything is read: stored documents may hold sealed fields.
+        let sealer = crate::sealed::Sealer::new(&config.lattice_keys()?);
         std::fs::create_dir_all(&storage_dir)
             .with_context(|| format!("Failed to create {}", storage_dir.display()))?;
 
@@ -525,6 +533,9 @@ impl HexDBEngine {
             plugins: crate::plugins::PluginRegistry::default(),
             login_throttle,
             lattice_keys,
+            sealer,
+            seal_policy: Default::default(),
+            seal_pending: std::sync::atomic::AtomicBool::new(true),
             lattice_nonces: crate::network::lattice_auth::NonceCache::default(),
             generation: AtomicU64::new(0),
             counts: std::sync::Mutex::new(reads::Counts::default()),
@@ -554,6 +565,7 @@ impl HexDBEngine {
         if replay.segments > 0 {
             engine.flush().await.context("Failed to flush recovered WAL records")?;
         }
+        engine.refresh_seal_policy().await;
         engine.rebuild_indexes().await?;
         engine.refresh_lattice_config().await;
         engine.load_metrics_history();
@@ -1044,7 +1056,9 @@ impl HexDBEngine {
                         return Ok((None, seq));
                     }
                     let doc = parse_document(&bytes)?;
-                    self.doc_cache.put(key, seq, &doc, bytes.len());
+                    if self.cacheable(key) {
+                        self.doc_cache.put(key, seq, &doc, bytes.len());
+                    }
                     return Ok((Some(doc), seq));
                 }
                 Some(Lookup::Tombstone { seq }) => return Ok((None, seq)),
@@ -1086,7 +1100,11 @@ impl HexDBEngine {
                             let doc = parse_document(&bytes)?;
                             // Documents from older files go into memory in the current, smaller form.
                             let bytes = if crate::document::is_legacy_stored(&bytes) { serde_json::to_vec(&doc)? } else { bytes };
-                            self.doc_cache.put(key, entry.seq, &doc, bytes.len());
+                            // ...and with their sealed fields sealed, which older files may not have.
+                            let bytes = self.sealed_bytes(&doc, bytes);
+                            if self.cacheable(key) {
+                                self.doc_cache.put(key, entry.seq, &doc, bytes.len());
+                            }
                             self.cache(key, entry.seq, entry.ttl, &bytes).await;
                             return Ok((Some(doc), entry.seq));
                         }

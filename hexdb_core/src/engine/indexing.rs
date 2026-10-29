@@ -77,7 +77,7 @@ impl HexDBEngine {
                 return Err(invalid(format!("A tessellation can have at most {} indexes.", MAX_INDEXES)));
             }
             // Registered before the scan so concurrent writes keep it current.
-            list.push(Index::with_analyzer(def.clone(), analyzer));
+            list.push(self.sealed_index(tess, Index::with_analyzer(def.clone(), analyzer)));
         }
 
         let built = self.build_index(tess, &def.name).await;
@@ -143,7 +143,8 @@ impl HexDBEngine {
                     continue;
                 }
             };
-            self.indexes.write().unwrap().by_tessellation.entry(tess.clone()).or_default().push(Index::with_analyzer(def.clone(), analyzer));
+            let index = self.sealed_index(&tess, Index::with_analyzer(def.clone(), analyzer));
+            self.indexes.write().unwrap().by_tessellation.entry(tess.clone()).or_default().push(index);
             if let Err(e) = self.build_index(&tess, &def.name).await {
                 // A unique index can only fail here if data was changed outside HexDB; keep serving without it.
                 tracing::error!("❌ Index '{}' on '{}' couldn't be rebuilt and is disabled: {:#}", def.name, tess, e);
@@ -155,6 +156,35 @@ impl HexDBEngine {
         }
         self.indexes_loaded.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+
+    /// An index set up for this tessellation's sealed fields (see `crate::sealed`).
+    pub(crate) fn sealed_index(&self, tess: &str, mut index: Index) -> Index {
+        index.set_sealed(&self.sealed_paths(tess), self.sealer.tokenizer());
+        index
+    }
+
+    /// Rebuild a tessellation's indexes from its documents, after which
+    /// fields are sealed changed. The planner skips them meanwhile.
+    pub(crate) async fn rebuild_tessellation_indexes(&self, tess: &str) {
+        let defs: Vec<IndexDef> = {
+            let mut indexes = self.indexes.write().unwrap();
+            let Some(list) = indexes.by_tessellation.get_mut(tess) else { return };
+            let defs: Vec<IndexDef> = list.iter().map(|i| i.def.clone()).collect();
+            list.clear();
+            defs
+        };
+        for def in defs {
+            let Ok(analyzer) = self.analyzer_for(&def) else { continue };
+            let index = self.sealed_index(tess, Index::with_analyzer(def.clone(), analyzer));
+            self.indexes.write().unwrap().by_tessellation.entry(tess.to_string()).or_default().push(index);
+            if let Err(e) = self.build_index(tess, &def.name).await {
+                tracing::error!("❌ Index '{}' on '{}' couldn't be rebuilt and is disabled until the next start: {:#}", def.name, tess, e);
+                self.remove_index_entry(tess, &def.name);
+                continue;
+            }
+            self.mark_ready(tess, &def.name);
+        }
     }
 
     /// The analyzer a text index uses (standard for field indexes).
@@ -198,7 +228,13 @@ impl HexDBEngine {
             return false;
         }
         let seq = snapshot.seq;
-        self.indexes.write().unwrap().by_tessellation.entry(tess.to_string()).or_default().push(Index::from_snapshot(snapshot, analyzer));
+        let snapshot_sealed = snapshot.sealed.clone();
+        let index = self.sealed_index(tess, Index::from_snapshot(snapshot, analyzer));
+        if index.sealed != snapshot_sealed {
+            // Which fields are sealed changed since the snapshot (roles changed).
+            return false;
+        }
+        self.indexes.write().unwrap().by_tessellation.entry(tess.to_string()).or_default().push(index);
         // Bring it up to date with every document written after the snapshot.
         let changed = self.sst.ids_changed_after(tess, seq).await;
         let mut applied = 0usize;
@@ -356,7 +392,7 @@ impl HexDBEngine {
         let (name, ordered) = {
             let indexes = self.indexes.read().unwrap();
             let Some(index) = indexes.by_tessellation.get(tess).and_then(|list| {
-                list.iter().find(|i| i.ready && i.def.kind == crate::index::IndexKind::Field && i.def.fields == [key.field.clone()])
+                list.iter().find(|i| i.usable() && i.def.kind == crate::index::IndexKind::Field && i.def.fields == [key.field.clone()])
             }) else {
                 return Ok(None);
             };

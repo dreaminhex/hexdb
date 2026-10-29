@@ -1018,6 +1018,7 @@ impl HexDBEngine {
         data.insert("key".into(), FieldValue::String(k.key.clone()));
         data.insert("fingerprint".into(), FieldValue::String(k.fingerprint.clone()));
         let mut result = serde_json::to_value(result)?;
+        self.seal_nested_documents(&mut result);
         if k.compact {
             // Documents keep their ID and metadata; their fields are dropped.
             if let Value::Array(items) = &mut result {
@@ -1111,6 +1112,9 @@ impl HexDBEngine {
             self.guard_file_writes(&mut items).await?;
             self.apply_schemas(&mut items).await?;
         }
+        // From here on, masked fields are sealed: in the WAL, the hex and the change feed.
+        self.seal_items(&mut items);
+        let roles_changed = items.iter().any(|i| i.key.tessellation == crate::users::ROLES_TESSELLATION);
         let user_writes = items.iter().filter(|i| i.key.tessellation != IDEMPOTENCY_TESSELLATION).count() as u64;
         let touched: Vec<String> = if replicated {
             Vec::new()
@@ -1228,6 +1232,9 @@ impl HexDBEngine {
         }
         self.changes.complete(first, count, changes);
         self.writes_total.fetch_add(user_writes, std::sync::atomic::Ordering::Relaxed);
+        if roles_changed {
+            self.refresh_seal_policy().await;
+        }
         if !replicated {
             let touched: Vec<&str> = touched.iter().map(String::as_str).collect();
             self.wait_for_acks(first + count - 1, &touched).await?;

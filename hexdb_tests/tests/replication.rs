@@ -177,3 +177,24 @@ fn schemas_and_indexes_reach_every_hex_promptly() -> Result<()> {
     assert_eq!(good.body["_schema"], 1, "stamped with the lattice's schema version: {}", good.body);
     Ok(())
 }
+
+#[test]
+fn sealed_fields_replicate_and_read_on_every_hex() -> Result<()> {
+    let ports = [TestServer::free_port()?, TestServer::free_port()?];
+    let overseer = TestServer::start_with(pair(ports, 0, 4096, ""))?;
+    let replica = TestServer::start_with(pair(ports, 1, 1024, ""))?;
+    let role = json!({ "name": "clerk", "permissions": ["read"], "restrictions": { "payments": { "mask": { "card": { "show_last": 4 } } } } });
+    let res = overseer.request(Method::POST, "/roles", Some(&role), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    let clerk = overseer.user_with_roles("cleo", json!([{ "name": "clerk", "tessellations": ["payments"] }]))?;
+    let id = overseer.insert("payments", &json!({ "card": "4111111111111111", "amount": 25 }))?;
+
+    // The replica receives the card sealed and opens it for reads; masks still apply per caller.
+    wait_until(Duration::from_secs(30), "the payment on the replica", || Ok(replica.get_doc("payments", &id)?.is_some()))?;
+    assert_eq!(replica.get_doc("payments", &id)?.unwrap()["card"], "4111111111111111");
+    let masked = replica.request_as(Some(&clerk), Method::GET, &format!("/payments/{}", id), None, &[])?;
+    assert_eq!(masked.body["card"], "************1111", "{}", masked.body);
+    let found = replica.request(Method::POST, "/payments/_query", Some(&json!({ "filter": { "card": "4111111111111111" } })), &[])?;
+    assert_eq!(found.body["documents"].as_array().map(Vec::len), Some(1), "{}", found.body);
+    Ok(())
+}

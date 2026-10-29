@@ -65,6 +65,12 @@ impl Change {
         }
     }
 
+    /// The changed document with its sealed fields open (the feed keeps
+    /// them sealed; see `crate::sealed`).
+    pub fn document_open(&self) -> Option<Document> {
+        self.document.as_ref().map(crate::sealed::unsealed)
+    }
+
     /// The change as the public API shows it (documents as plain JSON).
     pub fn to_api_json(&self) -> Value {
         let mut value = json!({
@@ -80,7 +86,7 @@ impl Change {
         if let Some(id) = self.id {
             value["id"] = Value::String(id.to_string());
         }
-        if let Some(doc) = &self.document {
+        if let Some(doc) = self.document_open() {
             value["document"] = doc.to_api_json();
         }
         value
@@ -181,6 +187,20 @@ impl ChangeFeed {
         }
         let start = inner.ring.partition_point(|c| c.seq <= after);
         Ok((inner.ring.iter().skip(start).cloned().collect(), receiver))
+    }
+
+    /// Replace the documents of kept changes (after the sealed fields
+    /// changed, see `crate::sealed`): `seal` returns a new document, or None
+    /// to keep one as it is.
+    pub(crate) fn reseal(&self, seal: impl Fn(&Document) -> Option<Document>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        for change in inner.ring.iter_mut() {
+            if let Some(doc) = change.document.as_ref().and_then(&seal) {
+                let mut updated = (**change).clone();
+                updated.document = Some(doc);
+                *change = Arc::new(updated);
+            }
+        }
     }
 
     /// Sequence number of the last published change position (everything up

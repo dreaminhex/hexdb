@@ -733,7 +733,12 @@ impl Follower {
             let mut recent = engine.recent_changes.lock().unwrap();
             for change in &batch.changes {
                 if change.id.is_some() && engine.is_sliced_tessellation(&change.tessellation) {
-                    recent.push(&session.source_id, change, limit);
+                    // Kept in memory: with its sealed fields sealed (see crate::sealed).
+                    let mut kept = change.clone();
+                    if let Some(doc) = &kept.document {
+                        kept.document = Some(engine.sealer.seal_document(doc, &engine.sealed_paths(&doc.tessellation)));
+                    }
+                    recent.push(&session.source_id, &kept, limit);
                 }
             }
         }

@@ -173,6 +173,10 @@ pub struct SecurityConfig {
     /// shown to anyone). Changing anything still needs an administrator.
     #[serde(default)]
     pub demo_mode: bool,
+    /// Let the operating system write a core dump if the server crashes. Off
+    /// by default: a dump holds the process's memory, keys included.
+    #[serde(default)]
+    pub core_dumps: bool,
 }
 
 fn default_audit_retention_days() -> u64 {
@@ -610,6 +614,7 @@ impl Default for HexConfig {
                 lockout_minutes: default_lockout_minutes(),
                 audit_retention_days: default_audit_retention_days(),
                 demo_mode: false,
+                core_dumps: false,
             },
             memory: MemoryConfig {
                 ram_mb: 1024,

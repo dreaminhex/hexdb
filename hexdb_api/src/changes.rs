@@ -88,9 +88,9 @@ fn render(engine: &HexDBEngine, principal: &Principal, change: &Change, tessella
         return None;
     }
     let mut json = change.to_api_json();
-    if let Some(doc) = &change.document {
+    if let Some(doc) = change.document_open() {
         let scope = principal.scope(&change.tessellation, hexdb_core::Action::Read);
-        if !scope.allows(doc) {
+        if !scope.allows(&doc) {
             return None;
         }
         if let Some(document) = json.get_mut("document") {

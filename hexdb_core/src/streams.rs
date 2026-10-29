@@ -459,7 +459,8 @@ async fn run_source(engine: Arc<HexDBEngine>, config: StreamConfig, index: usize
                 ChangeKind::DropTessellation => "",
             };
             let wanted_op = source.ops.is_empty() || source.ops.iter().any(|o| o == op);
-            let matches = match (&filter, &change.document) {
+            let document = change.document_open();
+            let matches = match (&filter, &document) {
                 (Some(f), Some(doc)) => f.matches(doc),
                 (Some(_), None) => false,
                 (None, _) => true,
@@ -472,7 +473,7 @@ async fn run_source(engine: Arc<HexDBEngine>, config: StreamConfig, index: usize
                 headers.insert("op".to_string(), op.to_string());
                 headers.insert("tessellation".to_string(), change.tessellation.clone());
                 headers.insert("seq".to_string(), change.seq.to_string());
-                let payload = change.document.as_ref().map(|d| d.to_api_json()).unwrap_or_else(|| json!({ "id": change.id.map(|i| i.to_string()) }));
+                let payload = document.as_ref().map(|d| d.to_api_json()).unwrap_or_else(|| json!({ "id": change.id.map(|i| i.to_string()) }));
                 pending.push(NewMessage { payload, key: change.id.map(|i| i.to_string()), headers });
             }
         }

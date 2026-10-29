@@ -24,6 +24,12 @@ impl Shard {
     }
 }
 
+/// Overwrite a shard's bytes before they're freed, so what a document held
+/// doesn't linger in freed memory.
+fn wipe(mut shard: Shard) {
+    zeroize::Zeroize::zeroize(&mut shard.bytes);
+}
+
 /// Represents a vertex in the hexagonal memory model.
 pub struct Vertex {
     pub id: usize,
@@ -51,6 +57,7 @@ impl Vertex {
         self.bytes += bytes.len();
         if let Some(old) = self.shards.insert(key.clone(), Shard::new(bytes)) {
             self.bytes -= old.bytes.len();
+            wipe(old);
         }
     }
 
@@ -69,6 +76,7 @@ impl Vertex {
     pub fn remove(&mut self, key: &DocKey) {
         if let Some(old) = self.shards.remove(key) {
             self.bytes -= old.bytes.len();
+            wipe(old);
         }
     }
 

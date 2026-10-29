@@ -141,7 +141,16 @@ impl<'de> Deserialize<'de> for Document {
         }
         let stored = Stored::deserialize(deserializer)?;
         let data = match (stored.json, stored.data) {
-            (Some(json), _) => infer_fields_from_json(&json),
+            (Some(mut json), _) => {
+                // Sealed fields (see crate::sealed) are opened as the document is read.
+                if crate::sealed::unseal_json(&stored.tessellation, &stored.id.to_string(), &mut json) {
+                    let data = infer_fields_from_json(&json);
+                    crate::sealed::wipe(json);
+                    data
+                } else {
+                    infer_fields_from_json(&json)
+                }
+            }
             (None, Some(data)) => data,
             (None, None) => CompactFields::new(),
         };

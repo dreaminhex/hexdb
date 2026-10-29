@@ -1666,6 +1666,16 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 - A stream can only be sourced from a tessellation the creator can read without restriction (a stream copies every change).
 - Administrators are never restricted, and restrictions apply to user tessellations only.
 
+**Masked fields in memory.** A field that any role masks usually holds something like a card or account number, so HexDB keeps its value sealed wherever documents stay in memory. That covers the hex's vertices (unflushed and recently read documents), the change feed's last 10,000 changes, a sliced replica's recent changes, idempotency records, and WAL records being written. A process memory dump shows ciphertext for these fields, not values.
+- Sealing is AES-256-GCM under a key derived from the lattice key, so every hex can open values sealed on another, and they replicate and back up sealed. Each value is bound to its tessellation, document ID and field path, so it can't be moved elsewhere. Sealed values are stored that way in the WAL and SSTables too, on top of the storage encryption.
+- Reading a document opens its sealed values for that request only, so filters, sorting, aggregation, SQL, GraphQL, MCP and administrators see real values, and masks apply per caller as above. The buffers that held a decrypted value are overwritten after use, and so are the hex's shards when a document is replaced or evicted. Copies a request makes while building its response aren't reached.
+- Documents of a tessellation with sealed fields aren't kept in the parsed-document cache, so reads of them parse and decrypt each time.
+- Indexes hold a keyed token instead of a sealed value. Unique indexes still work, but the planner doesn't use an index that covers a sealed field, so filters and sorts on it scan the tessellation. Text indexes leave sealed fields out; `$text` searches that cover them scan as well.
+- The sealed fields follow the roles: every path any role masks, per tessellation (`*` restrictions: every user tessellation). When a role's masks change, each hex reseals what it holds and rebuilds the affected indexes. Documents already on disk are sealed again as they're read into memory. Values sealed before a mask was removed stay readable and are written back as plain values with the document's next write.
+- `/status` lists the sealed fields under `memory_protection.sealed_fields`.
+
+**Core dumps.** A core dump holds the whole process memory, keys and open documents included. The server turns core dumps off at startup: `RLIMIT_CORE` is set to 0 on Unix, and on Linux the process is also made non-dumpable (`PR_SET_DUMPABLE`). systemd-coredump and other dump handlers respect that, and it also stops other processes of the same user from attaching a debugger. `/status` reports it as `memory_protection.core_dumps` (Linux; `null` elsewhere). `security.core_dumps = true` in `hexdb.toml` turns dumps back on, for debugging a crash. Windows writes full process dumps only when an administrator has configured Windows Error Reporting's LocalDumps for the server.
+
 ### The audit trail
 
 HexDB records security-relevant events as documents in the `_audit` system tessellation:
@@ -2228,6 +2238,7 @@ The tools are the same as the chat's, and all read-only: `list_tessellations`, `
 | `security.session_hours` | 12 | Session lifetime |
 | `security.max_failed_logins`, `lockout_minutes` | 5, 15 | Sign-in throttling |
 | `security.audit_retention_days` | 90 | Audit event lifetime (0: forever) |
+| `security.core_dumps` | false | Allow core dumps of the server (they hold its memory, keys included); see [masked fields in memory](#row-filters-and-field-masks) |
 | `security.demo_mode` | false | Every signed-in user can view (not change) the lattice configuration, and only administrators can change passwords or MFA; for public demos |
 | `tls.cert_file`, `key_file` | empty | PEM certificate chain and key; both set means HTTPS |
 | `tls.ca_file` | empty | Extra CAs trusted for other hexes |

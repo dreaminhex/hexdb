@@ -353,13 +353,14 @@ impl HexDBEngine {
         if event == "drop_tessellation" {
             return;
         }
+        let document = change.document_open();
         for trigger in self.triggers_on(&change.tessellation, Timing::After).await {
             // Deletes carry no document here, so a filtered after trigger doesn't see them.
-            if !trigger.applies(&change.tessellation, event, change.document.as_ref()) {
+            if !trigger.applies(&change.tessellation, event, document.as_ref()) {
                 continue;
             }
             let Some(id) = change.id else { continue };
-            let input = payload(&trigger, event, &change.tessellation, id, change.document.as_ref(), None, None);
+            let input = payload(&trigger, event, &change.tessellation, id, document.as_ref(), None, None);
             if let Err(e) = self.run_trigger(&trigger, input).await {
                 warn!("⚠️ Trigger '{}' failed on {} {} in '{}': {:#}", trigger.name, event, id, change.tessellation, e);
             }

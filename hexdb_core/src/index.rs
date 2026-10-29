@@ -225,6 +225,11 @@ pub(crate) struct Index {
     pub(crate) data: IndexData,
     /// False while the index is being built; the planner doesn't use it yet.
     pub(crate) ready: bool,
+    /// Sealed fields this index covers (see `crate::sealed`): a field index
+    /// holds a keyed token for their values, a text index leaves them out,
+    /// and the planner doesn't use the index.
+    pub(crate) sealed: Vec<String>,
+    tokens: Option<crate::sealed::Tokenizer>,
 }
 
 /// Bump when what an index stores for a document changes (keys or text
@@ -243,6 +248,9 @@ pub(crate) struct IndexSnapshot {
     /// A text index's analyzer pipeline when the snapshot was taken.
     #[serde(default)]
     pub analysis: String,
+    /// The sealed fields the index covered (tokens, not values).
+    #[serde(default)]
+    pub sealed: Vec<String>,
     data: SnapshotData,
 }
 
@@ -289,7 +297,7 @@ impl Index {
             }),
             IndexKind::Text => IndexData::Text(TextIndex { paths, analyzer, words: HashMap::new(), by_doc: HashMap::new() }),
         };
-        Index { def, data, ready: false }
+        Index { def, data, ready: false, sealed: Vec::new(), tokens: None }
     }
 
     /// The index's contents, for a snapshot.
@@ -302,7 +310,7 @@ impl Index {
             IndexData::Text(t) => t.analyzer.pipeline(),
             IndexData::Field(_) => String::new(),
         };
-        IndexSnapshot { version: SNAPSHOT_VERSION, tessellation: tessellation.to_string(), def: self.def.clone(), seq, analysis, data }
+        IndexSnapshot { version: SNAPSHOT_VERSION, tessellation: tessellation.to_string(), def: self.def.clone(), seq, analysis, sealed: self.sealed.clone(), data }
     }
 
     /// An index restored from a snapshot (not ready until it is caught up).
@@ -332,6 +340,48 @@ impl Index {
             _ => {}
         }
         index
+    }
+
+    /// Seal what this index covers of the sealed `paths` (an index is set up
+    /// before documents are added to it).
+    pub(crate) fn set_sealed(&mut self, paths: &[String], tokens: crate::sealed::Tokenizer) {
+        self.sealed = paths.iter().filter(|p| self.def.fields.iter().any(|f| crate::sealed::covers(f, p))).cloned().collect();
+        self.tokens = Some(tokens);
+    }
+
+    /// True if the planner may use this index.
+    pub(crate) fn usable(&self) -> bool {
+        self.ready && self.sealed.is_empty()
+    }
+
+    /// A document's fields as this index sees them: sealed values become
+    /// tokens (field index) or are left out (text index).
+    fn json_of(&self, doc: &Document) -> Value {
+        let mut json = doc.to_api_json();
+        if self.sealed.is_empty() {
+            return json;
+        }
+        let id = doc.id.to_string();
+        for path in &self.sealed {
+            let Some(slot) = path.split('.').try_fold(&mut json, |current, part| current.get_mut(part)) else { continue };
+            let plain = crate::sealed::open_value(&doc.tessellation, &id, path, slot);
+            *slot = match (&self.data, &self.tokens, plain) {
+                (_, _, Some(Value::Null)) => Value::Null,
+                (IndexData::Field(_), Some(tokens), Some(plain)) => {
+                    let token = Value::String(tokens.token(&plain));
+                    crate::sealed::wipe(plain);
+                    token
+                }
+                (IndexData::Field(_), _, None) => Value::String("sealed:unreadable".into()),
+                (_, _, plain) => {
+                    if let Some(plain) = plain {
+                        crate::sealed::wipe(plain);
+                    }
+                    Value::Null
+                }
+            };
+        }
+        json
     }
 
     pub(crate) fn info(&self) -> IndexInfo {
@@ -422,7 +472,7 @@ impl Index {
     /// Add (or replace) a document's entries.
     pub(crate) fn insert(&mut self, doc: &Document) {
         self.remove(&doc.id);
-        let json = doc.to_api_json();
+        let json = self.json_of(doc);
         let keys = self.keys_for(&json);
         match &mut self.data {
             IndexData::Field(f) => {
@@ -459,7 +509,7 @@ impl Index {
         if !f.unique {
             return None;
         }
-        for key in self.keys_for(&doc.to_api_json()) {
+        for key in self.keys_for(&self.json_of(doc)) {
             if key.iter().all(|k| *k == KeyPart::Null) {
                 continue;
             }
@@ -478,7 +528,7 @@ impl Index {
         if !f.unique {
             return Vec::new();
         }
-        self.keys_for(&doc.to_api_json())
+        self.keys_for(&self.json_of(doc))
             .into_iter()
             .filter(|k| !k.iter().all(|p| *p == KeyPart::Null))
             .map(|k| k.iter().map(|p| format!("{:?}", p)).collect())
@@ -534,7 +584,7 @@ fn plan_node(indexes: &[Index], node: &Node, used: &mut Vec<String>) -> Option<B
         Node::Field { path, ops } => {
             let field = path.join(".");
             let index = indexes.iter().find(|i| {
-                i.ready && i.def.kind == IndexKind::Field && i.def.fields.first() == Some(&field)
+                i.usable() && i.def.kind == IndexKind::Field && i.def.fields.first() == Some(&field)
             })?;
             let IndexData::Field(f) = &index.data else { return None };
             let mut best: Option<BTreeSet<Ulid>> = None;
@@ -552,7 +602,7 @@ fn plan_node(indexes: &[Index], node: &Node, used: &mut Vec<String>) -> Option<B
             best
         }
         Node::Text { terms, .. } => {
-            let index = indexes.iter().find(|i| i.ready && i.def.kind == IndexKind::Text)?;
+            let index = indexes.iter().find(|i| i.usable() && i.def.kind == IndexKind::Text)?;
             let IndexData::Text(t) = &index.data else { return None };
             used.push(index.def.name.clone());
             let mut result: Option<BTreeSet<Ulid>> = None;
@@ -586,7 +636,7 @@ fn composite_equality(indexes: &[Index], nodes: &[Node], used: &mut Vec<String>)
             }
         }
     }
-    let index = indexes.iter().filter(|i| i.ready && i.def.kind == IndexKind::Field && i.def.fields.len() > 1).find(|i| {
+    let index = indexes.iter().filter(|i| i.usable() && i.def.kind == IndexKind::Field && i.def.fields.len() > 1).find(|i| {
         i.def.fields.iter().all(|f| pinned.contains_key(f))
     })?;
     let IndexData::Field(f) = &index.data else { return None };

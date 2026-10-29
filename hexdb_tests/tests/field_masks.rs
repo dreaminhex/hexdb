@@ -95,3 +95,16 @@ fn masked_fields_read_masked_and_cannot_be_inferred_or_written() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn status_reports_the_sealed_fields() -> Result<()> {
+    let server = TestServer::start()?;
+    let role = json!({ "name": "clerk", "permissions": ["read"], "restrictions": { "payments": { "mask": { "card": {} } }, "*": { "mask": { "ssn": {} } } } });
+    assert!(server.request(Method::POST, "/roles", Some(&role), &[])?.status.is_success());
+    let status = server.request(Method::GET, "/status", None, &[])?.body;
+    assert_eq!(status["memory_protection"]["sealed_fields"], json!({ "payments": ["card"], "*": ["ssn"] }), "{}", status["memory_protection"]);
+    if cfg!(target_os = "linux") {
+        assert_eq!(status["memory_protection"]["core_dumps"], false, "core dumps are off by default");
+    }
+    Ok(())
+}
