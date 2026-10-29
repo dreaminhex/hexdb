@@ -1699,7 +1699,21 @@ Filters: `actor`, `action` (a value ending in `.` matches that area), `target`, 
 - Responses carry `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a Content Security Policy. The admin UI loads nothing from other origins.
 - API responses are `Cache-Control: no-store` (file content and thumbnails are `private` and revalidated with their ETag).
 - Stored files are served `inline` only for images (not SVG), audio, video, PDF and plain text, and otherwise as attachments; with `nosniff` and `default-src 'none'`, a stored HTML or SVG file can't run scripts.
-- No CORS headers are sent, so other sites can't read responses.
+- Other sites can't read responses unless their origin is listed in `cors.allowed_origins` (below).
+
+### Cross-origin requests (CORS)
+
+By default HexDB sends no CORS headers, so a page on another origin can't read its responses. To let your own web app call the API from the browser, list its origin in the lattice configuration:
+
+```bash
+hexdb config set cors.allowed_origins "https://app.example.com, http://localhost:5173"
+```
+
+- Each origin is `scheme://host[:port]` with no path; values are normalized as browsers send them (lowercase, no default port) and checked when saved. `*` allows every origin and can't be combined with others.
+- A listed origin gets `Access-Control-Allow-Origin` with its own value (and `Vary: Origin`); with `*`, the literal `*`. Responses also expose `ETag`, `Location`, `Retry-After`, `Content-Disposition`, `Content-Range`, `Last-Modified`, `Idempotent-Replayed`, `Upload-Offset` and the `X-HexDB-*` headers to the page.
+- Preflights (`OPTIONS` with `Access-Control-Request-Method`) are answered before authentication: 204 with the allowed methods (`GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`), the requested headers, and `Access-Control-Max-Age: 600`. From an origin that isn't allowed, they get 403 `cross_origin`.
+- Credentials are never allowed across origins (no `Access-Control-Allow-Credentials`), so the visitor's session cookie can't be used by another site, and cookie-authenticated changes still have to come from HexDB's own pages. A cross-origin app sends an API key or a session token as `Authorization: Bearer <token>`. An origin listed by name (not through `*`) may also call `POST /auth/login` with `"return_token": true` to sign a user in and get a token.
+- The setting is lattice-wide and takes effect on every hex within a second; change it on the Configuration page (Cross-origin access) too.
 
 ### Transport
 
@@ -2095,6 +2109,7 @@ hexdb config rollback 3 -m "bad key"
 | `ai.tagging.send` | `["metadata", "text"]` | What tagging sends: any of `metadata`, `text`, `thumbnail`, `image`, `video`, `pdf` |
 | `ai.tagging.video_frames` | 4 | With `video`: frames sent from each video |
 | `ai.video_thumbnails.enabled`, `frames` | false, 6 | The AI picks a video's thumbnail from this many frames |
+| `cors.allowed_origins` | empty | Origins whose pages may call the API from a browser, comma-separated, or `*` (see [CORS](#cross-origin-requests-cors)) |
 
 AI features only ever use the key entered here, for this lattice.
 

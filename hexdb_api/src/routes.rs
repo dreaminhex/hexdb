@@ -235,8 +235,9 @@ pub fn app_router(
     }
 
     // Layers run outside-in from the last one added: security headers, then
-    // the client address, then request logging, then the request timeout, then
-    // authentication, then forwarding writes to the Overseer (on replicas), then the route.
+    // the client address, then request logging, then CORS (preflights end
+    // there), then the request timeout, then authentication, then forwarding
+    // writes to the Overseer (on replicas), then the route.
     // Validated at startup (see main).
     let proxies = Arc::new(crate::client::TrustedProxies::parse(&engine.config.network.trusted_proxies).unwrap_or_default());
     let timeout = std::time::Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1));
@@ -245,6 +246,7 @@ pub fn app_router(
         .layer(middleware::from_fn_with_state(engine.clone(), crate::forward::forward_writes))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::authenticate))
         .layer(middleware::from_fn_with_state(timeout, crate::server::request_timeout))
+        .layer(middleware::from_fn_with_state(engine.clone(), crate::cors::cors))
         .layer(middleware::from_fn_with_state(engine.clone(), log_request))
         .layer(middleware::from_fn_with_state((proxies, engine.clone()), crate::client::resolve_client))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::security_headers))

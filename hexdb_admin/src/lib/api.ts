@@ -500,7 +500,7 @@ export interface Setting {
 export interface ConfigDef {
   key: string
   kind:
-    | { type: "text" | "url" | "secret" | "boolean" }
+    | { type: "text" | "url" | "origins" | "secret" | "boolean" }
     | { type: "integer"; min: number; max: number }
     | { type: "choice" | "set"; choices: string[] }
   description: string

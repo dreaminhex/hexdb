@@ -161,7 +161,7 @@ function SettingInput({
     <Input
       className="h-8 w-64"
       type={kind.type === "url" ? "url" : "text"}
-      placeholder={kind.type === "url" ? "https://…" : ""}
+      placeholder={kind.type === "url" ? "https://…" : kind.type === "origins" ? "https://app.example.com, …" : ""}
       value={String(current ?? "")}
       onChange={(e) => onChange(e.target.value)}
       aria-label={def.key}
@@ -587,6 +587,7 @@ export function ConfigurationPage() {
         {section("AI", "AI features use this lattice's own provider and key, never anyone else's. Everything is off until you turn it on.", "ai.")}
         {section("Quotas", "How much each user may upload. A user's own quota (Users page) comes first; 0 means no limit.", "quotas.")}
         {section("Sharing", "Links that give people without an account a file or a folder (users with the share permission make them on the Files page).", "sharing.")}
+        {section("Cross-origin access", "Web apps on other sites that may call the API from a browser, with an API key or bearer token of their own.", "cors.")}
       </fieldset>
       <AiCard refreshKey={historyKey} readOnly={readOnly} />
       <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} readOnly={readOnly} />

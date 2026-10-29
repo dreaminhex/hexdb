@@ -71,6 +71,8 @@ pub enum ConfigKind {
     Choice { choices: &'static [&'static str] },
     /// Any of these (a list without repeats).
     Set { choices: &'static [&'static str] },
+    /// Web origins (`https://app.example.com`), comma-separated, or `*`.
+    Origins,
 }
 
 /// One configurable setting.
@@ -128,6 +130,7 @@ pub const CONFIG: &[ConfigDef] = &[
     def("sharing.default_days", ConfigKind::Integer { min: 0, max: 3650 }, "7", "Days a new link lasts when its maker doesn't say (0: no expiry, if sharing.max_days allows it)."),
     def("sharing.max_days", ConfigKind::Integer { min: 0, max: 3650 }, "30", "Longest a link may last, in days (0: links may never expire)."),
     def("sharing.require_password", ConfigKind::Boolean, "false", "Every new link needs a password."),
+    def("cors.allowed_origins", ConfigKind::Origins, "\"\"", "Web pages on other origins that may call the API from a browser, comma-separated (e.g. https://app.example.com), or * for any. They sign in with an API key or a bearer token; the session cookie never works across origins. Empty: none."),
     def("ai.chat.enabled", ConfigKind::Boolean, "false", "Let users with the chat permission ask the AI about the data they can read (the admin UI's Ask page and POST /ai/chat)."),
     text("ai.chat.model", "Model for the chat (empty: ai.model). A smaller, cheaper model is usually enough, e.g. claude-haiku-5-5."),
     def("ai.chat.max_tokens_per_answer", ConfigKind::Integer { min: 64, max: 16_000 }, "1024", "Most tokens one chat answer may use."),
@@ -180,6 +183,26 @@ pub fn validate(def: &ConfigDef, value: &Value) -> Result<Value> {
             }
             Ok(Value::String(s.trim_end_matches('/').to_string()))
         }
+        ConfigKind::Origins => {
+            let s = value.as_str().ok_or_else(|| invalid(format!("{} must be a string.", key)))?;
+            let mut origins: Vec<String> = Vec::new();
+            for item in s.split(|c: char| c == ',' || c.is_whitespace()).filter(|i| !i.is_empty()) {
+                let origin = normalize_origin(item).ok_or_else(|| {
+                    invalid(format!("{} must list origins as scheme://host[:port] with no path (e.g. https://app.example.com), or be *.", key))
+                })?;
+                if !origins.contains(&origin) {
+                    origins.push(origin);
+                }
+            }
+            if origins.len() > 1 && origins.iter().any(|o| o == "*") {
+                return Err(invalid(format!("{}: * already allows every origin; list nothing else with it.", key)));
+            }
+            let joined = origins.join(", ");
+            if joined.len() > MAX_TEXT {
+                return Err(invalid(format!("{} must be at most {} characters.", key, MAX_TEXT)));
+            }
+            Ok(Value::String(joined))
+        }
         ConfigKind::Boolean => value.as_bool().map(Value::Bool).ok_or_else(|| invalid(format!("{} must be true or false.", key))),
         ConfigKind::Integer { min, max } => {
             let n = value.as_i64().ok_or_else(|| invalid(format!("{} must be a whole number.", key)))?;
@@ -207,6 +230,42 @@ pub fn validate(def: &ConfigDef, value: &Value) -> Result<Value> {
             Ok(Value::Array(choices.iter().filter(|c| seen.contains(*c)).map(|c| Value::String(c.to_string())).collect()))
         }
     }
+}
+
+/// A web origin as browsers send it (`scheme://host[:port]`, lowercase, no
+/// default port), or `*`. None if `item` isn't one.
+pub fn normalize_origin(item: &str) -> Option<String> {
+    if item == "*" {
+        return Some(item.to_string());
+    }
+    let item = item.trim_end_matches('/').to_ascii_lowercase();
+    let (scheme, authority) = item.split_once("://")?;
+    if !matches!(scheme, "http" | "https") || authority.is_empty() {
+        return None;
+    }
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(rest) => {
+            let (inner, after) = rest.split_once(']')?;
+            inner.parse::<std::net::Ipv6Addr>().ok()?;
+            (format!("[{}]", inner), if after.is_empty() { None } else { Some(after.strip_prefix(':')?.parse::<u16>().ok()?) })
+        }
+        None => {
+            let (host, port) = match authority.split_once(':') {
+                Some((host, port)) => (host, Some(port.parse::<u16>().ok()?)),
+                None => (authority, None),
+            };
+            let label_ok = |l: &str| !l.is_empty() && l.len() <= 63 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+            if host.len() > 253 || !host.split('.').all(label_ok) {
+                return None;
+            }
+            (host.to_string(), port)
+        }
+    };
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    Some(match port {
+        Some(p) if p != default_port => format!("{}://{}:{}", scheme, host, p),
+        _ => format!("{}://{}", scheme, host),
+    })
 }
 
 /// True for the well-known cloud instance metadata endpoints (they hand out
@@ -859,6 +918,19 @@ mod tests {
             assert_eq!(validate(d, &d.default_value()).unwrap(), d.default_value(), "{}", d.key);
         }
         assert!(definition("file_storage.backend").is_none(), "remote storage settings were removed");
+    }
+
+    #[test]
+    fn origins_are_normalized_as_browsers_send_them() {
+        let cors = definition("cors.allowed_origins").unwrap();
+        let ok = |v: &str| validate(cors, &json!(v)).unwrap();
+        assert_eq!(ok(""), json!(""));
+        assert_eq!(ok("*"), json!("*"));
+        assert_eq!(ok("HTTPS://App.Example.com/, http://localhost:5173 https://app.example.com:443"), json!("https://app.example.com, http://localhost:5173"));
+        assert_eq!(ok("http://[::1]:8080,http://127.0.0.1"), json!("http://[::1]:8080, http://127.0.0.1"));
+        for bad in ["app.example.com", "https://app.example.com/path", "ftp://x.com", "https://user@x.com", "https://x.com:99999", "*, https://x.com", "https://[zz]", "https://a..b"] {
+            assert!(validate(cors, &json!(bad)).is_err(), "{}", bad);
+        }
     }
 
     #[test]

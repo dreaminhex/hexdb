@@ -168,8 +168,10 @@ pub async fn authenticate(State(engine): State<Arc<HexDBEngine>>, mut request: R
     // names the replica, not this hex.
     let forwarded = request.extensions().get::<crate::forward::Forwarded>().is_some();
 
-    // A cross-site page must not be able to sign a browser in (login CSRF).
-    if path == "/auth/login" && headers.get(header::ORIGIN).is_some() && !same_origin(headers) {
+    // A cross-site page must not be able to sign a browser in (login CSRF),
+    // unless an administrator listed its origin in cors.allowed_origins.
+    let foreign_origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).filter(|_| !same_origin(headers));
+    if path == "/auth/login" && foreign_origin.is_some_and(|o| !crate::cors::AllowedOrigins::from_engine(&engine).lists(o)) {
         return ApiError::new(StatusCode::FORBIDDEN, "cross_origin", "Cross-origin sign-in is not allowed.").into_response();
     }
 
