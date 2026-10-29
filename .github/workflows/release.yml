@@ -301,65 +301,12 @@ jobs:
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
 
   apt:
+    # The packages come from the published release (see apt-repo.yml, which can also be run by hand).
     needs: [deb, publish]
-    runs-on: ubuntu-latest
-    env:
-      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/download-artifact@v8
-        if: env.APT_GPG_PRIVATE_KEY != ''
-        with:
-          pattern: deb-*
-          path: debs
-          merge-multiple: true
-      - name: Update the APT repository on the gh-pages branch
-        if: env.APT_GPG_PRIVATE_KEY != ''
-        run: |
-          set -euo pipefail
-          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
-          key=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ { print $5; exit }')
-          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase "${APT_GPG_PASSPHRASE:-}" -u "$key" "$@"; }
-
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if ! git clone --depth 1 --branch gh-pages "$remote" site 2>/dev/null; then
-            mkdir site && git -C site init -b gh-pages && git -C site remote add origin "$remote"
-          fi
-          cd site
-          touch .nojekyll
-          pool=apt/pool/main/h/hexdb
-          mkdir -p "$pool"
-          cp ../debs/*.deb "$pool/"
-          # Keep the five newest versions.
-          (cd "$pool" && printf '%s\n' hexdb_*.deb | sed -E 's/^hexdb_([^_]+)_.*/\1/' | sort -uV | head -n -5 | while read -r v; do rm -f "hexdb_${v}_"*.deb; done)
-
-          cd apt
-          for arch in amd64 arm64; do
-            mkdir -p "dists/stable/main/binary-$arch"
-            apt-ftparchive --arch "$arch" packages pool > "dists/stable/main/binary-$arch/Packages"
-            gzip -9kf "dists/stable/main/binary-$arch/Packages"
-          done
-          apt-ftparchive \
-            -o APT::FTPArchive::Release::Origin=HexDB \
-            -o APT::FTPArchive::Release::Label=HexDB \
-            -o APT::FTPArchive::Release::Suite=stable \
-            -o APT::FTPArchive::Release::Codename=stable \
-            -o "APT::FTPArchive::Release::Architectures=amd64 arm64" \
-            -o APT::FTPArchive::Release::Components=main \
-            -o "APT::FTPArchive::Release::Description=HexDB packages" \
-            release dists/stable > dists/stable/Release
-          sign --clearsign -o dists/stable/InRelease dists/stable/Release
-          sign -abs -o dists/stable/Release.gpg dists/stable/Release
-          gpg --export "$key" > hexdb.gpg
-          gpg --armor --export "$key" > hexdb.asc
-          cd ..
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "APT repository: HexDB ${GITHUB_REF_NAME}"
-          git push origin gh-pages
+    uses: ./.github/workflows/apt-repo.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
 
   homebrew:
     needs: publish

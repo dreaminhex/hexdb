@@ -1,0 +1,87 @@
+name: APT repository
+
+# Adds a release's .deb packages to the signed APT repository on the gh-pages
+# branch (served at https://dreaminhex.github.io/hexdb/apt). The release
+# workflow calls it after publishing; run it by hand (Actions > APT repository
+# > Run workflow) to redo a release's packages. Needs APT_GPG_PRIVATE_KEY
+# (+ APT_GPG_PASSPHRASE); skipped without it.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag, e.g. v2.2.0
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag, e.g. v2.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  apt:
+    runs-on: ubuntu-latest
+    env:
+      APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+      APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Update the APT repository on the gh-pages branch
+        if: env.APT_GPG_PRIVATE_KEY != ''
+        run: |
+          set -euo pipefail
+          # apt-ftparchive is in apt-utils, which runner images no longer include.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apt-utils
+          mkdir debs
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.deb' --dir debs
+          ls debs/*.deb
+
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          key=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ { print $5; exit }')
+          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase "${APT_GPG_PASSPHRASE:-}" -u "$key" "$@"; }
+
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if ! git clone --depth 1 --branch gh-pages "$remote" site 2>/dev/null; then
+            mkdir site && git -C site init -b gh-pages && git -C site remote add origin "$remote"
+          fi
+          cd site
+          touch .nojekyll
+          pool=apt/pool/main/h/hexdb
+          mkdir -p "$pool"
+          cp ../debs/*.deb "$pool/"
+          # Keep the five newest versions.
+          (cd "$pool" && printf '%s\n' hexdb_*.deb | sed -E 's/^hexdb_([^_]+)_.*/\1/' | sort -uV | head -n -5 | while read -r v; do rm -f "hexdb_${v}_"*.deb; done)
+
+          cd apt
+          for arch in amd64 arm64; do
+            mkdir -p "dists/stable/main/binary-$arch"
+            apt-ftparchive --arch "$arch" packages pool > "dists/stable/main/binary-$arch/Packages"
+            gzip -9kf "dists/stable/main/binary-$arch/Packages"
+          done
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=HexDB \
+            -o APT::FTPArchive::Release::Label=HexDB \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o "APT::FTPArchive::Release::Architectures=amd64 arm64" \
+            -o APT::FTPArchive::Release::Components=main \
+            -o "APT::FTPArchive::Release::Description=HexDB packages" \
+            release dists/stable > dists/stable/Release
+          sign --clearsign -o dists/stable/InRelease dists/stable/Release
+          sign -abs -o dists/stable/Release.gpg dists/stable/Release
+          gpg --export "$key" > hexdb.gpg
+          gpg --armor --export "$key" > hexdb.asc
+          cd ..
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "APT repository: HexDB ${TAG}"
+          git push origin gh-pages

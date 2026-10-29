@@ -48,7 +48,7 @@ The workflow pushes `ghcr.io/dreaminhex/hexdb` with the tags `v1.0.1`, `1.0.1` a
 
 ### APT repository
 
-The `apt` job signs a repository and pushes it to the `gh-pages` branch, served by GitHub Pages at https://dreaminhex.github.io/hexdb/apt.
+The `apt` job ([apt-repo.yml](../.github/workflows/apt-repo.yml)) adds the release's `.deb` packages to a signed repository and pushes it to the `gh-pages` branch, served by GitHub Pages at https://dreaminhex.github.io/hexdb/apt. If it fails, fix it and run **Actions > APT repository > Run workflow** with the release's tag: it takes the packages from the published release, so the release doesn't have to run again.
 
 1. Create a signing key, on any machine with GnuPG (Git Bash has `gpg`):
 
