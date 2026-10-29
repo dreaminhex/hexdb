@@ -21,6 +21,7 @@ pub mod tasks;
 pub mod runtime;
 pub mod crashes;
 pub mod users;
+pub mod recovery;
 pub mod audit;
 pub mod mfa;
 pub mod settings;

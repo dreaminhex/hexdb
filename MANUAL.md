@@ -132,6 +132,18 @@ The CLI sends `--token` (or `HEXDB_TOKEN`) only over HTTPS or to this machine (`
 
 With no users, the first start creates the administrator named by `security.admin_login` (default `hexdbadmin`). If `security.admin_password` is empty (recommended), HexDB generates a password, prints it once on the console, and writes it to `initial-admin-password.txt` in the data directory, readable by the owner only. It's never written to the log. Sign in, change the password on the Account page, and delete the file.
 
+### A forgotten password
+
+An administrator resets another user's password, unlocks the account or turns off its MFA on the Users page. When the administrator's own password is lost, reset it from the server's machine:
+
+```bash
+hexdb reset-password                    # the user named by security.admin_login
+hexdb reset-password --login alice      # another user
+hexdb reset-password --mfa-off          # also turn off MFA (lost authenticator and backup codes)
+```
+
+The CLI generates a new password, prints it, and leaves a request holding only its Argon2 hash in the storage folder (`reset-password.request`). The running server takes the request within two seconds and answers in `reset-password.result`; if the server isn't running, the next start applies it. The reset unlocks the account, clears its failed sign-ins, signs out all its sessions, and is recorded in the audit trail as `user.password_recovered` (client `local`). Nothing else can start a reset: it needs write access to the storage folder, which already holds the data and is readable only by the server's account, so run the CLI as that account or as an administrator of the machine, with the server's configuration (`--config`). In a lattice, run it on the Overseer's machine; on a replica it answers with the Overseer's address. In Docker: `docker exec -u hexdb <container> hexdb reset-password`.
+
 ### Docker
 
 The [Dockerfile](Dockerfile) builds an image with the server, the CLI, the admin UI, and Python and Node.js for script functions. HexDB runs as the unprivileged user `hexdb`: the entrypoint starts as root only to give the data volume to `hexdb` (some platforms, Fly.io among them, create volumes owned by root), then drops to it. Started with `--user`, it runs as that user. On Fly.io it sets `network.advertise_host` to the machine's private address (`<machine>.vm.<app>.internal`) unless you set it. Configuration lives in `/etc/hexdb/hexdb.toml` ([docker/hexdb.toml](docker/hexdb.toml)) and data in the volume `/var/lib/hexdb`.
@@ -1934,6 +1946,7 @@ A document in memory takes about 1.5 times its JSON size: four data fragments pl
 ├── query-stats.hxe            the query advisor's statistics (sealed)
 ├── hexdb.pid                  the running server's PID, endpoint and shutdown token (owner-only)
 ├── initial-admin-password.txt only until you delete it
+├── reset-password.request     a waiting `hexdb reset-password` (the new password's hash), and its .result
 ├── wal/
 │   ├── <first-seq>.wal        active write-ahead log segments
 │   └── archive/<first-seq>.wal  the change history

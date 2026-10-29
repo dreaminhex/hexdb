@@ -265,6 +265,7 @@ hexdb stop [--force]             stop it gracefully
 hexdb health                     is it up?
 hexdb status                     status and metrics (needs HEXDB_TOKEN)
 hexdb secret                     print a new random key
+hexdb reset-password [--login L] a new password for a forgotten admin login (on the server's machine)
 hexdb backup [--name N] [--list] back up the running server (needs HEXDB_TOKEN)
 hexdb sql "SELECT ..." [-p V]   run a SQL query and print a table (needs HEXDB_TOKEN)
 hexdb put|get|ls TESS ...        upload, download and list files (needs HEXDB_TOKEN)

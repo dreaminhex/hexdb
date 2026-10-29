@@ -47,6 +47,11 @@ pub fn verify_hash(input: &str, hash: &str) -> bool {
     !hash.is_empty() && Argon2::default().verify_password(input.as_bytes(), hash).is_ok()
 }
 
+/// True if `hash` is an Argon2 PHC string, as `create_hash` makes.
+pub fn is_hash(hash: &str) -> bool {
+    PasswordHash::new(hash).is_ok_and(|h| h.algorithm.as_str().starts_with("argon2"))
+}
+
 /// `count` random bytes from the operating system's CSPRNG.
 pub fn random_bytes(count: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; count];

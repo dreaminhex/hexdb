@@ -82,6 +82,15 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Give a user (the first administrator by default) a new password, from the server's machine
+    ResetPassword {
+        /// The user's login. Defaults to security.admin_login from the config.
+        #[arg(short, long)]
+        login: Option<String>,
+        /// Also turn off the user's MFA (lost authenticator and backup codes)
+        #[arg(long)]
+        mfa_off: bool,
+    },
     /// Check server health
     Health {
         /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
@@ -359,6 +368,7 @@ async fn main() -> Result<()> {
             supervise::supervise(&server, config.source.as_deref(), &config.storage_dir(), &log).await
         }
         Commands::Stop { timeout, force } => stop(config_path, Duration::from_secs(timeout), force).await,
+        Commands::ResetPassword { login, mfa_off } => reset_password(config_path, login, mfa_off).await,
         Commands::Health { url } => {
             let (base, config) = base_url(config_path, url)?;
             println!("{}", pretty(&get_text(&config, &base, "/health", token).await?));
@@ -612,6 +622,56 @@ async fn start(config_path: Option<&Path>, silent: bool, server_bin: Option<Path
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+/// Generate a new password, leave its hash in the storage folder for the
+/// server, and wait for the server's answer.
+async fn reset_password(config_path: Option<&Path>, login: Option<String>, mfa_off: bool) -> Result<()> {
+    use hexdb_core::recovery;
+    let config = load(config_path)?;
+    let storage_dir = config.storage_dir();
+    if !storage_dir.is_dir() {
+        bail!("{} doesn't exist. Run this on the server's machine, with its configuration (--config).", storage_dir.display());
+    }
+    let login = login.unwrap_or_else(|| config.security.admin_login.clone());
+    let (request, password) = recovery::ResetRequest::generate(&login, mfa_off);
+    recovery::write_request(&storage_dir, &request)?;
+    let done = |login: &str| {
+        println!("  login:    {}", login);
+        println!("  password: {}", password);
+        println!("Sign in and change it.");
+    };
+
+    // A Windows service's runtime file is private to its account: unknown counts as maybe running.
+    let running = match RuntimeInfo::read(&storage_dir) {
+        Ok(Some(info)) => platform::process_alive(info.pid) && is_same_server(&info),
+        Ok(None) => false,
+        Err(_) => true,
+    };
+    if running {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if let Some(result) = recovery::take_result(&storage_dir)? {
+                if let Some(error) = result.error {
+                    bail!("The server refused the reset: {}", error);
+                }
+                println!("The password was reset and the user's sessions signed out{}.", if mfa_off { "; MFA is off" } else { "" });
+                done(&result.login);
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        println!("The server hasn't taken the request yet (a hex still in its first election takes it after).");
+    } else {
+        println!("HexDB isn't running.");
+    }
+    println!(
+        "This password takes effect when the server takes {}{}:",
+        recovery::request_path(&storage_dir).display(),
+        if mfa_off { ", with MFA turned off" } else { "" }
+    );
+    done(&request.login);
+    Ok(())
 }
 
 async fn stop(config_path: Option<&Path>, timeout: Duration, force: bool) -> Result<()> {

@@ -376,6 +376,34 @@ pub async fn change_own_password(engine: &HexDBEngine, user_id: &str, current: &
     Ok(())
 }
 
+/// Set a user's password from `hexdb reset-password` (see `crate::recovery`),
+/// which only someone with access to the server's storage folder can ask for.
+/// The CLI generated the password and sends its Argon2 hash. Unlocks the
+/// account, signs it out everywhere and, with `turn_off_mfa`, removes its
+/// authenticator and backup codes. Returns the login as stored.
+pub async fn recover_password(engine: &HexDBEngine, login: &str, password_hash: &str, turn_off_mfa: bool) -> Result<String> {
+    if !crate::crypt::is_hash(password_hash) {
+        return Err(invalid("the request's password hash is not an Argon2 hash."));
+    }
+    engine.ensure_writable()?;
+    let _lock = engine.users_lock.lock().await;
+    let (id, mut user) = find_user(engine, login).await?.ok_or_else(|| not_found(login))?;
+    let now = Utc::now();
+    user.password_hash = password_hash.to_string();
+    user.last_password_change = now.timestamp();
+    user.password_attempts = 0;
+    user.is_locked = false;
+    user.sessions_valid_after = now.timestamp_millis();
+    if turn_off_mfa {
+        user.use_mfa = false;
+        user.mfa_secret = None;
+        user.mfa_pending_secret = None;
+        user.mfa_backup_codes.clear();
+    }
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    Ok(user.login)
+}
+
 // ---------------------------------------------------------------------------
 // Multi-factor authentication (see crate::mfa)
 // ---------------------------------------------------------------------------
