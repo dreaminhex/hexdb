@@ -102,6 +102,20 @@ pub fn tools() -> Vec<AiTool> {
             ),
         ),
         tool(
+            "similar",
+            "Find the documents whose meaning is closest to a text (semantic search), in a tessellation with a vector index (describe_tessellation lists it). Best match first, each with a _score; at most 25.",
+            schema(
+                json!({
+                    "tessellation": tess,
+                    "text": { "type": "string", "description": "What to look for, in plain words." },
+                    "field": { "type": "string", "description": "The vector field, when the tessellation has more than one vector index." },
+                    "filter": filter,
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 25 }
+                }),
+                &["tessellation", "text"],
+            ),
+        ),
+        tool(
             "sql",
             "Run a read-only SQL SELECT on one tessellation, e.g. SELECT country, SUM(total) AS revenue FROM orders GROUP BY country ORDER BY revenue DESC LIMIT 10.",
             schema(json!({ "query": { "type": "string" } }), &["query"]),
@@ -242,6 +256,46 @@ async fn run_tool(engine: &HexDBEngine, principal: &Principal, name: &str, input
                 Value::Array(page.documents.iter().map(|d| hexdb_core::project(&d.to_api_json(), &fields)).collect())
             };
             Ok(json!({ "documents": documents, "total": page.total }))
+        }
+        "similar" => {
+            let tess = text_arg(input, "tessellation")?;
+            readable(principal, engine, tess)?;
+            let vector_fields: Vec<String> = engine
+                .list_indexes(tess)
+                .into_iter()
+                .filter(|i| i.def.kind == hexdb_core::IndexKind::Vector)
+                .map(|i| i.def.fields[0].clone())
+                .collect();
+            let field = match input.get("field").and_then(Value::as_str) {
+                Some(f) => f.to_string(),
+                None if vector_fields.len() == 1 => vector_fields[0].clone(),
+                None if vector_fields.is_empty() => return Err(format!("'{}' has no vector index, so it can't be searched by meaning; use search or query.", tess)),
+                None => return Err(format!("'{}' has several vector indexes; name one as field: {}.", tess, vector_fields.join(", "))),
+            };
+            let query = hexdb_core::engine::SimilarQuery {
+                field,
+                vector: None,
+                text: Some(text_arg(input, "text")?.to_string()),
+                k: limit_arg(input),
+                min_score: None,
+                filter: Some(filter_arg(input)?),
+            };
+            let page = engine.similar_documents(tess, &query).await.map_err(err)?;
+            // The vectors themselves mean nothing to a reader; leave them out.
+            let documents: Vec<Value> = page
+                .documents
+                .iter()
+                .map(|d| {
+                    let mut json = d.to_api_json();
+                    if let Value::Object(map) = &mut json {
+                        for f in &vector_fields {
+                            map.remove(f.split('.').next().unwrap_or_default());
+                        }
+                    }
+                    json
+                })
+                .collect();
+            Ok(json!({ "documents": documents }))
         }
         "get_document" => {
             let tess = text_arg(input, "tessellation")?;

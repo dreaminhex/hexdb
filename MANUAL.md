@@ -717,6 +717,7 @@ Indexes speed up filtered queries, counts, aggregations and `_update`. They neve
 | --- | --- | --- |
 | Field | One field or several (composite), optionally `unique` | Equality, `$in`, ranges and `$startsWith` on the first field; equality on all fields together. Array values index each element |
 | Text | One or more string fields, with an analyzer; at most one per tessellation | `$text` |
+| Vector | One field holding a vector (an array of numbers), optionally filled from source fields by the embeddings provider | Similarity searches (`near`); see [Vector search](#vector-search) |
 
 ```bash
 curl -X POST http://localhost:7700/tessellations/orders/indexes -H "Content-Type: application/json" -d '{ "fields": ["status"] }'
@@ -734,6 +735,34 @@ Creating an index builds it from every document before the request returns. A wr
 - Definitions are stored in the encrypted catalog. Contents live in memory.
 - After each flush and at shutdown, each index is saved as an encrypted snapshot (`indexes/<tess>/<name>.hxi`) with the sequence number it reflects. At startup the snapshot is loaded and brought up to date from SSTables written after it. An index without a usable snapshot is rebuilt from every document.
 - Indexes replicate as definitions; each hex maintains its own contents.
+
+### Vector search
+
+A vector index finds the documents most similar in meaning to a piece of text or to a vector: semantic search over documents, and retrieval for the AI chat, MCP and A2A. It's an index type, not a separate store, so searches see the same documents, permissions, row filters and field masks as every other query.
+
+```bash
+# Vectors you compute yourself (any model): an array of numbers in a field.
+curl -X POST http://localhost:7700/tessellations/articles/indexes -H "Content-Type: application/json" \
+  -d '{ "kind": "vector", "fields": ["embedding"], "dimensions": 1536 }'
+
+# Or let HexDB embed source fields with the lattice's embeddings provider.
+hexdb config set ai.embeddings.provider voyage
+hexdb config set ai.embeddings.api_key            # prompts
+curl -X POST http://localhost:7700/tessellations/articles/indexes -H "Content-Type: application/json" \
+  -d '{ "kind": "vector", "fields": ["embedding"], "source": ["title", "body"] }'
+
+# The 5 articles nearest to a text (or "vector": [...]), among published ones.
+curl -X POST http://localhost:7700/articles/_query -H "Content-Type: application/json" \
+  -d '{ "filter": { "status": "published" }, "near": { "field": "embedding", "text": "storage engines for edge devices", "k": 5 } }'
+```
+
+- **Definition.** `kind: "vector"`, one field, and optionally `dimensions` (1-4096; otherwise the first vector stored sets it), `metric` (`cosine`, the default, or `dot`) and `source` (up to 8 fields to embed). A vector is an array of numbers, or an object with one under `vector`. Vectors of the wrong size aren't indexed. The index holds 4 bytes per dimension per document in memory.
+- **Searching.** `POST /{tessellation}/_query` with `near: { field, vector | text, k, min_score }` returns the `k` (1-100, default 10) nearest documents that match `filter`, best first, each with `_score` (cosine similarity, -1 to 1, or the dot product). It takes no `sort`, `limit`, `offset` or `after`; `fields` works. GraphQL has `similar(tessellation, field, text | vector, k, minScore, filter)`, and the AI tools have `similar` (chat, MCP and A2A answer "find notes about ..." by meaning). `_score` is ignored when a document is written back. SQL doesn't search by similarity yet.
+- **How it searches.** Up to 2,000 vectors, every vector is scored (exact). Beyond that, an HNSW graph (16 links per vector, 32 on the bottom layer) finds the nearest. The search widens until `k` documents pass the filter and the caller's row filter, or every vector has been considered, so restrictive filters stay correct but cost more. Removed vectors are skipped, and the graph is rebuilt once they outnumber the live ones. Snapshots and startup work as for other indexes.
+- **Auto-embedding.** With `source`, a write whose source text changed queues the document. On the Overseer, a background task embeds the queue in batches of 64 and writes `{"vector": [...], "model": "...", "source_hash": "..."}` into the field, as a guarded update: a document changed meanwhile is embedded again. Writes that leave the source text alone cost nothing, and vectors a client writes as plain arrays are kept. Changing `ai.embeddings.model` rebuilds these indexes and re-embeds every document. `/status` shows `embeddings`: the model, documents waiting, and the last error (failures retry every minute). Text is cut to 16,000 characters per document.
+- **Searching by text** embeds the text first (`ai.embeddings.*`). The asking user's tokens count against `ai.embeddings.user_daily_tokens` (200,000 a day by default), and every embedding counts against the monthly budget (`ai.monthly_token_budget`, as `embeddings` and `embeddings.query`).
+- **Providers.** `ai.embeddings.provider` is `same` (the chat provider and its key), `openai`, `voyage`, `azure_openai`, `github`, `openai_compatible` (Ollama, LM Studio, vLLM) or `none`. Anthropic has no embeddings API; with Claude for chat, use Voyage AI (Anthropic's recommended embeddings provider). Default models: `text-embedding-3-small` (OpenAI, GitHub Models) and `voyage-3.5` (Voyage). Others need `ai.embeddings.model` and, for Azure and OpenAI-compatible servers, `ai.embeddings.base_url`.
+- **Privacy.** Auto-embedding sends the source fields' text to the embeddings provider, so choose source fields accordingly. A vector field covered by a mask is sealed like any masked field and not indexed, and a caller can't search a field hidden from or masked for them.
 
 ### The query advisor
 
@@ -2119,6 +2148,9 @@ hexdb config rollback 3 -m "bad key"
 | `ai.tagging.send` | `["metadata", "text"]` | What tagging sends: any of `metadata`, `text`, `thumbnail`, `image`, `video`, `pdf` |
 | `ai.tagging.video_frames` | 4 | With `video`: frames sent from each video |
 | `ai.video_thumbnails.enabled`, `frames` | false, 6 | The AI picks a video's thumbnail from this many frames |
+| `ai.embeddings.provider` | `same` | Embeddings for vector indexes and text similarity searches: `same`, `none`, `openai`, `voyage`, `azure_openai`, `github`, `openai_compatible` |
+| `ai.embeddings.model`, `base_url`, `api_key` | empty | Embedding model, API base URL and key (empty key with `same`: `ai.api_key`) |
+| `ai.embeddings.user_daily_tokens` | 200,000 | Tokens one user's similarity searches by text may use per day (0: no limit) |
 | `a2a.enabled` | false | Answer other agents over A2A (needs `ai.chat.enabled`; see [A2A](#a2a-agent2agent)) |
 | `cors.allowed_origins` | empty | Origins whose pages may call the API from a browser, comma-separated, or `*` (see [CORS](#cross-origin-requests-cors)) |
 

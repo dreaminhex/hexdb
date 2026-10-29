@@ -105,7 +105,7 @@ pub struct AuditQuery {
 
 /// Index that orders the audit trail by time.
 fn time_index() -> IndexDef {
-    IndexDef { name: "time".into(), kind: IndexKind::Field, fields: vec!["time".into()], unique: false, analyzer: None }
+    IndexDef { name: "time".into(), kind: IndexKind::Field, fields: vec!["time".into()], unique: false, analyzer: None, ..Default::default() }
 }
 
 impl HexDBEngine {

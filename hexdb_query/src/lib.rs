@@ -282,6 +282,7 @@ impl From<hexdb_core::IndexInfo> for IndexObject {
             kind: match info.def.kind {
                 hexdb_core::IndexKind::Field => "field".into(),
                 hexdb_core::IndexKind::Text => "text".into(),
+                hexdb_core::IndexKind::Vector => "vector".into(),
             },
             fields: info.def.fields,
             unique: info.def.unique,
@@ -527,6 +528,42 @@ impl QueryRoot {
     ) -> GqlResult<DocumentPage> {
         require(ctx, Permission::Read, &tessellation)?;
         query_page(ctx, &tessellation, filter, sort, limit, offset, after).await
+    }
+
+    /// Similarity search: the k documents nearest to a vector, or to a text's
+    /// embedding, in a field with a vector index, among those matching the
+    /// filter; best first, each with `_score` in its JSON.
+    #[allow(clippy::too_many_arguments)]
+    async fn similar(
+        &self,
+        ctx: &Context<'_>,
+        tessellation: String,
+        field: String,
+        text: Option<String>,
+        vector: Option<Vec<f64>>,
+        #[graphql(desc = "Results, 1-100 (default 10).")] k: Option<i32>,
+        min_score: Option<f64>,
+        filter: Option<Json<Value>>,
+    ) -> GqlResult<DocumentPage> {
+        require(ctx, Permission::Read, &tessellation)?;
+        let engine = engine(ctx);
+        existing_tessellation(engine, &tessellation)?;
+        let query = hexdb_core::engine::SimilarQuery {
+            field,
+            vector: vector.map(|v| v.into_iter().map(|x| x as f32).collect()),
+            text,
+            k: k.unwrap_or(10).max(0) as usize,
+            min_score: min_score.map(|m| m as f32),
+            filter: Some(parse_filter(filter)?),
+        };
+        let page = engine.similar_documents(&tessellation, &query).await.map_err(to_gql)?;
+        Ok(DocumentPage {
+            total: page.documents.len(),
+            documents: page.documents.into_iter().map(DocumentObject).collect(),
+            next: None,
+            indexes_used: page.indexes,
+            scanned: page.scanned,
+        })
     }
 
     /// Number of documents, optionally only those matching a filter.
@@ -886,9 +923,12 @@ impl MutationRoot {
         tessellation: String,
         fields: Vec<String>,
         #[graphql(desc = "Defaults to the field names joined with _.")] name: Option<String>,
-        #[graphql(desc = "\"field\" (default) or \"text\".")] kind: Option<String>,
+        #[graphql(desc = "\"field\" (default), \"text\" or \"vector\".")] kind: Option<String>,
         #[graphql(default)] unique: bool,
         #[graphql(desc = "Text indexes: the analyzer (standard, simple, whitespace, keyword, english, ngram, autocomplete, or a custom one).")] analyzer: Option<String>,
+        #[graphql(desc = "Vector indexes: numbers per vector (default: as many as the first one).")] dimensions: Option<i32>,
+        #[graphql(desc = "Vector indexes: \"cosine\" (default) or \"dot\".")] metric: Option<String>,
+        #[graphql(desc = "Vector indexes: text fields to embed into the field with the lattice's embeddings provider.")] source: Option<Vec<String>>,
     ) -> GqlResult<IndexObject> {
         require(ctx, Permission::Manage, &tessellation)?;
         let engine = engine(ctx);
@@ -896,9 +936,17 @@ impl MutationRoot {
         let kind = match kind.as_deref().unwrap_or("field") {
             "field" => hexdb_core::IndexKind::Field,
             "text" => hexdb_core::IndexKind::Text,
-            other => return Err(gql_error("INVALID_REQUEST", format!("Unknown index kind '{}'; use field or text.", other))),
+            "vector" => hexdb_core::IndexKind::Vector,
+            other => return Err(gql_error("INVALID_REQUEST", format!("Unknown index kind '{}'; use field, text or vector.", other))),
         };
-        let def = hexdb_core::IndexDef { name: name.unwrap_or_default(), kind, fields, unique, analyzer };
+        let metric = match metric.as_deref() {
+            None => None,
+            Some("cosine") => Some(hexdb_core::vector::Metric::Cosine),
+            Some("dot") => Some(hexdb_core::vector::Metric::Dot),
+            Some(other) => return Err(gql_error("INVALID_REQUEST", format!("Unknown metric '{}'; use cosine or dot.", other))),
+        };
+        let dimensions = dimensions.map(|d| d.max(0) as usize);
+        let def = hexdb_core::IndexDef { name: name.unwrap_or_default(), kind, fields, unique, analyzer, dimensions, metric, source: source.unwrap_or_default() };
         let info = engine.create_index(&tessellation, def).await.map_err(to_gql)?;
         engine
             .audit(&principal(ctx)?.login, "index.create", &tessellation, serde_json::json!({ "index": info.def.name, "fields": info.def.fields }))

@@ -109,6 +109,7 @@ const fn secret(key: &'static str, description: &'static str) -> ConfigDef {
 }
 
 pub const AI_PROVIDERS: &[&str] = &["none", "anthropic", "openai", "github", "azure_openai", "openai_compatible"];
+pub const EMBEDDING_PROVIDERS: &[&str] = &["same", "none", "openai", "voyage", "azure_openai", "github", "openai_compatible"];
 pub const AI_INPUTS: &[&str] = &["metadata", "text", "thumbnail", "image", "video", "pdf"];
 
 pub const CONFIG: &[ConfigDef] = &[
@@ -132,6 +133,11 @@ pub const CONFIG: &[ConfigDef] = &[
     def("sharing.require_password", ConfigKind::Boolean, "false", "Every new link needs a password."),
     def("cors.allowed_origins", ConfigKind::Origins, "\"\"", "Web pages on other origins that may call the API from a browser, comma-separated (e.g. https://app.example.com), or * for any. They sign in with an API key or a bearer token; the session cookie never works across origins. Empty: none."),
     def("a2a.enabled", ConfigKind::Boolean, "false", "Let other AI agents ask this lattice questions over A2A (Agent2Agent): an agent card at /.well-known/agent-card.json and JSON-RPC at /a2a. Answers come from the AI chat, as the calling user, within the chat's limits; ai.chat.enabled must be on too."),
+    def("ai.embeddings.provider", ConfigKind::Choice { choices: EMBEDDING_PROVIDERS }, "\"same\"", "Embeddings for vector indexes with source fields and for similarity searches by text: same (ai.provider, with its key; Anthropic has no embeddings API), none, OpenAI, Voyage AI (Anthropic's recommended embeddings), Azure OpenAI, GitHub Models, or an OpenAI-compatible server (e.g. Ollama)."),
+    text("ai.embeddings.model", "Embedding model (empty: text-embedding-3-small for OpenAI and GitHub Models, voyage-3.5 for Voyage). Changing it re-embeds every document of an auto-embedding vector index."),
+    def("ai.embeddings.base_url", ConfigKind::Url, "\"\"", "Embeddings API base URL (empty: the provider's public API, or ai.base_url with the same provider). Required for Azure OpenAI and OpenAI-compatible servers."),
+    secret("ai.embeddings.api_key", "API key for the embeddings provider (empty with the same provider: ai.api_key)."),
+    def("ai.embeddings.user_daily_tokens", ConfigKind::Integer { min: 0, max: 1_000_000_000 }, "200000", "Most tokens one user's similarity searches by text may use per day (0: no limit beyond the monthly budget)."),
     def("ai.chat.enabled", ConfigKind::Boolean, "false", "Let users with the chat permission ask the AI about the data they can read (the admin UI's Ask page and POST /ai/chat)."),
     text("ai.chat.model", "Model for the chat (empty: ai.model). A smaller, cheaper model is usually enough, e.g. claude-haiku-5-5."),
     def("ai.chat.max_tokens_per_answer", ConfigKind::Integer { min: 64, max: 16_000 }, "1024", "Most tokens one chat answer may use."),
@@ -692,19 +698,22 @@ impl HexDBEngine {
             Some(body) => resolve(self, body),
             None => Err(anyhow!("{}", stored.problem.clone().unwrap_or_default())),
         };
-        let mut applied = self.lattice_config.applied.write().unwrap();
-        match outcome {
-            Ok(next) => {
-                info!("⚙️ Applied lattice configuration version {} ({}).", next.version, &next.sha256[..12]);
-                *applied = next;
-            }
-            Err(e) => {
-                if applied.rejected.as_ref().map(|r| r.0) != Some(stored.version) {
-                    warn!("⚠️ Rejected lattice configuration version {}: {:#}. Version {} stays in effect.", stored.version, e, applied.version);
+        {
+            let mut applied = self.lattice_config.applied.write().unwrap();
+            match outcome {
+                Ok(next) => {
+                    info!("⚙️ Applied lattice configuration version {} ({}).", next.version, &next.sha256[..12]);
+                    *applied = next;
                 }
-                applied.rejected = Some((stored.version, format!("{:#}", e)));
+                Err(e) => {
+                    if applied.rejected.as_ref().map(|r| r.0) != Some(stored.version) {
+                        warn!("⚠️ Rejected lattice configuration version {}: {:#}. Version {} stays in effect.", stored.version, e, applied.version);
+                    }
+                    applied.rejected = Some((stored.version, format!("{:#}", e)));
+                }
             }
         }
+        self.check_embedding_model().await;
     }
 
     /// Store a new version on the Overseer and apply it.

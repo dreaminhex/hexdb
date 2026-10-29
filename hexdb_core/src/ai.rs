@@ -33,6 +33,9 @@ pub const AI_USAGE_TESSELLATION: &str = "_ai_usage";
 const ANTHROPIC_API: &str = "https://api.anthropic.com";
 const OPENAI_API: &str = "https://api.openai.com/v1";
 const GITHUB_MODELS_API: &str = "https://models.github.ai/inference";
+const VOYAGE_API: &str = "https://api.voyageai.com/v1";
+/// Most texts in one embeddings request.
+pub const EMBED_BATCH: usize = 64;
 /// The default Claude model.
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 /// Claude models that accept server-side refusal fallbacks (`fallbacks: "default"`).
@@ -136,6 +139,21 @@ pub struct ChatReply {
     pub millis: u64,
 }
 
+/// What a text is embedded for (Voyage embeds the two differently).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EmbedPurpose {
+    Document,
+    Query,
+}
+
+/// Vectors for texts, in their order.
+#[derive(Debug, Clone)]
+pub struct Embeddings {
+    pub vectors: Vec<Vec<f32>>,
+    pub model: String,
+    pub tokens: u64,
+}
+
 /// Where calls go, from the lattice configuration.
 #[derive(Clone)]
 struct Provider {
@@ -190,6 +208,75 @@ impl HexDBEngine {
             return Err(EngineError::Invalid("Set ai.api_key for the AI provider.".into()).into());
         }
         Ok(Provider { kind, model, base_url: base_url.trim_end_matches('/').to_string(), key, legacy: false })
+    }
+
+    /// Where embeddings come from (`ai.embeddings.*`).
+    fn embedding_provider(&self) -> Result<Provider> {
+        let text = |key: &str| self.config_value(key).as_str().unwrap_or_default().trim().to_string();
+        let chosen = text("ai.embeddings.provider");
+        let same = chosen.is_empty() || chosen == "same";
+        let kind = if same { text("ai.provider") } else { chosen };
+        let not_configured = |why: String| -> anyhow::Error { EngineError::Invalid(why).into() };
+        match kind.as_str() {
+            "" | "none" => return Err(not_configured("No embeddings provider is configured: set ai.embeddings.provider (or ai.provider).".into())),
+            "anthropic" => {
+                return Err(not_configured(
+                    "Anthropic has no embeddings API: set ai.embeddings.provider to voyage (Anthropic's recommended embeddings) or another provider.".into(),
+                ))
+            }
+            _ => {}
+        }
+        let mut base_url = text("ai.embeddings.base_url");
+        if base_url.is_empty() && same {
+            base_url = text("ai.base_url");
+        }
+        if base_url.is_empty() {
+            base_url = match kind.as_str() {
+                "openai" => OPENAI_API.into(),
+                "voyage" => VOYAGE_API.into(),
+                "github" => GITHUB_MODELS_API.into(),
+                _ => return Err(not_configured(format!("ai.embeddings.base_url is required for the {} provider.", kind))),
+            };
+        }
+        let mut model = text("ai.embeddings.model");
+        if model.is_empty() {
+            model = match kind.as_str() {
+                "openai" => "text-embedding-3-small".into(),
+                "github" => "openai/text-embedding-3-small".into(),
+                "voyage" => "voyage-3.5".into(),
+                _ => return Err(not_configured(format!("Set ai.embeddings.model: the {} provider has no default embedding model in HexDB.", kind))),
+            };
+        }
+        let key = self.config_secret("ai.embeddings.api_key").or_else(|| if same { self.config_secret("ai.api_key") } else { None });
+        if key.is_none() && kind != "openai_compatible" {
+            return Err(not_configured("Set ai.embeddings.api_key for the embeddings provider.".into()));
+        }
+        Ok(Provider { kind, model, base_url: base_url.trim_end_matches('/').to_string(), key, legacy: false })
+    }
+
+    /// The embedding model in use, if embeddings are configured.
+    pub fn embedding_model(&self) -> Option<String> {
+        self.embedding_provider().ok().map(|p| p.model)
+    }
+
+    /// Embed texts with the embeddings provider, within the monthly budget;
+    /// the tokens are recorded under `feature`.
+    pub async fn ai_embed(&self, texts: &[String], purpose: EmbedPurpose, feature: &str) -> Result<Embeddings> {
+        let provider = self.embedding_provider()?;
+        if texts.is_empty() {
+            return Ok(Embeddings { vectors: Vec::new(), model: provider.model, tokens: 0 });
+        }
+        self.check_ai_budget().await?;
+        match post_embeddings(&provider, texts, purpose).await {
+            Ok((vectors, tokens)) => {
+                self.record_ai_usage(feature, tokens, 0, true).await;
+                Ok(Embeddings { vectors, model: provider.model, tokens })
+            }
+            Err(e) => {
+                self.record_ai_usage(feature, 0, 0, false).await;
+                Err(e)
+            }
+        }
     }
 
     /// The configured provider and model, for display (no key).
@@ -484,8 +571,48 @@ async fn call_anthropic(provider: &Provider, request: &AiRequest, max_tokens: u6
     Ok((answer.join(""), input, output))
 }
 
+/// POST texts to an embeddings API (OpenAI's shape, which Voyage, Azure,
+/// GitHub Models and OpenAI-compatible servers share); vectors in order, and tokens.
+async fn post_embeddings(provider: &Provider, texts: &[String], purpose: EmbedPurpose) -> Result<(Vec<Vec<f32>>, u64)> {
+    let mut body = json!({ "model": provider.model, "input": texts });
+    if provider.kind == "voyage" {
+        body["input_type"] = json!(if purpose == EmbedPurpose::Query { "query" } else { "document" });
+    }
+    let key = provider.key.as_ref().map(|k| k.expose().to_string()).unwrap_or_default();
+    let mut call = client()?.post(format!("{}/embeddings", provider.base_url)).json(&body);
+    if !key.is_empty() {
+        call = if provider.kind == "azure_openai" { call.header("api-key", &key) } else { call.bearer_auth(&key) };
+    }
+    let name = provider_name(&provider.kind);
+    let response = call.send().await.with_context(|| format!("calling the {} embeddings API", name))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(provider_error(name, status, &text, Some(&key)));
+    }
+    let reply: Value = serde_json::from_str(&text).with_context(|| format!("the {} embeddings API's answer wasn't JSON", name))?;
+    let mut items: Vec<(usize, Vec<f32>)> = reply["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(i, item)| {
+            let index = item["index"].as_u64().map(|n| n as usize).unwrap_or(i);
+            crate::vector::extract(&item["embedding"]).map(|v| (index, v))
+        })
+        .collect();
+    items.sort_by_key(|(i, _)| *i);
+    if items.len() != texts.len() {
+        bail!("the {} embeddings API returned {} vectors for {} texts", name, items.len(), texts.len());
+    }
+    let usage = &reply["usage"];
+    let tokens = usage["total_tokens"].as_u64().or_else(|| usage["prompt_tokens"].as_u64()).unwrap_or(0);
+    Ok((items.into_iter().map(|(_, v)| v).collect(), tokens))
+}
+
 fn provider_name(kind: &str) -> &'static str {
     match kind {
+        "voyage" => "Voyage AI",
         "openai" => "OpenAI",
         "github" => "GitHub Models",
         "azure_openai" => "Azure OpenAI",

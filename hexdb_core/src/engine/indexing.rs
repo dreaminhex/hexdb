@@ -98,6 +98,9 @@ impl HexDBEngine {
             }
         }
         let info = self.mark_ready(tess, &def.name);
+        if let Err(e) = self.sweep_embeddings(tess).await {
+            tracing::warn!("⚠️ Couldn't queue the documents of '{}' for embedding: {:#}", tess, e);
+        }
         info!("📇 Created index '{}' on '{}' ({:?}, {} documents).", def.name, tess, def.fields, info.documents);
         Ok(info)
     }
@@ -161,6 +164,7 @@ impl HexDBEngine {
     /// An index set up for this tessellation's sealed fields (see `crate::sealed`).
     pub(crate) fn sealed_index(&self, tess: &str, mut index: Index) -> Index {
         index.set_sealed(&self.sealed_paths(tess), self.sealer.tokenizer());
+        index.set_embedding_model(self.embedding_model());
         index
     }
 
@@ -220,6 +224,10 @@ impl HexDBEngine {
         let dropped_after = self.catalog.lock().unwrap().dropped.get(tess).is_some_and(|d| *d > snapshot.seq);
         let max_seq = self.stats().await.next_seq.saturating_sub(1);
         if snapshot.version != SNAPSHOT_VERSION || snapshot.tessellation != tess || snapshot.def != *def || dropped_after || snapshot.seq > max_seq {
+            return false;
+        }
+        if def.kind == crate::index::IndexKind::Vector && !def.source.is_empty() && snapshot.analysis != self.embedding_model().unwrap_or_default() {
+            // Embedded with another model: rebuild (and re-embed).
             return false;
         }
         let Ok(analyzer) = self.analyzer_for(def) else { return false };

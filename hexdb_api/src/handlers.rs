@@ -223,6 +223,9 @@ pub struct QueryRequest {
     pub fields: Option<FieldList>,
     /// `false` skips counting every match (`total` is null).
     pub total: Option<bool>,
+    /// Similarity search: `{"field", "vector" | "text", "k", "min_score"}`;
+    /// the k nearest matches of `filter`, best first, each with `_score`.
+    pub near: Option<hexdb_core::engine::SimilarQuery>,
 }
 
 /// Field paths as a list or a comma-separated string.
@@ -1068,6 +1071,24 @@ pub async fn query_docs(
 ) -> ApiResult {
     principal.require(Permission::Read, &tess)?;
     let Json(request) = body?;
+    if let Some(mut near) = request.near {
+        if request.sort.is_some() || request.offset.is_some() || request.after.is_some() || request.limit.is_some() {
+            return Err(ApiError::invalid("A similarity search (near) returns the k best matches in order; it takes no sort, limit, offset or after."));
+        }
+        existing_tessellation(&engine, &tess)?;
+        near.filter = Some(Filter::parse(&request.filter)?);
+        let page = engine.similar_documents(&tess, &near).await?;
+        let fields = request.fields.map(FieldList::paths);
+        let documents = match &fields {
+            Some(f) if !f.is_empty() => {
+                let mut f = f.clone();
+                f.push("_score".into());
+                Value::Array(page.documents.iter().map(|d| hexdb_core::project(&d.to_api_json(), &f)).collect())
+            }
+            _ => docs_json(&page.documents),
+        };
+        return Ok(Json(json!({ "documents": documents, "total": null, "next": null, "plan": { "indexes": page.indexes, "scanned": page.scanned } })).into_response());
+    }
     let sort = match request.sort {
         Some(SortSpec::Text(text)) => parse_sort_text(&text)?,
         Some(SortSpec::Keys(keys)) => keys,

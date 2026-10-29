@@ -23,6 +23,7 @@ pub mod crashes;
 pub mod users;
 pub mod recovery;
 pub mod sealed;
+pub mod vector;
 pub mod audit;
 pub mod mfa;
 pub mod settings;

@@ -261,7 +261,7 @@ impl HexDBEngine {
     pub(crate) async fn ensure_file_indexes(&self, name: &str) -> Result<()> {
         let info = self.files_tessellation(name)?;
         if !info.indexes.iter().any(|i| i.name == PATH_INDEX) {
-            let def = IndexDef { name: PATH_INDEX.into(), kind: IndexKind::Field, fields: vec!["path".into(), "name".into()], unique: true, analyzer: None };
+            let def = IndexDef { name: PATH_INDEX.into(), kind: IndexKind::Field, fields: vec!["path".into(), "name".into()], unique: true, analyzer: None, ..Default::default() };
             self.create_index_unchecked(name, def).await?;
         }
         // Every string in a file's name, folders, tags, description and
@@ -272,10 +272,10 @@ impl HexDBEngine {
         if let Some(existing) = info.indexes.iter().find(|i| i.name == files::SEARCH_INDEX && i.kind == IndexKind::Text && i.fields == old) {
             info!("🔎 Adding AI tags to the search index of '{}'.", name);
             self.drop_index_unchecked(name, &existing.name)?;
-            let def = IndexDef { name: files::SEARCH_INDEX.into(), kind: IndexKind::Text, fields: fields.clone(), unique: false, analyzer: existing.analyzer.clone() };
+            let def = IndexDef { name: files::SEARCH_INDEX.into(), kind: IndexKind::Text, fields: fields.clone(), unique: false, analyzer: existing.analyzer.clone(), ..Default::default() };
             self.create_index_unchecked(name, def).await?;
         } else if !info.indexes.iter().any(|i| i.kind == IndexKind::Text) {
-            let def = IndexDef { name: files::SEARCH_INDEX.into(), kind: IndexKind::Text, fields, unique: false, analyzer: None };
+            let def = IndexDef { name: files::SEARCH_INDEX.into(), kind: IndexKind::Text, fields, unique: false, analyzer: None, ..Default::default() };
             self.create_index_unchecked(name, def).await?;
         }
         Ok(())

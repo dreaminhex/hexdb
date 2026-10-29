@@ -4217,6 +4217,30 @@
                   "total": {
                     "type": "boolean",
                     "description": "false skips counting every match (total is null)"
+                  },
+                  "near": {
+                    "type": "object",
+                    "description": "similarity search: {field, vector | text, k (1-100), min_score}; the k nearest matches, best first, with _score",
+                    "properties": {
+                      "field": {
+                        "type": "string"
+                      },
+                      "vector": {
+                        "type": "array",
+                        "items": {
+                          "type": "number"
+                        }
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "k": {
+                        "type": "integer"
+                      },
+                      "min_score": {
+                        "type": "number"
+                      }
+                    }
                   }
                 }
               }

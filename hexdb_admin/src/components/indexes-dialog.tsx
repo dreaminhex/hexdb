@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { usePoll } from "@/hooks/use-poll"
-import { api, errorMessage, type Advice, type IndexSuggestion } from "@/lib/api"
+import { api, errorMessage, type Advice, type IndexKind, type IndexSuggestion } from "@/lib/api"
 import { formatNumber } from "@/lib/format"
 
 /** List, create, and drop a tessellation's secondary indexes. */
@@ -36,7 +36,10 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
   const indexes = usePoll(() => api.indexes(tessellation), 0, [tessellation])
   const [fields, setFields] = useState("")
   const [name, setName] = useState("")
-  const [kind, setKind] = useState<"field" | "text">("field")
+  const [kind, setKind] = useState<IndexKind>("field")
+  const [source, setSource] = useState("")
+  const [dimensions, setDimensions] = useState("")
+  const [metric, setMetric] = useState<"cosine" | "dot">("cosine")
   const [unique, setUnique] = useState(false)
   const [analyzer, setAnalyzer] = useState("standard")
   const analyzers = usePoll(api.analyzers, 0)
@@ -55,11 +58,18 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
     setBusy(true)
     setError(undefined)
     try {
-      const created = await api.createIndex(tessellation, { fields: fieldList, name: name.trim() || undefined, kind, unique: kind === "field" && unique, ...(kind === "text" ? { analyzer } : {}) })
+      const sourceList = source
+        .split(",")
+        .map((f) => f.trim())
+        .filter(Boolean)
+      const vector = kind === "vector" ? { metric, source: sourceList, ...(dimensions.trim() ? { dimensions: Number(dimensions) } : {}) } : {}
+      const created = await api.createIndex(tessellation, { fields: fieldList, name: name.trim() || undefined, kind, unique: kind === "field" && unique, ...(kind === "text" ? { analyzer } : {}), ...vector })
       toast.success(`Created index '${created.name}' over ${formatNumber(created.documents)} documents.`)
       setFields("")
       setName("")
       setUnique(false)
+      setSource("")
+      setDimensions("")
       await indexes.refresh()
       onChanged()
     } catch (e) {
@@ -97,10 +107,13 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
                 <Badge variant="outline">{index.kind}</Badge>
                 {index.unique && <Badge variant="secondary">unique</Badge>}
                 {index.kind === "text" && index.analyzer && <Badge variant="secondary">{index.analyzer}</Badge>}
+                {index.kind === "vector" && <Badge variant="secondary">{index.metric ?? "cosine"}</Badge>}
+                {index.kind === "vector" && (index.source?.length ?? 0) > 0 && <Badge variant="secondary">embeds {index.source?.join(", ")}</Badge>}
                 {!index.ready && <Badge variant="secondary">building</Badge>}
               </div>
               <div className="text-muted-foreground truncate font-mono text-xs">
-                {index.fields.join(", ")} · {formatNumber(index.documents)} docs · {formatNumber(index.keys)} {index.kind === "text" ? "words" : "keys"}
+                {index.fields.join(", ")} · {formatNumber(index.documents)} {index.kind === "vector" ? "vectors" : "docs"} · {formatNumber(index.keys)}{" "}
+                {index.kind === "text" ? "words" : index.kind === "vector" ? "dimensions" : "keys"}
               </div>
             </div>
             <Button
@@ -125,7 +138,7 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
             <Input
               id="index-fields"
               className="font-mono"
-              placeholder={kind === "text" ? "title, body" : "status, author.name"}
+              placeholder={kind === "text" ? "title, body" : kind === "vector" ? "embedding" : "status, author.name"}
               value={fields}
               onChange={(e) => setFields(e.target.value)}
               autoComplete="off"
@@ -133,13 +146,14 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
           </div>
           <div className="grid gap-1.5">
             <Label>Kind</Label>
-            <Select value={kind} onValueChange={(v) => v && setKind(v as "field" | "text")}>
+            <Select value={kind} onValueChange={(v) => v && setKind(v as IndexKind)}>
               <SelectTrigger className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="field">Field</SelectItem>
                 <SelectItem value="text">Full text</SelectItem>
+                <SelectItem value="vector">Vector</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -147,13 +161,45 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
         <p className="text-muted-foreground text-xs">
           {kind === "field"
             ? "Comma-separated paths. A field index answers equality, $in, ranges, and $startsWith on its first field, and equality on all of its fields."
-            : "Comma-separated string fields. A text index answers $text searches; a tessellation has at most one."}
+            : kind === "text"
+              ? "Comma-separated string fields. A text index answers $text searches; a tessellation has at most one."
+              : "The field holding each document's vector (an array of numbers). A vector index answers similarity searches (near). With source fields, HexDB fills the field with embeddings of their text (ai.embeddings.* on the Configuration page)."}
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <div className="grid min-w-48 flex-1 gap-1.5">
             <Label htmlFor="index-name">Name (optional)</Label>
-            <Input id="index-name" placeholder={(fieldList.length ? fieldList.join("_").replace(/\./g, "_") : kind === "text" ? "title" : "status") + (kind === "text" ? "_text" : "")} value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" />
+            <Input
+              id="index-name"
+              placeholder={(fieldList.length ? fieldList.join("_").replace(/\./g, "_") : kind === "text" ? "title" : kind === "vector" ? "embedding" : "status") + (kind === "text" ? "_text" : kind === "vector" ? "_vector" : "")}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoComplete="off"
+            />
           </div>
+          {kind === "vector" && (
+            <>
+              <div className="grid min-w-48 flex-1 gap-1.5">
+                <Label htmlFor="index-source">Embed from (optional)</Label>
+                <Input id="index-source" className="font-mono" placeholder="title, body" value={source} onChange={(e) => setSource(e.target.value)} autoComplete="off" />
+              </div>
+              <div className="grid w-28 gap-1.5">
+                <Label htmlFor="index-dimensions">Dimensions</Label>
+                <Input id="index-dimensions" type="number" min={1} max={4096} placeholder="auto" value={dimensions} onChange={(e) => setDimensions(e.target.value)} />
+              </div>
+              <div className="grid w-32 gap-1.5">
+                <Label>Metric</Label>
+                <Select value={metric} onValueChange={(v) => v && setMetric(v as "cosine" | "dot")}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="cosine">Cosine</SelectItem>
+                    <SelectItem value="dot">Dot product</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          )}
           {kind === "text" && (
             <div className="grid w-44 gap-1.5">
               <Label>Analyzer</Label>

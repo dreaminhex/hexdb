@@ -48,10 +48,12 @@ pub enum IndexKind {
     #[default]
     Field,
     Text,
+    /// Nearest-neighbor search over a field holding a vector (see `crate::vector`).
+    Vector,
 }
 
 /// An index definition, as stored in the catalog.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct IndexDef {
     /// Defaults to the field names joined with `_` (plus `_text` for text indexes).
     #[serde(default)]
@@ -68,6 +70,18 @@ pub struct IndexDef {
     /// default "standard").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analyzer: Option<String>,
+    /// Vector indexes only: how many numbers each vector has (default: as
+    /// many as the first one stored).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<usize>,
+    /// Vector indexes only: cosine (default) or dot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<crate::vector::Metric>,
+    /// Vector indexes only: text fields to embed into the indexed field with
+    /// the lattice's embeddings provider (`ai.embeddings.*`). Empty: clients
+    /// write the vectors themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source: Vec<String>,
 }
 
 fn invalid(message: impl Into<String>) -> anyhow::Error {
@@ -95,17 +109,39 @@ impl IndexDef {
                 return Err(invalid(format!("'{}' appears twice in the index.", f)));
             }
         }
-        if self.kind == IndexKind::Text && self.unique {
-            return Err(invalid("Text indexes can't be unique."));
+        if self.kind != IndexKind::Field && self.unique {
+            return Err(invalid("Only field indexes can be unique."));
         }
-        if self.kind == IndexKind::Field && self.analyzer.is_some() {
+        if self.kind != IndexKind::Text && self.analyzer.is_some() {
             return Err(invalid("Only text indexes have an analyzer."));
+        }
+        if self.kind == IndexKind::Vector {
+            if self.fields.len() != 1 {
+                return Err(invalid("A vector index covers one field, the one holding the vectors."));
+            }
+            if self.dimensions.is_some_and(|d| d == 0 || d > crate::vector::MAX_DIMENSIONS) {
+                return Err(invalid(format!("dimensions must be 1-{}.", crate::vector::MAX_DIMENSIONS)));
+            }
+            if self.source.len() > 8 {
+                return Err(invalid("A vector index can embed at most 8 source fields."));
+            }
+            for f in &self.source {
+                if f.is_empty() || f.split('.').any(str::is_empty) || *f == self.fields[0] {
+                    return Err(invalid(format!("Invalid source field '{}'.", f)));
+                }
+            }
+        } else if self.dimensions.is_some() || self.metric.is_some() || !self.source.is_empty() {
+            return Err(invalid("dimensions, metric and source are for vector indexes."));
         }
         if self.analyzer.as_deref() == Some("") || self.analyzer.as_deref() == Some("standard") {
             self.analyzer = None;
         }
         if self.name.is_empty() {
-            let suffix = if self.kind == IndexKind::Text { "_text" } else { "" };
+            let suffix = match self.kind {
+                IndexKind::Text => "_text",
+                IndexKind::Vector => "_vector",
+                IndexKind::Field => "",
+            };
             self.name = format!("{}{}", self.fields.join("_").replace('.', "_"), suffix);
         }
         if self.name.len() > 64 || !self.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
@@ -215,9 +251,19 @@ pub(crate) struct TextIndex {
     by_doc: HashMap<Ulid, Vec<String>>,
 }
 
+/// A vector index: one vector per document (see `crate::vector`).
+pub(crate) struct VectorIndex {
+    path: Vec<String>,
+    pub(crate) store: crate::vector::VectorStore,
+    /// Fields embedded into `path` (auto-embedding), and the model in use.
+    source: Vec<Vec<String>>,
+    model: Option<String>,
+}
+
 pub(crate) enum IndexData {
     Field(FieldIndex),
     Text(TextIndex),
+    Vector(VectorIndex),
 }
 
 pub(crate) struct Index {
@@ -230,6 +276,20 @@ pub(crate) struct Index {
     /// and the planner doesn't use the index.
     pub(crate) sealed: Vec<String>,
     tokens: Option<crate::sealed::Tokenizer>,
+}
+
+/// Longest text sent to the embeddings provider for one document, in characters.
+const MAX_EMBED_CHARS: usize = 16_000;
+
+/// The text of a document's source fields, for embedding.
+pub(crate) fn source_text(json: &Value, source: &[Vec<String>]) -> String {
+    let mut texts = Vec::new();
+    for path in source {
+        for v in resolve(json, path) {
+            strings(v, &mut texts);
+        }
+    }
+    texts.join("\n").chars().take(MAX_EMBED_CHARS).collect()
 }
 
 /// Bump when what an index stores for a document changes (keys or text
@@ -260,6 +320,8 @@ enum SnapshotData {
     Field(Vec<(Ulid, Vec<Key>, bool)>),
     /// (document, words)
     Text(Vec<(Ulid, Vec<String>)>),
+    /// (document, vector as stored)
+    Vector(Vec<(Ulid, Vec<f32>)>),
 }
 
 /// Index statistics for the API.
@@ -296,6 +358,12 @@ impl Index {
                 irregular: HashSet::new(),
             }),
             IndexKind::Text => IndexData::Text(TextIndex { paths, analyzer, words: HashMap::new(), by_doc: HashMap::new() }),
+            IndexKind::Vector => IndexData::Vector(VectorIndex {
+                path: paths.into_iter().next().unwrap_or_default(),
+                store: crate::vector::VectorStore::new(def.metric.unwrap_or_default(), def.dimensions),
+                source: def.source.iter().map(|f| split(f)).collect(),
+                model: None,
+            }),
         };
         Index { def, data, ready: false, sealed: Vec::new(), tokens: None }
     }
@@ -305,9 +373,12 @@ impl Index {
         let data = match &self.data {
             IndexData::Field(f) => SnapshotData::Field(f.by_doc.iter().map(|(id, keys)| (*id, keys.clone(), f.irregular.contains(id))).collect()),
             IndexData::Text(t) => SnapshotData::Text(t.by_doc.iter().map(|(id, words)| (*id, words.clone())).collect()),
+            IndexData::Vector(v) => SnapshotData::Vector(v.store.entries()),
         };
+        // Text: the analyzer; vector: the embedding model (a change means rebuilding).
         let analysis = match &self.data {
             IndexData::Text(t) => t.analyzer.pipeline(),
+            IndexData::Vector(v) => v.model.clone().unwrap_or_default(),
             IndexData::Field(_) => String::new(),
         };
         IndexSnapshot { version: SNAPSHOT_VERSION, tessellation: tessellation.to_string(), def: self.def.clone(), seq, analysis, sealed: self.sealed.clone(), data }
@@ -334,6 +405,11 @@ impl Index {
                         t.words.entry(w.clone()).or_default().insert(id);
                     }
                     t.by_doc.insert(id, words);
+                }
+            }
+            (IndexData::Vector(v), SnapshotData::Vector(docs)) => {
+                for (id, vector) in docs {
+                    v.store.insert(id, vector);
                 }
             }
             // The kind didn't match the definition: leave it empty (it will be rebuilt).
@@ -388,6 +464,7 @@ impl Index {
         let (documents, keys) = match &self.data {
             IndexData::Field(f) => (f.by_doc.len(), f.entries.len()),
             IndexData::Text(t) => (t.by_doc.len(), t.words.len()),
+            IndexData::Vector(v) => (v.store.len(), v.store.dimensions.unwrap_or(0)),
         };
         IndexInfo { def: self.def.clone(), documents, keys, ready: self.ready }
     }
@@ -417,6 +494,7 @@ impl Index {
         match &self.data {
             IndexData::Field(f) => f.by_doc.contains_key(id),
             IndexData::Text(t) => t.by_doc.contains_key(id),
+            IndexData::Vector(v) => v.store.contains(id),
         }
     }
 
@@ -466,6 +544,7 @@ impl Index {
                     }
                 }
             }
+            IndexData::Vector(v) => v.store.remove(id),
         }
     }
 
@@ -498,6 +577,65 @@ impl Index {
                 }
                 t.by_doc.insert(doc.id, words.into_iter().collect());
             }
+            IndexData::Vector(v) => {
+                let value = resolve(&json, &v.path).first().map(|v| (*v).clone()).unwrap_or(Value::Null);
+                // An embedding made with another model than the one in use waits to be redone.
+                let stale = !v.source.is_empty() && value.get("model").and_then(Value::as_str).is_some_and(|m| Some(m) != v.model.as_deref());
+                if let (false, Some(vector)) = (stale, crate::vector::extract(&value)) {
+                    v.store.insert(doc.id, vector);
+                }
+            }
+        }
+    }
+
+    /// Vector indexes with source fields: the embedding model in use.
+    pub(crate) fn set_embedding_model(&mut self, model: Option<String>) {
+        if let IndexData::Vector(v) = &mut self.data {
+            v.model = model;
+        }
+    }
+
+    /// True for a vector index that embeds source fields itself.
+    pub(crate) fn embeds(&self) -> bool {
+        matches!(&self.data, IndexData::Vector(v) if !v.source.is_empty())
+    }
+
+    /// For a vector index with source fields: the text to embed for this
+    /// document and its fingerprint, if its stored embedding isn't of that
+    /// text with the model in use. Vectors a client wrote are left alone.
+    pub(crate) fn needs_embedding(&self, doc: &Document) -> Option<(String, String)> {
+        let IndexData::Vector(v) = &self.data else { return None };
+        if v.source.is_empty() {
+            return None;
+        }
+        let json = doc.to_api_json();
+        let text = source_text(&json, &v.source);
+        if text.trim().is_empty() {
+            return None;
+        }
+        let hash = blake3::hash(text.as_bytes()).to_hex()[..32].to_string();
+        let current = resolve(&json, &v.path).first().map(|v| (*v).clone()).unwrap_or(Value::Null);
+        let done = match &current {
+            Value::Array(_) => true,
+            Value::Object(map) => map.get("source_hash").and_then(Value::as_str) == Some(hash.as_str()) && map.get("model").and_then(Value::as_str) == v.model.as_deref(),
+            _ => false,
+        };
+        (!done).then_some((text, hash))
+    }
+
+    /// The nearest documents to a query vector, best first, with scores.
+    /// None if this isn't a vector index or the vector doesn't fit it.
+    pub(crate) fn nearest(&self, query: Vec<f32>, limit: usize, ef: usize) -> Option<Vec<(Ulid, f32)>> {
+        let IndexData::Vector(v) = &self.data else { return None };
+        let query = v.store.prepare(query)?;
+        Some(v.store.search(&query, limit, ef))
+    }
+
+    /// Vectors held (vector indexes).
+    pub(crate) fn vector_count(&self) -> usize {
+        match &self.data {
+            IndexData::Vector(v) => v.store.len(),
+            _ => 0,
         }
     }
 
@@ -734,7 +872,7 @@ impl Indexes {
     pub(crate) fn text_index(&self, tess: &str) -> Option<(Vec<String>, crate::analysis::Analyzer)> {
         self.by_tessellation.get(tess)?.iter().find_map(|i| match &i.data {
             IndexData::Text(t) => Some((i.def.fields.clone(), t.analyzer.clone())),
-            IndexData::Field(_) => None,
+            IndexData::Field(_) | IndexData::Vector(_) => None,
         })
     }
 }
@@ -759,7 +897,7 @@ mod tests {
     }
 
     fn field(fields: &[&str]) -> IndexDef {
-        IndexDef { name: String::new(), kind: IndexKind::Field, fields: fields.iter().map(|s| s.to_string()).collect(), unique: false, analyzer: None }
+        IndexDef { name: String::new(), kind: IndexKind::Field, fields: fields.iter().map(|s| s.to_string()).collect(), unique: false, analyzer: None, ..Default::default() }
     }
 
     /// The planner's candidates always include every true match.
@@ -817,7 +955,7 @@ mod tests {
             doc(json!({ "country": "NZ", "city": "Wellington", "bio": "rust" })),
             doc(json!({ "country": "AU", "city": "Auckland", "bio": "Python" })),
         ];
-        let text = IndexDef { name: String::new(), kind: IndexKind::Text, fields: vec!["bio".into()], unique: false, analyzer: None };
+        let text = IndexDef { name: String::new(), kind: IndexKind::Text, fields: vec!["bio".into()], unique: false, analyzer: None, ..Default::default() };
         let indexes = vec![ready(field(&["country", "city"]), &docs), ready(text, &docs)];
         assert_eq!(indexes[0].def.name, "country_city");
         assert_eq!(indexes[1].def.name, "bio_text");

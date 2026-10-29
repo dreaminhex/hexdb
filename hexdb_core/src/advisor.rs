@@ -223,7 +223,7 @@ pub fn suggest(shapes: &[ShapeStats], indexes: &[crate::index::IndexInfo], docum
                 if !covered(std::slice::from_ref(&field)) && s.count >= 3 && documents >= 100 && proposed.insert(vec![field.clone()]) {
                     out.push(Suggestion {
                         action: "create_index".into(),
-                        index: Some(IndexDef { name: String::new(), kind: IndexKind::Field, fields: vec![field.clone()], unique: false, analyzer: None }),
+                        index: Some(IndexDef { name: String::new(), kind: IndexKind::Field, fields: vec![field.clone()], unique: false, analyzer: None, ..Default::default() }),
                         name: None,
                         impact: impact.into(),
                         reason: format!("{} queries sort all {} documents by {}; with an index they read only the page they return.", s.count, documents, field),
@@ -236,7 +236,7 @@ pub fn suggest(shapes: &[ShapeStats], indexes: &[crate::index::IndexInfo], docum
         if wasteful && s.count >= 2 && !covered(&fields) && proposed.insert(fields.clone()) {
             out.push(Suggestion {
                 action: "create_index".into(),
-                index: Some(IndexDef { name: String::new(), kind: IndexKind::Field, fields: fields.clone(), unique: false, analyzer: None }),
+                index: Some(IndexDef { name: String::new(), kind: IndexKind::Field, fields: fields.clone(), unique: false, analyzer: None, ..Default::default() }),
                 name: None,
                 impact: impact.into(),
                 reason: format!(
@@ -383,7 +383,7 @@ pub async fn ai_suggestions(engine: &HexDBEngine, tess: &str, shapes: &[ShapeSta
                 let kind = if item["kind"] == "text" { IndexKind::Text } else { IndexKind::Field };
                 let analyzer = item["analyzer"].as_str().map(String::from).filter(|_| kind == IndexKind::Text);
                 // Only well-formed definitions are passed on.
-                if let Ok(def) = (IndexDef { name: String::new(), kind, fields, unique: false, analyzer }).validated() {
+                if let Ok(def) = (IndexDef { name: String::new(), kind, fields, unique: false, analyzer, ..Default::default() }).validated() {
                     out.push(Suggestion { action: "create_index".into(), index: Some(def), name: None, impact, reason, source: "ai".into() });
                 }
             }
@@ -428,7 +428,7 @@ mod tests {
         }
         stats.record("posts", shape(json!({ "author": "ada" }), &[]), 1000, 900, 2.0, &[]);
         let unused = crate::index::IndexInfo {
-            def: IndexDef { name: "old".into(), kind: IndexKind::Field, fields: vec!["legacy".into()], unique: false, analyzer: None },
+            def: IndexDef { name: "old".into(), kind: IndexKind::Field, fields: vec!["legacy".into()], unique: false, analyzer: None, ..Default::default() },
             documents: 1000,
             keys: 5,
             ready: true,

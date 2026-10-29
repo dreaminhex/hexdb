@@ -998,7 +998,7 @@ async fn bootstrap_inner(engine: &HexDBEngine, security: &SecurityConfig) -> Res
     engine
         .ensure_internal_index(
             USERS_TESSELLATION,
-            crate::index::IndexDef { name: LOGIN_INDEX.into(), kind: crate::index::IndexKind::Field, fields: vec!["login_key".into()], unique: false, analyzer: None },
+            crate::index::IndexDef { name: LOGIN_INDEX.into(), kind: crate::index::IndexKind::Field, fields: vec!["login_key".into()], unique: false, analyzer: None, ..Default::default() },
         )
         .await?;
 

@@ -35,6 +35,8 @@ pub struct HexMeta {
     pub restarts: serde_json::Value,
     /// The newest HexDB release, from the last check (see `crate::updates`).
     pub updates: crate::updates::ReleaseCheck,
+    /// Vector indexes' embeddings: the model, documents waiting, the last error.
+    pub embeddings: serde_json::Value,
     /// Memory protection: the fields kept sealed (see `crate::sealed`), and
     /// whether this process may be dumped (null where unknown).
     pub memory_protection: serde_json::Value,
@@ -327,6 +329,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         config: engine.lattice_config().status_json(),
         restarts: crate::crashes::status(&engine.config.storage_dir()),
         updates: crate::updates::ReleaseCheck { hosted: engine.config.updates.hosted(), ..crate::updates::last_check() },
+        embeddings: engine.embeddings_status(),
         memory_protection: serde_json::json!({
             "sealed_fields": engine.seal_policy.read().unwrap().summary(),
             "core_dumps": crate::runtime::core_dumps_allowed(),

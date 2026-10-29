@@ -368,12 +368,17 @@ export interface Tessellation {
   schema_pending?: boolean
 }
 
+export type IndexKind = "field" | "text" | "vector"
+
 export interface IndexInfo {
   name: string
-  kind: "field" | "text"
+  kind: IndexKind
   fields: string[]
   unique: boolean
   analyzer?: string
+  dimensions?: number
+  metric?: "cosine" | "dot"
+  source?: string[]
   documents: number
   keys: number
   ready: boolean
@@ -382,9 +387,12 @@ export interface IndexInfo {
 export interface NewIndex {
   fields: string[]
   name?: string
-  kind?: "field" | "text"
+  kind?: IndexKind
   unique?: boolean
   analyzer?: string
+  dimensions?: number
+  metric?: "cosine" | "dot"
+  source?: string[]
 }
 
 export interface Analyzer {

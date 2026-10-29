@@ -1230,6 +1230,11 @@ impl HexDBEngine {
             self.changes.complete(first, count, Vec::new());
             return Err(e);
         }
+        for change in &changes {
+            if let Some(doc) = &change.document {
+                self.note_for_embedding(&change.tessellation, doc);
+            }
+        }
         self.changes.complete(first, count, changes);
         self.writes_total.fetch_add(user_writes, std::sync::atomic::Ordering::Relaxed);
         if roles_changed {

@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(page.documents.iter().map(|d| d.id).collect::<Vec<_>>(), vec![first]);
 
         // An index on the card holds tokens and isn't used by the planner, so results don't change.
-        engine.create_index("orders", crate::index::IndexDef { name: "card".into(), kind: crate::index::IndexKind::Field, fields: vec!["card".into()], unique: true, analyzer: None }).await.unwrap();
+        engine.create_index("orders", crate::index::IndexDef { name: "card".into(), kind: crate::index::IndexKind::Field, fields: vec!["card".into()], unique: true, analyzer: None, ..Default::default() }).await.unwrap();
         let page = engine.query_documents("orders", &query).await.unwrap();
         assert_eq!(page.documents.len(), 1);
         assert!(page.indexes.is_empty(), "a sealed field's index isn't used");
