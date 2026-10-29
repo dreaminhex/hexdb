@@ -80,6 +80,8 @@ pub fn app_router(
         .route("/_s/{code}/content", get(crate::shares::content))
         .route("/_s/{code}/thumbnail", get(crate::shares::thumbnail))
         .route("/_s/{code}/files", get(crate::shares::files))
+        .route("/a2a", post(crate::a2a::post))
+        .route("/.well-known/agent-card.json", get(crate::a2a::agent_card))
         .route("/mcp", post(crate::mcp::post).get(crate::mcp::not_offered).delete(crate::mcp::not_offered))
         .route("/join", post(join_info))
 

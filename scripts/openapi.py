@@ -91,6 +91,8 @@ ROUTES = [
     ("get", "/_s/{code}/thumbnail", "Files", "A shared file's thumbnail", {"security": [], "parameters": [param("code"), param("file", "query"), param("t", "query")], "responses": ok()}),
     ("get", "/_s/{code}/files", "Files", "A folder link's files", {"security": [], "parameters": [param("code"), param("t", "query")], "responses": ok()}),
     ("post", "/mcp", "Configuration", "Model Context Protocol (JSON-RPC 2.0): read-only lattice tools for external agents", {"requestBody": body({"type": "object"}), "responses": ok()}),
+    ("post", "/a2a", "Configuration", "A2A (Agent2Agent) 1.0 JSON-RPC: SendMessage, GetTask, ListTasks, CancelTask; answered by the chat as the caller (a2a.enabled)", {"requestBody": body({"type": "object"}), "responses": ok()}),
+    ("get", "/.well-known/agent-card.json", "Configuration", "The A2A agent card (public; 404 while a2a.enabled is off)", {"security": [], "responses": ok()}),
     ("get", "/ai/estimate", "Configuration", "Token estimates for AI tagging and video thumbnails, per files tessellation (admins)", {"responses": ok()}),
     ("post", "/{tessellation}/_ai_tag", "Configuration", "Tag existing files with the AI (admins); ?id= one file, ?all=true every file", {"parameters": [param("tessellation"), param("id", "query"), param("all", "query")], "responses": ok("Queued", status="202")}),
     ("post", "/{tessellation}/_ai_thumbnails", "Configuration", "Let the AI choose existing videos' thumbnails (admins)", {"parameters": [param("tessellation"), param("id", "query"), param("all", "query")], "responses": ok("Queued", status="202")}),

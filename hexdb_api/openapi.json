@@ -2488,6 +2488,82 @@
         }
       }
     },
+    "/a2a": {
+      "post": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "A2A (Agent2Agent) 1.0 JSON-RPC: SendMessage, GetTask, ListTasks, CancelTask; answered by the chat as the caller (a2a.enabled)",
+        "operationId": "post_a2a",
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/agent-card.json": {
+      "get": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "The A2A agent card (public; 404 while a2a.enabled is off)",
+        "operationId": "get_.well-known_agent-card.json",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ai/estimate": {
       "get": {
         "tags": [

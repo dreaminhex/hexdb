@@ -446,9 +446,36 @@ pub async fn chat(
         return Err(ApiError::forbidden("The AI chat is off. An administrator can turn it on (ai.chat.enabled)."));
     }
     let Json(input) = body?;
-    let limits = limits(&engine);
-    let client = hexdb_core::auth::client_bucket(&client);
-    let question = input.question.trim();
+    let reply = answer(&engine, &principal, &client, &input.question, &input.history, "ai.chat").await?;
+    Ok(Json(json!({
+        "answer": reply.answer,
+        "steps": reply.steps,
+        "model": reply.model,
+        "tokens": { "input": reply.input_tokens, "output": reply.output_tokens },
+        "left": { "user_today": reply.user_left, "client_today": reply.client_left },
+    }))
+    .into_response())
+}
+
+/// A chat answer and what it cost.
+pub struct ChatAnswer {
+    pub answer: String,
+    pub steps: Vec<Value>,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub user_left: Option<u64>,
+    pub client_left: Option<u64>,
+}
+
+/// Answer a question about the lattice's data as `principal`, within the
+/// chat's limits, and audit it as `action`. Callers check the chat permission
+/// and that the chat is on. Used by `POST /ai/chat` and A2A (`crate::a2a`).
+pub async fn answer(engine: &Arc<HexDBEngine>, principal: &Principal, client: &str, question: &str, history: &[ChatHistoryItem], action: &str) -> Result<ChatAnswer, ApiError> {
+    let input_history = history;
+    let limits = limits(engine);
+    let client = hexdb_core::auth::client_bucket(client);
+    let question = question.trim();
     if question.is_empty() || question.chars().count() > limits.max_question_chars {
         return Err(ApiError::invalid(format!("Ask a question of 1-{} characters.", limits.max_question_chars)));
     }
@@ -456,7 +483,7 @@ pub async fn chat(
     tokens_left(&principal.login, &client, &limits)?;
 
     let mut turns: Vec<Turn> = Vec::new();
-    let history = &input.history[input.history.len().saturating_sub(limits.max_history)..];
+    let history = &input_history[input_history.len().saturating_sub(limits.max_history)..];
     // Newest first, up to MAX_HISTORY_CHARS in all.
     let mut room = MAX_HISTORY_CHARS;
     let first_kept = history
@@ -549,7 +576,7 @@ No more lookups are available for this question. Answer now from what the lookup
                 } else {
                     ((limits.max_per_question as usize * 4) / (2 * (limits.max_tool_calls as usize + 1))).clamp(2048, MAX_RESULT)
                 };
-                call_tool_capped(&engine, &principal, name, input, cap).await
+                call_tool_capped(engine, principal, name, input, cap).await
             };
             steps.push(json!({ "tool": name, "input": input, "ok": outcome.is_ok() }));
             let (content, is_error) = match outcome {
@@ -565,19 +592,12 @@ No more lookups are available for this question. Answer now from what the lookup
     let (user_left, client_left) = tokens_left(&principal.login, &client, &limits).unwrap_or((Some(0), Some(0)));
     engine
         .record_audit(
-            hexdb_core::AuditEvent::new(&principal.login, "ai.chat", "chat")
+            hexdb_core::AuditEvent::new(&principal.login, action, "chat")
                 .client(&client)
                 .details(json!({ "input_tokens": input_tokens, "output_tokens": output_tokens, "lookups": calls_made, "model": model })),
         )
         .await;
-    Ok(Json(json!({
-        "answer": answer,
-        "steps": steps,
-        "model": model,
-        "tokens": { "input": input_tokens, "output": output_tokens },
-        "left": { "user_today": user_left, "client_today": client_left },
-    }))
-    .into_response())
+    Ok(ChatAnswer { answer, steps, model, input_tokens, output_tokens, user_left, client_left })
 }
 
 /// AI errors as the API reports them (provider problems are 502, budget 429).

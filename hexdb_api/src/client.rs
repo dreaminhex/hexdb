@@ -28,6 +28,11 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct ClientIp(pub String);
 
+/// True if the client reached this server over HTTPS (its own TLS, or a
+/// trusted proxy's), for URLs the server gives out.
+#[derive(Debug, Clone, Copy)]
+pub struct ViaHttps(pub bool);
+
 impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
     type Rejection = std::convert::Infallible;
 
@@ -164,6 +169,7 @@ pub async fn resolve_client(
     request.headers_mut().remove(FORWARDED_FOR_HEADER);
     request.headers_mut().remove(FORWARD_SIGNATURE_HEADER);
     request.extensions_mut().insert(ClientIp(address));
+    request.extensions_mut().insert(ViaHttps(https || engine.config.tls.enabled()));
     let mut response = next.run(request).await;
     if https && !engine.config.tls.enabled() {
         secure_behind_proxy(response.headers_mut());

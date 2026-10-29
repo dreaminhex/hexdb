@@ -70,6 +70,8 @@ fn is_public(method: &Method, path: &str) -> bool {
         || crate::routes::is_ui_path(path)
         || (path == "/health" && method == Method::GET)
         || (path == "/openapi.json" && method == Method::GET)
+        // A2A discovery; it says nothing unless a2a.enabled, and /a2a itself needs credentials.
+        || (path == "/.well-known/agent-card.json" && method == Method::GET)
         || (path == "/auth/login" && method == Method::POST)
         || (path == "/shutdown" && method == Method::POST)
         || is_lattice_route(method, path)

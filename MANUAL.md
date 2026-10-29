@@ -2119,6 +2119,7 @@ hexdb config rollback 3 -m "bad key"
 | `ai.tagging.send` | `["metadata", "text"]` | What tagging sends: any of `metadata`, `text`, `thumbnail`, `image`, `video`, `pdf` |
 | `ai.tagging.video_frames` | 4 | With `video`: frames sent from each video |
 | `ai.video_thumbnails.enabled`, `frames` | false, 6 | The AI picks a video's thumbnail from this many frames |
+| `a2a.enabled` | false | Answer other agents over A2A (needs `ai.chat.enabled`; see [A2A](#a2a-agent2agent)) |
 | `cors.allowed_origins` | empty | Origins whose pages may call the API from a browser, comma-separated, or `*` (see [CORS](#cross-origin-requests-cors)) |
 
 AI features only ever use the key entered here, for this lattice.
@@ -2188,6 +2189,24 @@ claude mcp add --transport http hexdb https://hexdb.example.com/mcp --header "Au
 ```
 
 The tools are the same as the chat's, and all read-only: `list_tessellations`, `describe_tessellation` (schema, indexes, text-search fields, sample field names), `query` (filter, sort, fields), `get_document`, `search` (full text), `count`, `aggregate`, and `sql` (a `SELECT` on one tessellation). They run with the key's permissions, row filters and field masks, return at most 25 documents and about 24 KB, and shorten long strings. The MCP server doesn't call an AI provider (the client brings its own model) and costs no tokens here. Any hex answers; `GET /mcp` (an event stream) returns 405.
+
+### A2A (Agent2Agent)
+
+Other AI agents can delegate questions about the lattice's data to it over the [A2A protocol](https://a2a-protocol.org/) (version 1.0, JSON-RPC binding). Where MCP hands an agent the tools and lets it bring its own model, A2A hands it an answer: the lattice's own chat does the lookups and replies. It's off until an administrator turns on both `ai.chat.enabled` and `a2a.enabled`:
+
+```bash
+hexdb config set ai.chat.enabled true
+hexdb config set a2a.enabled true
+curl https://hexdb.example.com/.well-known/agent-card.json
+curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Version: 1.0" -H "Content-Type: application/json"   -d '{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"1","role":"ROLE_USER","parts":[{"text":"How many orders shipped last week?"}]}}}'
+```
+
+- **The agent card** (`GET /.well-known/agent-card.json`) is public, as discovery needs, and says nothing while A2A is off (404). It names one skill (questions about the data), the JSON-RPC interface at `/a2a` (its URL is built from the request's host, `https` behind TLS or a trusted proxy), and bearer authentication. Streaming and push notifications are not offered.
+- **Every request authenticates** with an API key or session token (`Authorization: Bearer`). The question runs as that user, exactly like the chat: it needs the `chat` permission, lookups use the user's read permissions, row filters and field masks, and the `ai.chat.*` limits and the monthly budget apply. Each answer is audited as `a2a.message`.
+- **`SendMessage`** takes a text message (`ROLE_USER`, text parts; other parts are refused with -32005) and returns a completed task (`{"task": ...}`): the answer as an artifact and as the status message, the question and answer in `history` (`configuration.historyLength` trims it), and the model, tokens and lookups in `metadata.hexdb`. If the provider fails or a limit is reached, the task is `TASK_STATE_FAILED` with the reason. A task takes no further messages; to follow up, send a new message with the same `contextId`, and the earlier questions and answers go along as the chat's history.
+- **`GetTask`**, **`ListTasks`** (optionally by `contextId`) and **`CancelTask`** see only the caller's own tasks. Tasks are kept for an hour (at most 2,000), and cancelling a finished task gives -32002. `SendStreamingMessage`, `SubscribeToTask` and push notification methods give -32004 or -32003.
+- **A2A 0.3 clients** work too: `message/send`, `tasks/get` and `tasks/cancel` get 0.3-shaped answers (`kind` fields, lowercase states and roles). Other `A2A-Version` values get -32009.
+- Requests to `/a2a` are forwarded to the Overseer like the chat, where tasks, contexts and the chat's counters live, in memory.
 
 `POST /ai/complete` lets plugins and scripts use the lattice's provider without a key of their own; it needs the `ai` permission (the built-in `ai` role) and its usage is recorded as `api:<login>`. A plugin gets it with `ai = true` in its manifest's `[access]` section. The Configuration page has a "Test" button and shows the month's usage; the CLI has `hexdb config ai-test` and `hexdb config ai-usage`.
 

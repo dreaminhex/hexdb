@@ -67,6 +67,14 @@ impl ApiError {
         &self.message
     }
 
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
     /// Ask the client to retry after this many seconds.
     pub(crate) fn retry_after(mut self, seconds: u64) -> Self {
         self.retry_after = Some(seconds);

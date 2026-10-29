@@ -131,6 +131,7 @@ pub const CONFIG: &[ConfigDef] = &[
     def("sharing.max_days", ConfigKind::Integer { min: 0, max: 3650 }, "30", "Longest a link may last, in days (0: links may never expire)."),
     def("sharing.require_password", ConfigKind::Boolean, "false", "Every new link needs a password."),
     def("cors.allowed_origins", ConfigKind::Origins, "\"\"", "Web pages on other origins that may call the API from a browser, comma-separated (e.g. https://app.example.com), or * for any. They sign in with an API key or a bearer token; the session cookie never works across origins. Empty: none."),
+    def("a2a.enabled", ConfigKind::Boolean, "false", "Let other AI agents ask this lattice questions over A2A (Agent2Agent): an agent card at /.well-known/agent-card.json and JSON-RPC at /a2a. Answers come from the AI chat, as the calling user, within the chat's limits; ai.chat.enabled must be on too."),
     def("ai.chat.enabled", ConfigKind::Boolean, "false", "Let users with the chat permission ask the AI about the data they can read (the admin UI's Ask page and POST /ai/chat)."),
     text("ai.chat.model", "Model for the chat (empty: ai.model). A smaller, cheaper model is usually enough, e.g. claude-haiku-5-5."),
     def("ai.chat.max_tokens_per_answer", ConfigKind::Integer { min: 64, max: 16_000 }, "1024", "Most tokens one chat answer may use."),

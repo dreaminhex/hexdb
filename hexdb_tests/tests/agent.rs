@@ -205,3 +205,71 @@ fn the_chat_answers_from_the_users_data_within_its_limits() -> Result<()> {
     assert_eq!(audit["events"].as_array().unwrap().len(), 3, "{}", audit);
     Ok(())
 }
+
+fn a2a(server: &TestServer, key: &str, method: &str, params: Value, version: &str) -> Result<Value> {
+    let res = server.request_as(Some(key), Method::POST, "/a2a", Some(&json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params })), &[("a2a-version", version)])?;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    Ok(res.body)
+}
+
+#[test]
+fn a2a_agents_ask_as_the_calling_user() -> Result<()> {
+    let server = TestServer::start()?;
+    let key = seed(&server)?;
+    let (port, _seen) = mock_claude()?;
+    configure(&server, json!({ "ai.provider": "anthropic", "ai.base_url": format!("http://127.0.0.1:{}", port), "ai.api_key": "sk-test-a2a-0001", "ai.chat.enabled": true }))?;
+    let anon = hexdb_tests::http().build()?;
+
+    // Off by default: no card, no endpoint.
+    assert_eq!(anon.get(server.url("/.well-known/agent-card.json")).send()?.status(), StatusCode::NOT_FOUND);
+    let send = json!({ "message": { "messageId": "m1", "role": "ROLE_USER", "parts": [{ "text": "How many orders?" }] } });
+    assert_eq!(server.request_as(Some(&key), Method::POST, "/a2a", Some(&json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": send })), &[])?.status, StatusCode::NOT_FOUND);
+    configure(&server, json!({ "a2a.enabled": true }))?;
+
+    // The card is public and points at /a2a; the endpoint needs credentials.
+    let card: Value = anon.get(server.url("/.well-known/agent-card.json")).send()?.json()?;
+    assert_eq!(card["supportedInterfaces"][0]["protocolBinding"], "JSONRPC");
+    assert!(card["supportedInterfaces"][0]["url"].as_str().unwrap().ends_with("/a2a"), "{}", card);
+    assert_eq!(card["securitySchemes"]["bearer"]["httpAuthSecurityScheme"]["scheme"], "Bearer");
+    assert_eq!(anon.post(server.url("/a2a")).json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": send })).send()?.status(), StatusCode::UNAUTHORIZED);
+
+    // A question runs as the caller (three EU orders, not five) and completes a task.
+    let answer = a2a(&server, &key, "SendMessage", send.clone(), "1.0")?;
+    let task = &answer["result"]["task"];
+    assert_eq!(task["status"]["state"], "TASK_STATE_COMPLETED", "{}", answer);
+    assert!(task["artifacts"][0]["parts"][0]["text"].as_str().unwrap().contains("\"count\":3"), "{}", answer);
+    assert_eq!(task["history"][0]["role"], "ROLE_USER");
+    let (task_id, context) = (task["id"].as_str().unwrap().to_string(), task["contextId"].as_str().unwrap().to_string());
+
+    // Tasks can be read back (by their owner only), listed, and not canceled once done.
+    let got = a2a(&server, &key, "GetTask", json!({ "id": task_id, "historyLength": 1 }), "1.0")?;
+    assert_eq!(got["result"]["id"], task_id.as_str());
+    assert_eq!(got["result"]["history"].as_array().unwrap().len(), 1);
+    assert_eq!(a2a(&server, &key, "CancelTask", json!({ "id": task_id }), "1.0")?["error"]["code"], -32002);
+    let listed = a2a(&server, &key, "ListTasks", json!({ "contextId": context }), "1.0")?;
+    assert_eq!(listed["result"]["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(a2a(&server, server.token(), "GetTask", json!({ "id": task_id }), "1.0")?["error"]["code"], -32001, "another user's task isn't found");
+
+    // A follow-up in the same context carries the conversation.
+    let follow = json!({ "message": { "messageId": "m2", "role": "ROLE_USER", "contextId": context, "parts": [{ "text": "And in the US?" }] } });
+    assert_eq!(a2a(&server, &key, "SendMessage", follow, "1.0")?["result"]["task"]["contextId"], context.as_str());
+
+    // 0.3 clients: their method names and shapes.
+    let old = a2a(&server, &key, "message/send", json!({ "message": { "kind": "message", "messageId": "m3", "role": "user", "parts": [{ "kind": "text", "text": "How many orders?" }] } }), "")?;
+    assert_eq!(old["result"]["kind"], "task", "{}", old);
+    assert_eq!(old["result"]["status"]["state"], "completed");
+
+    // Unsupported things say so.
+    assert_eq!(a2a(&server, &key, "SendStreamingMessage", send.clone(), "1.0")?["error"]["code"], -32004);
+    let image = json!({ "message": { "messageId": "m4", "role": "ROLE_USER", "parts": [{ "url": "https://example.com/x.png" }] } });
+    assert_eq!(a2a(&server, &key, "SendMessage", image, "1.0")?["error"]["code"], -32005);
+    assert_eq!(a2a(&server, &key, "SendMessage", send.clone(), "2.0")?["error"]["code"], -32009);
+
+    // Without the chat permission: refused.
+    let reader = server.user_with_roles("rita", json!([{ "name": "reader", "tessellations": ["orders"] }]))?;
+    let res = server.request_as(Some(&reader), Method::POST, "/a2a", Some(&json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": send })), &[])?;
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    let audit = server.request(Method::GET, "/audit?action=a2a.message", None, &[])?;
+    assert!(audit.body["events"].as_array().is_some_and(|e| e.len() >= 3), "{}", audit.body);
+    Ok(())
+}
