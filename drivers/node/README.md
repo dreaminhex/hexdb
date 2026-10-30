@@ -2,7 +2,7 @@
 
 The JavaScript and TypeScript client for [HexDB](https://github.com/dreaminhex/hexdb), a document database with REST, GraphQL and read-only SQL, encryption at rest and replication with automatic failover.
 
-It covers documents (insert, get, replace, patch, delete), queries with filters, sorting and paging, counts, aggregations, upserts, transactions, idempotency keys, the change feed, streams, functions and GraphQL. It retries `429` and `503` answers for reads, and for writes that carry an idempotency key. Runs on Node.js 18+, Deno, Bun and in browsers, with no dependencies.
+It covers documents (insert, get, replace, patch, delete), queries with filters, sorting and paging, counts, aggregations, upserts, detokenizing vault tokens, transactions, idempotency keys, the change feed, streams, functions and GraphQL. It retries `429` and `503` answers for reads, and for writes that carry an idempotency key. Runs on Node.js 18+, Deno, Bun and in browsers, with no dependencies.
 
 ```sh
 npm install @dreaminhex/hexdb

@@ -5,6 +5,7 @@ Client libraries for HexDB's REST API, plus an Entity Framework Core provider an
 - documents: insert, get, replace, patch, delete;
 - queries with filters, sorting and paging;
 - counts, aggregations and upserts;
+- detokenizing vault tokens of tokenized fields;
 - transactions and idempotency keys;
 - the change feed;
 - streams: publish, read, consumer groups;

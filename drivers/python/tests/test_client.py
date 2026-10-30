@@ -86,6 +86,15 @@ class ClientTest(unittest.TestCase):
         thread.join(timeout=35)
         self.assertEqual(received[0]["id"], doc["id"])
 
+    def test_tokenized_fields(self):
+        accounts = self.tess("accounts")
+        accounts.insert({"card": "0000000000000000"})
+        self.db.request("POST", f"/tessellations/{accounts.name}/schemas", {"fields": {"card": {"type": "string", "tokenize": "vault"}}})
+        doc = accounts.insert({"card": "4111111111111111"})
+        self.assertTrue(doc["card"].startswith("tok_") and doc["card"].endswith("_1111"), doc["card"])
+        self.assertEqual(accounts.query({"card": "4111111111111111"})["documents"][0]["id"], doc["id"])
+        self.assertEqual(accounts.detokenize([doc["card"]])[doc["card"]], "4111111111111111")
+
     def test_streams(self):
         name = f"{self.prefix}-events"
         self.db.request("POST", "/streams", {"name": name})

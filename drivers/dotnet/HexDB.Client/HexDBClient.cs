@@ -332,6 +332,14 @@ public sealed class Tessellation
 
     public Task<JsonNode?> UpdateWhereAsync(object filter, object update, CancellationToken cancel = default) =>
         _db.RequestAsync(HttpMethod.Post, $"{_path}/_update", new { filter, update }, null, cancel);
+
+    /// <summary>
+    /// The values behind vault tokens of tokenized fields (up to 1,000; needs the
+    /// <c>detokenize</c> permission; audited). One-way and unknown tokens map to null.
+    /// </summary>
+    public async Task<Dictionary<string, string?>> DetokenizeAsync(IEnumerable<string> tokens, CancellationToken cancel = default) =>
+        (await _db.RequestAsync(HttpMethod.Post, $"/tessellations/{Uri.EscapeDataString(Name)}/detokenize", new { tokens }, null, cancel).ConfigureAwait(false))!["values"]!
+            .Deserialize<Dictionary<string, string?>>(HexDBClient.Json)!;
 }
 
 /// <summary>A publish/subscribe stream.</summary>

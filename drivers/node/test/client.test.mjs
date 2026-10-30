@@ -140,3 +140,13 @@ test("files", async () => {
   await media.purge(doc.id)
   assert.deepEqual(await media.trash(), [])
 })
+
+test("tokenized fields: lookups by value, detokenize", async () => {
+  const accounts = db.tessellation("accounts")
+  await accounts.insert({ card: "0000000000000000" })
+  await db.request("POST", "/tessellations/accounts/schemas", { fields: { card: { type: "string", tokenize: "vault" } } })
+  const doc = await accounts.insert({ card: "4111111111111111" })
+  assert.match(doc.card, /^tok_[a-z2-7]{26}_1111$/)
+  assert.equal((await accounts.query({ filter: { card: "4111111111111111" } })).documents[0].id, doc.id)
+  assert.equal((await accounts.detokenize([doc.card]))[doc.card], "4111111111111111")
+})

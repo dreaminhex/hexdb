@@ -360,6 +360,14 @@ export class Tessellation {
   updateWhere(filter: Record<string, unknown>, update: Record<string, unknown>): Promise<{ matched: number; modified: number }> {
     return this.db.request("POST", `${this.path}/_update`, { filter, update })
   }
+
+  /**
+   * The values behind vault tokens of tokenized fields (up to 1,000; needs the
+   * `detokenize` permission; audited). One-way and unknown tokens map to null.
+   */
+  async detokenize(tokens: string[]): Promise<Record<string, string | null>> {
+    return (await this.db.request<{ values: Record<string, string | null> }>("POST", `/tessellations/${enc(this.name)}/detokenize`, { tokens })).values
+  }
 }
 
 export class Stream {

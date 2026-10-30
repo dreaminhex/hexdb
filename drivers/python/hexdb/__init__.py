@@ -305,6 +305,11 @@ class Tessellation:
         """Insert or replace documents matched by key fields."""
         return self.db.request("POST", f"{self.path}/_upsert", {"key": key if isinstance(key, str) else list(key), "documents": list(docs)}, _idem(idempotency_key))
 
+    def detokenize(self, tokens: Sequence[str]) -> Dict[str, Optional[str]]:
+        """The values behind vault tokens of tokenized fields (up to 1,000; needs the
+        detokenize permission; audited). One-way and unknown tokens map to None."""
+        return self.db.request("POST", f"/tessellations/{_quote(self.name)}/detokenize", {"tokens": list(tokens)})["values"]
+
     def update_where(self, filter: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, int]:
         return self.db.request("POST", f"{self.path}/_update", {"filter": filter, "update": update})
 

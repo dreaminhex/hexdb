@@ -70,6 +70,22 @@ public class ClientTests
     }
 
     [SkippableFact]
+    public async Task TokenizedFields()
+    {
+        Skip.If(Url is null || Key is null, "set HEXDB_URL and HEXDB_API_KEY");
+        using var db = Client();
+        var accounts = db.Tessellation($"{_prefix}_accounts");
+        await accounts.InsertAsync(new { card = "0000000000000000" });
+        await db.RequestAsync(HttpMethod.Post, $"/tessellations/{accounts.Name}/schemas", new { fields = new { card = new { type = "string", tokenize = "vault" } } });
+        var doc = await accounts.InsertAsync(new { card = "4111111111111111" });
+        var token = doc["card"]!.GetValue<string>();
+        Assert.StartsWith("tok_", token);
+        Assert.EndsWith("_1111", token);
+        var values = await accounts.DetokenizeAsync(new[] { token });
+        Assert.Equal("4111111111111111", values[token]);
+    }
+
+    [SkippableFact]
     public async Task Streams()
     {
         Skip.If(Url is null || Key is null, "set HEXDB_URL and HEXDB_API_KEY");
