@@ -8,6 +8,8 @@ import {
   IconCopy,
   IconFilter,
   IconLoader2,
+  IconLock,
+  IconLockOpen,
   IconPlus,
   IconTrash,
 } from "@tabler/icons-react"
@@ -28,6 +30,7 @@ import { can, useAuth } from "@/lib/auth"
 import { api, type ApiDocument, errorMessage } from "@/lib/api"
 import { formatNumber, formatTimestamp } from "@/lib/format"
 import { setQueryParam, useQueryParam } from "@/lib/router"
+import { tokensIn } from "@/lib/tokens"
 
 const PAGE_SIZES = ["25", "50", "100"]
 
@@ -42,6 +45,62 @@ function editableJson(doc: ApiDocument | null): string {
   return JSON.stringify(fields, null, 2)
 }
 
+/** A document's tokenized fields, and their real values for users with the detokenize permission (audited). */
+function TokenizedFields({ tessellation, doc, canDetokenize }: { tessellation: string; doc: ApiDocument; canDetokenize: boolean }) {
+  const tokens = useMemo(() => tokensIn(Object.fromEntries(Object.entries(doc).filter(([key]) => key !== "id"))), [doc])
+  const [values, setValues] = useState<Record<string, string | null>>()
+  const [busy, setBusy] = useState(false)
+  useEffect(() => setValues(undefined), [doc])
+  if (tokens.length === 0) return null
+
+  const reveal = async () => {
+    setBusy(true)
+    try {
+      setValues(await api.detokenize(tessellation, [...new Set(tokens.map((t) => t.token))]))
+    } catch (e) {
+      toast.error(errorMessage(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="grid gap-2 px-4 pt-4">
+      <div className="flex items-center justify-between gap-2">
+        <Label>Tokenized fields</Label>
+        {canDetokenize && !values && (
+          <Button size="sm" variant="outline" onClick={() => void reveal()} disabled={busy}>
+            {busy ? <IconLoader2 className="animate-spin" /> : <IconLockOpen />} Detokenize
+          </Button>
+        )}
+      </div>
+      <ul className="grid max-h-40 gap-1 overflow-y-auto text-xs">
+        {tokens.map(({ path, token }) => {
+          const value = values?.[token]
+          return (
+            <li key={path} className="flex min-w-0 items-center gap-2">
+              {typeof value === "string" ? (
+                <IconLockOpen className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+              ) : (
+                <IconLock className="text-muted-foreground size-3.5 shrink-0" aria-hidden />
+              )}
+              <span className="text-muted-foreground shrink-0 font-mono">{path}</span>
+              {!values ? (
+                <span className="truncate font-mono">{token}</span>
+              ) : value === null || value === undefined ? (
+                <span className="text-muted-foreground truncate italic">one-way token: the value can't be read back</span>
+              ) : (
+                <span className="truncate font-mono">{value}</span>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+      {values && <p className="text-muted-foreground text-xs">Shown here only, and recorded in the audit trail. Saving keeps the tokens.</p>}
+    </div>
+  )
+}
+
 function DocumentEditor({
   tessellation,
   doc,
@@ -49,6 +108,7 @@ function DocumentEditor({
   onOpenChange,
   onSaved,
   readOnly,
+  canDetokenize,
 }: {
   tessellation: string
   /** null = new document. */
@@ -58,6 +118,8 @@ function DocumentEditor({
   onSaved: () => void
   /** The user can't write to this tessellation. */
   readOnly: boolean
+  /** The user may read vault tokens' values here. */
+  canDetokenize: boolean
 }) {
   const [text, setText] = useState("")
   const [ttl, setTtl] = useState("")
@@ -149,6 +211,7 @@ function DocumentEditor({
             <CodeEditor value={text} onChange={setText} extensions={extensions} onRun={save} aria-label="Document JSON" />
           </div>
 
+          {doc && <TokenizedFields tessellation={tessellation} doc={doc} canDetokenize={canDetokenize} />}
           <div className="grid gap-2 px-4 pt-4">
             <Label htmlFor="doc-ttl">{doc ? "New TTL (seconds, optional)" : "TTL (seconds, optional)"}</Label>
             <Input id="doc-ttl" inputMode="numeric" value={ttl} onChange={(e) => setTtl(e.target.value)} placeholder={doc?._expires_at ? "Keep the current expiry" : "Never expires"} />
@@ -383,6 +446,7 @@ export function DocumentsPage() {
           onOpenChange={(open) => !open && setEditing(undefined)}
           onSaved={() => void page.refresh()}
           readOnly={!can(me, "write", tessellation)}
+          canDetokenize={can(me, "detokenize", tessellation)}
         />
       )}
     </div>

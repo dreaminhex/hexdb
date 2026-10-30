@@ -38,12 +38,13 @@ function draftFromPending(pending: PendingSchema): string {
 /** What the schema editor offers while typing inside quotes. */
 const SCHEMA_KEYWORDS: Completion[] = [
   ...["fields", "additional_fields", "migration"].map((label) => ({ label, type: "property", detail: "schema" })),
-  ...["type", "required", "nullable", "default", "enum", "min", "max", "min_length", "max_length", "description"].map((label) => ({
+  ...["type", "required", "nullable", "default", "enum", "min", "max", "min_length", "max_length", "description", "tokenize"].map((label) => ({
     label,
     type: "property",
     detail: "field rule",
   })),
   ...["string", "number", "integer", "boolean", "object", "array", "any"].map((label) => ({ label, type: "enum", detail: "type" })),
+  ...["one_way", "vault"].map((label) => ({ label, type: "enum", detail: "tokenize" })),
   ...["rename", "copy", "remove", "set_default", "convert", "function"].map((label) => ({ label, type: "keyword", detail: "migration step" })),
   ...["from", "to", "field", "value", "name", "undo"].map((label) => ({ label, type: "property", detail: "step option" })),
 ]
@@ -294,7 +295,8 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
         />
         <p className="text-muted-foreground text-xs">
           Field rules: type (string, number, integer, boolean, object, array, any), required, nullable, default, enum, min, max, min_length,
-          max_length, description. Migration steps: rename and copy ({"{from, to}"}), remove ("field"), set_default ({"{field, value}"}), convert (
+          max_length, description, and tokenize (one_way or vault, string fields only: the value is replaced by a token on write; vault tokens can be
+          read back with the detokenize permission). Migration steps: rename and copy ({"{from, to}"}), remove ("field"), set_default ({"{field, value}"}), convert (
           {"{field, to}"}), and function ({"{name, undo}"}: a function that gets batches of documents and returns them migrated). A new version must stay
           compatible: no type change without a convert step, no new required field without a default. With a function step, use Check to run it on
           the existing documents first.

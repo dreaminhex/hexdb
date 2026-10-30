@@ -1,4 +1,7 @@
+import { IconLock } from "@tabler/icons-react"
+
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { isToken } from "@/lib/tokens"
 import { cn } from "@/lib/utils"
 
 export type { TableData } from "@/lib/doc-table"
@@ -67,6 +70,7 @@ export function DocumentTable({ columns, rows, onRowClick, selectedId, className
                       )}
                       title={typeof value === "object" && value !== null ? JSON.stringify(value, null, 2) : undefined}
                     >
+                      {isToken(value) && <IconLock className="text-muted-foreground mr-1 inline size-3.5 align-text-bottom" aria-label="Tokenized" />}
                       {formatCell(value)}
                     </TableCell>
                   )

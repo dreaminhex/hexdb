@@ -49,7 +49,7 @@ const enc = encodeURIComponent
 export const UNAUTHORIZED_EVENT = "hexdb:unauthorized"
 
 /** Something a role allows. read/write/manage apply to the granted tessellations; the rest apply everywhere. */
-export type Action = "read" | "write" | "manage" | "upload" | "delete" | "restore" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin" | "ai" | "chat" | "share"
+export type Action = "read" | "write" | "manage" | "upload" | "delete" | "restore" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin" | "ai" | "chat" | "share" | "detokenize"
 
 /** A sharing link, as its maker sees it. */
 export interface ShareLink {
@@ -1102,6 +1102,9 @@ export const api = {
   inferSchema: (tess: string) => request<InferredSchema>("GET", `/tessellations/${enc(tess)}/schemas/infer`),
   checkSchema: (tess: string, schema: unknown) => request<SchemaCheck>("POST", `/tessellations/${enc(tess)}/schemas/check`, schema),
   dropSchemas: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas`),
+  /** The values behind vault tokens (null for tokens that aren't vault tokens of this tessellation). Audited. */
+  detokenize: (tess: string, tokens: string[]) =>
+    request<{ values: Record<string, string | null> }>("POST", `/tessellations/${enc(tess)}/detokenize`, { tokens }).then((r) => r.values),
   savePendingSchema: (tess: string, schema: unknown) => request<Schemas>("PUT", `/tessellations/${enc(tess)}/schemas/pending`, schema),
   applyPendingSchema: (tess: string) => request<SchemaVersion>("POST", `/tessellations/${enc(tess)}/schemas/pending/apply`),
   discardPendingSchema: (tess: string) => request<void>("DELETE", `/tessellations/${enc(tess)}/schemas/pending`),
