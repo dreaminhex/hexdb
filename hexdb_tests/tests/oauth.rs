@@ -156,8 +156,24 @@ fn provider_tokens_authenticate_as_existing_users() -> Result<()> {
     let me = server.request_as(Some(&agent), Method::GET, "/auth/me", None, &[])?;
     assert_eq!(me.body["login"], "billing-agent", "{}", me.body);
 
-    // Turned off again: tokens stop working.
+    // Discovery: the protected resource metadata names the provider, a 401 points to it,
+    // and the A2A agent card offers the provider's tokens beside API keys.
+    let metadata = server.request_as(None, Method::GET, "/.well-known/oauth-protected-resource", None, &[])?;
+    assert_eq!(metadata.status, StatusCode::OK, "{}", metadata.body);
+    assert_eq!(metadata.body["authorization_servers"], json!([provider.issuer]));
+    let anonymous = server.request_as(None, Method::GET, "/notes", None, &[])?;
+    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    let challenge = anonymous.headers["www-authenticate"].to_str()?.to_string();
+    assert!(challenge.contains("resource_metadata=") && challenge.contains("/.well-known/oauth-protected-resource"), "{}", challenge);
+    configure(&server, json!({ "ai.chat.enabled": true, "a2a.enabled": true }))?;
+    let card = server.request_as(None, Method::GET, "/.well-known/agent-card.json", None, &[])?;
+    assert_eq!(card.status, StatusCode::OK, "{}", card.body);
+    assert_eq!(card.body["securitySchemes"]["oidc"]["openIdConnectSecurityScheme"]["openIdConnectUrl"], format!("{}/.well-known/openid-configuration", provider.issuer));
+    assert_eq!(card.body["securityRequirements"].as_array().map(Vec::len), Some(2), "either scheme: {}", card.body);
+
+    // Turned off again: tokens stop working, and discovery says nothing.
     configure(&server, json!({ "oauth.issuer": "" }))?;
     assert_eq!(status_with(&server, &agent, &doc, StatusCode::UNAUTHORIZED)?, StatusCode::UNAUTHORIZED);
+    assert_eq!(server.request_as(None, Method::GET, "/.well-known/oauth-protected-resource", None, &[])?.status, StatusCode::NOT_FOUND);
     Ok(())
 }

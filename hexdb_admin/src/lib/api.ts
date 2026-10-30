@@ -106,7 +106,7 @@ export interface Me {
   /** Permissions that apply everywhere (status, logs, audit, ...). */
   permissions: Action[]
   is_admin: boolean
-  credential: { kind: "session"; session_id: string; expires_at: number } | { kind: "api_key"; key_id: string }
+  credential: { kind: "session"; session_id: string; expires_at: number } | { kind: "api_key"; key_id: string } | { kind: "oauth"; issuer: string; subject: string }
   /** The hex runs in demo mode: everyone may view the Configuration page (read-only). */
   demo_mode?: boolean
 }

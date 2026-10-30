@@ -93,6 +93,7 @@ ROUTES = [
     ("post", "/mcp", "Configuration", "Model Context Protocol (JSON-RPC 2.0): read-only lattice tools for external agents", {"requestBody": body({"type": "object"}), "responses": ok()}),
     ("post", "/a2a", "Configuration", "A2A (Agent2Agent) 1.0 JSON-RPC: SendMessage, GetTask, ListTasks, CancelTask; answered by the chat as the caller (a2a.enabled)", {"requestBody": body({"type": "object"}), "responses": ok()}),
     ("get", "/.well-known/agent-card.json", "Configuration", "The A2A agent card (public; 404 while a2a.enabled is off)", {"security": [], "responses": ok()}),
+    ("get", "/.well-known/oauth-protected-resource", "Configuration", "OAuth protected resource metadata (RFC 9728): the OpenID Connect provider whose access tokens are accepted (public; 404 while oauth.issuer is empty)", {"security": [], "responses": ok()}),
     ("get", "/ai/estimate", "Configuration", "Token estimates for AI tagging and video thumbnails, per files tessellation (admins)", {"responses": ok()}),
     ("post", "/{tessellation}/_ai_tag", "Configuration", "Tag existing files with the AI (admins); ?id= one file, ?all=true every file", {"parameters": [param("tessellation"), param("id", "query"), param("all", "query")], "responses": ok("Queued", status="202")}),
     ("post", "/{tessellation}/_ai_thumbnails", "Configuration", "Let the AI choose existing videos' thumbnails (admins)", {"parameters": [param("tessellation"), param("id", "query"), param("all", "query")], "responses": ok("Queued", status="202")}),

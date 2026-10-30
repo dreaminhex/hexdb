@@ -589,6 +589,11 @@ export function ConfigurationPage() {
         {section("Sharing", "Links that give people without an account a file or a folder (users with the share permission make them on the Files page).", "sharing.")}
         {section("A2A", "Other AI agents can ask this lattice questions over the Agent2Agent protocol, answered by the chat as the calling user.", "a2a.")}
         {section("Cross-origin access", "Web apps on other sites that may call the API from a browser, with an API key or bearer token of their own.", "cors.")}
+        {section(
+          "OAuth",
+          "Accept access tokens from your OpenID Connect provider (Entra ID, Auth0, Okta, Keycloak, Google) on every API endpoint. Each token acts as the existing user its claim names; HexDB never creates users from tokens.",
+          "oauth.",
+        )}
       </fieldset>
       <AiCard refreshKey={historyKey} readOnly={readOnly} />
       <AiEstimateCard refreshKey={historyKey} configured={!!data && data.lattice["ai.provider"] !== undefined && data.lattice["ai.provider"] !== "none"} readOnly={readOnly} />

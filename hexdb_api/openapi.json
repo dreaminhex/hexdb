@@ -2564,6 +2564,39 @@
         }
       }
     },
+    "/.well-known/oauth-protected-resource": {
+      "get": {
+        "tags": [
+          "Configuration"
+        ],
+        "summary": "OAuth protected resource metadata (RFC 9728): the OpenID Connect provider whose access tokens are accepted (public; 404 while oauth.issuer is empty)",
+        "operationId": "get_.well-known_oauth-protected-resource",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ai/estimate": {
       "get": {
         "tags": [

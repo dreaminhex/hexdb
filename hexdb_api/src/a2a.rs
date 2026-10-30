@@ -68,6 +68,18 @@ pub async fn agent_card(axum::extract::State(engine): Engine, Extension(https): 
     }
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or(&engine.config.network.api_endpoint);
     let url = format!("{}://{}/a2a", if https.0 { "https" } else { "http" }, host);
+    // Either scheme will do: an API key or session token, or the OpenID Connect provider's access token.
+    let mut security_schemes = json!({
+        "bearer": { "httpAuthSecurityScheme": { "scheme": "Bearer", "description": "A HexDB API key (hxk_...) or session token, sent as Authorization: Bearer." } }
+    });
+    let mut requirements = vec![json!({ "schemes": { "bearer": { "list": [] } } })];
+    if let Some(oauth) = hexdb_core::oauth::Settings::from_engine(&engine) {
+        security_schemes["oidc"] = json!({ "openIdConnectSecurityScheme": {
+            "openIdConnectUrl": oauth.discovery_url(),
+            "description": format!("An access token from this provider for the audience {}, sent as Authorization: Bearer. It acts as the HexDB user its {} claim names.", oauth.audience, oauth.user_claim),
+        } });
+        requirements.push(json!({ "schemes": { "oidc": { "list": [] } } }));
+    }
     let card = json!({
         "name": "HexDB",
         "description": "Answers questions about the data stored in this HexDB lattice, looking it up as the calling user: their read permissions, row filters and field masks apply. Read-only.",
@@ -75,10 +87,8 @@ pub async fn agent_card(axum::extract::State(engine): Engine, Extension(https): 
         "version": env!("CARGO_PKG_VERSION"),
         "documentationUrl": "https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md",
         "capabilities": { "streaming": true, "pushNotifications": false, "extendedAgentCard": false },
-        "securitySchemes": {
-            "bearer": { "httpAuthSecurityScheme": { "scheme": "Bearer", "description": "A HexDB API key (hxk_...) or session token, sent as Authorization: Bearer." } }
-        },
-        "securityRequirements": [{ "schemes": { "bearer": { "list": [] } } }],
+        "securitySchemes": security_schemes,
+        "securityRequirements": requirements,
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain"],
         "skills": [{

@@ -1645,6 +1645,7 @@ Every API request needs credentials except:
 - `GET /health`;
 - `POST /auth/login`;
 - `GET /openapi.json`;
+- discovery documents: `GET /.well-known/agent-card.json` (with A2A on) and `GET /.well-known/oauth-protected-resource` (with OAuth on);
 - the admin UI's static files;
 - `POST /shutdown` with its token;
 - the hex-to-hex `/lattice/*` endpoints, which use their own signatures.
@@ -1662,6 +1663,8 @@ Requests without credentials get 401, including requests to paths that don't exi
 - A key acts with its user's current roles and doesn't use MFA.
 - `GET /auth/keys` lists them; `DELETE /auth/keys/{id}` revokes one.
 
+**OAuth access tokens** come from an OpenID Connect provider you already use (see [OAuth access tokens](#oauth-access-tokens)).
+
 **Passwords.**
 - At least 12 characters, not containing the login, not trivial.
 - Hashed with Argon2id and never returned.
@@ -1676,6 +1679,30 @@ Requests without credentials get 401, including requests to paths that don't exi
 **Brute force.**
 - After `security.max_failed_logins` (5) failures for one login, or from one address, within `lockout_minutes` (15), sign-in is refused with 429. The count is shared across the lattice. Wrong answers to the password (and code) a signed-in user must give again (changing the password, setting up or turning off MFA, new backup codes, "Add a hex") count the same way, so a stolen session or API key can't be used to guess the password.
 - Unknown logins take as long as wrong passwords and return the same message, so logins can't be enumerated.
+
+### OAuth access tokens
+
+HexDB can accept access tokens from an OpenID Connect provider, such as Microsoft Entra ID, Auth0, Okta, Keycloak or Google, so agents and services sign in the way the rest of your organization does instead of holding HexDB API keys. HexDB doesn't issue these tokens; it checks the provider's.
+
+```bash
+hexdb config set oauth.issuer "https://login.microsoftonline.com/<tenant-id>/v2.0"
+hexdb config set oauth.audience "api://hexdb"
+hexdb config set oauth.user_claim email      # the default
+```
+
+**At the provider:**
+1. Register HexDB as an API (Entra: App registrations, *Expose an API*; Auth0: APIs, *Create API*). Its identifier or Application ID URI is `oauth.audience`, and the tenant's issuer URL is `oauth.issuer`.
+2. Register each client that will call HexDB: a machine agent uses the client credentials flow (an app with a secret or certificate, granted access to the HexDB API); an app acting for a person uses the authorization code flow.
+3. Decide which claim names the HexDB user (`oauth.user_claim`). A person's token can use `email` (in Entra, add `email` as an optional claim on access tokens; in Auth0, add it with an Action). A machine client's token has no email: use `sub` (or `azp` in Entra) and create a HexDB user whose login is that value, with the roles the client should have.
+
+**What HexDB checks.** A bearer token that is a JWT is checked only when `oauth.issuer` and `oauth.audience` are set:
+- The signature, with the provider's keys. They're found through `<issuer>/.well-known/openid-configuration`, cached for an hour, and fetched again (at most once a minute) for a key ID HexDB hasn't seen, so the provider's key rotation just works. If the provider can't be reached, the keys fetched earlier keep working. RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384 and EdDSA are accepted; `none` and shared-secret (HS*) tokens never are.
+- `iss` is the provider's issuer, `aud` names `oauth.audience`, and the time is within `nbf` and `exp`, allowing a minute for clock differences.
+- The `oauth.user_claim` claim equals an existing user's login or, failing that, email address, ignoring case. HexDB never creates users from tokens: unknown identities, and users whose address two accounts share, are refused, so administrators decide who gets in and with which roles.
+
+**Then** the request runs as that user, on every endpoint (REST, GraphQL, SQL, MCP, A2A), exactly as with an API key: their roles, row filters and field masks apply, a locked user is refused, and `GET /auth/me` shows `"credential": {"kind": "oauth", "issuer", "subject"}`. A refused token gets the same 401 as a wrong API key; the server log says why (`OAuth token refused: ...`). The provider's discovery and key URLs must use HTTPS (plain HTTP only on `localhost`, for testing).
+
+**Discovery for clients.** While OAuth is on, `GET /.well-known/oauth-protected-resource` (RFC 9728) names the provider, a 401 without credentials carries `WWW-Authenticate: Bearer realm="HexDB", resource_metadata="..."` pointing to it (as MCP clients expect), and the A2A agent card lists an `openIdConnectSecurityScheme` beside the bearer scheme.
 
 ### Multi-factor authentication
 
@@ -2300,6 +2327,8 @@ hexdb config rollback 3 -m "bad key"
 | `ai.embeddings.model`, `base_url`, `api_key` | empty | Embedding model, API base URL and key (empty key with `same`: `ai.api_key`) |
 | `ai.embeddings.user_daily_tokens` | 200,000 | Tokens one user's similarity searches by text may use per day (0: no limit) |
 | `a2a.enabled` | false | Answer other agents over A2A (needs `ai.chat.enabled`; see [A2A](#a2a-agent2agent)) |
+| `oauth.issuer`, `oauth.audience` | empty | Accept access tokens from this OpenID Connect provider for this audience (see [OAuth](#oauth-access-tokens)) |
+| `oauth.user_claim` | `email` | The token claim naming the HexDB user (login or email address) |
 | `cors.allowed_origins` | empty | Origins whose pages may call the API from a browser, comma-separated, or `*` (see [CORS](#cross-origin-requests-cors)) |
 
 AI features only ever use the key entered here, for this lattice.
@@ -2368,7 +2397,7 @@ All of it is also bounded by `ai.monthly_token_budget`. Chat requests sent to a 
 claude mcp add --transport http hexdb https://hexdb.example.com/mcp --header "Authorization: Bearer hxk_..."
 ```
 
-The tools are the same as the chat's, and all read-only: `list_tessellations`, `describe_tessellation` (schema, indexes, text-search fields, sample field names), `query` (filter, sort, fields), `get_document`, `search` (full text), `count`, `aggregate`, and `sql` (a `SELECT` on one tessellation). They run with the key's permissions, row filters and field masks, return at most 25 documents and about 24 KB, and shorten long strings. The MCP server doesn't call an AI provider (the client brings its own model) and costs no tokens here. Any hex answers; `GET /mcp` (an event stream) returns 405.
+The tools are the same as the chat's, and all read-only: `list_tessellations`, `describe_tessellation` (schema, indexes, text-search fields, sample field names), `query` (filter, sort, fields), `get_document`, `search` (full text), `count`, `aggregate`, and `sql` (a `SELECT` on one tessellation). An [OAuth access token](#oauth-access-tokens) works in place of the key. They run with the key's permissions, row filters and field masks, return at most 25 documents and about 24 KB, and shorten long strings. The MCP server doesn't call an AI provider (the client brings its own model) and costs no tokens here. Any hex answers; `GET /mcp` (an event stream) returns 405.
 
 ### A2A (Agent2Agent)
 
@@ -2381,8 +2410,8 @@ curl https://hexdb.example.com/.well-known/agent-card.json
 curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Version: 1.0" -H "Content-Type: application/json"   -d '{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"1","role":"ROLE_USER","parts":[{"text":"How many orders shipped last week?"}]}}}'
 ```
 
-- **The agent card** (`GET /.well-known/agent-card.json`) is public, as discovery needs, and says nothing while A2A is off (404). It names one skill (questions about the data), the JSON-RPC interface at `/a2a` (its URL is built from the request's host, `https` behind TLS or a trusted proxy), bearer authentication, and streaming. Push notifications are not offered.
-- **Every request authenticates** with an API key or session token (`Authorization: Bearer`). The question runs as that user, exactly like the chat: it needs the `chat` permission, lookups use the user's read permissions, row filters and field masks, and the `ai.chat.*` limits and the monthly budget apply. Each answer is audited as `a2a.message`.
+- **The agent card** (`GET /.well-known/agent-card.json`) is public, as discovery needs, and says nothing while A2A is off (404). It names one skill (questions about the data), the JSON-RPC interface at `/a2a` (its URL is built from the request's host, `https` behind TLS or a trusted proxy), bearer authentication (and the OpenID Connect provider, with [OAuth](#oauth-access-tokens) on), and streaming. Push notifications are not offered.
+- **Every request authenticates** with an API key, a session token or an [OAuth access token](#oauth-access-tokens) (`Authorization: Bearer`). The question runs as that user, exactly like the chat: it needs the `chat` permission, lookups use the user's read permissions, row filters and field masks, and the `ai.chat.*` limits and the monthly budget apply. Each answer is audited as `a2a.message`.
 - **`SendMessage`** takes a text message (`ROLE_USER`, text parts; other parts are refused with -32005) and returns a completed task (`{"task": ...}`): the answer as an artifact and as the status message, the question and answer in `history` (`configuration.historyLength` trims it), and the model, tokens and lookups in `metadata.hexdb`. If the provider fails or a limit is reached, the task is `TASK_STATE_FAILED` with the reason. A task takes no further messages; to follow up, send a new message with the same `contextId`, and the earlier questions and answers go along as the chat's history.
 - **`SendStreamingMessage`** answers the same question as Server-Sent Events (`text/event-stream`). Each event is a JSON-RPC response whose `result` holds one of: `task` (first, `TASK_STATE_WORKING`), `statusUpdate` (one per lookup the chat makes, with a message such as `Looking things up: query in 'orders'`, then the final status), and `artifactUpdate` (the answer, with `lastChunk: true`). The stream ends after the final status. The answer runs on even if the client disconnects, and the task stays readable with `GetTask`.
 - **`GetTask`**, **`ListTasks`** (optionally by `contextId`) and **`CancelTask`** see only the caller's own tasks. Tasks are kept for an hour (at most 2,000), and cancelling a finished task gives -32002. `SubscribeToTask` gives -32004 (tasks finish with their answer), and push notification methods give -32003.

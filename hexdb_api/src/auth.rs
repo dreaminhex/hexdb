@@ -7,7 +7,7 @@
 // extractor (see `hexdb_core::auth` for the permission model).
 //
 // Public: GET /health, GET /openapi.json, POST /auth/login, the admin UI's static files, the
-// hex-to-hex /lattice/* endpoints (they verify the lattice signature
+// discovery documents under /.well-known/, the hex-to-hex /lattice/* endpoints (they verify the lattice signature
 // themselves), and POST /shutdown (it verifies the shutdown token, or an
 // admin session).
 //
@@ -72,6 +72,8 @@ fn is_public(method: &Method, path: &str) -> bool {
         || (path == "/openapi.json" && method == Method::GET)
         // A2A discovery; it says nothing unless a2a.enabled, and /a2a itself needs credentials.
         || (path == "/.well-known/agent-card.json" && method == Method::GET)
+        // OAuth discovery (RFC 9728); 404 unless oauth.issuer is set.
+        || (path == PROTECTED_RESOURCE_PATH && method == Method::GET)
         || (path == "/auth/login" && method == Method::POST)
         || (path == "/shutdown" && method == Method::POST)
         || is_lattice_route(method, path)
@@ -217,12 +219,43 @@ pub async fn authenticate(State(engine): State<Arc<HexDBEngine>>, mut request: R
         }
     } else if !is_public(&method, &path) {
         let mut response = ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "Sign in, or send an API key.").into_response();
-        response
-            .headers_mut()
-            .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer realm=\"HexDB\""));
+        // With OAuth on, clients such as MCP's find the provider through the resource metadata.
+        let challenge = match hexdb_core::oauth::Settings::from_engine(&engine) {
+            Some(_) => format!("Bearer realm=\"HexDB\", resource_metadata=\"{}{}\"", base_url(&engine, &request), PROTECTED_RESOURCE_PATH),
+            None => "Bearer realm=\"HexDB\"".to_string(),
+        };
+        if let Ok(value) = HeaderValue::from_str(&challenge) {
+            response.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+        }
         return response;
     }
     next.run(request).await
+}
+
+/// Where the OAuth protected resource metadata is served.
+const PROTECTED_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource";
+
+/// This hex's address as the client reached it: `http(s)://host[:port]`.
+pub fn base_url(engine: &HexDBEngine, request: &Request) -> String {
+    let https = request.extensions().get::<crate::client::ViaHttps>().is_some_and(|h| h.0);
+    let host = request.headers().get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or(&engine.config.network.api_endpoint);
+    format!("{}://{}", if https { "https" } else { "http" }, host)
+}
+
+/// `GET /.well-known/oauth-protected-resource` (RFC 9728): the OpenID Connect
+/// provider whose access tokens this lattice accepts (404 while OAuth is off).
+pub async fn protected_resource(State(engine): Engine, request: Request) -> ApiResult {
+    let Some(settings) = hexdb_core::oauth::Settings::from_engine(&engine) else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "OAuth is off on this lattice."));
+    };
+    Ok(Json(json!({
+        "resource": base_url(&engine, &request),
+        "authorization_servers": [settings.issuer],
+        "bearer_methods_supported": ["header"],
+        "resource_name": "HexDB",
+        "resource_documentation": "https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md#oauth-access-tokens",
+    }))
+    .into_response())
 }
 
 /// Security headers on every response.
