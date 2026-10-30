@@ -500,7 +500,7 @@ pub async fn chat(
         return Err(ApiError::forbidden("The AI chat is off. An administrator can turn it on (ai.chat.enabled)."));
     }
     let Json(input) = body?;
-    let reply = answer(&engine, &principal, &client, &input.question, &input.history, "ai.chat").await?;
+    let reply = answer(&engine, &principal, &client, &input.question, &input.history, "ai.chat", None).await?;
     Ok(Json(json!({
         "answer": reply.answer,
         "steps": reply.steps,
@@ -525,7 +525,16 @@ pub struct ChatAnswer {
 /// Answer a question about the lattice's data as `principal`, within the
 /// chat's limits, and audit it as `action`. Callers check the chat permission
 /// and that the chat is on. Used by `POST /ai/chat` and A2A (`crate::a2a`).
-pub async fn answer(engine: &Arc<HexDBEngine>, principal: &Principal, client: &str, question: &str, history: &[ChatHistoryItem], action: &str) -> Result<ChatAnswer, ApiError> {
+/// `progress` hears of each lookup as it starts (A2A streaming).
+pub async fn answer(
+    engine: &Arc<HexDBEngine>,
+    principal: &Principal,
+    client: &str,
+    question: &str,
+    history: &[ChatHistoryItem],
+    action: &str,
+    progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<ChatAnswer, ApiError> {
     let input_history = history;
     let limits = limits(engine);
     let client = hexdb_core::auth::client_bucket(client);
@@ -620,6 +629,10 @@ No more lookups are available for this question. Answer now from what the lookup
         let mut results = Vec::new();
         for ToolCall { id, name, input } in &reply.calls {
             calls_made += 1;
+            if let Some(progress) = progress {
+                let on = input.get("tessellation").and_then(Value::as_str).map(|t| format!(" in '{}'", t)).unwrap_or_default();
+                let _ = progress.send(format!("Looking things up: {}{}", name, on));
+            }
             let outcome = if calls_made > limits.max_tool_calls {
                 Err("No more lookups are allowed for this question; answer with what you have.".to_string())
             } else {

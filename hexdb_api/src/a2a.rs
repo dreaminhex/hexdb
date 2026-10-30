@@ -10,8 +10,10 @@
 //   GetTask        a task this caller started (kept for an hour)
 //   ListTasks      this caller's tasks, newest first
 //   CancelTask     tasks finish before the answer, so: not cancelable
+//   SendStreamingMessage   the same, as Server-Sent Events: the task, a
+//                  status update per lookup, the answer, the final status
 //
-// Streaming and push notifications aren't offered. Every message runs the
+// Push notifications aren't offered. Every message runs the
 // chat (`crate::agent::answer`) as the caller, authenticated by an API key
 // or session token: the `chat` permission, read permissions, row filters and
 // field masks, the `ai.chat.*` limits and the monthly budget all apply, and
@@ -72,7 +74,7 @@ pub async fn agent_card(axum::extract::State(engine): Engine, Extension(https): 
         "supportedInterfaces": [{ "url": url, "protocolBinding": "JSONRPC", "protocolVersion": PROTOCOL_VERSION }],
         "version": env!("CARGO_PKG_VERSION"),
         "documentationUrl": "https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md",
-        "capabilities": { "streaming": false, "pushNotifications": false, "extendedAgentCard": false },
+        "capabilities": { "streaming": true, "pushNotifications": false, "extendedAgentCard": false },
         "securitySchemes": {
             "bearer": { "httpAuthSecurityScheme": { "scheme": "Bearer", "description": "A HexDB API key (hxk_...) or session token, sent as Authorization: Bearer." } }
         },
@@ -178,10 +180,14 @@ pub async fn post(
         "message/send" => (Dialect::V03, "SendMessage"),
         "tasks/get" => (Dialect::V03, "GetTask"),
         "tasks/cancel" => (Dialect::V03, "CancelTask"),
-        "message/stream" | "tasks/resubscribe" => (Dialect::V03, "SendStreamingMessage"),
+        "message/stream" => (Dialect::V03, "SendStreamingMessage"),
+        "tasks/resubscribe" => (Dialect::V03, "SubscribeToTask"),
         m if m.starts_with("tasks/pushNotificationConfig/") => (Dialect::V03, "SetTaskPushNotificationConfig"),
         m => (Dialect::V1, m),
     };
+    if method == "SendStreamingMessage" {
+        return send_streaming(engine, principal, client, id, params, dialect).await;
+    }
     let answer = match method {
         "SendMessage" => send_message(&engine, &principal, &client, &id, &params, dialect).await?,
         "GetTask" => get_task(&principal, &id, &params, dialect),
@@ -194,7 +200,7 @@ pub async fn post(
                 error(&id, TASK_NOT_FOUND, "No such task.")
             }
         }
-        "SendStreamingMessage" | "SubscribeToTask" => error(&id, UNSUPPORTED, "Streaming isn't offered; use SendMessage."),
+        "SubscribeToTask" => error(&id, UNSUPPORTED, "Tasks here finish with their answer; read a task with GetTask."),
         m if m.contains("PushNotificationConfig") => error(&id, PUSH_NOT_SUPPORTED, "Push notifications aren't offered."),
         "GetExtendedAgentCard" => error(&id, UNSUPPORTED, "There is no extended agent card."),
         other => error(&id, METHOD_NOT_FOUND, &format!("Method '{}' isn't supported.", other)),
@@ -217,75 +223,206 @@ fn client_id(value: &Value) -> Result<Option<String>, &'static str> {
     }
 }
 
-async fn send_message(engine: &std::sync::Arc<hexdb_core::engine::HexDBEngine>, principal: &Principal, client: &str, id: &Value, params: &Value, dialect: Dialect) -> Result<Value, ApiError> {
+/// A SendMessage request, checked and ready to answer.
+struct Prepared {
+    question: String,
+    history: Vec<ChatHistoryItem>,
+    context_id: String,
+    task_id: String,
+    user_message: Value,
+    history_length: Option<u64>,
+}
+
+/// Check a SendMessage request: Ok(Err(reply)) is a JSON-RPC error to send back.
+fn prepare(engine: &hexdb_core::engine::HexDBEngine, principal: &Principal, id: &Value, params: &Value) -> Result<Result<Prepared, Value>, ApiError> {
     principal.require_action(Action::Chat)?;
     if engine.config_value("ai.chat.enabled") != json!(true) {
         return Err(ApiError::forbidden("A2A answers with the AI chat, which is off. An administrator can turn it on (ai.chat.enabled)."));
     }
     let message = &params["message"];
     if !message.is_object() {
-        return Ok(error(id, INVALID_PARAMS, "params.message is required."));
+        return Ok(Err(error(id, INVALID_PARAMS, "params.message is required.")));
     }
     if !matches!(message["role"].as_str(), Some("ROLE_USER") | Some("user")) {
-        return Ok(error(id, INVALID_PARAMS, "The message's role must be ROLE_USER."));
+        return Ok(Err(error(id, INVALID_PARAMS, "The message's role must be ROLE_USER.")));
     }
     let Some(question) = message_text(message) else {
-        return Ok(error(id, CONTENT_TYPE_NOT_SUPPORTED, "Only text parts are understood."));
+        return Ok(Err(error(id, CONTENT_TYPE_NOT_SUPPORTED, "Only text parts are understood.")));
     };
     if !message["taskId"].is_null() {
-        return Ok(error(id, UNSUPPORTED, "Tasks here complete with their answer and take no more messages. Send a new message with the same contextId to follow up."));
+        return Ok(Err(error(id, UNSUPPORTED, "Tasks here complete with their answer and take no more messages. Send a new message with the same contextId to follow up.")));
     }
     let context_id = match client_id(&message["contextId"]) {
         Ok(found) => found.unwrap_or_else(|| ulid::Ulid::generate().to_string()),
-        Err(e) => return Ok(error(id, INVALID_PARAMS, e)),
+        Err(e) => return Ok(Err(error(id, INVALID_PARAMS, e))),
     };
     let message_id = message["messageId"].as_str().map(String::from).unwrap_or_else(|| ulid::Ulid::generate().to_string());
-    let history_length = params["configuration"]["historyLength"].as_u64();
-
     // The conversation so far, if this caller started it.
     let history: Vec<ChatHistoryItem> = {
         let mut store = store().lock().unwrap();
         store.prune();
         match store.contexts.get(&context_id) {
             Some(c) if c.owner == principal.user_id => c.history.iter().map(|h| ChatHistoryItem { role: h.role.clone(), content: h.content.clone() }).collect(),
-            Some(_) => return Ok(error(id, INVALID_PARAMS, "That contextId belongs to someone else; start a new context.")),
+            Some(_) => return Ok(Err(error(id, INVALID_PARAMS, "That contextId belongs to someone else; start a new context."))),
             None => Vec::new(),
         }
     };
-
     let task_id = ulid::Ulid::generate().to_string();
     let user_message = json!({ "messageId": message_id, "role": "ROLE_USER", "parts": [{ "text": question }], "contextId": context_id, "taskId": task_id });
-    let (state, text, metadata) = match agent::answer(engine, principal, client, &question, &history, "a2a.message").await {
+    Ok(Ok(Prepared { question, history, context_id, task_id, user_message, history_length: params["configuration"]["historyLength"].as_u64() }))
+}
+
+/// Keep a task (A2A 1.0 form) for GetTask and ListTasks.
+fn keep(principal: &Principal, task: &Value) {
+    let id = task["id"].as_str().unwrap_or_default().to_string();
+    store().lock().unwrap().tasks.insert(id, StoredTask { owner: principal.user_id.clone(), task: task.clone(), at: Instant::now() });
+}
+
+fn agent_message(text: &str, context_id: &str, task_id: &str) -> Value {
+    json!({ "messageId": ulid::Ulid::generate().to_string(), "role": "ROLE_AGENT", "parts": [{ "text": text }], "contextId": context_id, "taskId": task_id })
+}
+
+/// Answer a prepared question and keep the finished task. Err only for the
+/// request's own faults (permissions, input); provider problems and limits fail the task.
+async fn run_task(
+    engine: &std::sync::Arc<hexdb_core::engine::HexDBEngine>,
+    principal: &Principal,
+    client: &str,
+    p: &Prepared,
+    progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<Value, ApiError> {
+    let (state, text, metadata) = match agent::answer(engine, principal, client, &p.question, &p.history, "a2a.message", progress).await {
         Ok(answer) => {
             let mut store = store().lock().unwrap();
-            let context = store.contexts.entry(context_id.clone()).or_insert_with(|| Context { owner: principal.user_id.clone(), history: Vec::new(), at: Instant::now() });
-            context.history.push(ChatHistoryItem { role: "user".into(), content: question.clone() });
+            let context = store.contexts.entry(p.context_id.clone()).or_insert_with(|| Context { owner: principal.user_id.clone(), history: Vec::new(), at: Instant::now() });
+            context.history.push(ChatHistoryItem { role: "user".into(), content: p.question.clone() });
             context.history.push(ChatHistoryItem { role: "assistant".into(), content: answer.answer.clone() });
             context.at = Instant::now();
             let metadata = json!({ "hexdb": { "model": answer.model, "tokens": { "input": answer.input_tokens, "output": answer.output_tokens }, "lookups": answer.steps.len() } });
             ("TASK_STATE_COMPLETED", answer.answer, metadata)
         }
-        // Permission and input problems are the request's fault; the rest fail the task.
-        Err(e) if matches!(e.status(), StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED) => return Err(e),
-        Err(e) if e.status() == StatusCode::BAD_REQUEST => return Ok(error(id, INVALID_PARAMS, e.message())),
+        Err(e) if matches!(e.status(), StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED | StatusCode::BAD_REQUEST) => return Err(e),
         Err(e) => ("TASK_STATE_FAILED", e.message().to_string(), json!({ "hexdb": { "error": e.code() } })),
     };
-    let agent_message = json!({ "messageId": ulid::Ulid::generate().to_string(), "role": "ROLE_AGENT", "parts": [{ "text": text }], "contextId": context_id, "taskId": task_id });
+    let reply = agent_message(&text, &p.context_id, &p.task_id);
     let mut task = json!({
-        "id": task_id,
-        "contextId": context_id,
-        "status": { "state": state, "message": agent_message, "timestamp": now() },
-        "history": [user_message, agent_message],
+        "id": p.task_id,
+        "contextId": p.context_id,
+        "status": { "state": state, "message": reply, "timestamp": now() },
+        "history": [p.user_message, reply],
         "metadata": metadata,
     });
     if state == "TASK_STATE_COMPLETED" {
         task["artifacts"] = json!([{ "artifactId": ulid::Ulid::generate().to_string(), "name": "answer", "parts": [{ "text": text }] }]);
     }
-    {
-        let mut store = store().lock().unwrap();
-        store.tasks.insert(task_id, StoredTask { owner: principal.user_id.clone(), task: task.clone(), at: Instant::now() });
+    keep(principal, &task);
+    Ok(task)
+}
+
+async fn send_message(engine: &std::sync::Arc<hexdb_core::engine::HexDBEngine>, principal: &Principal, client: &str, id: &Value, params: &Value, dialect: Dialect) -> Result<Value, ApiError> {
+    let p = match prepare(engine, principal, id, params)? {
+        Ok(p) => p,
+        Err(reply) => return Ok(reply),
+    };
+    match run_task(engine, principal, client, &p, None).await {
+        Ok(task) => Ok(reply(id, shaped(&task, p.history_length, dialect))),
+        Err(e) if e.status() == StatusCode::BAD_REQUEST => Ok(error(id, INVALID_PARAMS, e.message())),
+        Err(e) => Err(e),
     }
-    Ok(reply(id, shaped(&task, history_length, dialect)))
+}
+
+/// SendStreamingMessage (0.3: message/stream): Server-Sent Events, each a
+/// JSON-RPC response whose result is a StreamResponse: the task (working),
+/// a status update per lookup the chat makes, the answer as an artifact
+/// update, and the final status. The answer runs in its own task, as the
+/// caller, and is kept for GetTask even if the client goes away.
+async fn send_streaming(
+    engine: std::sync::Arc<hexdb_core::engine::HexDBEngine>,
+    principal: Principal,
+    client: String,
+    id: Value,
+    params: Value,
+    dialect: Dialect,
+) -> ApiResult {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    let p = match prepare(&engine, &principal, &id, &params)? {
+        Ok(p) => p,
+        Err(reply) => return Ok(Json(reply).into_response()),
+    };
+    let (events, receiver) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let started = json!({
+        "id": p.task_id,
+        "contextId": p.context_id,
+        "status": { "state": "TASK_STATE_WORKING", "timestamp": now() },
+        "history": [p.user_message],
+    });
+    keep(&principal, &started);
+    let _ = events.send(json!({ "task": started }));
+    let caller = std::sync::Arc::new(principal.clone());
+    tokio::spawn(hexdb_core::access::as_caller(caller, async move {
+        let (progress, mut steps) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (task_id, context_id) = (p.task_id.clone(), p.context_id.clone());
+        let relay = {
+            let events = events.clone();
+            let (task_id, context_id) = (task_id.clone(), context_id.clone());
+            tokio::spawn(async move {
+                while let Some(step) = steps.recv().await {
+                    let status = json!({ "state": "TASK_STATE_WORKING", "message": agent_message(&step, &context_id, &task_id), "timestamp": now() });
+                    let _ = events.send(json!({ "statusUpdate": { "taskId": task_id, "contextId": context_id, "status": status } }));
+                }
+            })
+        };
+        let task = match run_task(&engine, &principal, &client, &p, Some(&progress)).await {
+            Ok(task) => task,
+            Err(e) => {
+                let reply = agent_message(e.message(), &context_id, &task_id);
+                let task = json!({ "id": task_id, "contextId": context_id, "status": { "state": "TASK_STATE_REJECTED", "message": reply, "timestamp": now() }, "history": [p.user_message, reply] });
+                keep(&principal, &task);
+                task
+            }
+        };
+        drop(progress);
+        let _ = relay.await;
+        if let Some(artifact) = task["artifacts"].get(0) {
+            let _ = events.send(json!({ "artifactUpdate": { "taskId": task_id, "contextId": context_id, "artifact": artifact, "append": false, "lastChunk": true } }));
+        }
+        let _ = events.send(json!({ "statusUpdate": { "taskId": task_id, "contextId": context_id, "status": task["status"], "metadata": task["metadata"] } }));
+    }));
+    use futures::StreamExt;
+    let stream = futures::stream::unfold(receiver, |mut r| async move { r.recv().await.map(|v| (v, r)) }).map(move |result| {
+        let result = if dialect == Dialect::V03 { stream_v03(result) } else { result };
+        Ok::<_, std::convert::Infallible>(Event::default().data(reply(&id, result).to_string()))
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()).into_response())
+}
+
+/// A 1.0 StreamResponse in 0.3's form: the bare object with its `kind`
+/// (task, status-update with `final`, artifact-update).
+fn stream_v03(result: Value) -> Value {
+    if let Some(task) = result.get("task") {
+        return to_v03(task.clone());
+    }
+    if let Some(update) = result.get("statusUpdate") {
+        let mut update = update.clone();
+        let state = update["status"]["state"].as_str().unwrap_or_default().to_string();
+        update["kind"] = json!("status-update");
+        update["final"] = json!(state != "TASK_STATE_WORKING");
+        update["status"]["state"] = json!(state.trim_start_matches("TASK_STATE_").to_ascii_lowercase());
+        if update["status"]["message"].is_object() {
+            let message = to_v03(json!({ "history": [update["status"]["message"]] }))["history"][0].clone();
+            update["status"]["message"] = message;
+        }
+        return update;
+    }
+    if let Some(update) = result.get("artifactUpdate") {
+        let mut update = update.clone();
+        update["kind"] = json!("artifact-update");
+        for part in update["artifact"]["parts"].as_array_mut().into_iter().flatten() {
+            part["kind"] = json!("text");
+        }
+        return update;
+    }
+    result
 }
 
 fn owned_task(principal: &Principal, task_id: &str) -> Option<Value> {

@@ -195,8 +195,10 @@ pub async fn serve(
 
 /// Routes that hold a request open on purpose (long polls and streams). They
 /// cap their own waits, so the request timeout doesn't apply.
-fn is_long_running(path: &str) -> bool {
+pub(crate) fn is_long_running(path: &str) -> bool {
     matches!(path, "/changes" | "/changes/stream" | "/lattice/changes")
+        // A2A answers (and their event streams) take as long as the chat's lookups; the chat bounds them.
+        || path == "/a2a"
         // File uploads and downloads take as long as the file needs.
         || path.contains("/_files/")
         || path.contains("/_uploads/")

@@ -260,7 +260,29 @@ fn a2a_agents_ask_as_the_calling_user() -> Result<()> {
     assert_eq!(old["result"]["status"]["state"], "completed");
 
     // Unsupported things say so.
-    assert_eq!(a2a(&server, &key, "SendStreamingMessage", send.clone(), "1.0")?["error"]["code"], -32004);
+    // Streaming: Server-Sent Events, each a JSON-RPC response with one StreamResponse.
+    assert_eq!(card["capabilities"]["streaming"], true);
+    let events = |method: &str, params: Value, version: &str| -> Result<Vec<Value>> {
+        let res = server.request_as(Some(&key), Method::POST, "/a2a", Some(&json!({ "jsonrpc": "2.0", "id": 9, "method": method, "params": params })), &[("a2a-version", version)])?;
+        assert_eq!(res.status, StatusCode::OK);
+        assert!(res.headers["content-type"].to_str()?.starts_with("text/event-stream"));
+        let text = res.body.as_str().unwrap_or_default().to_string();
+        Ok(text.lines().filter_map(|l| l.strip_prefix("data:")).map(|d| serde_json::from_str::<Value>(d.trim()).unwrap()["result"].clone()).collect())
+    };
+    let stream = events("SendStreamingMessage", send.clone(), "1.0")?;
+    assert_eq!(stream[0]["task"]["status"]["state"], "TASK_STATE_WORKING", "{:?}", stream);
+    assert!(stream.iter().any(|e| e["statusUpdate"]["status"]["message"]["parts"][0]["text"] == "Looking things up: count in 'orders'"), "{:?}", stream);
+    let artifact = stream.iter().find(|e| e.get("artifactUpdate").is_some()).expect("the answer");
+    assert!(artifact["artifactUpdate"]["artifact"]["parts"][0]["text"].as_str().unwrap().contains("\"count\":3"), "{:?}", stream);
+    let last = stream.last().unwrap();
+    assert_eq!(last["statusUpdate"]["status"]["state"], "TASK_STATE_COMPLETED", "{:?}", stream);
+    let streamed_task = stream[0]["task"]["id"].as_str().unwrap();
+    assert_eq!(a2a(&server, &key, "GetTask", json!({ "id": streamed_task }), "1.0")?["result"]["status"]["state"], "TASK_STATE_COMPLETED", "kept for GetTask");
+    let old_stream = events("message/stream", json!({ "message": { "kind": "message", "messageId": "m5", "role": "user", "parts": [{ "kind": "text", "text": "How many orders?" }] } }), "")?;
+    assert_eq!(old_stream[0]["kind"], "task");
+    let last = old_stream.last().unwrap();
+    assert_eq!((last["kind"].clone(), last["final"].clone(), last["status"]["state"].clone()), (json!("status-update"), json!(true), json!("completed")), "{:?}", old_stream);
+    assert_eq!(a2a(&server, &key, "SubscribeToTask", json!({ "id": streamed_task }), "1.0")?["error"]["code"], -32004);
     let image = json!({ "message": { "messageId": "m4", "role": "ROLE_USER", "parts": [{ "url": "https://example.com/x.png" }] } });
     assert_eq!(a2a(&server, &key, "SendMessage", image, "1.0")?["error"]["code"], -32005);
     assert_eq!(a2a(&server, &key, "SendMessage", send.clone(), "2.0")?["error"]["code"], -32009);

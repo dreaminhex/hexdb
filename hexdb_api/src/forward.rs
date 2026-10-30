@@ -248,7 +248,8 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     let Some(http) = forward_client(&engine) else {
         return next.run(Request::from_parts(parts, Body::from(bytes))).await;
     };
-    let timeout = Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1));
+    // Long-running routes (A2A streams) keep their own limits; forwarding mustn't cut them off.
+    let timeout = if crate::server::is_long_running(&path) { Duration::from_secs(3600) } else { Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1)) };
     let mut headers = HeaderMap::new();
     copy_headers(&parts.headers, &mut headers);
     let signature = engine.lattice_keys.sign_request(parts.method.as_str(), &signed_target(&path_and_query, &client), b"");
