@@ -4,7 +4,7 @@
 
 HexDB is a document database written in Rust. Documents are JSON, grouped into collections called tessellations, and served over REST, GraphQL, gRPC and read-only SQL from a single binary that also hosts an admin UI. It also stores files of any kind, with their metadata indexed for search. Several HexDB servers (hexes) form a lattice: one Overseer takes writes, and the others replicate its data, serve reads, and take over if it fails.
 
-The [technical manual](https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md) covers every feature in depth, including how the storage engine, encryption, replication and indexes work.
+The [technical manual](MANUAL.md) covers every feature in depth, including how the storage engine, encryption, replication and indexes work.
 
 ## Features
 
@@ -67,7 +67,7 @@ Measured with `cargo run --release -p hexdb_bench` on one laptop (Intel Core i9-
 | **Failover**, discovery every second | new Overseer takes writes after 2.5 s | 2.8 s |
 | **Failover**, default 10 s discovery | 31 s | 30 s |
 
-Writes are slower in the Linux column because Docker on Windows keeps its data on WSL2's virtual disk, which adds to every fsync. Ubuntu 24.04 in the same setup measured within a few percent of Debian. The full reports, with how each number is taken, are in [bench/results](https://github.com/dreaminhex/hexdb/blob/main/bench/results): [Windows](https://github.com/dreaminhex/hexdb/blob/main/bench/results/windows-full.md), [Debian](https://github.com/dreaminhex/hexdb/blob/main/bench/results/debian-docker-full.md) and [Ubuntu](https://github.com/dreaminhex/hexdb/blob/main/bench/results/ubuntu-docker-full.md). Run the benchmark to measure your own hardware.
+Writes are slower in the Linux column because Docker on Windows keeps its data on WSL2's virtual disk, which adds to every fsync. Ubuntu 24.04 in the same setup measured within a few percent of Debian. The full reports, with how each number is taken, are in [bench/results](bench/results): [Windows](bench/results/windows-full.md), [Debian](bench/results/debian-docker-full.md) and [Ubuntu](bench/results/ubuntu-docker-full.md). Run the benchmark to measure your own hardware.
 
 Some results don't depend on the machine:
 
@@ -78,7 +78,7 @@ Some results don't depend on the machine:
 
 Documents over 1 MB need `limits.max_document_kb` raised (up to 64 MB).
 
-For the hosted sizes of HexDB Enterprise (2 or 4 shared or dedicated vCPUs), [bench/results/enterprise-sizes.md](https://github.com/dreaminhex/hexdb/blob/main/bench/results/enterprise-sizes.md) has the same benchmark run under each size's CPU and memory limits.
+For the hosted sizes of HexDB Enterprise (2 or 4 shared or dedicated vCPUs), [bench/results/enterprise-sizes.md](bench/results/enterprise-sizes.md) has the same benchmark run under each size's CPU and memory limits.
 
 ## Quick start
 
@@ -221,7 +221,7 @@ To load sample data (articles, products, customers, orders and short-lived sessi
 
 ### While developing
 
-- `cargo run -p hexdb_api` from the repository root runs the server straight from source, using `hexdb_api/hexdb.toml` (set by [.cargo/config.toml](https://github.com/dreaminhex/hexdb/blob/main/.cargo/config.toml)). Stop any `hexdb start` server first: both use port 7700.
+- `cargo run -p hexdb_api` from the repository root runs the server straight from source, using `hexdb_api/hexdb.toml` (set by [.cargo/config.toml](.cargo/config.toml)). Stop any `hexdb start` server first: both use port 7700.
 - `cd hexdb_admin && npm run dev` serves the admin UI with live reload at http://localhost:5173/ui/, sending API calls to the server on port 7700.
 - `node scripts/lattice-demo.mjs` starts a lattice; see [See a lattice](#see-a-lattice) below.
 - `hexdb lattice spawn --count 2` (from `hexdb_api`) adds two hexes to your own server's lattice instead.
@@ -258,7 +258,7 @@ docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
 
 The first start prints a generated administrator password in the container log (`docker logs <container> | grep password`). Open http://localhost:7700/ui/ and sign in. Keep the encryption key: the data can't be read without it.
 
-`docker compose up -d` starts a three-hex lattice instead; see the comments at the top of [docker-compose.yml](https://github.com/dreaminhex/hexdb/blob/main/docker-compose.yml).
+`docker compose up -d` starts a three-hex lattice instead; see the comments at the top of [docker-compose.yml](docker-compose.yml).
 
 ## Command-line interface
 
@@ -307,14 +307,14 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 
 | Language | Folder | Requirements |
 | --- | --- | --- |
-| JavaScript / TypeScript | [drivers/node](https://github.com/dreaminhex/hexdb/blob/main/drivers/node) | Node.js 18+, Deno, Bun or a browser |
-| Python | [drivers/python](https://github.com/dreaminhex/hexdb/blob/main/drivers/python) | Python 3.9+, standard library only |
-| .NET | [drivers/dotnet](https://github.com/dreaminhex/hexdb/blob/main/drivers/dotnet) | .NET 8+ |
-| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](https://github.com/dreaminhex/hexdb/blob/main/drivers/dotnet/HexDB.EntityFrameworkCore) | .NET 8+, EF Core 9 |
-| ODBC | [drivers/odbc](https://github.com/dreaminhex/hexdb/blob/main/drivers/odbc) | Windows, Linux (unixODBC); 64-bit |
-| JDBC | [drivers/java](https://github.com/dreaminhex/hexdb/blob/main/drivers/java) | Java 11+, no dependencies |
+| JavaScript / TypeScript | [drivers/node](drivers/node) | Node.js 18+, Deno, Bun or a browser |
+| Python | [drivers/python](drivers/python) | Python 3.9+, standard library only |
+| .NET | [drivers/dotnet](drivers/dotnet) | .NET 8+ |
+| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | .NET 8+, EF Core 9 |
+| ODBC | [drivers/odbc](drivers/odbc) | Windows, Linux (unixODBC); 64-bit |
+| JDBC | [drivers/java](drivers/java) | Java 11+, no dependencies |
 
-See [drivers/README.md](https://github.com/dreaminhex/hexdb/blob/main/drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](https://github.com/dreaminhex/hexdb/blob/main/hexdb_api/openapi.json)).
+See [drivers/README.md](drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](hexdb_api/openapi.json)).
 
 ## Installing
 
@@ -324,16 +324,16 @@ Prebuilt releases are on the [releases page](https://github.com/dreaminhex/hexdb
 | --- | --- |
 | Windows | [hexdb-windows-x64.msi](https://github.com/dreaminhex/hexdb/releases/latest/download/hexdb-windows-x64.msi), `winget install DreamInHex.HexDB` or `choco install hexdb` |
 | macOS | [hexdb-macos-universal.dmg](https://github.com/dreaminhex/hexdb/releases/latest/download/hexdb-macos-universal.dmg) or `brew install dreaminhex/hexdb/hexdb` |
-| Debian, Ubuntu | `sudo apt install hexdb` from the APT repository (see [packaging/RELEASING.md](https://github.com/dreaminhex/hexdb/blob/main/packaging/RELEASING.md#what-users-run)) |
+| Debian, Ubuntu | `sudo apt install hexdb` from the APT repository (see [packaging/RELEASING.md](packaging/RELEASING.md#what-users-run)) |
 | Linux, macOS | `curl -fsSL https://raw.githubusercontent.com/dreaminhex/hexdb/main/packaging/install.sh \| sh` |
 | Docker | `docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb -e HEXDB_STORAGE__ENCRYPTION_KEY=... ghcr.io/dreaminhex/hexdb` (also on Docker Hub as `dreaminhex/hexdb`) |
-| Kubernetes | `helm install hexdb oci://ghcr.io/dreaminhex/charts/hexdb --set replicas=3` (see the MANUAL's [On Kubernetes](https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md#on-kubernetes)) |
+| Kubernetes | `helm install hexdb oci://ghcr.io/dreaminhex/charts/hexdb --set replicas=3` (see the MANUAL's [On Kubernetes](MANUAL.md#on-kubernetes)) |
 
 Then run `hexdb start`. The first start creates your configuration and encryption key (`hexdb init` does only that step) and prints where the generated administrator password is; open http://127.0.0.1:7700/ui/ to sign in. Each installer includes the ODBC driver, and the Windows installer and the Debian package register it.
 
 Linux builds need glibc 2.28 or later (Ubuntu 20.04, Debian 10, RHEL 8 and newer). Windows builds need nothing else installed.
 
-[packaging/RELEASING.md](https://github.com/dreaminhex/hexdb/blob/main/packaging/RELEASING.md) explains how releases are built and published to each channel.
+[packaging/RELEASING.md](packaging/RELEASING.md) explains how releases are built and published to each channel.
 
 ## Repository layout
 
@@ -359,14 +359,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cd hexdb_admin && npm run dev               # UI dev server; proxies the API at 127.0.0.1:7700
 ```
 
-The end-to-end tests in `hexdb_tests` start real servers on free ports in temporary directories. Some of them run several hexes and exercise failover. Set `HEXDB_TEST_KEEP=1` to keep each test's directory and server log. CI ([.github/workflows/ci.yml](https://github.com/dreaminhex/hexdb/blob/main/.github/workflows/ci.yml)) runs the tests, clippy, `cargo audit`, `npm audit`, the UI build and the driver tests. `Cargo.lock` and the npm lockfiles are tracked and every build uses them (`--locked`, `npm ci`), so a release contains only reviewed dependency versions; Dependabot proposes updates as pull requests.
+The end-to-end tests in `hexdb_tests` start real servers on free ports in temporary directories. Some of them run several hexes and exercise failover. Set `HEXDB_TEST_KEEP=1` to keep each test's directory and server log. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the tests, clippy, `cargo audit`, `npm audit`, the UI build and the driver tests. `Cargo.lock` and the npm lockfiles are tracked and every build uses them (`--locked`, `npm ci`), so a release contains only reviewed dependency versions; Dependabot proposes updates as pull requests.
 
 ## Limitations
 
 - Slicing (`replication.slicing`) splits the data across replicas, but the Overseer still keeps every slice, so a lattice can't hold more than one machine can, and replicas holding slices pass queries to the Overseer.
 - SQL is read-only. Statements with joins, subqueries or expressions run in memory over table reads of at most `limits.sql_max_rows` documents each (100,000), and window functions and recursive `WITH` aren't supported. The ODBC driver is tested with pyodbc (unixODBC and the Windows driver manager) and the JDBC driver with JUnit, not yet with desktop tools such as Excel, Power BI or DBeaver.
-- The Entity Framework Core provider loads relationships with extra queries (no joins), so navigations can't be used inside server-side filters; many-to-many skip navigations, complex types and composite keys aren't supported (see [MANUAL.md](https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md#entity-framework-core)).
+- The Entity Framework Core provider loads relationships with extra queries (no joins), so navigations can't be used inside server-side filters; many-to-many skip navigations, complex types and composite keys aren't supported (see [MANUAL.md](MANUAL.md#entity-framework-core)).
 
 ## License
 
-HexDB is licensed under the [Apache License 2.0](https://github.com/dreaminhex/hexdb/blob/main/LICENSE).
+HexDB is licensed under the [Apache License 2.0](LICENSE).
