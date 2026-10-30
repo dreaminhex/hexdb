@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "hexdb.fullname" . }}
+  labels:
+    {{- include "hexdb.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "hexdb.headless" . }}
+  replicas: {{ .Values.replicas }}
+  # Hexes elect an Overseer among themselves; they can all start at once.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "hexdb.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hexdb.selector" . | nindent 8 }}
+      annotations:
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The image's unprivileged user; the volume is given to its group.
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: hexdb
+          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: api
+              containerPort: 7700
+            - name: discovery
+              containerPort: 7702
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HEXDB_IDENTITY__NAME
+              value: "$(POD_NAME)"
+            - name: HEXDB_NETWORK__ADVERTISE_HOST
+              value: "$(POD_NAME).{{ include "hexdb.headless" . }}.{{ .Release.Namespace }}.svc.cluster.local"
+            - name: HEXDB_NETWORK__LATTICE_NAME
+              value: {{ .Values.latticeName | quote }}
+            - name: HEXDB_NETWORK__PEERS
+              value: {{ include "hexdb.peers" . | quote }}
+            - name: HEXDB_STORAGE__ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hexdb.secretName" . }}
+                  key: encryption-key
+            - name: HEXDB_NETWORK__LATTICE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hexdb.secretName" . }}
+                  key: lattice-secret
+            - name: HEXDB_SECURITY__ADMIN_LOGIN
+              value: {{ .Values.admin.login | quote }}
+            - name: HEXDB_SECURITY__ADMIN_EMAIL
+              value: {{ .Values.admin.email | quote }}
+            {{- if .Values.admin.password }}
+            - name: HEXDB_SECURITY__ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hexdb.secretName" . }}
+                  key: admin-password
+            {{- end }}
+            - name: HEXDB_MEMORY__RAM_MB
+              value: {{ .Values.ramMb | quote }}
+            - name: HEXDB_STORAGE__DISK_MB
+              value: {{ include "hexdb.diskMb" . | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 4
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/hexdb
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

@@ -1,0 +1,17 @@
+HexDB {{ .Chart.AppVersion }} is starting: {{ .Values.replicas }} hex(es) in the lattice "{{ .Values.latticeName }}".
+
+The admin UI and API:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hexdb.fullname" . }} 7700:{{ .Values.service.port }}
+  open http://localhost:7700/ui/
+{{- if not .Values.admin.password }}
+
+The first administrator ({{ .Values.admin.login }}) gets a generated password, printed once by the hex that creates it:
+  kubectl -n {{ .Release.Namespace }} logs {{ include "hexdb.fullname" . }}-0 | grep -A2 "first administrator"
+{{- end }}
+{{- if not .Values.existingSecret }}
+
+Back up the storage key: the data can't be read without it.
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "hexdb.fullname" . }} -o jsonpath='{.data.encryption-key}' | base64 -d
+{{- end }}
+
+A forgotten admin password: kubectl -n {{ .Release.Namespace }} exec {{ include "hexdb.fullname" . }}-0 -- hexdb reset-password

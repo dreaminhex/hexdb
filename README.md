@@ -323,7 +323,8 @@ Prebuilt releases are on the [releases page](https://github.com/dreaminhex/hexdb
 | macOS | [hexdb-macos-universal.dmg](https://github.com/dreaminhex/hexdb/releases/latest/download/hexdb-macos-universal.dmg) or `brew install dreaminhex/hexdb/hexdb` |
 | Debian, Ubuntu | `sudo apt install hexdb` from the APT repository (see [packaging/RELEASING.md](packaging/RELEASING.md#what-users-run)) |
 | Linux, macOS | `curl -fsSL https://raw.githubusercontent.com/dreaminhex/hexdb/main/packaging/install.sh \| sh` |
-| Docker | `docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb -e HEXDB_STORAGE__ENCRYPTION_KEY=... ghcr.io/dreaminhex/hexdb` |
+| Docker | `docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb -e HEXDB_STORAGE__ENCRYPTION_KEY=... ghcr.io/dreaminhex/hexdb` (also on Docker Hub as `dreaminhex/hexdb`) |
+| Kubernetes | `helm install hexdb oci://ghcr.io/dreaminhex/charts/hexdb --set replicas=3` (see the MANUAL's [On Kubernetes](MANUAL.md#on-kubernetes)) |
 
 Then run `hexdb start`. The first start creates your configuration and encryption key (`hexdb init` does only that step) and prints where the generated administrator password is; open http://127.0.0.1:7700/ui/ to sign in. Each installer includes the ODBC driver, and the Windows installer and the Debian package register it.
 

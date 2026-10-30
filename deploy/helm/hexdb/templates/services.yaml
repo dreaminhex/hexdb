@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hexdb.fullname" . }}
+  labels:
+    {{- include "hexdb.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "hexdb.selector" . | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.service.port }}
+      targetPort: api
+---
+# Gives each hex a DNS name for the others; listed before they're ready,
+# since hexes find each other while they start.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hexdb.headless" . }}
+  labels:
+    {{- include "hexdb.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "hexdb.selector" . | nindent 4 }}
+  ports:
+    - name: api
+      port: 7700
+      targetPort: api
+    - name: discovery
+      port: 7702
+      targetPort: discovery

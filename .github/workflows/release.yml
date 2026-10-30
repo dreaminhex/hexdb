@@ -12,8 +12,10 @@ name: Release
 #     the Apple secrets are set);
 #   - .deb packages for Debian and Ubuntu (amd64, arm64);
 #   - hexdb-jdbc-<version>.jar, the JDBC driver;
-#   - a multi-arch container image on GitHub Container Registry.
+#   - a multi-arch container image on GitHub Container Registry, and the
+#     Helm chart next to it (oci://ghcr.io/<owner>/charts/hexdb).
 # When its secret is set (each job is skipped otherwise):
+#   - Docker Hub (a copy of the image)       DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
 #   - the APT repository on GitHub Pages     APT_GPG_PRIVATE_KEY (+ APT_GPG_PASSPHRASE)
 #   - the Homebrew tap                       HOMEBREW_TAP_TOKEN
 #   - Chocolatey                             CHOCOLATEY_API_KEY
@@ -299,6 +301,32 @@ jobs:
             org.opencontainers.image.description=HexDB: a document database with REST, GraphQL, SQL, replication and an admin UI
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+
+  docker-hub:
+    # The image built above, copied to Docker Hub (see docker-hub.yml, which can also be run by hand).
+    needs: image
+    uses: ./.github/workflows/docker-hub.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+
+  helm:
+    # The Helm chart, as an OCI artifact next to the image: oci://ghcr.io/<owner>/charts/hexdb.
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Package and push the chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          command -v helm >/dev/null || curl -fsSL https://raw.githubusercontent.com/helm/helm/v3.16.4/scripts/get-helm-3 | bash
+          version="${GITHUB_REF_NAME#v}"
+          helm lint deploy/helm/hexdb
+          helm package deploy/helm/hexdb --version "$version" --app-version "$version" --destination dist
+          echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          helm push "dist/hexdb-$version.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts"
 
   apt:
     # The packages come from the published release (see apt-repo.yml, which can also be run by hand).

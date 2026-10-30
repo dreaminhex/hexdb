@@ -1,0 +1,72 @@
+# HexDB chart values. Every hex is a pod of one StatefulSet; with more than
+# one replica they form a lattice (one Overseer takes writes, the others
+# replicate and take over if it fails). See the MANUAL's "On Kubernetes".
+
+# Hexes. 1 is a single hex; 3 is the smallest lattice that survives losing one.
+replicas: 1
+
+image:
+  repository: ghcr.io/dreaminhex/hexdb
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The lattice's name; every hex of one lattice has the same.
+latticeName: hexdb
+
+# Secrets. Leave existingSecret empty to have the chart create one, with a new
+# storage encryption key and lattice secret on first install, kept on upgrades.
+# Back the key up: without it the data can't be read. To bring your own, create
+# a Secret with the keys "encryption-key" and "lattice-secret" (each
+# base64:<32 bytes>, e.g. from `hexdb secret`) and name it here.
+existingSecret: ""
+
+# The first administrator. With an empty password HexDB generates one and
+# prints it in the first hex's log: kubectl logs <release>-hexdb-0 | grep password
+admin:
+  login: hexdbadmin
+  email: admin@hexdb.local
+  password: ""
+
+# Memory for documents before they're flushed (MB); also ranks hexes in elections.
+ramMb: 1024
+
+# Disk HexDB may use, in MB (0: 90% of persistence.size).
+diskMb: 0
+
+persistence:
+  size: 20Gi
+  # Empty: the cluster's default storage class.
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 1536Mi
+  limits:
+    memory: 3Gi
+
+service:
+  type: ClusterIP
+  port: 7700
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: hexdb.example.com
+  # e.g. [{ secretName: hexdb-tls, hosts: [hexdb.example.com] }]
+  tls: []
+
+# More HEXDB_<SECTION>__<FIELD> settings, e.g.
+#   - name: HEXDB_LIMITS__MAX_DOCUMENT_KB
+#     value: "2048"
+extraEnv: []
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

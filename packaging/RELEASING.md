@@ -11,6 +11,8 @@ Pushing a tag such as `v1.0.1` runs [.github/workflows/release.yml](../.github/w
 | macOS installer | `hexdb-macos-universal.dmg` | GitHub Releases | nothing (signing optional) | `MACOS_*`, `APPLE_*` for signing |
 | curl script | `curl -fsSL .../install.sh \| sh` | GitHub (raw file) | nothing | none |
 | Docker | `docker run ghcr.io/dreaminhex/hexdb` | GitHub Container Registry | make the package public | none |
+| Docker Hub | `docker run dreaminhex/hexdb` | hub.docker.com | an account (or organization) and an access token | `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` (+ variable `DOCKERHUB_NAMESPACE`) |
+| Helm | `helm install hexdb oci://ghcr.io/dreaminhex/charts/hexdb` | GitHub Container Registry | make the chart package public; list it on Artifact Hub | none |
 | APT | `sudo apt install hexdb` | GitHub Pages (`gh-pages` branch) | a GPG key, turn on Pages | `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE` |
 | Homebrew | `brew install dreaminhex/hexdb/hexdb` | the tap repo `dreaminhex/homebrew-hexdb` | create the tap repo, a token | `HOMEBREW_TAP_TOKEN` |
 | winget | `winget install DreamInHex.HexDB` | `microsoft/winget-pkgs` | a token; first version is reviewed | `WINGET_TOKEN` |
@@ -45,6 +47,23 @@ The workflow pushes `ghcr.io/dreaminhex/hexdb` with the tags `v1.0.1`, `1.0.1` a
 1. Open https://github.com/users/dreaminhex/packages/container/package/hexdb (it exists after the first release run).
 2. **Package settings > Danger Zone > Change visibility > Public.**
 3. Under **Manage Actions access**, check that the `hexdb` repository has **Write**.
+
+### Docker Hub
+
+The `docker-hub` job ([docker-hub.yml](../.github/workflows/docker-hub.yml)) copies each release's image, every platform, from GitHub Container Registry to `docker.io/<namespace>/hexdb` with the tags `v1.0.1`, `1.0.1` and `latest`, and updates the Docker Hub page from [docker/README.md](../docker/README.md). Nothing is rebuilt.
+
+1. Sign up at https://hub.docker.com. The namespace is your user name, or create an organization named `dreaminhex` so the image is `dreaminhex/hexdb`.
+2. **Account settings > Personal access tokens > Generate new token**, with **Read & Write** access.
+3. Add the secrets `DOCKERHUB_USERNAME` (your Docker Hub user name) and `DOCKERHUB_TOKEN`. If the namespace isn't your user name (an organization), add the repository **variable** `DOCKERHUB_NAMESPACE` (Settings > Secrets and variables > Actions > Variables).
+4. Publish the current release without waiting for the next one: **Actions > Docker Hub > Run workflow**, tag `v2.2.0`.
+5. Apply to the Docker-Sponsored Open Source program (https://www.docker.com/community/open-source/application/): free for open-source projects, it removes pull rate limits for your users and shows a "Sponsored OSS" badge on the page.
+
+### Helm chart
+
+The `helm` job packages [deploy/helm/hexdb](../deploy/helm/hexdb) with the release's version and pushes it to `oci://ghcr.io/dreaminhex/charts/hexdb`, using the workflow's own token.
+
+1. After the first release run, open https://github.com/users/dreaminhex/packages/container/package/charts%2Fhexdb and set **Package settings > Change visibility > Public**, as for the image.
+2. List it on Artifact Hub, where Kubernetes users search: sign in at https://artifacthub.io, **Control Panel > Add repository**, kind **Helm charts**, URL `oci://ghcr.io/dreaminhex/charts/hexdb`.
 
 ### APT repository
 

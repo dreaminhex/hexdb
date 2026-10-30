@@ -1,0 +1,26 @@
+apiVersion: v2
+name: hexdb
+description: HexDB, an encrypted, replicated document and file database in one binary, as a single hex or a lattice of hexes.
+type: application
+# Set to the release's version when the chart is published (see .github/workflows/release.yml).
+version: 2.2.0
+appVersion: "2.2.0"
+home: https://hexdb.app
+sources:
+  - https://github.com/dreaminhex/hexdb
+icon: https://cdn.jsdelivr.net/gh/dreaminhex/hexdb@main/hexdb_admin/public/favicon-192.png
+keywords:
+  - database
+  - document-database
+  - vector-search
+  - replication
+  - mcp
+license: Apache-2.0
+maintainers:
+  - name: Dream In Hex
+    url: https://hexdb.app
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: Manual
+      url: https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md

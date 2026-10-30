@@ -245,6 +245,25 @@ docker run --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privile
 
 [docker-compose.yml](docker-compose.yml) runs a three-hex lattice (two Harvester candidates and a Replicant) on ports 7700, 7710 and 7720, with those settings.
 
+### On Kubernetes
+
+The Helm chart ([deploy/helm/hexdb](deploy/helm/hexdb)) runs a single hex or a lattice as a StatefulSet. It's published with every release as an OCI chart:
+
+```bash
+helm install hexdb oci://ghcr.io/dreaminhex/charts/hexdb                  # one hex
+helm install hexdb oci://ghcr.io/dreaminhex/charts/hexdb --set replicas=3 \
+  --set persistence.size=100Gi --set ramMb=4096                             # a lattice of three
+kubectl port-forward svc/hexdb 7700:7700                                    # then http://localhost:7700/ui/
+kubectl logs hexdb-0 | grep -A2 "first administrator"                        # the generated admin password
+```
+
+- **Hexes.** Each pod is a hex with its own volume (`persistence.size`, the cluster's default storage class unless `persistence.storageClass` is set). They find each other through a headless Service that lists pods before they're ready, so the lattice forms while they start, and each announces its own DNS name (`hexdb-0.hexdb-hexes.<namespace>.svc.cluster.local`). The `hexdb` Service sends requests to any hex; replicas answer reads and forward writes to the Overseer. Use an odd number of replicas, 3 or more, for failover.
+- **Secrets.** On first install the chart creates a Secret with a new storage encryption key and lattice secret, keeps them on upgrades, and leaves the Secret in place if the release is deleted (`helm.sh/resource-policy: keep`), so the volumes stay readable. Back the key up (the install notes show how). To bring your own, create a Secret with `encryption-key` and `lattice-secret` (each `base64:<32 bytes>`, from `hexdb secret`) and set `existingSecret`. Every hex of the release shares the key.
+- **Settings.** `latticeName`, `admin.login`, `admin.email` and `admin.password` (empty: generated and printed once), `ramMb` (memory before flushing; also ranks hexes in elections), `diskMb` (default 90% of the volume), `resources`, `service`, `ingress`, and `extraEnv` for any other `HEXDB_<SECTION>__<FIELD>` setting. Lattice-wide settings (AI, CORS, A2A, ...) are set once, in the admin UI or with `hexdb config`.
+- **Hardening.** Pods run as the image's unprivileged user (10001) with a read-only root file system, no Linux capabilities, no privilege escalation and the runtime's default seccomp profile; `/tmp` is an emptyDir.
+- **Probes.** Readiness and liveness use `GET /health`.
+- **A forgotten admin password:** `kubectl exec hexdb-0 -- hexdb reset-password`, on the Overseer's pod (see [A forgotten password](#a-forgotten-password)).
+
 ### As a service
 
 [packaging/systemd/hexdb.service](packaging/systemd/hexdb.service) runs HexDB under systemd. The Debian package (from the APT repository, or built by `cargo deb -p hexdb_api`) installs it, creates a `hexdb` user and a key in `/etc/hexdb/hexdb.local.toml`; start it with `sudo systemctl enable --now hexdb`. Homebrew runs it with `brew services start hexdb`. On Windows, run it as a service from an elevated (administrator) prompt:
