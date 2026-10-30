@@ -1113,7 +1113,7 @@ impl HexDBEngine {
             self.apply_schemas(&mut items).await?;
         }
         if !replicated {
-            self.tokenize_items(&mut items)?;
+            self.tokenize_items(&mut items).await?;
         }
         // From here on, masked fields are sealed: in the WAL, the hex and the change feed.
         self.seal_items(&mut items);
@@ -1252,7 +1252,7 @@ impl HexDBEngine {
 
     /// Replace tokenized fields' values with tokens (after schema checks, which
     /// see the real values), and add the vault entries of vault tokens.
-    fn tokenize_items(&self, items: &mut Vec<BatchItem>) -> Result<()> {
+    async fn tokenize_items(&self, items: &mut Vec<BatchItem>) -> Result<()> {
         let mut vault = Vec::new();
         for item in items.iter_mut() {
             let WalOp::Put(doc) = &mut item.op else { continue };
@@ -1267,15 +1267,25 @@ impl HexDBEngine {
             vault.extend(entries);
         }
         if !vault.is_empty() {
-            self.ensure_system_tessellation(crate::tokens::VAULT_TESSELLATION)?;
-            let ttl = None;
-            for (id, data) in vault {
+            use crate::tokens::{VaultEntry, VAULT_TESSELLATION};
+            self.ensure_system_tessellation(VAULT_TESSELLATION)?;
+            for entry in vault {
+                let (id, data) = match entry {
+                    VaultEntry::New(id, data) => (id, Some(data)),
+                    VaultEntry::Existing(id) => (id, None),
+                };
                 // One entry per token: the same value written again rewrites the same entry.
-                if items.iter().any(|i| i.key.tessellation == crate::tokens::VAULT_TESSELLATION && i.key.id == id) {
+                if items.iter().any(|i| i.key.tessellation == VAULT_TESSELLATION && i.key.id == id) {
                     continue;
                 }
-                let doc = Document { id, tessellation: crate::tokens::VAULT_TESSELLATION.into(), data: crate::document::infer_fields_from_json(&data), ttl };
-                items.push(BatchItem { key: DocKey::new(crate::tokens::VAULT_TESSELLATION, id), op: WalOp::Put(doc), expected_seq: None });
+                let doc = match data {
+                    Some(data) => Document { id, tessellation: VAULT_TESSELLATION.into(), data: crate::document::infer_fields_from_json(&data), ttl: None },
+                    None => match self.get_system_document(VAULT_TESSELLATION, id).await? {
+                        Some(doc) => doc,
+                        None => continue,
+                    },
+                };
+                items.push(BatchItem { key: DocKey::new(VAULT_TESSELLATION, id), op: WalOp::Put(doc), expected_seq: None });
             }
         }
         Ok(())

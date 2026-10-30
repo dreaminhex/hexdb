@@ -105,3 +105,49 @@ fn tokenized_fields_hold_tokens_and_vault_tokens_detokenize() -> Result<()> {
     assert!(!audit.body.to_string().contains(CARD), "values never reach the audit trail");
     Ok(())
 }
+
+#[test]
+fn vault_entries_are_per_tessellation_and_unused_ones_are_deleted() -> Result<()> {
+    let server = TestServer::start()?;
+    let schema = json!({ "fields": { "card": { "type": "string", "tokenize": "vault" } } });
+    for tess in ["accounts", "payments"] {
+        server.insert(tess, &json!({ "card": "0000000000000000" }))?;
+        let res = server.request(Method::POST, &format!("/tessellations/{}/schemas", tess), Some(&schema), &[])?;
+        assert!(res.status.is_success(), "{}", res.body);
+    }
+    let detokenize = |tess: &str, token: &str| -> Result<Value> {
+        let res = server.request(Method::POST, &format!("/tessellations/{}/detokenize", tess), Some(&json!({ "tokens": [token] })), &[])?;
+        assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+        Ok(res.body["values"][token].clone())
+    };
+    let compact = || -> Result<u64> {
+        let res = server.request(Method::POST, "/compact", None, &[])?;
+        assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+        Ok(res.body["vault_tokens_deleted"].as_u64().unwrap())
+    };
+
+    // The same card in two tessellations: one token, an entry in each.
+    let account = server.insert("accounts", &json!({ "card": CARD }))?;
+    let payment = server.insert("payments", &json!({ "card": CARD }))?;
+    let token = server.get_doc("accounts", &account)?.unwrap()["card"].as_str().unwrap().to_string();
+    assert_eq!(server.get_doc("payments", &payment)?.unwrap()["card"], token.as_str());
+    assert_eq!(detokenize("accounts", &token)?, CARD);
+    assert_eq!(detokenize("payments", &token)?, CARD);
+    assert_eq!(compact()?, 0, "every entry is in use");
+
+    // Deleting the account leaves its entry unused; the payment's stays.
+    let res = server.request(Method::DELETE, &format!("/accounts/{}", account), None, &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    assert_eq!(compact()?, 1);
+    assert!(detokenize("accounts", &token)?.is_null());
+    assert_eq!(detokenize("payments", &token)?, CARD);
+
+    // A changed value leaves the old token's entry unused.
+    let res = server.request(Method::PATCH, &format!("/payments/{}", payment), Some(&json!({ "card": "5500005555555559" })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    let new_token = server.get_doc("payments", &payment)?.unwrap()["card"].as_str().unwrap().to_string();
+    assert_eq!(compact()?, 1);
+    assert!(detokenize("payments", &token)?.is_null());
+    assert_eq!(detokenize("payments", &new_token)?, "5500005555555559");
+    Ok(())
+}

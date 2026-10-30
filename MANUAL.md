@@ -1849,7 +1849,8 @@ curl -X POST http://localhost:7700/accounts -H "Content-Type: application/json" 
   ```
 
   It takes up to 1,000 tokens. A token that isn't a vault token of that tessellation (one-way, unknown, or another tessellation's) gives `null`. A role that hides or masks a vault field can't detokenize in that tessellation, even with the permission. Each call is audited as `token.detokenize`, with how many tokens were asked for and found, never the values.
-- **Adding it later.** A new schema version that tokenizes a field rewrites the existing documents in the background, like any schema migration (`GET /tessellations/{name}/schemas` shows the progress). Vault entries aren't deleted with documents, since one token can be shared by several.
+- **Adding it later.** A new schema version that tokenizes a field rewrites the existing documents in the background, like any schema migration (`GET /tessellations/{name}/schemas` shows the progress).
+- **Vault cleanup.** Each tessellation has its own vault entry per token, shared by every document there with that value. Entries no document in their tessellation holds any more (the documents were deleted or changed, or the tessellation was dropped) are deleted with each compaction (`storage.compaction_frequency`, or `POST /compact`, whose answer includes `vault_tokens_deleted`). After that, the old token gives `null`.
 - **Masks still apply.** A masked tokenized field shows its token masked, and tokenization can be combined with [sealed fields](#row-filters-and-field-masks).
 
 ### The audit trail

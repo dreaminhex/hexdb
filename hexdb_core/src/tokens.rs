@@ -18,12 +18,19 @@
 // can: the value is kept, sealed with the lattice keys and bound to its
 // token, in the `_vault` system tessellation (written in the same commit),
 // and users with the `detokenize` permission on the tessellation can read it
-// back (`HexDBEngine::detokenize`, audited).
+// back (`HexDBEngine::detokenize`, audited). There's one entry per token and
+// tessellation; entries no document holds the token of any more are deleted
+// with compaction (`HexDBEngine::collect_vault_garbage`).
 
+use crate::engine::writes::BatchItem;
+use crate::hex::DocKey;
 use crate::schema::Tokenize;
+use crate::wal::WalOp;
 use crate::HexDBEngine;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use tracing::info;
 use ulid::Ulid;
 use zeroize::Zeroizing;
 
@@ -34,6 +41,8 @@ const HASH_CHARS: usize = 26;
 /// Values this long or longer keep their last 4 characters in the token.
 const SHOW_LAST_FROM: usize = 10;
 const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+/// Documents read at a time by the vault sweep.
+const PAGE: usize = 1000;
 
 /// The lattice's tokenization key.
 pub struct TokenKey(Zeroizing<[u8; 32]>);
@@ -74,14 +83,24 @@ pub fn is_token(value: &str) -> bool {
     tail_ok && hash.bytes().all(|b| ALPHABET.contains(&b))
 }
 
-/// The vault document ID for a token.
-fn vault_id(token: &str) -> Ulid {
-    let hash = blake3::hash(token.as_bytes());
+/// The vault document ID for a token in a tessellation. Equal values give
+/// equal tokens across the lattice, so each tessellation has its own entry.
+fn vault_id(tess: &str, token: &str) -> Ulid {
+    let hash = blake3::hash(format!("{}\n{}", tess, token).as_bytes());
     Ulid::from(u128::from_be_bytes(hash.as_bytes()[..16].try_into().expect("16 bytes")))
 }
 
 fn aad(token: &str) -> String {
     format!("hexdb-vault:{}", token)
+}
+
+/// A vault entry a write needs.
+pub(crate) enum VaultEntry {
+    /// A value tokenized by this write: its entry, (ID, document data).
+    New(Ulid, Value),
+    /// A vault token written back as read: its entry is rewritten unchanged,
+    /// so a vault sweep that saw the entry before this write can't delete it.
+    Existing(Ulid),
 }
 
 impl HexDBEngine {
@@ -94,20 +113,23 @@ impl HexDBEngine {
     }
 
     /// Replace a document's tokenized values with tokens. Returns the vault
-    /// entries to write with it: (vault ID, document data).
-    pub(crate) fn tokenize_json(&self, tess: &str, json: &mut Value, fields: &[(String, Tokenize)]) -> Vec<(Ulid, Value)> {
+    /// entries to write with it.
+    pub(crate) fn tokenize_json(&self, tess: &str, json: &mut Value, fields: &[(String, Tokenize)]) -> Vec<VaultEntry> {
         let mut vault = Vec::new();
         for (path, kind) in fields {
             let Some(slot) = path.split('.').try_fold(&mut *json, |current, part| current.get_mut(part)) else { continue };
             let Value::String(value) = slot else { continue };
             if is_token(value) {
+                if *kind == Tokenize::Vault {
+                    vault.push(VaultEntry::Existing(vault_id(tess, value)));
+                }
                 continue;
             }
             let plain = Zeroizing::new(std::mem::take(value));
             let token = self.token_key.token(&plain);
             if *kind == Tokenize::Vault {
                 let sealed = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, self.lattice_keys.seal(plain.as_bytes(), aad(&token).as_bytes()));
-                vault.push((vault_id(&token), json!({ "token": token, "tessellation": tess, "field": path, "value": sealed })));
+                vault.push(VaultEntry::New(vault_id(tess, &token), json!({ "token": token, "tessellation": tess, "field": path, "value": sealed })));
             }
             *slot = Value::String(token);
         }
@@ -129,7 +151,7 @@ impl HexDBEngine {
         for token in tokens {
             let value = match is_token(token) {
                 false => None,
-                true => match self.get_system_document(VAULT_TESSELLATION, vault_id(token)).await? {
+                true => match self.get_system_document(VAULT_TESSELLATION, vault_id(tess, token)).await? {
                     None => None,
                     Some(doc) => {
                         let data = doc.data_json();
@@ -148,6 +170,82 @@ impl HexDBEngine {
             out.push(value);
         }
         Ok(out)
+    }
+
+    /// Delete vault entries whose token no document of their tessellation
+    /// holds any more (deleted documents, changed values, dropped
+    /// tessellations). On the Overseer; returns how many were deleted.
+    pub async fn collect_vault_garbage(&self) -> Result<usize> {
+        if !self.is_writable() || !self.tessellation_exists(VAULT_TESSELLATION) {
+            return Ok(0);
+        }
+        // Entries and their versions before the documents: a write after this
+        // point that uses a token rewrites its entry, and the delete below,
+        // which expects the version read here, leaves it alone.
+        let mut entries: HashMap<String, Vec<(Ulid, String, u64)>> = HashMap::new();
+        let mut after = None;
+        loop {
+            let ids = self.visible_ids_after(VAULT_TESSELLATION, after, PAGE).await;
+            for &id in &ids {
+                let (Some(doc), seq) = self.read_latest(&DocKey::new(VAULT_TESSELLATION, id)).await? else { continue };
+                let data = doc.data_json();
+                if let (Some(token), Some(tess)) = (data["token"].as_str(), data["tessellation"].as_str()) {
+                    entries.entry(tess.to_string()).or_default().push((id, token.to_string(), seq));
+                }
+            }
+            match ids.last() {
+                Some(&last) if ids.len() == PAGE => after = Some(last),
+                _ => break,
+            }
+        }
+        let mut deleted = 0;
+        for (tess, entries) in entries {
+            let in_use = self.tokens_in_use(&tess).await?;
+            for (id, token, seq) in entries {
+                if in_use.contains(&token) {
+                    continue;
+                }
+                let op = WalOp::Delete { tessellation: VAULT_TESSELLATION.into(), id };
+                let item = BatchItem { key: DocKey::new(VAULT_TESSELLATION, id), op, expected_seq: Some(seq) };
+                if self.commit(vec![item]).await? {
+                    deleted += 1;
+                }
+            }
+        }
+        if deleted > 0 {
+            info!("🧹 Vault: deleted {} token(s) no document uses any more.", deleted);
+        }
+        Ok(deleted)
+    }
+
+    /// Every token held anywhere in a tessellation's documents (whatever its
+    /// schema says now: a field that stopped being tokenized keeps its tokens).
+    async fn tokens_in_use(&self, tess: &str) -> Result<HashSet<String>> {
+        fn collect(value: &Value, out: &mut HashSet<String>) {
+            match value {
+                Value::String(s) if is_token(s) => {
+                    out.insert(s.clone());
+                }
+                Value::Array(items) => items.iter().for_each(|v| collect(v, out)),
+                Value::Object(map) => map.values().for_each(|v| collect(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = HashSet::new();
+        if !self.tessellation_exists(tess) {
+            return Ok(out);
+        }
+        let mut after = None;
+        loop {
+            let page = self.list_documents(tess, after, PAGE).await?;
+            for doc in &page.documents {
+                collect(&doc.data_json(), &mut out);
+            }
+            match page.next {
+                Some(next) => after = Some(next),
+                None => return Ok(out),
+            }
+        }
     }
 }
 

@@ -569,11 +569,13 @@ pub async fn list_backups(State(engine): Engine, Auth(principal): Auth) -> ApiRe
     Ok(Json(json!({ "directory": engine.backup_dir().display().to_string(), "backups": backups })).into_response())
 }
 
-/// Compact SSTables now. Also re-encrypts files written with a previous key.
+/// Compact SSTables now. Also re-encrypts files written with a previous key,
+/// and deletes file chunks and vault tokens nothing references.
 pub async fn compact(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     principal.require_action(Action::Maintenance)?;
     let stats = engine.compact().await?;
     let chunks = engine.collect_file_garbage().await?;
+    let vault_tokens_deleted = engine.collect_vault_garbage().await?;
     engine.audit(&principal.login, "maintenance.compact", &engine.name, json!({ "files_merged": stats.files_merged })).await;
     Ok(Json(json!({
         "tessellations": stats.tessellations,
@@ -583,6 +585,7 @@ pub async fn compact(State(engine): Engine, Auth(principal): Auth) -> ApiResult 
         "sstable_files_on_old_keys": engine.sst_files_needing_rewrite().await,
         "chunks": chunks,
         "chunks_on_old_keys": engine.blobs().stats().chunks_on_old_keys,
+        "vault_tokens_deleted": vault_tokens_deleted,
     }))
     .into_response())
 }

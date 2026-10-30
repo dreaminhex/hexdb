@@ -155,7 +155,7 @@ pub fn spawn_flush_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_r
     });
 }
 
-/// Compact SSTables, and remove file content nothing references, every `interval`.
+/// Compact SSTables, and remove file content and vault tokens nothing references, every `interval`.
 pub fn spawn_compaction_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_rx: watch::Receiver<()>) {
     crate::tasks::supervise_background("compaction", shutdown_rx.clone(), move || {
         let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
@@ -172,6 +172,9 @@ pub fn spawn_compaction_task(engine: Arc<HexDBEngine>, interval: Duration, shutd
                         }
                         if let Err(e) = engine.collect_file_garbage().await {
                             error!("❌ File garbage collection failed: {:#}", e);
+                        }
+                        if let Err(e) = engine.collect_vault_garbage().await {
+                            error!("❌ Vault cleanup failed: {:#}", e);
                         }
                     }
                 }
