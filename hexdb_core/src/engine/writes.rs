@@ -1112,6 +1112,9 @@ impl HexDBEngine {
             self.guard_file_writes(&mut items).await?;
             self.apply_schemas(&mut items).await?;
         }
+        if !replicated {
+            self.tokenize_items(&mut items)?;
+        }
         // From here on, masked fields are sealed: in the WAL, the hex and the change feed.
         self.seal_items(&mut items);
         let roles_changed = items.iter().any(|i| i.key.tessellation == crate::users::ROLES_TESSELLATION);
@@ -1245,6 +1248,37 @@ impl HexDBEngine {
             self.wait_for_acks(first + count - 1, &touched).await?;
         }
         Ok(Some(first))
+    }
+
+    /// Replace tokenized fields' values with tokens (after schema checks, which
+    /// see the real values), and add the vault entries of vault tokens.
+    fn tokenize_items(&self, items: &mut Vec<BatchItem>) -> Result<()> {
+        let mut vault = Vec::new();
+        for item in items.iter_mut() {
+            let WalOp::Put(doc) = &mut item.op else { continue };
+            let fields = self.tokenized_fields(&doc.tessellation);
+            if fields.is_empty() {
+                continue;
+            }
+            let mut json = doc.data_json();
+            let entries = self.tokenize_json(&doc.tessellation, &mut json, &fields);
+            doc.data = crate::document::infer_fields_from_json(&json);
+            crate::sealed::wipe(json);
+            vault.extend(entries);
+        }
+        if !vault.is_empty() {
+            self.ensure_system_tessellation(crate::tokens::VAULT_TESSELLATION)?;
+            let ttl = None;
+            for (id, data) in vault {
+                // One entry per token: the same value written again rewrites the same entry.
+                if items.iter().any(|i| i.key.tessellation == crate::tokens::VAULT_TESSELLATION && i.key.id == id) {
+                    continue;
+                }
+                let doc = Document { id, tessellation: crate::tokens::VAULT_TESSELLATION.into(), data: crate::document::infer_fields_from_json(&data), ttl };
+                items.push(BatchItem { key: DocKey::new(crate::tokens::VAULT_TESSELLATION, id), op: WalOp::Put(doc), expected_seq: None });
+            }
+        }
+        Ok(())
     }
 
     /// Refuse documents over `limits.max_document_kb`, and writes that add

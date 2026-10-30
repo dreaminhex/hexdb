@@ -3235,7 +3235,8 @@
                   "kind": {
                     "enum": [
                       "field",
-                      "text"
+                      "text",
+                      "vector"
                     ]
                   },
                   "unique": {
@@ -3252,6 +3253,72 @@
         "responses": {
           "201": {
             "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tessellations/{name}/detokenize": {
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "The values behind vault tokens (detokenize permission; audited)",
+        "operationId": "post_tessellations_name_detokenize",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Name",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "tokens"
+                ],
+                "properties": {
+                  "tokens": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 1000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{\"values\": {token: value | null}}",
             "content": {
               "application/json": {
                 "schema": {

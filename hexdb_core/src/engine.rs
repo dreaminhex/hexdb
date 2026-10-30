@@ -274,6 +274,8 @@ pub struct HexDBEngine {
     seal_pending: std::sync::atomic::AtomicBool,
     /// Documents waiting to be embedded for vector indexes (see `vectors`).
     pub(crate) embeddings: vectors::EmbedState,
+    /// Makes tokens for tokenized fields (see `crate::tokens`).
+    pub(crate) token_key: crate::tokens::TokenKey,
     /// Nonces of discovery hellos and replication requests already seen.
     pub lattice_nonces: crate::network::lattice_auth::NonceCache,
     /// Bumped by every change to stored data (the role cache keys on it).
@@ -352,6 +354,7 @@ impl HexDBEngine {
         let wal_dir = storage_dir.join("wal");
         // Before anything is read: stored documents may hold sealed fields.
         let sealer = crate::sealed::Sealer::new(&config.lattice_keys()?);
+        let token_key = crate::tokens::TokenKey::new(&config.lattice_key()?);
         std::fs::create_dir_all(&storage_dir)
             .with_context(|| format!("Failed to create {}", storage_dir.display()))?;
 
@@ -541,6 +544,7 @@ impl HexDBEngine {
             seal_policy: Default::default(),
             seal_pending: std::sync::atomic::AtomicBool::new(true),
             embeddings: Default::default(),
+            token_key,
             lattice_nonces: crate::network::lattice_auth::NonceCache::default(),
             generation: AtomicU64::new(0),
             counts: std::sync::Mutex::new(reads::Counts::default()),

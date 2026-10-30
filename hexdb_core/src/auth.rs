@@ -110,6 +110,8 @@ pub enum Permission {
     Delete,
     /// Restore trashed files and earlier versions (files tessellations).
     Restore,
+    /// Read the values behind vault tokens.
+    Detokenize,
 }
 
 impl Permission {
@@ -121,6 +123,7 @@ impl Permission {
             Permission::Upload => "upload files to",
             Permission::Delete => "delete files in",
             Permission::Restore => "restore files in",
+            Permission::Detokenize => "read token values in",
         }
     }
 
@@ -132,6 +135,7 @@ impl Permission {
             Permission::Upload => Action::Upload,
             Permission::Delete => Action::Delete,
             Permission::Restore => Action::Restore,
+            Permission::Detokenize => Action::Detokenize,
         }
     }
 }
@@ -155,10 +159,11 @@ pub enum Action {
     Ai,
     Chat,
     Share,
+    Detokenize,
 }
 
 impl Action {
-    pub const ALL: [Action; 15] = [
+    pub const ALL: [Action; 16] = [
         Action::Read,
         Action::Write,
         Action::Manage,
@@ -174,6 +179,7 @@ impl Action {
         Action::Ai,
         Action::Chat,
         Action::Share,
+        Action::Detokenize,
     ];
 
     pub fn name(self) -> &'static str {
@@ -193,6 +199,7 @@ impl Action {
             Action::Ai => "ai",
             Action::Chat => "chat",
             Action::Share => "share",
+            Action::Detokenize => "detokenize",
         }
     }
 
@@ -202,7 +209,7 @@ impl Action {
 
     /// True for permissions that apply to the granted tessellations only.
     pub fn is_scoped(self) -> bool {
-        matches!(self, Action::Read | Action::Write | Action::Manage | Action::Upload | Action::Delete | Action::Restore)
+        matches!(self, Action::Read | Action::Write | Action::Manage | Action::Upload | Action::Delete | Action::Restore | Action::Detokenize)
     }
 
     pub fn description(self) -> &'static str {
@@ -222,6 +229,7 @@ impl Action {
             Action::Ai => "Run prompts through the lattice's AI provider, within its token budget.",
             Action::Chat => "Ask the AI chat about the data you can read, within the chat limits (it never sees more than you can).",
             Action::Share => "Make sharing links to files and folders you can read, for people without an account.",
+            Action::Detokenize => "Read the real values behind vault tokens in the granted tessellations (audited).",
         }
     }
 }

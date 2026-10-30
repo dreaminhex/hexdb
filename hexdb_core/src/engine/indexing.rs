@@ -448,6 +448,13 @@ impl HexDBEngine {
     /// Bind `$text` to the tessellation's text index fields, and ask the
     /// planner for candidates. Returns the filter to evaluate and the plan.
     pub(crate) fn prepare_filter(&self, tess: &str, filter: &Filter) -> (Filter, Option<Plan>) {
+        // Equality on a tokenized field compares tokens.
+        let tokenized: Vec<String> = self.tokenized_fields(tess).into_iter().map(|(path, _)| path).collect();
+        let filter = &if tokenized.is_empty() {
+            filter.clone()
+        } else {
+            filter.map_values(&|path, value| if tokenized.iter().any(|t| *t == path) { self.token_for_filter(value) } else { None })
+        };
         let indexes = self.indexes.read().unwrap();
         let filter = match (filter.has_text(), indexes.text_index(tess)) {
             (true, Some((fields, analyzer))) => filter.with_text_index(&fields, &analyzer),

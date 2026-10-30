@@ -152,6 +152,7 @@ pub fn app_router(
         .route("/tessellations", get(list_tessellations).post(create_tessellation))
         .route("/tessellations/{name}", get(get_tessellation).delete(delete_tessellation))
         .route("/tessellations/{name}/indexes", get(list_indexes).post(create_index))
+        .route("/tessellations/{name}/detokenize", post(detokenize))
         .route("/tessellations/{name}/indexes/{index}", axum::routing::delete(drop_index))
         .route("/tessellations/{name}/advice", get(advice))
         .route("/tessellations/{name}/schemas", get(get_schemas).post(add_schema).delete(drop_schemas))

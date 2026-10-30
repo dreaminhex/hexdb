@@ -25,7 +25,10 @@
 // rewrites the existing documents in the background (`GET .../schemas` shows
 // the progress); until it finishes, reads can return documents of both versions.
 //
-// Field types: string, number, integer, boolean, object, array, any.
+// Field types: string, number, integer, boolean, object, array, any. A
+// string field can be tokenized (`"tokenize": "one_way"` or `"vault"`): its
+// value is replaced by a token on write (see `crate::tokens`).
+
 // Migration steps: rename {from, to}, copy {from, to}, remove "field",
 // set_default {field, value}, convert {field, to: string | number | integer |
 // boolean}. Fields are top-level names or dotted paths.
@@ -77,6 +80,16 @@ impl FieldType {
     }
 }
 
+/// How a field is tokenized (see `crate::tokens`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tokenize {
+    /// A keyed hash: matched, never recovered.
+    OneWay,
+    /// Recoverable from the vault with the `detokenize` permission.
+    Vault,
+}
+
 /// What one field must look like.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +118,9 @@ pub struct FieldRule {
     pub max_length: Option<usize>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// Replace the value with a token on write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenize: Option<Tokenize>,
 }
 
 /// One migration step.
@@ -469,6 +485,15 @@ pub fn new_version(current: &[SchemaVersion], input: SchemaInput) -> Result<Sche
         }
         if rule.min_length.zip(rule.max_length).is_some_and(|(a, b)| a > b) || rule.min.zip(rule.max).is_some_and(|(a, b)| a > b) {
             bail!("{}: the minimum is larger than the maximum", field);
+        }
+        if rule.tokenize.is_some() {
+            if !matches!(rule.kind, FieldType::String | FieldType::Any) {
+                bail!("{}: only string fields can be tokenized", field);
+            }
+            // Documents read and written back carry tokens, which no list of values holds.
+            if rule.allowed.is_some() {
+                bail!("{}: a tokenized field can't have enum values", field);
+            }
         }
     }
     for step in &input.migration {

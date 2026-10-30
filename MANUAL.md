@@ -899,6 +899,7 @@ curl -X POST http://localhost:7700/tessellations/orders/schemas -H "Content-Type
 - `required`, `nullable`, `default` and `enum`.
 - `min` and `max` (numbers), `min_length` and `max_length` (strings and arrays).
 - `description`.
+- `tokenize`: `one_way` or `vault` (string fields only, without `enum`): the value is replaced by a token on write. See [Tokenization](#tokenization).
 
 Field names are top-level names or dotted paths. With `"additional_fields": false`, documents can't have other fields.
 
@@ -1706,6 +1707,7 @@ A role is a set of permissions:
 | `ai` | Run prompts through the lattice's AI provider (`POST /ai/complete`), within its token budget | no |
 | `chat` | Ask the AI chat about the data you can read (`POST /ai/chat`, the Ask page), within the chat limits | no |
 | `share` | Make sharing links to files and folders you can read, for people without an account (see [Sharing links](#sharing-links)); not in any built-in role but `admin` | no |
+| `detokenize` | Read the real values behind vault tokens (see [Tokenization](#tokenization)); not in any built-in role but `admin` | yes |
 | `admin` | Everything: users, roles, settings, functions, schedules, joining hexes, shutdown | no |
 
 Built-in roles:
@@ -1799,6 +1801,37 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 - `/status` lists the sealed fields under `memory_protection.sealed_fields`.
 
 **Core dumps.** A core dump holds the whole process memory, keys and open documents included. The server turns core dumps off at startup by setting `RLIMIT_CORE` to 0 (soft and hard limits) on Unix. The kernel honors that for core files, and dump handlers such as systemd-coredump and apport honor it for the crashing process. `/status` reports it as `memory_protection.core_dumps` (Unix; `null` elsewhere). `security.core_dumps = true` in `hexdb.toml` turns dumps back on, for debugging a crash. Windows writes full process dumps only when an administrator has configured Windows Error Reporting's LocalDumps for the server.
+
+### Tokenization
+
+A field marked `tokenize` in the tessellation's [schema](#13-schemas) never holds its real value. Writes replace the value with a token before the document reaches the WAL, memory, disk, replicas or backups, so card numbers, account numbers and national IDs aren't stored in documents at all.
+
+```bash
+curl -X POST http://localhost:7700/tessellations/accounts/schemas -H "Content-Type: application/json" -d '{
+  "fields": {
+    "card": { "type": "string", "tokenize": "vault" },
+    "ssn":  { "type": "string", "tokenize": "one_way" }
+  }
+}'
+curl -X POST http://localhost:7700/accounts -H "Content-Type: application/json" -d '{ "name": "Ada", "card": "4111111111111111", "ssn": "123-45-6789" }'
+# stored: "card": "tok_q3v6...k2m_1111", "ssn": "tok_7hd2...xa_6789"
+```
+
+- **Tokens.** `tok_` followed by 26 lowercase base32 characters (a keyed BLAKE3 hash of the value under a key derived from the lattice key), then `_` and the value's last 4 characters when it has at least 10. Shorter values show nothing. Equal values give equal tokens across the lattice.
+- **Lookups.** Filters comparing a tokenized field for equality (a plain value, `$eq`, `$ne`, `$in`, `$nin`) compare tokens. So `{"card": "4111111111111111"}` finds the document in REST, GraphQL and single-table SQL (`WHERE card = ?`), and unique indexes work. Ranges, prefixes, `$contains` and full-text search can't see values. Filtering by the token itself works too.
+- **Writes.** Schema rules (`required`, `min_length`, `max_length`, ...) check the real value, before it's replaced. A token written back unchanged, as a document read and saved again carries it, is kept as it is.
+- **One-way** tokens can't be turned back into the value by anyone, administrators included: use them for values you only need to match, such as de-duplicating customers by national ID.
+- **Vault** tokens can. The value is kept in the `_vault` system tessellation, sealed with the lattice keys and bound to its token, written in the same commit as the document. Users with the `detokenize` permission on the tessellation read it back:
+
+  ```bash
+  curl -X POST http://localhost:7700/tessellations/accounts/detokenize -H "Content-Type: application/json" \
+    -d '{ "tokens": ["tok_q3v6...k2m_1111"] }'
+  # {"values": {"tok_q3v6...k2m_1111": "4111111111111111"}}
+  ```
+
+  It takes up to 1,000 tokens. A token that isn't a vault token of that tessellation (one-way, unknown, or another tessellation's) gives `null`. A role that hides or masks a vault field can't detokenize in that tessellation, even with the permission. Each call is audited as `token.detokenize`, with how many tokens were asked for and found, never the values.
+- **Adding it later.** A new schema version that tokenizes a field rewrites the existing documents in the background, like any schema migration (`GET /tessellations/{name}/schemas` shows the progress). Vault entries aren't deleted with documents, since one token can be shared by several.
+- **Masks still apply.** A masked tokenized field shows its token masked, and tokenization can be combined with [sealed fields](#row-filters-and-field-masks).
 
 ### The audit trail
 

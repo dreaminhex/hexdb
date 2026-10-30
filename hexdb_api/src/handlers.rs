@@ -935,6 +935,41 @@ pub async fn list_indexes(Path(name): Path<String>, State(engine): Engine, Auth(
 
 /// Create an index: `{"fields": ["status"], "name"?, "kind"?: "field" | "text", "unique"?: bool}`.
 /// Builds it from the existing documents before returning 201.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetokenizeRequest {
+    pub tokens: Vec<String>,
+}
+
+/// `POST /tessellations/{name}/detokenize`: `{"tokens": [...]}` gives
+/// `{"values": {token: value | null}}` for vault tokens of this tessellation.
+/// Needs the detokenize permission there, and a role that neither hides nor
+/// masks the tokenized fields. Audited (the count, never the values).
+pub async fn detokenize(Path(name): Path<String>, State(engine): Engine, Auth(principal): Auth, body: Result<Json<DetokenizeRequest>, JsonRejection>) -> ApiResult {
+    principal.require(Permission::Detokenize, &name)?;
+    existing_tessellation(&engine, &name)?;
+    let Json(request) = body?;
+    if request.tokens.is_empty() || request.tokens.len() > 1000 {
+        return Err(ApiError::invalid("Send 1-1000 tokens."));
+    }
+    let scope = principal.scope(&name, hexdb_core::Action::Read);
+    let schemas = engine.schemas(&name);
+    let vault_fields: Vec<&String> = schemas
+        .last()
+        .map(|v| v.fields.iter().filter(|(_, r)| r.tokenize == Some(hexdb_core::schema::Tokenize::Vault)).map(|(p, _)| p).collect())
+        .unwrap_or_default();
+    if vault_fields.iter().any(|f| scope.hidden.iter().any(|h| h == *f) || scope.mask_of(f).is_some()) {
+        return Err(ApiError::forbidden("Your role hides or masks a tokenized field here, so it can't read the values behind its tokens."));
+    }
+    let values = engine.detokenize(&name, &request.tokens).await?;
+    let found = values.iter().filter(|v| v.is_some()).count();
+    engine
+        .audit(&principal.login, "token.detokenize", &name, json!({ "tokens": request.tokens.len(), "found": found }))
+        .await;
+    let map: serde_json::Map<String, Value> = request.tokens.iter().cloned().zip(values.into_iter().map(|v| v.map(Value::String).unwrap_or(Value::Null))).collect();
+    Ok(Json(json!({ "values": map })).into_response())
+}
+
 pub async fn create_index(
     Path(name): Path<String>,
     State(engine): Engine,

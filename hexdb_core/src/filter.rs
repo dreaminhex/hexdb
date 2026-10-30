@@ -129,6 +129,36 @@ impl Filter {
         eval(&self.0, &json)
     }
 
+    /// The filter with the values compared for equality (`$eq`, `$ne`,
+    /// `$in`, `$nin`, plain values) replaced where `f` returns a new one for
+    /// (field path, value).
+    pub fn map_values(&self, f: &dyn Fn(&str, &Value) -> Option<Value>) -> Filter {
+        fn op(o: &Op, path: &str, f: &dyn Fn(&str, &Value) -> Option<Value>) -> Op {
+            let one = |v: &Value| f(path, v).unwrap_or_else(|| v.clone());
+            match o {
+                Op::Eq(v) => Op::Eq(one(v)),
+                Op::Ne(v) => Op::Ne(one(v)),
+                Op::In(vs) => Op::In(vs.iter().map(one).collect()),
+                Op::Nin(vs) => Op::Nin(vs.iter().map(one).collect()),
+                Op::Not(ops) => Op::Not(ops.iter().map(|o| op(o, path, f)).collect()),
+                other => other.clone(),
+            }
+        }
+        fn node(n: &Node, f: &dyn Fn(&str, &Value) -> Option<Value>) -> Node {
+            match n {
+                Node::And(nodes) => Node::And(nodes.iter().map(|n| node(n, f)).collect()),
+                Node::Or(nodes) => Node::Or(nodes.iter().map(|n| node(n, f)).collect()),
+                Node::Not(inner) => Node::Not(Box::new(node(inner, f))),
+                Node::Field { path, ops } => {
+                    let joined = path.join(".");
+                    Node::Field { path: path.clone(), ops: ops.iter().map(|o| op(o, &joined, f)).collect() }
+                }
+                text @ Node::Text { .. } => text.clone(),
+            }
+        }
+        Filter(node(&self.0, f))
+    }
+
     /// True if the filter matches everything.
     pub fn is_empty(&self) -> bool {
         matches!(&self.0, Node::And(nodes) if nodes.is_empty())
