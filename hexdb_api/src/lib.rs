@@ -17,6 +17,7 @@ pub mod config;
 pub mod agent;
 pub mod mcp;
 pub mod a2a;
+pub mod a2a_push;
 pub mod shares;
 pub mod queues;
 pub mod grpc;

@@ -295,3 +295,112 @@ fn a2a_agents_ask_as_the_calling_user() -> Result<()> {
     assert!(audit.body["events"].as_array().is_some_and(|e| e.len() >= 3), "{}", audit.body);
     Ok(())
 }
+
+/// A webhook receiver: each request's headers (lowercase names) and JSON body.
+type Received = Arc<Mutex<Vec<(std::collections::HashMap<String, String>, Value)>>>;
+
+fn webhook() -> Result<(u16, Received)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let received: Received = Arc::default();
+    let record = received.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let mut headers = std::collections::HashMap::new();
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap_or(0);
+                let h = h.trim_end().to_string();
+                if h.is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':') {
+                    headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+                }
+            }
+            let length = headers.get("content-length").and_then(|l| l.parse().ok()).unwrap_or(0);
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).ok();
+            record.lock().unwrap().push((headers, serde_json::from_slice(&body).unwrap_or(Value::Null)));
+            let mut stream = stream;
+            let _ = write!(stream, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        }
+    });
+    Ok((port, received))
+}
+
+fn wait_for(received: &Received, count: usize) -> Vec<(std::collections::HashMap<String, String>, Value)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while received.lock().unwrap().len() < count && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    received.lock().unwrap().clone()
+}
+
+#[test]
+fn a2a_push_notifications_post_finished_tasks_to_webhooks() -> Result<()> {
+    let server = TestServer::start()?;
+    let key = seed(&server)?;
+    let (port, _seen) = mock_claude()?;
+    configure(&server, json!({ "ai.provider": "anthropic", "ai.base_url": format!("http://127.0.0.1:{}", port), "ai.api_key": "sk-test-a2a-0001", "ai.chat.enabled": true, "a2a.enabled": true }))?;
+    let (hook_port, received) = webhook()?;
+    let hook = format!("http://127.0.0.1:{}/hook", hook_port);
+    let anon = hexdb_tests::http().build()?;
+    let card: Value = anon.get(server.url("/.well-known/agent-card.json")).send()?.json()?;
+    assert_eq!(card["capabilities"]["pushNotifications"], true);
+
+    // Private addresses and plain HTTP are refused until a2a.push_private_networks allows them.
+    let question = |config: Value| json!({ "message": { "messageId": "m1", "role": "ROLE_USER", "parts": [{ "text": "How many orders?" }] }, "configuration": config });
+    let config = json!({ "url": hook, "token": "task-token", "authentication": { "scheme": "Bearer", "credentials": "hook-secret" } });
+    let refused = a2a(&server, &key, "SendMessage", question(json!({ "taskPushNotificationConfig": config })), "1.0")?;
+    assert_eq!(refused["error"]["code"], -32602, "{}", refused);
+    assert!(refused["error"]["message"].as_str().unwrap().contains("a2a.push_private_networks"), "{}", refused);
+    configure(&server, json!({ "a2a.push_private_networks": true }))?;
+
+    // returnImmediately: the working task now, the finished one at the webhook.
+    let started = a2a(&server, &key, "SendMessage", question(json!({ "taskPushNotificationConfig": config, "returnImmediately": true })), "1.0")?;
+    assert_eq!(started["result"]["task"]["status"]["state"], "TASK_STATE_WORKING", "{}", started);
+    let task_id = started["result"]["task"]["id"].as_str().unwrap().to_string();
+    let posts = wait_for(&received, 1);
+    assert_eq!(posts.len(), 1, "one notification");
+    let (headers, body) = &posts[0];
+    assert_eq!(body["task"]["id"], task_id.as_str());
+    assert_eq!(body["task"]["status"]["state"], "TASK_STATE_COMPLETED", "{}", body);
+    assert_eq!(headers["content-type"], "application/a2a+json");
+    assert_eq!(headers["x-a2a-notification-token"], "task-token");
+    assert_eq!(headers["authorization"], "Bearer hook-secret");
+    let got = a2a(&server, &key, "GetTask", json!({ "id": task_id }), "1.0")?;
+    assert_eq!(got["result"]["status"]["state"], "TASK_STATE_COMPLETED");
+
+    // The configs: listed without credentials, got, deleted.
+    let listed = a2a(&server, &key, "ListTaskPushNotificationConfigs", json!({ "taskId": task_id }), "1.0")?;
+    let configs = listed["result"]["configs"].as_array().unwrap().clone();
+    assert_eq!(configs.len(), 1, "{}", listed);
+    assert!(!listed.to_string().contains("hook-secret"), "credentials aren't echoed");
+    let config_id = configs[0]["id"].as_str().unwrap().to_string();
+    let one = a2a(&server, &key, "GetTaskPushNotificationConfig", json!({ "taskId": task_id, "id": config_id }), "1.0")?;
+    assert_eq!(one["result"]["url"], hook.as_str());
+    let deleted = a2a(&server, &key, "DeleteTaskPushNotificationConfig", json!({ "taskId": task_id, "id": config_id }), "1.0")?;
+    assert!(deleted["error"].is_null(), "{}", deleted);
+    let listed = a2a(&server, &key, "ListTaskPushNotificationConfigs", json!({ "taskId": task_id }), "1.0")?;
+    assert_eq!(listed["result"]["configs"], json!([]));
+
+    // A webhook added to a finished task gets it at once, here through 0.3's method, in 0.3's form.
+    let set = a2a(&server, &key, "tasks/pushNotificationConfig/set", json!({ "taskId": task_id, "pushNotificationConfig": { "url": hook } }), "0.3")?;
+    assert_eq!(set["result"]["taskId"], task_id.as_str(), "{}", set);
+    let posts = wait_for(&received, 2);
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[1].1["kind"], "task", "{}", posts[1].1);
+    assert_eq!(posts[1].1["status"]["state"], "completed");
+
+    // Someone else's task: not found.
+    let other = server.user_with_roles("otto", json!([{ "name": "eu_reader", "tessellations": ["orders"] }]))?;
+    let res = a2a(&server, &other, "CreateTaskPushNotificationConfig", json!({ "taskId": task_id, "url": hook }), "1.0")?;
+    assert_eq!(res["error"]["code"], -32001, "{}", res);
+    Ok(())
+}

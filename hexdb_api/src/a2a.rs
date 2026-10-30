@@ -12,8 +12,12 @@
 //   CancelTask     tasks finish before the answer, so: not cancelable
 //   SendStreamingMessage   the same, as Server-Sent Events: the task, a
 //                  status update per lookup, the answer, the final status
+//   Create/Get/List/DeleteTaskPushNotificationConfig(s)   webhooks a task's
+//                  result is POSTed to when it finishes (see `a2a_push`);
+//                  SendMessage can set one, and with returnImmediately
+//                  answers at once with the working task
 //
-// Push notifications aren't offered. Every message runs the
+// Every message runs the
 // chat (`crate::agent::answer`) as the caller, authenticated by an API key
 // or session token: the `chat` permission, read permissions, row filters and
 // field masks, the `ai.chat.*` limits and the monthly budget all apply, and
@@ -24,6 +28,7 @@
 
 use crate::agent::{self, ChatHistoryItem};
 use crate::auth::Auth;
+use crate::a2a_push::{self, PushConfig};
 use crate::handlers::{ApiError, ApiResult, Engine};
 use axum::{
     extract::rejection::JsonRejection,
@@ -52,7 +57,8 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const TASK_NOT_FOUND: i64 = -32001;
 const TASK_NOT_CANCELABLE: i64 = -32002;
-const PUSH_NOT_SUPPORTED: i64 = -32003;
+/// Most webhooks one task may have.
+const MAX_PUSH_CONFIGS: usize = 10;
 const UNSUPPORTED: i64 = -32004;
 const CONTENT_TYPE_NOT_SUPPORTED: i64 = -32005;
 const VERSION_NOT_SUPPORTED: i64 = -32009;
@@ -86,7 +92,7 @@ pub async fn agent_card(axum::extract::State(engine): Engine, Extension(https): 
         "supportedInterfaces": [{ "url": url, "protocolBinding": "JSONRPC", "protocolVersion": PROTOCOL_VERSION }],
         "version": env!("CARGO_PKG_VERSION"),
         "documentationUrl": "https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md",
-        "capabilities": { "streaming": true, "pushNotifications": false, "extendedAgentCard": false },
+        "capabilities": { "streaming": true, "pushNotifications": true, "extendedAgentCard": false },
         "securitySchemes": security_schemes,
         "securityRequirements": requirements,
         "defaultInputModes": ["text/plain"],
@@ -120,6 +126,8 @@ struct Context {
 struct Store {
     tasks: HashMap<String, StoredTask>,
     contexts: HashMap<String, Context>,
+    /// Task ID -> its webhooks.
+    push: HashMap<String, Vec<PushConfig>>,
 }
 
 impl Store {
@@ -138,6 +146,8 @@ impl Store {
         }
         trim(&mut self.tasks, |t| t.at);
         trim(&mut self.contexts, |c| c.at);
+        let tasks = &self.tasks;
+        self.push.retain(|id, _| tasks.contains_key(id));
     }
 }
 
@@ -192,7 +202,12 @@ pub async fn post(
         "tasks/cancel" => (Dialect::V03, "CancelTask"),
         "message/stream" => (Dialect::V03, "SendStreamingMessage"),
         "tasks/resubscribe" => (Dialect::V03, "SubscribeToTask"),
-        m if m.starts_with("tasks/pushNotificationConfig/") => (Dialect::V03, "SetTaskPushNotificationConfig"),
+        "tasks/pushNotificationConfig/set" => (Dialect::V03, "CreateTaskPushNotificationConfig"),
+        "tasks/pushNotificationConfig/get" => (Dialect::V03, "GetTaskPushNotificationConfig"),
+        "tasks/pushNotificationConfig/list" => (Dialect::V03, "ListTaskPushNotificationConfigs"),
+        "tasks/pushNotificationConfig/delete" => (Dialect::V03, "DeleteTaskPushNotificationConfig"),
+        // An early 1.0 draft's name.
+        "ListTaskPushNotificationConfig" => (Dialect::V1, "ListTaskPushNotificationConfigs"),
         m => (Dialect::V1, m),
     };
     if method == "SendStreamingMessage" {
@@ -211,7 +226,10 @@ pub async fn post(
             }
         }
         "SubscribeToTask" => error(&id, UNSUPPORTED, "Tasks here finish with their answer; read a task with GetTask."),
-        m if m.contains("PushNotificationConfig") => error(&id, PUSH_NOT_SUPPORTED, "Push notifications aren't offered."),
+        "CreateTaskPushNotificationConfig" => create_push_config(&engine, &principal, &id, &params, dialect).await,
+        "GetTaskPushNotificationConfig" => get_push_config(&principal, &id, &params, dialect),
+        "ListTaskPushNotificationConfigs" => list_push_configs(&principal, &id, &params, dialect),
+        "DeleteTaskPushNotificationConfig" => delete_push_config(&principal, &id, &params, dialect),
         "GetExtendedAgentCard" => error(&id, UNSUPPORTED, "There is no extended agent card."),
         other => error(&id, METHOD_NOT_FOUND, &format!("Method '{}' isn't supported.", other)),
     };
@@ -282,10 +300,126 @@ fn prepare(engine: &hexdb_core::engine::HexDBEngine, principal: &Principal, id: 
     Ok(Ok(Prepared { question, history, context_id, task_id, user_message, history_length: params["configuration"]["historyLength"].as_u64() }))
 }
 
-/// Keep a task (A2A 1.0 form) for GetTask and ListTasks.
+/// Keep a task (A2A 1.0 form) for GetTask and ListTasks; a finished task
+/// goes to its webhooks.
 fn keep(principal: &Principal, task: &Value) {
     let id = task["id"].as_str().unwrap_or_default().to_string();
-    store().lock().unwrap().tasks.insert(id, StoredTask { owner: principal.user_id.clone(), task: task.clone(), at: Instant::now() });
+    let configs = {
+        let mut store = store().lock().unwrap();
+        store.tasks.insert(id.clone(), StoredTask { owner: principal.user_id.clone(), task: task.clone(), at: Instant::now() });
+        if finished(task) { store.push.get(&id).cloned().unwrap_or_default() } else { Vec::new() }
+    };
+    if !configs.is_empty() {
+        a2a_push::notify(configs, task.clone());
+    }
+}
+
+fn finished(task: &Value) -> bool {
+    !matches!(task["status"]["state"].as_str(), Some("TASK_STATE_WORKING" | "TASK_STATE_SUBMITTED"))
+}
+
+/// The task a push config request names: 1.0 `taskId` (or `parent`
+/// `tasks/{id}`), 0.3 `id` (`taskId` for set).
+fn push_task_id(params: &Value, dialect: Dialect) -> String {
+    let named = match dialect {
+        Dialect::V1 => params["taskId"].as_str().or_else(|| params["parent"].as_str().and_then(|p| p.strip_prefix("tasks/"))),
+        Dialect::V03 => params["taskId"].as_str().or_else(|| params["id"].as_str()),
+    };
+    named.unwrap_or_default().to_string()
+}
+
+/// Check a webhook and add it to a task (the task must be the caller's).
+async fn add_push_config(engine: &hexdb_core::engine::HexDBEngine, principal: &Principal, task_id: &str, config: &Value, v03: bool) -> Result<PushConfig, (i64, String)> {
+    let private_networks = engine.config_value("a2a.push_private_networks") == json!(true);
+    let config = a2a_push::parse(config, v03, private_networks).map_err(|e| (INVALID_PARAMS, e))?;
+    a2a_push::check(&config.url, private_networks).await.map_err(|e| (INVALID_PARAMS, e))?;
+    let mut store = store().lock().unwrap();
+    store.prune();
+    if !store.tasks.get(task_id).is_some_and(|t| t.owner == principal.user_id) {
+        return Err((TASK_NOT_FOUND, "No such task (tasks are kept for an hour).".into()));
+    }
+    let list = store.push.entry(task_id.to_string()).or_default();
+    list.retain(|c| c.id != config.id);
+    if list.len() >= MAX_PUSH_CONFIGS {
+        return Err((INVALID_PARAMS, format!("A task can have at most {} push notification configs.", MAX_PUSH_CONFIGS)));
+    }
+    list.push(config.clone());
+    Ok(config)
+}
+
+async fn create_push_config(engine: &hexdb_core::engine::HexDBEngine, principal: &Principal, id: &Value, params: &Value, dialect: Dialect) -> Value {
+    let task_id = push_task_id(params, dialect);
+    let config = if params["config"].is_object() { &params["config"] } else { params };
+    match add_push_config(engine, principal, &task_id, config, dialect == Dialect::V03).await {
+        Ok(config) => {
+            // Already finished (it may have, before the client asked): send it now.
+            if let Some(task) = owned_task(principal, &task_id).filter(finished) {
+                a2a_push::notify(vec![config.clone()], task);
+            }
+            reply(id, a2a_push::view(&config, &task_id))
+        }
+        Err((code, message)) => error(id, code, &message),
+    }
+}
+
+/// A task's webhooks, if the task is the caller's.
+fn push_configs(principal: &Principal, task_id: &str) -> Option<Vec<PushConfig>> {
+    let mut store = store().lock().unwrap();
+    store.prune();
+    let owned = store.tasks.get(task_id).is_some_and(|t| t.owner == principal.user_id);
+    owned.then(|| store.push.get(task_id).cloned().unwrap_or_default())
+}
+
+/// The config ID a get or delete names (0.3: `pushNotificationConfigId`).
+fn push_config_id(params: &Value, dialect: Dialect) -> Option<&str> {
+    match dialect {
+        Dialect::V1 => params["id"].as_str().or_else(|| params["name"].as_str().and_then(|n| n.rsplit('/').next())),
+        Dialect::V03 => params["pushNotificationConfigId"].as_str(),
+    }
+}
+
+fn get_push_config(principal: &Principal, id: &Value, params: &Value, dialect: Dialect) -> Value {
+    let task_id = push_task_id(params, dialect);
+    let Some(configs) = push_configs(principal, &task_id) else { return error(id, TASK_NOT_FOUND, "No such task.") };
+    let wanted = push_config_id(params, dialect);
+    match configs.iter().find(|c| wanted.is_none_or(|w| c.id == w)) {
+        Some(config) => reply(id, a2a_push::view(config, &task_id)),
+        None => error(id, INVALID_PARAMS, "No such push notification config."),
+    }
+}
+
+fn list_push_configs(principal: &Principal, id: &Value, params: &Value, dialect: Dialect) -> Value {
+    let task_id = push_task_id(params, dialect);
+    let Some(configs) = push_configs(principal, &task_id) else { return error(id, TASK_NOT_FOUND, "No such task.") };
+    let views: Vec<Value> = configs.iter().map(|c| a2a_push::view(c, &task_id)).collect();
+    match dialect {
+        Dialect::V1 => reply(id, json!({ "configs": views, "nextPageToken": "" })),
+        Dialect::V03 => reply(id, json!(views)),
+    }
+}
+
+fn delete_push_config(principal: &Principal, id: &Value, params: &Value, dialect: Dialect) -> Value {
+    let task_id = push_task_id(params, dialect);
+    let Some(wanted) = push_config_id(params, dialect).map(String::from) else { return error(id, INVALID_PARAMS, "Name the config to delete.") };
+    if push_configs(principal, &task_id).is_none() {
+        return error(id, TASK_NOT_FOUND, "No such task.");
+    }
+    let removed = store().lock().unwrap().push.get_mut(&task_id).is_some_and(|list| {
+        let before = list.len();
+        list.retain(|c| c.id != wanted);
+        list.len() < before
+    });
+    match (removed, dialect) {
+        (false, _) => error(id, INVALID_PARAMS, "No such push notification config."),
+        (true, Dialect::V1) => reply(id, json!({})),
+        (true, Dialect::V03) => reply(id, Value::Null),
+    }
+}
+
+/// A task refused for the caller's own fault (permissions, input).
+fn rejected(p: &Prepared, message: &str) -> Value {
+    let reply = agent_message(message, &p.context_id, &p.task_id);
+    json!({ "id": p.task_id, "contextId": p.context_id, "status": { "state": "TASK_STATE_REJECTED", "message": reply, "timestamp": now() }, "history": [p.user_message, reply] })
 }
 
 fn agent_message(text: &str, context_id: &str, task_id: &str) -> Value {
@@ -334,7 +468,39 @@ async fn send_message(engine: &std::sync::Arc<hexdb_core::engine::HexDBEngine>, 
         Ok(p) => p,
         Err(reply) => return Ok(reply),
     };
-    match run_task(engine, principal, client, &p, None).await {
+    let working = json!({
+        "id": p.task_id,
+        "contextId": p.context_id,
+        "status": { "state": "TASK_STATE_WORKING", "timestamp": now() },
+        "history": [p.user_message],
+    });
+    keep(principal, &working);
+    // A webhook for this task (1.0 taskPushNotificationConfig, 0.3 pushNotificationConfig).
+    let configuration = &params["configuration"];
+    let webhook = [&configuration["taskPushNotificationConfig"], &configuration["pushNotificationConfig"]].into_iter().find(|c| c.is_object());
+    if let Some(webhook) = webhook {
+        if let Err((code, message)) = add_push_config(engine, principal, &p.task_id, webhook, dialect == Dialect::V03).await {
+            store().lock().unwrap().tasks.remove(&p.task_id);
+            return Ok(error(id, code, &message));
+        }
+    }
+    // Answer now with the working task, and finish it in the background (1.0
+    // returnImmediately, 0.3 blocking: false); the webhook or GetTask has the result.
+    if configuration["returnImmediately"] == json!(true) || configuration["blocking"] == json!(false) {
+        let (engine, principal, client) = (engine.clone(), principal.clone(), client.to_string());
+        let caller = std::sync::Arc::new(principal.clone());
+        tokio::spawn(hexdb_core::access::as_caller(caller, async move {
+            if let Err(e) = run_task(&engine, &principal, &client, &p, None).await {
+                keep(&principal, &rejected(&p, e.message()));
+            }
+        }));
+        return Ok(reply(id, shaped(&working, None, dialect)));
+    }
+    let result = run_task(engine, principal, client, &p, None).await;
+    if let Err(e) = &result {
+        keep(principal, &rejected(&p, e.message()));
+    }
+    match result {
         Ok(task) => Ok(reply(id, shaped(&task, p.history_length, dialect))),
         Err(e) if e.status() == StatusCode::BAD_REQUEST => Ok(error(id, INVALID_PARAMS, e.message())),
         Err(e) => Err(e),
@@ -385,8 +551,7 @@ async fn send_streaming(
         let task = match run_task(&engine, &principal, &client, &p, Some(&progress)).await {
             Ok(task) => task,
             Err(e) => {
-                let reply = agent_message(e.message(), &context_id, &task_id);
-                let task = json!({ "id": task_id, "contextId": context_id, "status": { "state": "TASK_STATE_REJECTED", "message": reply, "timestamp": now() }, "history": [p.user_message, reply] });
+                let task = rejected(&p, e.message());
                 keep(&principal, &task);
                 task
             }
@@ -488,7 +653,8 @@ fn trimmed(mut task: Value, history_length: Option<u64>) -> Value {
     task
 }
 
-fn to_v03(mut task: Value) -> Value {
+/// A task in 0.3's form (also what 0.3 webhooks receive).
+pub(crate) fn to_v03(mut task: Value) -> Value {
     fn message(m: &mut Value) {
         m["kind"] = json!("message");
         if let Some(role) = m["role"].as_str() {
