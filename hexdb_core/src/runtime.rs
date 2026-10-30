@@ -68,7 +68,11 @@ impl RuntimeInfo {
         fs::create_dir_all(storage_dir)
             .with_context(|| format!("Failed to create {}", storage_dir.display()))?;
         let path = Self::path(storage_dir);
-        write_private_file(&path, serde_json::to_string_pretty(self)?.as_bytes())?;
+        // Written aside and renamed into place, so a reader (the CLI, a
+        // supervisor) never sees it half-written.
+        let partial = path.with_extension("pid.partial");
+        write_private_file(&partial, serde_json::to_string_pretty(self)?.as_bytes())?;
+        fs::rename(&partial, &path).with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(path)
     }
 
