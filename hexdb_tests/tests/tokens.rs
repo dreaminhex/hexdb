@@ -151,3 +151,35 @@ fn vault_entries_are_per_tessellation_and_unused_ones_are_deleted() -> Result<()
     assert_eq!(detokenize("payments", &new_token)?, "5500005555555559");
     Ok(())
 }
+
+#[test]
+fn sql_beyond_one_table_compares_tokenized_fields_by_value() -> Result<()> {
+    let server = TestServer::start()?;
+    let schema = json!({ "fields": { "card": { "type": "string", "tokenize": "one_way" } } });
+    for tess in ["accounts", "payments"] {
+        server.insert(tess, &json!({ "card": "0000000000000000" }))?;
+        let res = server.request(Method::POST, &format!("/tessellations/{}/schemas", tess), Some(&schema), &[])?;
+        assert!(res.status.is_success(), "{}", res.body);
+    }
+    server.insert("accounts", &json!({ "name": "Ada", "card": CARD }))?;
+    server.insert("accounts", &json!({ "name": "Bo", "card": "5500005555555559" }))?;
+    server.insert("payments", &json!({ "amount": 12, "card": CARD }))?;
+    let sql = |statement: &str, params: Value| -> Result<Value> {
+        let res = server.request(Method::POST, "/sql", Some(&json!({ "sql": statement, "params": params })), &[])?;
+        assert_eq!(res.status, StatusCode::OK, "{}: {}", statement, res.body);
+        Ok(res.body["rows"].clone())
+    };
+    // A join on the tokenized field, filtered by the real value.
+    assert_eq!(
+        sql("SELECT a.name, p.amount FROM accounts a JOIN payments p ON p.card = a.card WHERE a.card = ?", json!([CARD]))?,
+        json!([["Ada", 12]])
+    );
+    // Expressions run in memory: a function, IN, <> and a subquery.
+    assert_eq!(sql("SELECT UPPER(name) FROM accounts WHERE card IN (?, 'nope')", json!([CARD]))?, json!([["ADA"]]));
+    assert_eq!(sql("SELECT UPPER(name) FROM accounts WHERE card <> ? AND name IS NOT NULL", json!([CARD]))?, json!([["BO"]]));
+    assert_eq!(
+        sql("SELECT name FROM accounts WHERE card IN (SELECT card FROM payments WHERE card = ?)", json!([CARD]))?,
+        json!([["Ada"]])
+    );
+    Ok(())
+}

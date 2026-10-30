@@ -9,7 +9,8 @@
 // 1. Each table reference is read through the engine's ordinary query path
 //    (so the caller's row filters and hidden fields apply, and indexes are
 //    used). WHERE and inner-join conditions that compare one table's field
-//    with a value are pushed into that read. A read may return at most
+//    with a value are pushed into that read. Values compared for equality
+//    with a tokenized field are replaced by their tokens first (`Tokens`). A read may return at most
 //    `limits.sql_max_rows` documents; more is an error, never a silently
 //    short answer.
 // 2. Everything else runs in memory: hash joins on equality conditions
@@ -1613,6 +1614,21 @@ struct Env<'a> {
 impl HexDBEngine {
     /// Run a statement compiled for the general executor: every row of its result.
     pub(super) async fn run_general(&self, plan: &General) -> Result<Output> {
+        let tokenized: HashMap<String, Vec<String>> = plan
+            .tables
+            .iter()
+            .map(|t| (t.clone(), self.tokenized_fields(t).into_iter().map(|(path, _)| path).collect::<Vec<_>>()))
+            .filter(|(_, paths)| !paths.is_empty())
+            .collect();
+        let rewritten;
+        let plan = if tokenized.is_empty() {
+            plan
+        } else {
+            let mut copy = plan.clone();
+            Tokens { engine: self, fields: tokenized, seen: RefCell::new(HashSet::new()) }.plan(&mut copy);
+            rewritten = copy;
+            &rewritten
+        };
         let max_rows = self.config.limits.sql_max_rows.max(1);
         let mut scans = Vec::with_capacity(plan.scans.len());
         let mut loaded: HashMap<(String, String), usize> = HashMap::new();
@@ -1672,6 +1688,180 @@ impl HexDBEngine {
             null: Arc::new(Value::Null),
         };
         ctx.query(&plan.root, None)
+    }
+}
+
+/// Rewrites a plan so values compared for equality with a tokenized field
+/// (`=`, `<>`, `IN`, `IS [NOT] DISTINCT FROM`) are compared as tokens, which
+/// is what the rows hold. Pushed-down reads get the same rewrite from the
+/// engine (`prepare_filter`); this covers what's checked in memory.
+struct Tokens<'e> {
+    engine: &'e HexDBEngine,
+    /// Table -> its tokenized field paths.
+    fields: HashMap<String, Vec<String>>,
+    /// Subqueries already rewritten.
+    seen: RefCell<HashSet<usize>>,
+}
+
+/// Per binding of one scope, the table it scans (None: a CTE or derived table).
+type Scope = Vec<Option<String>>;
+
+impl Tokens<'_> {
+    fn plan(&self, plan: &mut General) {
+        let tables: Vec<String> = plan.scans.iter().map(|s| s.table.clone()).collect();
+        let mut subs: Vec<Option<SubPlan>> = std::mem::take(&mut plan.subqueries).into_iter().map(Some).collect();
+        self.query(&mut plan.root, &tables, &mut Vec::new(), &mut subs);
+        for cte in &mut plan.ctes {
+            self.query(cte, &tables, &mut Vec::new(), &mut subs);
+        }
+        // Subqueries are reached from where they're used; any left see no outer scope.
+        for i in 0..subs.len() {
+            self.sub(i, &tables, &mut Vec::new(), &mut subs);
+        }
+        plan.subqueries = subs.into_iter().map(|s| s.expect("every subquery is put back")).collect();
+    }
+
+    fn sub(&self, index: usize, tables: &[String], scopes: &mut Vec<Scope>, subs: &mut [Option<SubPlan>]) {
+        if !self.seen.borrow_mut().insert(index) {
+            return;
+        }
+        if let Some(mut sub) = subs[index].take() {
+            self.query(&mut sub.query, tables, scopes, subs);
+            subs[index] = Some(sub);
+        }
+    }
+
+    fn query(&self, node: &mut QueryNode, tables: &[String], scopes: &mut Vec<Scope>, subs: &mut [Option<SubPlan>]) {
+        self.set(&mut node.body, tables, scopes, subs);
+    }
+
+    fn set(&self, node: &mut SetNode, tables: &[String], scopes: &mut Vec<Scope>, subs: &mut [Option<SubPlan>]) {
+        match node {
+            SetNode::Select(select) => self.select(select, tables, scopes, subs),
+            SetNode::Set { left, right, .. } => {
+                self.set(left, tables, scopes, subs);
+                self.set(right, tables, scopes, subs);
+            }
+            SetNode::Query(query) => self.query(query, tables, scopes, subs),
+        }
+    }
+
+    fn select(&self, s: &mut SelectNode, tables: &[String], scopes: &mut Vec<Scope>, subs: &mut [Option<SubPlan>]) {
+        let mut scope: Scope = vec![None; s.bindings.len()];
+        if let Some(from) = &mut s.from {
+            self.scanned_tables(from, tables, &mut scope, subs);
+        }
+        scopes.push(scope);
+        if let Some(from) = &mut s.from {
+            self.join_conditions(from, tables, scopes, subs);
+        }
+        let exprs = s
+            .filter
+            .iter_mut()
+            .chain(s.having.iter_mut())
+            .chain(s.group_keys.iter_mut())
+            .chain(s.aggregates.iter_mut().filter_map(|a| a.arg.as_mut()))
+            .chain(s.items.iter_mut().filter_map(|i| match i {
+                OutItem::Expr(e, _) => Some(e),
+                OutItem::Wildcard(_) => None,
+            }))
+            .chain(s.order.iter_mut().map(|(e, _, _)| e));
+        for e in exprs {
+            self.ex(e, tables, scopes, subs);
+        }
+        scopes.pop();
+    }
+
+    /// Note the table each binding scans; derived tables see no outer scope.
+    fn scanned_tables(&self, node: &mut FromNode, tables: &[String], scope: &mut Scope, subs: &mut [Option<SubPlan>]) {
+        match node {
+            FromNode::Source { binding, source } => match source {
+                Source::Scan(i) => scope[*binding] = tables.get(*i).cloned(),
+                Source::Derived(query, _) => self.query(query, tables, &mut Vec::new(), subs),
+                Source::Cte(..) => {}
+            },
+            FromNode::Join { left, right, .. } => {
+                self.scanned_tables(left, tables, scope, subs);
+                self.scanned_tables(right, tables, scope, subs);
+            }
+        }
+    }
+
+    fn join_conditions(&self, node: &mut FromNode, tables: &[String], scopes: &mut Vec<Scope>, subs: &mut [Option<SubPlan>]) {
+        if let FromNode::Join { left, right, on, .. } = node {
+            self.join_conditions(left, tables, scopes, subs);
+            self.join_conditions(right, tables, scopes, subs);
+            if let Some(on) = on {
+                self.ex(on, tables, scopes, subs);
+            }
+        }
+    }
+
+    fn ex(&self, e: &mut Ex, tables: &[String], scopes: &mut Vec<Scope>, subs: &mut [Option<SubPlan>]) {
+        match e {
+            Ex::Cmp(a, BinaryOperator::Eq | BinaryOperator::NotEq, b) | Ex::DistinctFrom(a, b, _) => {
+                if self.tokenized(a, scopes) {
+                    self.literal(b);
+                } else if self.tokenized(b, scopes) {
+                    self.literal(a);
+                }
+            }
+            Ex::InList(a, list, _) if self.tokenized(a, scopes) => list.iter_mut().for_each(|v| self.literal(v)),
+            _ => {}
+        }
+        match e {
+            Ex::Lit(_) | Ex::Col(_) | Ex::Agg(_) => {}
+            Ex::Neg(a) | Ex::Not(a) | Ex::IsNull(a, _) | Ex::IsBool(a, _, _) | Ex::Cast(a, _, _) | Ex::Extract(_, a) => self.ex(a, tables, scopes, subs),
+            Ex::Arith(a, _, b) | Ex::Cmp(a, _, b) | Ex::And(a, b) | Ex::Or(a, b) | Ex::Concat(a, b) | Ex::DistinctFrom(a, b, _) => {
+                self.ex(a, tables, scopes, subs);
+                self.ex(b, tables, scopes, subs);
+            }
+            Ex::InList(a, list, _) => {
+                self.ex(a, tables, scopes, subs);
+                list.iter_mut().for_each(|v| self.ex(v, tables, scopes, subs));
+            }
+            Ex::InSub(a, i, _) | Ex::Quantified(a, _, i, _) => {
+                self.ex(a, tables, scopes, subs);
+                self.sub(*i, tables, scopes, subs);
+            }
+            Ex::Exists(i, _) | Ex::Scalar(i) => self.sub(*i, tables, scopes, subs),
+            Ex::Like { expr, pattern, .. } => {
+                self.ex(expr, tables, scopes, subs);
+                self.ex(pattern, tables, scopes, subs);
+            }
+            Ex::Case { operand, whens, otherwise } => {
+                for part in operand.iter_mut().chain(otherwise.iter_mut()) {
+                    self.ex(part, tables, scopes, subs);
+                }
+                for (when, then) in whens {
+                    self.ex(when, tables, scopes, subs);
+                    self.ex(then, tables, scopes, subs);
+                }
+            }
+            Ex::Func(_, args) => args.iter_mut().for_each(|a| self.ex(a, tables, scopes, subs)),
+        }
+    }
+
+    /// Whether an expression is a column of a tokenized field.
+    fn tokenized(&self, e: &Ex, scopes: &[Scope]) -> bool {
+        let Ex::Col(c) = e else { return false };
+        let Some(scope) = scopes.len().checked_sub(c.depth + 1).and_then(|i| scopes.get(i)) else { return false };
+        let path = c.path.join(".");
+        let tokenizes = |table: &Option<String>| table.as_ref().and_then(|t| self.fields.get(t)).is_some_and(|paths| paths.contains(&path));
+        match c.binding {
+            Some(b) => scope.get(b).is_some_and(tokenizes),
+            // Unqualified: the one table in scope, or the one that tokenizes it.
+            None if scope.len() == 1 => tokenizes(&scope[0]),
+            None => scope.iter().filter(|t| tokenizes(t)).count() == 1,
+        }
+    }
+
+    fn literal(&self, e: &mut Ex) {
+        if let Ex::Lit(value) = e {
+            if let Some(token) = self.engine.token_for_filter(value) {
+                *value = token;
+            }
+        }
     }
 }
 
