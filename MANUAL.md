@@ -138,11 +138,94 @@ An administrator resets another user's password, unlocks the account or turns of
 
 ```bash
 hexdb reset-password                    # the user named by security.admin_login
-hexdb reset-password --login alice      # another user
+hexdb reset-password --login alice      # another user (login or user ID)
 hexdb reset-password --mfa-off          # also turn off MFA (lost authenticator and backup codes)
+hexdb --config /etc/hexdb/hexdb.toml reset-password   # the server's configuration, if it isn't found by default
 ```
 
-The CLI generates a new password, prints it, and leaves a request holding only its Argon2 hash in the storage folder (`reset-password.request`). The running server takes the request within two seconds and answers in `reset-password.result`; if the server isn't running, the next start applies it. The reset unlocks the account, clears its failed sign-ins, signs out all its sessions, and is recorded in the audit trail as `user.password_recovered` (client `local`). Nothing else can start a reset: it needs write access to the storage folder, which already holds the data and is readable only by the server's account, so run the CLI as that account or as an administrator of the machine, with the server's configuration (`--config`). In a lattice, run it on the Overseer's machine; on a replica it answers with the Overseer's address. In Docker: `docker exec -u hexdb <container> hexdb reset-password`.
+Only someone who can write to the server's storage folder (`storage.path`) can reset a password this way. That folder already holds the data and is readable only by the server's account, so the reset grants nothing new, and no network request can start one. Run the CLI as the server's account or as an administrator of the machine. In Docker, run `docker exec -u hexdb <container> hexdb reset-password`; the image's `HEXDB_CONFIG` points the CLI at the server's configuration. In a lattice, run it on the Overseer's machine (users are written there).
+
+**What the reset does.** The user gets the new password; the account is unlocked; its failed sign-ins are cleared (on this hex and lattice-wide); every session it had is signed out; with `--mfa-off`, its authenticator, pending enrollment and backup codes are removed. Roles aren't changed. The server logs a warning and records `user.password_recovered` in the audit trail (actor `-`, client `local`, details `{"mfa_turned_off": true|false}`).
+
+**What the CLI does.**
+
+1. It generates a password: 18 random bytes from the operating system, URL-safe Base64 (24 characters).
+2. It deletes any earlier answer (`reset-password.result`), then writes `reset-password.request` into the storage folder. The request holds only the password's Argon2 hash; the password itself is never written anywhere.
+3. If the server is running (or its runtime file can't be read, as for a Windows service), it waits up to 20 seconds for `reset-password.result`, prints the outcome and deletes the answer:
+
+   ```text
+   The password was reset and the user's sessions signed out.
+     login:    admin
+     password: 3kQ9...Vw
+   Sign in and change it.
+   ```
+
+   A refusal (an unknown login, a hex that isn't the Overseer) is printed as `The server refused the reset: <reason>` and exits with status 1.
+4. If the server isn't running, or doesn't answer within 20 seconds, the CLI leaves the request in place, prints the password and says it takes effect when the server takes the request (at its next start, or once a starting hex has finished its election). It exits with status 0.
+
+**The files.** Another program on the server's machine can reset a password the same way, without the CLI, by following this protocol. Both files are plain JSON in the storage folder, created with the folder's own permissions (they hold no secret, so the CLI and a server running under another account can each read what the other wrote).
+
+`<storage.path>/reset-password.request`, written by the requester:
+
+```json
+{ "login": "admin", "password_hash": "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>", "turn_off_mfa": false }
+```
+
+- `login`: the user's login (case doesn't matter) or user ID. Surrounding spaces are ignored.
+- `password_hash`: an Argon2 hash of the new password in PHC string format (`$argon2id$...`, `$argon2i$...` or `$argon2d$...`). Any parameters work: sign-in reads them from the string. HexDB itself uses Argon2id with m=19456, t=2, p=1.
+- `turn_off_mfa` (optional, default false).
+
+`<storage.path>/reset-password.result`, written by the server:
+
+```json
+{ "login": "admin" }
+{ "login": "nobody", "error": "User 'nobody' not found." }
+```
+
+- On success, `login` is the user's login as stored, and there's no `error`.
+- On failure, `error` says why. The reasons are an unreadable request (`login` is then empty), a `password_hash` that isn't an Argon2 hash, an unknown user, or a hex that isn't the Overseer (the message names the Overseer's address). Nothing is changed on failure.
+- The server never deletes the answer. The requester reads it and deletes it. Delete any old answer before writing a new request, so the next answer is the one for that request.
+
+**How the server handles a request.**
+
+- It looks for the request at startup and then every 2 seconds.
+- A hex that isn't the Overseer and doesn't yet know which hex is (one still in its first election) leaves the request where it is and takes it later.
+- Otherwise it deletes the request first, so a request is applied at most once, then applies it and writes the answer. A request the server can't delete isn't applied: it logs a warning instead.
+- A replica that knows the Overseer consumes the request and answers with an error naming it. Write the request on the Overseer's machine.
+
+**Checklist for another program.** Write the request atomically (to a temporary name in the same folder, then rename it), so the server never reads half a file. Then poll for the answer for up to about 20 seconds, read it, and delete it. HexDB never sees the password, so it can't apply its password policy: generate a long random one, or check at least 12 characters, not containing the login. Show or deliver the password only after the answer reports success.
+
+For example, in Python with the `argon2-cffi` package:
+
+```python
+import json, os, secrets, time
+from argon2 import PasswordHasher
+
+storage = "/var/lib/hexdb"                       # the server's storage.path
+password = secrets.token_urlsafe(18)             # 24 characters, as the CLI makes
+request = {"login": "admin", "password_hash": PasswordHasher().hash(password), "turn_off_mfa": False}
+
+result = os.path.join(storage, "reset-password.result")
+if os.path.exists(result):
+    os.remove(result)                            # the next answer is this request's
+tmp = os.path.join(storage, "reset-password.request.tmp")
+with open(tmp, "w") as f:
+    json.dump(request, f)
+os.replace(tmp, os.path.join(storage, "reset-password.request"))
+
+for _ in range(80):                              # up to 20 seconds
+    if os.path.exists(result):
+        with open(result) as f:
+            answer = json.load(f)
+        os.remove(result)
+        if "error" in answer:
+            raise SystemExit("refused: " + answer["error"])
+        print(answer["login"], password)
+        break
+    time.sleep(0.25)
+else:
+    print("no answer yet: the reset applies when the server takes the request")
+```
 
 ### Docker
 
