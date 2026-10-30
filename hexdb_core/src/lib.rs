@@ -26,6 +26,7 @@ pub mod sealed;
 pub mod vector;
 pub mod tokens;
 pub mod oauth;
+pub mod jws;
 pub mod audit;
 pub mod mfa;
 pub mod settings;

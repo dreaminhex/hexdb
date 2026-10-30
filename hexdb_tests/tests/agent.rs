@@ -354,6 +354,25 @@ fn a2a_push_notifications_post_finished_tasks_to_webhooks() -> Result<()> {
     let card: Value = anon.get(server.url("/.well-known/agent-card.json")).send()?.json()?;
     assert_eq!(card["capabilities"]["pushNotifications"], true);
 
+    // The card is signed (detached JWS over its RFC 8785 form) with the key its jku publishes.
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let signature = &card["signatures"][0];
+    let protected = signature["protected"].as_str().unwrap();
+    let header: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(protected)?)?;
+    assert_eq!((header["alg"].as_str(), header["typ"].as_str()), (Some("EdDSA"), Some("JOSE")), "{}", header);
+    let jku = header["jku"].as_str().unwrap();
+    assert!(jku.ends_with("/.well-known/jwks.json"), "{}", jku);
+    let jwks: Value = anon.get(server.url("/.well-known/jwks.json")).send()?.json()?;
+    let jwk = jwks["keys"].as_array().unwrap().iter().find(|k| k["kid"] == header["kid"]).expect("the kid is published");
+    let mut unsigned = card.clone();
+    unsigned.as_object_mut().unwrap().remove("signatures");
+    let input = format!("{}.{}", protected, URL_SAFE_NO_PAD.encode(hexdb_core::jws::canonical(&unsigned)));
+    let public = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, URL_SAFE_NO_PAD.decode(jwk["x"].as_str().unwrap())?);
+    assert!(public.verify(input.as_bytes(), &URL_SAFE_NO_PAD.decode(signature["signature"].as_str().unwrap())?).is_ok(), "the signature verifies");
+    unsigned["name"] = json!("Not HexDB");
+    let forged = format!("{}.{}", protected, URL_SAFE_NO_PAD.encode(hexdb_core::jws::canonical(&unsigned)));
+    assert!(public.verify(forged.as_bytes(), &URL_SAFE_NO_PAD.decode(signature["signature"].as_str().unwrap())?).is_err());
+
     // Private addresses and plain HTTP are refused until a2a.push_private_networks allows them.
     let question = |config: Value| json!({ "message": { "messageId": "m1", "role": "ROLE_USER", "parts": [{ "text": "How many orders?" }] }, "configuration": config });
     let config = json!({ "url": hook, "token": "task-token", "authentication": { "scheme": "Bearer", "credentials": "hook-secret" } });

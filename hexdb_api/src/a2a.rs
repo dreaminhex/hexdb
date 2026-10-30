@@ -73,7 +73,8 @@ pub async fn agent_card(axum::extract::State(engine): Engine, Extension(https): 
         return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "A2A is off on this lattice."));
     }
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or(&engine.config.network.api_endpoint);
-    let url = format!("{}://{}/a2a", if https.0 { "https" } else { "http" }, host);
+    let base = format!("{}://{}", if https.0 { "https" } else { "http" }, host);
+    let url = format!("{}/a2a", base);
     // Either scheme will do: an API key or session token, or the OpenID Connect provider's access token.
     let mut security_schemes = json!({
         "bearer": { "httpAuthSecurityScheme": { "scheme": "Bearer", "description": "A HexDB API key (hxk_...) or session token, sent as Authorization: Bearer." } }
@@ -105,7 +106,23 @@ pub async fn agent_card(axum::extract::State(engine): Engine, Extension(https): 
             "examples": ["Which tessellations are there, and how many documents does each have?", "How many orders over $100 shipped last month?"]
         }]
     });
+    // Signed (A2A 8.4) without its default-valued properties, which verifiers leave out too.
+    let mut card = hexdb_core::jws::without_defaults(card);
+    let signer = hexdb_core::jws::Signer::new(&engine.config.lattice_key()?);
+    card["signatures"] = json!([signer.sign(&card, &format!("{}{}", base, JWKS_PATH))]);
     Ok(([(header::CACHE_CONTROL, "public, max-age=300")], Json(card)).into_response())
+}
+
+/// Where the agent card's signing key is published.
+pub const JWKS_PATH: &str = "/.well-known/jwks.json";
+
+/// `GET /.well-known/jwks.json`: the key the agent card is signed with (404 while A2A is off).
+pub async fn jwks(axum::extract::State(engine): Engine) -> ApiResult {
+    if !enabled(&engine) {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "A2A is off on this lattice."));
+    }
+    let signer = hexdb_core::jws::Signer::new(&engine.config.lattice_key()?);
+    Ok(([(header::CACHE_CONTROL, "public, max-age=300")], Json(signer.jwks())).into_response())
 }
 
 /// One task: its owner and its A2A (1.0) form.

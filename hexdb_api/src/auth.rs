@@ -71,7 +71,7 @@ fn is_public(method: &Method, path: &str) -> bool {
         || (path == "/health" && method == Method::GET)
         || (path == "/openapi.json" && method == Method::GET)
         // A2A discovery; it says nothing unless a2a.enabled, and /a2a itself needs credentials.
-        || (path == "/.well-known/agent-card.json" && method == Method::GET)
+        || ((path == "/.well-known/agent-card.json" || path == crate::a2a::JWKS_PATH) && method == Method::GET)
         // OAuth discovery (RFC 9728); 404 unless oauth.issuer is set.
         || (path == PROTECTED_RESOURCE_PATH && method == Method::GET)
         || (path == "/auth/login" && method == Method::POST)
