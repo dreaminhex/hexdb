@@ -263,3 +263,21 @@ fn files_are_searched_by_the_meaning_of_their_extracted_text() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn quantized_indexes_rank_and_score_exactly() -> Result<()> {
+    let server = TestServer::start()?;
+    for (name, v) in [("a", [1.0, 0.0, 0.0]), ("b", [0.6, 0.8, 0.0]), ("c", [0.0, 0.0, 1.0])] {
+        server.insert("q", &json!({ "name": name, "v": v }))?;
+    }
+    let res = server.request(Method::POST, "/tessellations/q/indexes", Some(&json!({ "kind": "vector", "fields": ["v"], "quantization": "int8" })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    assert_eq!(res.body["quantization"], "int8");
+    let res = near(&server, None, "q", json!({ "near": { "field": "v", "vector": [1, 0, 0], "k": 2 } }))?;
+    assert_eq!(ids(&res, "name"), ["a", "b"]);
+    let scores: Vec<f64> = res.body["documents"].as_array().unwrap().iter().map(|d| d["_score"].as_f64().unwrap()).collect();
+    assert_eq!(scores, [1.0, 0.6], "rescored from the documents' own vectors");
+    let bad = server.request(Method::POST, "/tessellations/q/indexes", Some(&json!({ "fields": ["name"], "quantization": "int8" })), &[])?;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "quantization is for vector indexes");
+    Ok(())
+}

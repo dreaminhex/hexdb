@@ -254,6 +254,10 @@ impl HexDBEngine {
             _ => return Err(invalid("Give either vector (numbers) or text to search by.")),
         };
 
+        let prepared = {
+            let indexes = self.indexes.read().unwrap();
+            indexes.by_tessellation.get(tess).and_then(|l| l.iter().find(|i| i.def.name == index_name)).and_then(|i| i.prepare_query(vector.clone()))
+        };
         let mut documents: Vec<Document> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut scanned = 0;
@@ -280,8 +284,14 @@ impl HexDBEngine {
                 if !filter.matches(&doc) {
                     continue;
                 }
+                // A quantized index ranks approximately; the document's own vector gives the exact score.
+                let exact = prepared.as_ref().and_then(|q| {
+                    let indexes = self.indexes.read().unwrap();
+                    indexes.by_tessellation.get(tess).and_then(|l| l.iter().find(|i| i.def.name == index_name)).and_then(|i| i.exact_score(q, &doc))
+                });
+                let score = exact.unwrap_or(*score);
                 let mut doc = scope.mask(doc);
-                doc.data.insert("_score".into(), FieldValue::Float((*score as f64 * 1e6).round() / 1e6));
+                doc.data.insert("_score".into(), FieldValue::Float((score as f64 * 1e6).round() / 1e6));
                 documents.push(doc);
                 if documents.len() == query.k {
                     break;
@@ -292,6 +302,12 @@ impl HexDBEngine {
             }
             want = (want * 4).min(held);
         }
+        // Exact scores may reorder what an approximate (quantized) ranking found.
+        let key = |d: &Document| match d.data.get("_score") {
+            Some(FieldValue::Float(f)) => *f,
+            _ => f64::MIN,
+        };
+        documents.sort_by(|a, b| key(b).total_cmp(&key(a)));
         // How many documents were read would reveal how many the caller can't see.
         let scanned = if scope.is_full() { scanned } else { documents.len() };
         Ok(crate::engine::QueryPage { documents, total: None, next: None, indexes: vec![index_name], scanned })

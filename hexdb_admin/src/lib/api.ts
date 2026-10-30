@@ -378,6 +378,7 @@ export interface IndexInfo {
   analyzer?: string
   dimensions?: number
   metric?: "cosine" | "dot"
+  quantization?: "none" | "int8"
   source?: string[]
   documents: number
   keys: number
@@ -392,6 +393,7 @@ export interface NewIndex {
   analyzer?: string
   dimensions?: number
   metric?: "cosine" | "dot"
+  quantization?: "none" | "int8"
   source?: string[]
 }
 

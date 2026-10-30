@@ -929,6 +929,7 @@ impl MutationRoot {
         #[graphql(desc = "Vector indexes: numbers per vector (default: as many as the first one).")] dimensions: Option<i32>,
         #[graphql(desc = "Vector indexes: \"cosine\" (default) or \"dot\".")] metric: Option<String>,
         #[graphql(desc = "Vector indexes: text fields to embed into the field with the lattice's embeddings provider.")] source: Option<Vec<String>>,
+        #[graphql(desc = "Vector indexes: \"none\" (default) or \"int8\" (a quarter of the memory).")] quantization: Option<String>,
     ) -> GqlResult<IndexObject> {
         require(ctx, Permission::Manage, &tessellation)?;
         let engine = engine(ctx);
@@ -945,8 +946,14 @@ impl MutationRoot {
             Some("dot") => Some(hexdb_core::vector::Metric::Dot),
             Some(other) => return Err(gql_error("INVALID_REQUEST", format!("Unknown metric '{}'; use cosine or dot.", other))),
         };
+        let quantization = match quantization.as_deref() {
+            None => None,
+            Some("none") => Some(hexdb_core::vector::Quantization::None),
+            Some("int8") => Some(hexdb_core::vector::Quantization::Int8),
+            Some(other) => return Err(gql_error("INVALID_REQUEST", format!("Unknown quantization '{}'; use none or int8.", other))),
+        };
         let dimensions = dimensions.map(|d| d.max(0) as usize);
-        let def = hexdb_core::IndexDef { name: name.unwrap_or_default(), kind, fields, unique, analyzer, dimensions, metric, source: source.unwrap_or_default() };
+        let def = hexdb_core::IndexDef { name: name.unwrap_or_default(), kind, fields, unique, analyzer, dimensions, metric, quantization, source: source.unwrap_or_default() };
         let info = engine.create_index(&tessellation, def).await.map_err(to_gql)?;
         engine
             .audit(&principal(ctx)?.login, "index.create", &tessellation, serde_json::json!({ "index": info.def.name, "fields": info.def.fields }))

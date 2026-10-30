@@ -40,6 +40,7 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
   const [source, setSource] = useState("")
   const [dimensions, setDimensions] = useState("")
   const [metric, setMetric] = useState<"cosine" | "dot">("cosine")
+  const [compact, setCompact] = useState(false)
   const [unique, setUnique] = useState(false)
   const [analyzer, setAnalyzer] = useState("standard")
   const analyzers = usePoll(api.analyzers, 0)
@@ -62,7 +63,8 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
         .split(",")
         .map((f) => f.trim())
         .filter(Boolean)
-      const vector = kind === "vector" ? { metric, source: sourceList, ...(dimensions.trim() ? { dimensions: Number(dimensions) } : {}) } : {}
+      const vector =
+        kind === "vector" ? { metric, source: sourceList, ...(dimensions.trim() ? { dimensions: Number(dimensions) } : {}), ...(compact ? { quantization: "int8" as const } : {}) } : {}
       const created = await api.createIndex(tessellation, { fields: fieldList, name: name.trim() || undefined, kind, unique: kind === "field" && unique, ...(kind === "text" ? { analyzer } : {}), ...vector })
       toast.success(`Created index '${created.name}' over ${formatNumber(created.documents)} documents.`)
       setFields("")
@@ -108,6 +110,7 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
                 {index.unique && <Badge variant="secondary">unique</Badge>}
                 {index.kind === "text" && index.analyzer && <Badge variant="secondary">{index.analyzer}</Badge>}
                 {index.kind === "vector" && <Badge variant="secondary">{index.metric ?? "cosine"}</Badge>}
+                {index.kind === "vector" && index.quantization === "int8" && <Badge variant="secondary">int8</Badge>}
                 {index.kind === "vector" && (index.source?.length ?? 0) > 0 && <Badge variant="secondary">embeds {index.source?.join(", ")}</Badge>}
                 {!index.ready && <Badge variant="secondary">building</Badge>}
               </div>
@@ -198,6 +201,9 @@ function IndexManager({ tessellation, onChanged }: { tessellation: string; onCha
                   </SelectContent>
                 </Select>
               </div>
+              <Label className="flex h-9 items-center gap-2 font-normal" title="One byte per dimension instead of four; results are rescored exactly">
+                <Checkbox checked={compact} onCheckedChange={(v) => setCompact(v === true)} /> Compact (int8)
+              </Label>
             </>
           )}
           {kind === "text" && (

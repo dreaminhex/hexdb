@@ -77,6 +77,10 @@ pub struct IndexDef {
     /// Vector indexes only: cosine (default) or dot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metric: Option<crate::vector::Metric>,
+    /// Vector indexes only: how vectors are kept in memory (`none`, the
+    /// default, or `int8`: a quarter of the memory, rescored exactly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<crate::vector::Quantization>,
     /// Vector indexes only: text fields to embed into the indexed field with
     /// the lattice's embeddings provider (`ai.embeddings.*`). Empty: clients
     /// write the vectors themselves.
@@ -130,8 +134,8 @@ impl IndexDef {
                     return Err(invalid(format!("Invalid source field '{}'.", f)));
                 }
             }
-        } else if self.dimensions.is_some() || self.metric.is_some() || !self.source.is_empty() {
-            return Err(invalid("dimensions, metric and source are for vector indexes."));
+        } else if self.dimensions.is_some() || self.metric.is_some() || self.quantization.is_some() || !self.source.is_empty() {
+            return Err(invalid("dimensions, metric, quantization and source are for vector indexes."));
         }
         if self.analyzer.as_deref() == Some("") || self.analyzer.as_deref() == Some("standard") {
             self.analyzer = None;
@@ -360,7 +364,7 @@ impl Index {
             IndexKind::Text => IndexData::Text(TextIndex { paths, analyzer, words: HashMap::new(), by_doc: HashMap::new() }),
             IndexKind::Vector => IndexData::Vector(VectorIndex {
                 path: paths.into_iter().next().unwrap_or_default(),
-                store: crate::vector::VectorStore::new(def.metric.unwrap_or_default(), def.dimensions),
+                store: crate::vector::VectorStore::with_quantization(def.metric.unwrap_or_default(), def.dimensions, def.quantization.unwrap_or_default()),
                 source: def.source.iter().map(|f| split(f)).collect(),
                 model: None,
             }),
@@ -629,6 +633,26 @@ impl Index {
         let IndexData::Vector(v) = &self.data else { return None };
         let query = v.store.prepare(query)?;
         Some(v.store.search(&query, limit, ef))
+    }
+
+    /// For a quantized vector index: the exact score of a prepared query
+    /// against a document's vector. None when not quantized or it doesn't fit.
+    pub(crate) fn exact_score(&self, query: &[f32], doc: &Document) -> Option<f32> {
+        let IndexData::Vector(v) = &self.data else { return None };
+        if v.store.quantization == crate::vector::Quantization::None {
+            return None;
+        }
+        let json = doc.to_api_json();
+        let value = resolve(&json, &v.path).first().map(|v| (*v).clone())?;
+        v.store.exact_score(query, crate::vector::extract(&value)?)
+    }
+
+    /// A query vector as this index compares it (normalized for cosine).
+    pub(crate) fn prepare_query(&self, query: Vec<f32>) -> Option<Vec<f32>> {
+        match &self.data {
+            IndexData::Vector(v) => v.store.prepare(query),
+            _ => None,
+        }
     }
 
     /// Vectors held (vector indexes).
