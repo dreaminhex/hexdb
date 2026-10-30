@@ -291,6 +291,9 @@ pub struct ResolvedGrant {
 pub enum Credential {
     Session { session_id: String, expires_at: i64 },
     ApiKey { key_id: String },
+    /// An access token from the lattice's OpenID Connect provider (see `crate::oauth`).
+    #[serde(rename = "oauth")]
+    OAuth { issuer: String, subject: String },
 }
 
 /// The authenticated user behind a request.
@@ -635,6 +638,9 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
             &definitions,
         )
         .with_attributes(user.attributes)));
+    }
+    if crate::oauth::looks_like_jwt(token) {
+        return engine.oauth.authenticate(engine, token).await;
     }
     Ok(None)
 }

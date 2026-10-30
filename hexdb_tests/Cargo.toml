@@ -21,6 +21,8 @@ base64 = "0.23.1"
 chrono = "0.4.41"
 sha2 = "0.11"
 hex = "0.4.3"
+# Signs JWTs for the OAuth tests' local provider.
+ring = "0.17"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 # A WebSocket client for the live-feed tests.
 tungstenite = "0.30"

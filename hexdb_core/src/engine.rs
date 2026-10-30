@@ -276,6 +276,8 @@ pub struct HexDBEngine {
     pub(crate) embeddings: vectors::EmbedState,
     /// Makes tokens for tokenized fields (see `crate::tokens`).
     pub(crate) token_key: crate::tokens::TokenKey,
+    /// The OpenID Connect provider's keys and verified access tokens (see `crate::oauth`).
+    pub(crate) oauth: crate::oauth::OAuth,
     /// Nonces of discovery hellos and replication requests already seen.
     pub lattice_nonces: crate::network::lattice_auth::NonceCache,
     /// Bumped by every change to stored data (the role cache keys on it).
@@ -545,6 +547,7 @@ impl HexDBEngine {
             seal_pending: std::sync::atomic::AtomicBool::new(true),
             embeddings: Default::default(),
             token_key,
+            oauth: crate::oauth::OAuth::default(),
             lattice_nonces: crate::network::lattice_auth::NonceCache::default(),
             generation: AtomicU64::new(0),
             counts: std::sync::Mutex::new(reads::Counts::default()),
