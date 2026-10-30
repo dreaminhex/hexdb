@@ -24,6 +24,10 @@
 // - GROUP BY fields, HAVING, ORDER BY (fields, aliases, aggregates or
 //   positions), LIMIT, OFFSET, FETCH FIRST and TOP;
 // - parameters: `?` (numbered in order of appearance) or `$1`, `$2`, ...
+// - similarity search over a vector index: ORDER BY SIMILARITY(field, 'text')
+//   DESC (or a vector, '[0.1, ...]' or a JSON array parameter) with a LIMIT
+//   (offset + limit at most 100); SIMILARITY(...) in the SELECT list is the
+//   score. It runs as `HexDBEngine::similar_documents`.
 //
 // Comparisons follow SQL's NULL rules: a comparison with NULL matches nothing,
 // and `x <> 1`, `NOT x = 1` and `x NOT IN (...)` don't match documents where x
@@ -95,6 +99,13 @@ enum Body {
     },
     /// Run by the general executor.
     General(std::sync::Arc<exec::General>),
+    /// ORDER BY SIMILARITY(...): the nearest documents of a vector index.
+    Similar {
+        filter: Value,
+        field: String,
+        by: Nearness,
+        columns: Vec<DocColumn>,
+    },
     Aggregate {
         filter: Value,
         group_by: Vec<String>,
@@ -117,6 +128,13 @@ enum DocColumn {
     All,
     Field { name: String, path: Vec<String> },
     Constant { name: String, value: Value },
+}
+
+/// What a similarity search compares with.
+#[derive(Debug, Clone, PartialEq)]
+enum Nearness {
+    Text(String),
+    Vector(Vec<f32>),
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +290,8 @@ impl SqlQuery {
         let translated = translator.query(query).and_then(|q| translator.params.check_all_used().map(|_| q));
         match translated {
             Ok(q) => Ok(q),
+            // Similarity search is the translation's alone: its reasons are the ones to report.
+            Err(e) if query.to_string().to_ascii_lowercase().contains("similarity(") => Err(e),
             // What the translation can't express, the general executor runs.
             // It accepts everything the translation does, so its errors are the ones to report.
             Err(_) => {
@@ -303,6 +323,13 @@ impl SqlQuery {
             }
             Body::Documents { filter, sort, .. } => {
                 out.insert("query".into(), json!({ "filter": filter, "sort": sort }));
+            }
+            Body::Similar { filter, field, by, .. } => {
+                let near = match by {
+                    Nearness::Text(t) => json!({ "field": field, "text": t }),
+                    Nearness::Vector(v) => json!({ "field": field, "vector_dimensions": v.len() }),
+                };
+                out.insert("similar".into(), json!({ "filter": filter, "near": near }));
             }
             Body::Aggregate { filter, group_by, aggregates, sort, having, count_only, .. } => {
                 if *count_only {
@@ -525,6 +552,33 @@ impl<'a> Translator<'a> {
             || items.iter().any(|i| matches!(i, Item::Expr { expr, .. } if has_aggregate(expr)))
             || order_by.iter().any(|o| has_aggregate(&o.expr));
 
+        let similar = match order_by {
+            [only] => self.similarity(&only.expr)?.map(|s| (s, order_direction(only))),
+            _ => {
+                if order_by.iter().any(|o| is_similarity(&o.expr)) {
+                    return Err(invalid("ORDER BY SIMILARITY(...) must be the only sort key."));
+                }
+                None
+            }
+        };
+        if let Some(((field, by), descending)) = similar {
+            if !descending? {
+                return Err(invalid("ORDER BY SIMILARITY(...) sorts best first: use DESC."));
+            }
+            if aggregated {
+                return Err(invalid("SIMILARITY(...) can't be combined with GROUP BY, DISTINCT or aggregates."));
+            }
+            let k = limit.map(|l| l.saturating_add(offset));
+            if !k.is_some_and(|k| (1..=crate::engine::MAX_SIMILAR).contains(&k)) {
+                return Err(invalid(format!("ORDER BY SIMILARITY(...) needs a LIMIT, with OFFSET + LIMIT at most {}.", crate::engine::MAX_SIMILAR)));
+            }
+            let columns = self.similar_columns(&items, &field, &by)?;
+            return Ok(SqlQuery { tessellation: Some(tessellation), body: Body::Similar { filter, field, by, columns }, offset, limit });
+        }
+        if items.iter().any(|i| matches!(i, Item::Expr { expr, .. } if is_similarity(expr))) {
+            return Err(invalid("SIMILARITY(...) in the SELECT list needs ORDER BY the same SIMILARITY(...) DESC and a LIMIT."));
+        }
+
         let body = if aggregated {
             self.aggregate_body(filter, &items, group_exprs, select.having.as_ref(), order_by, distinct)?
         } else {
@@ -598,6 +652,65 @@ impl<'a> Translator<'a> {
             sort.push(SortKey { field, descending });
         }
         Ok(Body::Documents { filter, sort, columns })
+    }
+
+    /// `SIMILARITY(field, 'text' | '[vector]' | ?)`: the field and what it's compared with.
+    fn similarity(&mut self, expr: &Expr) -> Result<Option<(String, Nearness)>> {
+        let Expr::Function(function) = expr else { return Ok(None) };
+        if !function.name.to_string().eq_ignore_ascii_case("similarity") {
+            return Ok(None);
+        }
+        let usage = || invalid("SIMILARITY takes a vector-indexed field and a text or vector: SIMILARITY(embedding, 'storage for edge devices').");
+        let FunctionArguments::List(list) = &function.args else { return Err(usage()) };
+        let args: Vec<&Expr> = list
+            .args
+            .iter()
+            .map(|a| match a {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => Ok(e),
+                _ => Err(usage()),
+            })
+            .collect::<Result<_>>()?;
+        let [field, by] = args.as_slice() else { return Err(usage()) };
+        let field = self.field(field)?.ok_or_else(usage)?;
+        let value = self.literal(by)?.ok_or_else(usage)?;
+        let numbers = |items: &[Value]| -> Result<Vec<f32>> {
+            items.iter().map(|v| v.as_f64().map(|f| f as f32)).collect::<Option<Vec<_>>>().ok_or_else(|| invalid("A SIMILARITY vector holds only numbers."))
+        };
+        let by = match value {
+            Value::Array(items) => Nearness::Vector(numbers(&items)?),
+            Value::String(s) if s.trim_start().starts_with('[') => {
+                let items: Vec<Value> = serde_json::from_str(&s).map_err(|_| invalid("A SIMILARITY vector is written '[0.1, 0.2, ...]'."))?;
+                Nearness::Vector(numbers(&items)?)
+            }
+            Value::String(s) if !s.trim().is_empty() => Nearness::Text(s),
+            _ => return Err(usage()),
+        };
+        Ok(Some((field, by)))
+    }
+
+    /// Output columns of a similarity search: fields, literals, and the score.
+    fn similar_columns(&mut self, items: &[Item], field: &str, by: &Nearness) -> Result<Vec<DocColumn>> {
+        let mut columns = Vec::new();
+        for item in items {
+            columns.push(match item {
+                Item::Wildcard => DocColumn::All,
+                Item::Expr { expr, name } => {
+                    if let Some((f, b)) = self.similarity(expr)? {
+                        if f != field || b != *by {
+                            return Err(invalid("SIMILARITY(...) in the SELECT list must match the one in ORDER BY."));
+                        }
+                        DocColumn::Field { name: name.clone(), path: vec!["_score".into()] }
+                    } else if let Some(path) = self.field(expr)? {
+                        DocColumn::Field { name: name.clone(), path: split(&path) }
+                    } else if let Some(value) = self.literal(expr)? {
+                        DocColumn::Constant { name: name.clone(), value }
+                    } else {
+                        return Err(select_error(expr));
+                    }
+                }
+            });
+        }
+        Ok(columns)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1103,6 +1216,10 @@ fn order_direction(order: &ast::OrderByExpr) -> Result<bool> {
     }
 }
 
+fn is_similarity(expr: &Expr) -> bool {
+    matches!(expr, Expr::Function(f) if f.name.to_string().eq_ignore_ascii_case("similarity"))
+}
+
 fn has_aggregate(expr: &Expr) -> bool {
     match expr {
         Expr::Function(f) => matches!(
@@ -1425,6 +1542,30 @@ impl HexDBEngine {
                 let rows = if start == 0 && want > 0 { vec![row] } else { Vec::new() };
                 (names, rows, false, None)
             }
+            Body::Similar { filter, field, by, columns } => {
+                // The k nearest, computed once; OFFSET and paging cut from them.
+                let k = query.limit.unwrap_or(0).saturating_add(query.offset);
+                let request = crate::engine::SimilarQuery {
+                    field: field.clone(),
+                    vector: match by {
+                        Nearness::Vector(v) => Some(v.clone()),
+                        Nearness::Text(_) => None,
+                    },
+                    text: match by {
+                        Nearness::Text(t) => Some(t.clone()),
+                        Nearness::Vector(_) => None,
+                    },
+                    k,
+                    min_score: None,
+                    filter: Some(Filter::parse(filter)?),
+                };
+                let result = self.similar_documents(tess, &request).await?;
+                let documents: Vec<Value> = result.documents.iter().skip(start).take(want).map(|d| d.to_api_json()).collect();
+                let names = if documents.is_empty() { self.empty_doc_names(tess, columns).await? } else { doc_names(columns, &documents) };
+                let rows = documents.iter().map(|d| doc_row(columns, &names, d)).collect::<Vec<_>>();
+                let more = start + rows.len() < result.documents.len() && rows.len() == want;
+                (names, rows, more, None)
+            }
             Body::Documents { filter, sort, columns } => {
                 if want == 0 {
                     (self.empty_doc_names(tess, columns).await?, Vec::new(), false, None)
@@ -1542,7 +1683,7 @@ fn column_fields(body: &Body, names: &[String]) -> Vec<Option<String>> {
                 _ => None,
             })
             .collect(),
-        Body::Documents { columns, .. } => {
+        Body::Documents { columns, .. } | Body::Similar { columns, .. } => {
             let mut fields = Vec::with_capacity(names.len());
             let expanded = names.len() + 1 - columns.len();
             for column in columns {
@@ -1827,6 +1968,21 @@ mod tests {
         let e = error("SELECT * FROM t WHERE SUM(a) > 1");
         assert!(e.contains("HAVING"), "{}", e);
         assert!(error("SELECT * FROM t, t").contains("appears twice"));
+    }
+
+    #[test]
+    fn similarity_orders_a_limited_search() {
+        let query = SqlQuery::parse("SELECT name, SIMILARITY(e, 'red apples') AS s FROM t WHERE n > 1 ORDER BY SIMILARITY(e, 'red apples') DESC LIMIT 5", &[]).unwrap();
+        assert_eq!(query.describe()["similar"]["near"], json!({ "field": "e", "text": "red apples" }));
+        let vector = SqlQuery::parse("SELECT * FROM t ORDER BY SIMILARITY(e, ?) DESC LIMIT 3", &[json!([0.5, 1])]).unwrap();
+        assert_eq!(vector.describe()["similar"]["near"]["vector_dimensions"], 2);
+        assert!(error("SELECT * FROM t ORDER BY SIMILARITY(e, 'x') DESC").contains("LIMIT"));
+        assert!(error("SELECT * FROM t ORDER BY SIMILARITY(e, 'x') DESC LIMIT 101").contains("at most 100"));
+        assert!(error("SELECT * FROM t ORDER BY SIMILARITY(e, 'x') LIMIT 3").contains("DESC"));
+        assert!(error("SELECT * FROM t ORDER BY SIMILARITY(e, 'x') DESC, n LIMIT 3").contains("only sort key"));
+        assert!(error("SELECT SIMILARITY(e, 'x') FROM t LIMIT 3").contains("ORDER BY"));
+        assert!(error("SELECT SIMILARITY(e, 'y') FROM t ORDER BY SIMILARITY(e, 'x') DESC LIMIT 3").contains("must match"));
+        assert!(error("SELECT COUNT(*) FROM t ORDER BY SIMILARITY(e, 'x') DESC LIMIT 3").contains("GROUP BY"));
     }
 
     #[test]

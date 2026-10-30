@@ -68,6 +68,26 @@ fn client_vectors_are_searched_nearest_first_within_the_callers_reach() -> Resul
     assert_eq!(ids(&res, "name"), ["north-east", "north"]);
     assert_eq!(res.body["plan"]["scanned"], 2, "nothing about other regions leaks");
 
+    // SQL: ORDER BY SIMILARITY(...) DESC with a LIMIT; the same expression in SELECT is the score.
+    let sql = |key: Option<&str>, body: Value| -> Result<hexdb_tests::ApiResponse> {
+        match key {
+            Some(key) => server.request_as(Some(key), Method::POST, "/sql", Some(&body), &[]),
+            None => server.request(Method::POST, "/sql", Some(&body), &[]),
+        }
+    };
+    let res = sql(None, json!({ "sql": "SELECT name, SIMILARITY(embedding, '[0.9, 0.2, 0]') AS score FROM places ORDER BY SIMILARITY(embedding, '[0.9, 0.2, 0]') DESC LIMIT 3" }))?;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    let names: Vec<&str> = res.body["rows"].as_array().unwrap().iter().filter_map(|r| r[0].as_str()).collect();
+    assert_eq!(names, ["north", "north-east", "east"], "{}", res.body);
+    assert!(res.body["rows"][0][1].as_f64().unwrap() > 0.97, "{}", res.body);
+    let res = sql(None, json!({ "sql": "SELECT name FROM places WHERE region = 'us' ORDER BY SIMILARITY(embedding, ?) DESC LIMIT 2 OFFSET 1", "params": [[1, 0.5, 0]] }))?;
+    assert_eq!(res.body["rows"], json!([["up"]]), "{}", res.body);
+    let res = sql(None, json!({ "sql": "SELECT name FROM places ORDER BY SIMILARITY(embedding, '[1, 0, 0]') DESC" }))?;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert!(res.body.to_string().contains("LIMIT"), "{}", res.body);
+    let res = sql(Some(&key), json!({ "sql": "SELECT name FROM places ORDER BY SIMILARITY(embedding, '[0, 1, 0]') DESC LIMIT 4" }))?;
+    assert_eq!(res.body["rows"], json!([["north-east"], ["north"]]), "row filters apply in SQL too: {}", res.body);
+
     // Updates and deletes move the index along; a restart restores it.
     let east = server.request(Method::POST, "/places/_query", Some(&json!({ "filter": { "name": "east" } })), &[])?.body["documents"][0]["id"].as_str().unwrap().to_string();
     server.patch("places", &json!({ "id": east, "embedding": [1, 0, 0.01] }))?;

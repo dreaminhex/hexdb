@@ -55,7 +55,7 @@ pub use history::ChangeReader;
 mod transactions;
 mod sealing;
 mod vectors;
-pub use vectors::{spawn_embedding_task, SimilarQuery};
+pub use vectors::{spawn_embedding_task, SimilarQuery, MAX_K as MAX_SIMILAR};
 pub(crate) mod writes;
 pub use transactions::{parse_transaction, TransactionResult, TxOpKind, TxOperation, TxResult, MAX_TRANSACTION_OPS};
 pub use writes::{
