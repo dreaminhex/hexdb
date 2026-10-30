@@ -355,6 +355,8 @@ impl SchemaVersion {
                         }
                     }
                     let len = match value {
+                        // A token: the value was checked before it was replaced.
+                        Value::String(s) if rule.tokenize.is_some() && crate::tokens::is_token(s) => None,
                         Value::String(s) => Some(s.chars().count()),
                         Value::Array(a) => Some(a.len()),
                         _ => None,

@@ -183,3 +183,42 @@ fn sql_beyond_one_table_compares_tokenized_fields_by_value() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn answers_and_idempotency_records_hold_tokens_and_rules_accept_them() -> Result<()> {
+    let server = TestServer::start()?;
+    server.insert("accounts", &json!({ "name": "seed" }))?;
+    // max_length 16 fits the card, not its 35-character token: rules check the value, once.
+    let schema = json!({ "fields": { "card": { "type": "string", "tokenize": "vault", "max_length": 16 } } });
+    let res = server.request(Method::POST, "/tessellations/accounts/schemas", Some(&schema), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+
+    // The insert's answer, and its replay under the same Idempotency-Key, show the token.
+    let key = [("Idempotency-Key", "card-1")];
+    let first = server.request(Method::POST, "/accounts", Some(&json!({ "name": "Ada", "card": CARD })), &key)?;
+    assert!(first.status.is_success(), "{}", first.body);
+    let token = first.body["card"].as_str().unwrap().to_string();
+    assert!(token.starts_with("tok_"), "{}", first.body);
+    let replay = server.request(Method::POST, "/accounts", Some(&json!({ "name": "Ada", "card": CARD })), &key)?;
+    assert_eq!(replay.body["card"], token.as_str(), "{}", replay.body);
+    let id = first.body["id"].as_str().unwrap().to_string();
+
+    // Patching another field, and writing the document back, keep the token within max_length.
+    let res = server.request(Method::PATCH, &format!("/accounts/{}", id), Some(&json!({ "name": "Ada L." })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    assert_eq!(res.body["card"], token.as_str());
+    let mut doc = server.get_doc("accounts", &id)?.unwrap();
+    doc["name"] = json!("Ada Lovelace");
+    let res = server.request(Method::PUT, &format!("/accounts/{}", id), Some(&doc), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    let long = server.request(Method::POST, "/accounts", Some(&json!({ "card": "41111111111111112222" })), &[])?;
+    assert_eq!(long.status.as_u16(), 422, "the value itself is still checked: {}", long.body);
+
+    // A transaction's results show tokens too.
+    let tx = json!({ "operations": [{ "op": "insert", "tessellation": "accounts", "data": { "name": "Bo", "card": "5500005555555559" } }] });
+    let res = server.request(Method::POST, "/transactions", Some(&tx), &[("Idempotency-Key", "tx-1")])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    assert!(res.body["results"][0]["document"]["card"].as_str().unwrap().starts_with("tok_"), "{}", res.body);
+    assert!(!res.body.to_string().contains("5500005555555559"));
+    Ok(())
+}

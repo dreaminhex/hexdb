@@ -415,6 +415,8 @@ impl HexDBEngine {
                 }
             };
             let document = document.map(|mut json| {
+                // Tokens, as the commit will store them (its vault entries are written then).
+                self.tokenize_json(&op.tessellation, &mut json, &self.tokenized_fields(&op.tessellation));
                 read.mask_json(&mut json);
                 json
             });

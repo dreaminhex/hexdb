@@ -789,6 +789,8 @@ impl HexDBEngine {
     async fn stored_forms(&self, mut items: Vec<BatchItem>) -> Result<(Vec<BatchItem>, Vec<Document>)> {
         self.guard_file_writes(&mut items).await?;
         self.apply_schemas(&mut items).await?;
+        // Answers (and idempotency records) show tokens, as stored, never the values.
+        self.tokenize_items(&mut items).await?;
         let docs = items
             .iter()
             .filter_map(|item| match &item.op {
