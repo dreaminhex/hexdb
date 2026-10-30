@@ -66,6 +66,8 @@ jobs:
           docker buildx imagetools inspect "$target:$version"
       - name: Update the Docker Hub page
         if: env.DOCKERHUB_TOKEN != ''
+        # The image is what matters; a page update refused (a token without the Delete scope) only warns.
+        continue-on-error: true
         uses: peter-evans/dockerhub-description@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}

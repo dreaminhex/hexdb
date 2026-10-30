@@ -53,9 +53,9 @@ The workflow pushes `ghcr.io/dreaminhex/hexdb` with the tags `v1.0.1`, `1.0.1` a
 The `docker-hub` job ([docker-hub.yml](../.github/workflows/docker-hub.yml)) copies each release's image, every platform, from GitHub Container Registry to `docker.io/<namespace>/hexdb` with the tags `v1.0.1`, `1.0.1` and `latest`, and updates the Docker Hub page from [docker/README.md](../docker/README.md). Nothing is rebuilt.
 
 1. Sign up at https://hub.docker.com. The namespace is your user name, or create an organization named `dreaminhex` so the image is `dreaminhex/hexdb`.
-2. **Account settings > Personal access tokens > Generate new token**, with **Read & Write** access.
+2. **Account settings > Personal access tokens > Generate new token** (https://app.docker.com/settings/personal-access-tokens), with **Read, Write, Delete** access. Read & Write is enough to push the image, but Docker Hub refuses page (description) updates without Delete.
 3. Add the secrets `DOCKERHUB_USERNAME` (your Docker Hub user name) and `DOCKERHUB_TOKEN`. If the namespace isn't your user name (an organization), add the repository **variable** `DOCKERHUB_NAMESPACE` (Settings > Secrets and variables > Actions > Variables).
-4. Publish the current release without waiting for the next one: **Actions > Docker Hub > Run workflow**, tag `v2.2.0`.
+4. Publish the current release without waiting for the next one: **Actions > Docker Hub > Run workflow**, tag `v2.2.0` (or `gh workflow run docker-hub.yml --repo dreaminhex/hexdb -f tag=v2.2.0`).
 5. Apply to the Docker-Sponsored Open Source program (https://www.docker.com/community/open-source/application/): free for open-source projects, it removes pull rate limits for your users and shows a "Sponsored OSS" badge on the page.
 
 ### Helm chart
