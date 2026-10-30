@@ -762,6 +762,7 @@ curl -X POST http://localhost:7700/articles/_query -H "Content-Type: application
 - **Auto-embedding.** With `source`, a write whose source text changed queues the document. On the Overseer, a background task embeds the queue in batches of 64 and writes `{"vector": [...], "model": "...", "source_hash": "..."}` into the field, as a guarded update: a document changed meanwhile is embedded again. Writes that leave the source text alone cost nothing, and vectors a client writes as plain arrays are kept. Changing `ai.embeddings.model` rebuilds these indexes and re-embeds every document. `/status` shows `embeddings`: the model, documents waiting, and the last error (failures retry every minute). Text is cut to 16,000 characters per document.
 - **Searching by text** embeds the text first (`ai.embeddings.*`). The asking user's tokens count against `ai.embeddings.user_daily_tokens` (200,000 a day by default), and every embedding counts against the monthly budget (`ai.monthly_token_budget`, as `embeddings` and `embeddings.query`).
 - **Providers.** `ai.embeddings.provider` is `same` (the chat provider and its key), `openai`, `voyage`, `azure_openai`, `github`, `openai_compatible` (Ollama, LM Studio, vLLM) or `none`. Anthropic has no embeddings API; with Claude for chat, use Voyage AI (Anthropic's recommended embeddings provider). Default models: `text-embedding-3-small` (OpenAI, GitHub Models) and `voyage-3.5` (Voyage). Others need `ai.embeddings.model` and, for Azure and OpenAI-compatible servers, `ai.embeddings.base_url`.
+- **Files.** In a files tessellation, embed `meta.text` (extracted body text) with the name and description to search documents by meaning; see [Finding files](#finding-files).
 - **Privacy.** Auto-embedding sends the source fields' text to the embeddings provider, so choose source fields accordingly. A vector field covered by a mask is sealed like any masked field and not indexed, and a caller can't search a field hidden from or masked for them.
 
 ### The query advisor
@@ -1089,6 +1090,15 @@ curl -X POST http://localhost:7700/sql -d '{ "sql": "SELECT name, meta.title FRO
 ```
 
 Indexes on metadata fields (for example `meta.camera.model` or `meta.artist`) make such filters fast, as for any field.
+
+**By meaning.** A [vector index](#vector-search) that embeds the extracted text finds files about something, whatever words they use. PDFs, office documents, text files and anything else with body text have it in `meta.text`. Extraction writes it after the upload, and that write queues the file for embedding, so a new file becomes searchable once both have run:
+
+```bash
+curl -X POST http://localhost:7700/tessellations/media/indexes -H "Content-Type: application/json"   -d '{ "kind": "vector", "fields": ["embedding"], "source": ["name", "description", "meta.title", "meta.text", "ai.description"] }'
+curl -X POST http://localhost:7700/media/_query -H "Content-Type: application/json"   -d '{ "filter": { "path": { "$startsWith": "/contracts/" } }, "near": { "field": "embedding", "text": "termination notice period", "k": 5 }, "fields": ["name", "path"] }'
+```
+
+Images without text are found through what describes them: their name, tags, description, metadata and AI tags (`ai.description`). Their pixels aren't embedded.
 
 ### Metadata extraction
 

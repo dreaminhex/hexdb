@@ -210,3 +210,36 @@ fn wait_until_calls(calls: &AtomicUsize, at_least: usize) -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn files_are_searched_by_the_meaning_of_their_extracted_text() -> Result<()> {
+    let server = TestServer::start()?;
+    let res = server.request(Method::POST, "/tessellations", Some(&json!({ "name": "media", "kind": "files" })), &[])?;
+    assert_eq!(res.status, StatusCode::CREATED, "{}", res.body);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let port = mock_embeddings(calls.clone())?;
+    let config = json!({ "changes": { "ai.embeddings.provider": "openai_compatible", "ai.embeddings.base_url": format!("http://127.0.0.1:{}/v1", port), "ai.embeddings.model": "mock-embed" } });
+    assert!(server.request(Method::PUT, "/config", Some(&config), &[])?.status.is_success());
+    let res = server.request(Method::POST, "/tessellations/media/indexes", Some(&json!({ "kind": "vector", "fields": ["embedding"], "source": ["name", "description", "meta.text"] })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+
+    for (path, text) in [("notes/garden.txt", "tomatoes beans and squash in the vegetable garden"), ("notes/boat.txt", "sails rigging and the harbour at dawn"), ("notes/tax.txt", "invoices receipts and quarterly tax returns")] {
+        let res = server.send_bytes(Method::PUT, &format!("/media/_files/{}", path), text.as_bytes().to_vec(), &[])?;
+        assert!(res.status.is_success(), "{}", res.body);
+    }
+    // Extraction fills meta.text after each upload; that write is embedded too, in the background.
+    for (query, expected) in [("vegetable garden beans", "garden.txt"), ("harbour sails", "boat.txt"), ("quarterly tax receipts", "tax.txt")] {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let res = near(&server, None, "media", json!({ "near": { "field": "embedding", "text": query, "k": 1 }, "fields": ["name"] }))?;
+            if res.status == StatusCode::OK && ids(&res, "name") == [expected] {
+                break;
+            }
+            if Instant::now() > deadline {
+                bail!("{} was never found by meaning ('{}'): {}", expected, query, res.body);
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+    Ok(())
+}
