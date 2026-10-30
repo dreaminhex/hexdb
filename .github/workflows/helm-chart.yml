@@ -1,0 +1,42 @@
+name: Helm chart
+
+# Packages deploy/helm/hexdb with a release's version and pushes it to
+# oci://ghcr.io/<owner>/charts/hexdb, with the workflow's own token. The
+# release workflow calls it; run it by hand (Actions > Helm chart > Run
+# workflow) to publish the chart for an earlier release.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag, e.g. v2.2.0
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag, e.g. v2.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Package and push the chart
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          command -v helm >/dev/null || curl -fsSL https://raw.githubusercontent.com/helm/helm/v3.16.4/scripts/get-helm-3 | bash
+          version="${TAG#v}"
+          helm lint deploy/helm/hexdb
+          helm package deploy/helm/hexdb --version "$version" --app-version "$version" --destination dist
+          echo "$GH_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          helm push "dist/hexdb-$version.tgz" "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts"

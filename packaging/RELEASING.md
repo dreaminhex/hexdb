@@ -60,7 +60,7 @@ The `docker-hub` job ([docker-hub.yml](../.github/workflows/docker-hub.yml)) cop
 
 ### Helm chart
 
-The `helm` job packages [deploy/helm/hexdb](../deploy/helm/hexdb) with the release's version and pushes it to `oci://ghcr.io/dreaminhex/charts/hexdb`, using the workflow's own token.
+The `helm` job ([helm-chart.yml](../.github/workflows/helm-chart.yml)) packages [deploy/helm/hexdb](../deploy/helm/hexdb) with the release's version and pushes it to `oci://ghcr.io/dreaminhex/charts/hexdb`, using the workflow's own token. Run it by hand (**Actions > Helm chart > Run workflow**) to publish the chart for an earlier tag.
 
 1. After the first release run, open https://github.com/users/dreaminhex/packages/container/package/charts%2Fhexdb and set **Package settings > Change visibility > Public**, as for the image.
 2. List it on Artifact Hub, where Kubernetes users search: sign in at https://artifacthub.io, **Control Panel > Add repository**, kind **Helm charts**, URL `oci://ghcr.io/dreaminhex/charts/hexdb`.
