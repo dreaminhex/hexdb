@@ -238,8 +238,9 @@ pub struct ReplicationConfig {
     pub quorum: usize,
     /// With two or more replicas, each keeps only some of the data's 64
     /// slices (see `crate::slicing`); the Overseer keeps all of them. The
-    /// Overseer's setting applies to the lattice.
-    #[serde(default)]
+    /// Overseer's setting applies to the lattice. On by default: a lattice of
+    /// several hexes shouldn't keep a full copy on every one.
+    #[serde(default = "default_true")]
     pub slicing: bool,
     /// Replicas that keep each slice (the Overseer keeps every slice too).
     #[serde(default = "default_slice_copies")]
@@ -270,7 +271,7 @@ impl Default for ReplicationConfig {
             ack_timeout_ms: default_ack_timeout_ms(),
             forward_writes: true,
             quorum: 0,
-            slicing: false,
+            slicing: true,
             slice_copies: default_slice_copies(),
             recent_changes: default_recent_changes(),
         }

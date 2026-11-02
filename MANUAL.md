@@ -2024,7 +2024,7 @@ A hex that restarts reports where its data really is: an Overseer that restarts 
 
 ### Replication
 
-Every hex keeps a full copy, unless the lattice splits its data into slices (see [Slicing](#slicing)). A replica:
+The Overseer keeps all the data. With two or more replicas, they share it in slices by default instead of each keeping a full copy (see [Slicing](#slicing)). A replica:
 
 1. **Full sync.** It reads a consistent snapshot from the Overseer: its sequence number S, its tessellations and index definitions, then every document with its version, page by page. Local data the Overseer doesn't have is removed.
 2. **Streaming.** It follows the Overseer's change feed after S with long polls, applying each batch atomically together with its replication cursor, so a crash can't leave data and cursor out of step. A change older than the snapshot's version of a document is skipped, so changes made during the snapshot apply exactly once.
@@ -2056,7 +2056,7 @@ quorum = 2            # hexes (including itself) the Overseer must see to accept
 
 ### Slicing
 
-With `replication.slicing = true` on the Overseer and two or more replicas, the replicas share the data instead of each keeping a full copy, which saves their disk and memory:
+With two or more replicas, the replicas share the data instead of each keeping a full copy, which saves their disk and memory. It's on by default (since 2.3.1), and the Overseer's setting applies to the lattice; a lattice upgraded from an earlier version starts slicing when its Overseer runs 2.3.1, and each replica then gives up the slices it doesn't keep once another replica holds them. Set `slicing = false` on the Overseer for full copies on every replica, so each serves reads and live feeds from its own data:
 
 ```toml
 [replication]
@@ -2475,7 +2475,7 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `tls.ca_file` | empty | Extra CAs trusted for other hexes |
 | `limits.*` | see above | Request and connection limits |
 | `replication.min_acks`, `ack_timeout_ms`, `forward_writes`, `quorum` | 0, 5000, true, 0 | See [Durability options](#durability-options) |
-| `replication.slicing`, `slice_copies`, `recent_changes` | false, 1, 20000 | See [Slicing](#slicing) |
+| `replication.slicing`, `slice_copies`, `recent_changes` | true, 1, 20000 | See [Slicing](#slicing) |
 | `plugins.enabled`, `registry` | true, `plugins.json` | Plugin loading |
 | `functions.scripts`, `python`, `node` | true, `python3`/`python`, `node` | Script runtimes |
 | `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Pre-1.6 query advisor key, used only while the lattice configuration's `ai.provider` is `none` |

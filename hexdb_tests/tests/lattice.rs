@@ -145,7 +145,9 @@ fn replication(server: &TestServer) -> Result<Value> {
 #[test]
 fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
     let cluster = Cluster::new(3)?;
-    let mut big = TestServer::start_with(cluster.options(0, 4096, "auto"))?;
+    // Replicas with full copies, answering reads themselves (tests/slicing.rs covers sliced ones).
+    let full = |options: TestOptions| TestOptions { extra_toml: format!("{}\n[replication]\nslicing = false\n", options.extra_toml), ..options };
+    let mut big = TestServer::start_with(full(cluster.options(0, 4096, "auto")))?;
     assert_eq!(role(&big)?, "Overseer");
 
     // Data written before the replicas exist arrives by full sync.
@@ -157,10 +159,10 @@ fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
     assert!(res.status.is_success(), "{}", res.body);
     big.insert("doomed", &json!({ "x": 1 }))?;
 
-    let medium = TestServer::start_with(cluster.options(1, 2048, "auto"))?;
+    let medium = TestServer::start_with(full(cluster.options(1, 2048, "auto")))?;
     // The replicant refuses writes instead of forwarding them.
     let replicant = TestServer::start_with(TestOptions {
-        extra_toml: "\n[replication]\nforward_writes = false\n".into(),
+        extra_toml: "\n[replication]\nforward_writes = false\nslicing = false\n".into(),
         ..cluster.options(2, 8192, "replicant")
     })?;
     for replica in [&medium, &replicant] {
