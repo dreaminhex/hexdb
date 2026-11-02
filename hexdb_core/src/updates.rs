@@ -422,11 +422,15 @@ async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
     STEPPING_DOWN.store(true, AtomicOrdering::Relaxed);
     // Writes already past the check finish committing.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let head = engine.changes.published_seq();
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
+        // Every replica at the last change, with nothing committed since: then
+        // they all hold exactly what this hex holds, and whichever is elected
+        // continues the history from the very position the others are at.
+        let head = engine.changes.published_seq();
         let replicas: Vec<String> = engine.peers.lock().await.iter().filter(|p| p.status == "active").map(|p| p.hex.id.clone()).collect();
-        if replicas.iter().all(|id| engine.replica_applied(id).is_some_and(|applied| applied >= head)) {
+        let caught_up = replicas.iter().all(|id| engine.replica_applied(id).is_some_and(|applied| applied >= head));
+        if caught_up && engine.changes.published_seq() == head {
             break;
         }
         if Instant::now() > deadline {
