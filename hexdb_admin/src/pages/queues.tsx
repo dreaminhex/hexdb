@@ -185,7 +185,7 @@ export function QueuesPage() {
       </div>
       {queues.error && <p className="text-destructive text-sm">{queues.error.message}</p>}
       {queues.data?.length === 0 && <p className="text-muted-foreground text-sm">No queues yet.</p>}
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {queues.data?.map((q) => <QueueCard key={q.name} name={q.name} onDeleted={() => void queues.refresh()} />)}
       </div>
       <NewQueueDialog open={creating} onOpenChange={setCreating} queues={queues.data ?? []} onCreated={() => void queues.refresh()} />

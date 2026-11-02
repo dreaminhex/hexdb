@@ -296,21 +296,21 @@ export function UsersPage() {
         <Table>
           <TableHeader className="bg-muted/60">
             <TableRow>
-              <TableHead className="pl-6">Login</TableHead>
-              <TableHead>Email</TableHead>
+              <TableHead className="pl-4 sm:pl-6">Login</TableHead>
+              <TableHead className="hidden md:table-cell">Email</TableHead>
               <TableHead>Roles</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead>Last login</TableHead>
-              <TableHead className="w-24 pr-6" />
+              <TableHead className="hidden sm:table-cell">Status</TableHead>
+              <TableHead className="hidden lg:table-cell">Created</TableHead>
+              <TableHead className="hidden md:table-cell">Last login</TableHead>
+              <TableHead className="w-20 pr-4 sm:w-24 sm:pr-6" />
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.map((user) => (
               <TableRow key={user.id}>
-                <TableCell className="pl-6 font-medium">{user.login}</TableCell>
-                <TableCell className="text-muted-foreground">{user.email_address}</TableCell>
-                <TableCell>
+                <TableCell className="pl-4 font-medium break-all whitespace-normal sm:pl-6 sm:break-normal sm:whitespace-nowrap">{user.login}</TableCell>
+                <TableCell className="text-muted-foreground hidden md:table-cell">{user.email_address}</TableCell>
+                <TableCell className="whitespace-normal sm:whitespace-nowrap">
                   <div className="flex flex-wrap gap-1">
                     {user.roles.length === 0 && <span className="text-muted-foreground text-sm">None</span>}
                     {user.roles.map((grant) => (
@@ -324,7 +324,7 @@ export function UsersPage() {
                     ))}
                   </div>
                 </TableCell>
-                <TableCell>
+                <TableCell className="hidden sm:table-cell">
                   <div className="flex flex-wrap gap-1">
                     {user.is_locked ? (
                       <Badge variant="secondary" className="gap-1">
@@ -340,9 +340,9 @@ export function UsersPage() {
                     )}
                   </div>
                 </TableCell>
-                <TableCell className="text-muted-foreground text-sm">{formatEpochSeconds(user.created)}</TableCell>
-                <TableCell className="text-muted-foreground text-sm">{formatEpochSeconds(user.last_login)}</TableCell>
-                <TableCell className="pr-6">
+                <TableCell className="text-muted-foreground hidden text-sm lg:table-cell">{formatEpochSeconds(user.created)}</TableCell>
+                <TableCell className="text-muted-foreground hidden text-sm md:table-cell">{formatEpochSeconds(user.last_login)}</TableCell>
+                <TableCell className="pr-4 sm:pr-6">
                   <div className="flex justify-end gap-1">
                     <Button variant="ghost" size="icon" className="text-muted-foreground size-8" aria-label={`Edit ${user.login}`} onClick={() => setEditing(user)} disabled={!roles.data}>
                       <IconPencil />

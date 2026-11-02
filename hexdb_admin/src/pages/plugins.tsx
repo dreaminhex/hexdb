@@ -38,12 +38,12 @@ export function PluginsPage() {
         <Table>
           <TableHeader className="bg-muted/60">
             <TableRow>
-              <TableHead className="pl-6">Plugin</TableHead>
-              <TableHead>Runtime / type</TableHead>
+              <TableHead className="pl-4 sm:pl-6">Plugin</TableHead>
+              <TableHead className="hidden sm:table-cell">Runtime / type</TableHead>
               <TableHead>State</TableHead>
-              <TableHead className="text-right">Delivered</TableHead>
-              <TableHead className="text-right">Last seq</TableHead>
-              <TableHead className="pr-6 text-right">Restarts</TableHead>
+              <TableHead className="pr-4 text-right md:pr-2">Delivered</TableHead>
+              <TableHead className="hidden text-right md:table-cell">Last seq</TableHead>
+              <TableHead className="hidden pr-6 text-right md:table-cell">Restarts</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -68,7 +68,7 @@ function PluginRow({ plugin: p }: { plugin: PluginStatus }) {
   const state = STATE[p.state] ?? { label: p.state, dot: "bg-muted-foreground", hint: "" }
   return (
     <TableRow className="align-top">
-      <TableCell className="pl-6">
+      <TableCell className="pl-4 whitespace-normal sm:pl-6 sm:whitespace-nowrap">
         <div className="font-medium">
           {p.name} {p.version && <span className="text-muted-foreground text-xs font-normal">v{p.version}</span>}
         </div>
@@ -76,7 +76,7 @@ function PluginRow({ plugin: p }: { plugin: PluginStatus }) {
         {p.description && <div className="text-muted-foreground mt-1 max-w-xl text-xs whitespace-normal">{p.description}</div>}
         {p.last_error && <div className="text-destructive mt-1 max-w-xl text-xs whitespace-normal">{p.last_error}</div>}
       </TableCell>
-      <TableCell>
+      <TableCell className="hidden sm:table-cell">
         {p.runtime ? <Badge variant="outline">{p.runtime}</Badge> : <span className="text-muted-foreground">—</span>}
         {p.type && <div className="text-muted-foreground mt-1 text-xs">{p.type}</div>}
       </TableCell>
@@ -87,9 +87,9 @@ function PluginRow({ plugin: p }: { plugin: PluginStatus }) {
         </span>
         {p.skipped > 0 && <div className="text-muted-foreground text-xs">{formatNumber(p.skipped)} skipped</div>}
       </TableCell>
-      <TableCell className="text-right tabular-nums">{formatNumber(p.delivered)}</TableCell>
-      <TableCell className="text-right tabular-nums">{p.last_seq ? formatNumber(p.last_seq) : "—"}</TableCell>
-      <TableCell className="pr-6 text-right tabular-nums">{formatNumber(p.restarts)}</TableCell>
+      <TableCell className="pr-4 text-right tabular-nums md:pr-2">{formatNumber(p.delivered)}</TableCell>
+      <TableCell className="hidden text-right tabular-nums md:table-cell">{p.last_seq ? formatNumber(p.last_seq) : "—"}</TableCell>
+      <TableCell className="hidden pr-6 text-right tabular-nums md:table-cell">{formatNumber(p.restarts)}</TableCell>
     </TableRow>
   )
 }

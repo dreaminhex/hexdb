@@ -18,7 +18,7 @@ export function SchemasPage() {
   const chosen = useQueryParam("tessellation") ?? list[0]?.name ?? null
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[16rem_1fr]">
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[16rem_1fr]">
       <Card className="h-fit">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">

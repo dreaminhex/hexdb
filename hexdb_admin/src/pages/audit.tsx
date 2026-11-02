@@ -129,34 +129,34 @@ export function AuditPage() {
         <Table>
           <TableHeader className="bg-muted/60">
             <TableRow>
-              <TableHead className="pl-6">Time</TableHead>
-              <TableHead>Actor</TableHead>
+              <TableHead className="pl-4 sm:pl-6">Time</TableHead>
+              <TableHead className="hidden sm:table-cell">Actor</TableHead>
               <TableHead>Action</TableHead>
-              <TableHead>Target</TableHead>
-              <TableHead>Outcome</TableHead>
-              <TableHead>Client</TableHead>
-              <TableHead className="pr-6">Details</TableHead>
+              <TableHead className="hidden md:table-cell">Target</TableHead>
+              <TableHead className="pr-4 sm:pr-2">Outcome</TableHead>
+              <TableHead className="hidden lg:table-cell">Client</TableHead>
+              <TableHead className="hidden pr-6 md:table-cell">Details</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {(events.data?.events ?? []).map((event, i) => (
               <TableRow key={`${event.time}-${i}`}>
-                <TableCell className="text-muted-foreground pl-6 text-xs whitespace-nowrap tabular-nums">{new Date(event.time).toLocaleString()}</TableCell>
-                <TableCell className="font-medium">{event.actor}</TableCell>
+                <TableCell className="text-muted-foreground pl-4 text-xs whitespace-normal tabular-nums sm:pl-6 sm:whitespace-nowrap">{new Date(event.time).toLocaleString()}</TableCell>
+                <TableCell className="hidden font-medium sm:table-cell">{event.actor}</TableCell>
                 <TableCell>
                   <Badge variant="outline" className="font-mono font-normal">
                     {event.action}
                   </Badge>
                 </TableCell>
-                <TableCell className="max-w-56 truncate font-mono text-xs" title={event.target}>
+                <TableCell className="hidden max-w-56 truncate font-mono text-xs md:table-cell" title={event.target}>
                   {event.target}
                 </TableCell>
-                <TableCell className={cn("text-sm", OUTCOME_STYLE[event.outcome])}>{event.outcome}</TableCell>
-                <TableCell className="text-muted-foreground font-mono text-xs">
+                <TableCell className={cn("pr-4 text-sm sm:pr-2", OUTCOME_STYLE[event.outcome])}>{event.outcome}</TableCell>
+                <TableCell className="text-muted-foreground hidden font-mono text-xs lg:table-cell">
                   {event.client}
                   {event.hex && <div className="font-sans">{event.hex}</div>}
                 </TableCell>
-                <TableCell className="text-muted-foreground max-w-80 pr-6 text-xs whitespace-normal">{details(event)}</TableCell>
+                <TableCell className="text-muted-foreground hidden max-w-80 pr-6 text-xs whitespace-normal md:table-cell">{details(event)}</TableCell>
               </TableRow>
             ))}
             {events.data && events.data.events.length === 0 && (

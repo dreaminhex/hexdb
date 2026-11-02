@@ -254,14 +254,15 @@ function ActivityChart({ samples, minutes, onMinutesChange }: { samples: Metrics
 
   return (
     <Card className="@container/card">
-      <CardHeader>
+      {/* One column on a phone: title, description, then the controls. */}
+      <CardHeader className="has-data-[slot=card-action]:grid-cols-1 sm:has-data-[slot=card-action]:grid-cols-[1fr_auto]">
         <CardTitle>Activity</CardTitle>
         <CardDescription>
           {mode === "documents" && "Documents per tessellation (stacked)"}
           {mode === "operations" && "Operations per minute"}
           {mode === "storage" && "Memory and disk use"}
         </CardDescription>
-        <CardAction className="flex flex-wrap items-center gap-2">
+        <CardAction className="col-start-1 row-start-3 flex flex-wrap items-center gap-2 justify-self-start sm:col-start-2 sm:row-span-2 sm:row-start-1 sm:justify-self-end">
           <ToggleGroup type="single" value={mode} onValueChange={(v) => v && setMode(v as ChartMode)} variant="outline" size="sm">
             <ToggleGroupItem value="documents" className="px-3">Documents</ToggleGroupItem>
             <ToggleGroupItem value="operations" className="px-3">Operations</ToggleGroupItem>
@@ -451,7 +452,7 @@ function LatticeCard({ status }: { status: Status }) {
                 {hex.status !== "active" && <span className="text-muted-foreground text-xs font-normal">· {hex.status}</span>}
               </div>
               <div
-                className="text-muted-foreground truncate font-mono text-xs"
+                className="text-muted-foreground font-mono text-xs break-words sm:truncate"
                 title={`Discovery ${hex.ip}. ${hex.is_self ? "" : "Replication figures are as of the last discovery round."}`}
               >
                 {hex.version ? `v${hex.version} · ` : ""}
@@ -681,19 +682,19 @@ function TessellationTable({ status }: { status: Status }) {
       <Table>
         <TableHeader className="bg-muted/60">
           <TableRow>
-            <TableHead className="pl-6">Name</TableHead>
-            <TableHead>Kind</TableHead>
+            <TableHead className="pl-4 sm:pl-6">Name</TableHead>
+            <TableHead className="hidden sm:table-cell">Kind</TableHead>
             <TableHead className="text-right">Documents</TableHead>
-            <TableHead className="text-right">In memory</TableHead>
-            <TableHead className="text-right">Disk only</TableHead>
-            <TableHead className="text-right">Avg size</TableHead>
-            <TableHead className="pr-6 text-right">Total size</TableHead>
+            <TableHead className="hidden text-right md:table-cell">In memory</TableHead>
+            <TableHead className="hidden text-right md:table-cell">Disk only</TableHead>
+            <TableHead className="hidden text-right sm:table-cell">Avg size</TableHead>
+            <TableHead className="pr-4 text-right sm:pr-6">Total size</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((t) => (
             <TableRow key={t.name} className={t.kind === "user" ? undefined : "bg-muted/15 text-muted-foreground hover:bg-muted/25"}>
-              <TableCell className="pl-6 font-medium">
+              <TableCell className="pl-4 font-medium whitespace-normal break-all sm:pl-6 sm:whitespace-nowrap sm:break-normal">
                 <span className="flex items-center gap-2.5">
                   <span
                     className={cn(
@@ -715,16 +716,16 @@ function TessellationTable({ status }: { status: Status }) {
                   )}
                 </span>
               </TableCell>
-              <TableCell>
+              <TableCell className="hidden sm:table-cell">
                 <Badge variant={t.kind === "user" ? "outline" : "secondary"} className={t.kind === "user" ? undefined : "text-[10px] tracking-wide uppercase"}>
                   {t.kind}
                 </Badge>
               </TableCell>
               <TableCell className="text-right tabular-nums">{formatNumber(t.document_count)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(t.documents_in_ram)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatNumber(t.documents_on_disk)}</TableCell>
-              <TableCell className="text-right tabular-nums">{formatBytes(t.avg_document_size_bytes)}</TableCell>
-              <TableCell className="pr-6 text-right tabular-nums">{formatBytes(t.total_size_bytes)}</TableCell>
+              <TableCell className="hidden text-right tabular-nums md:table-cell">{formatNumber(t.documents_in_ram)}</TableCell>
+              <TableCell className="hidden text-right tabular-nums md:table-cell">{formatNumber(t.documents_on_disk)}</TableCell>
+              <TableCell className="hidden text-right tabular-nums sm:table-cell">{formatBytes(t.avg_document_size_bytes)}</TableCell>
+              <TableCell className="pr-4 text-right tabular-nums sm:pr-6">{formatBytes(t.total_size_bytes)}</TableCell>
             </TableRow>
           ))}
           {rows.length === 0 && (
@@ -850,7 +851,7 @@ export function OverviewPage() {
       <div className="px-4 lg:px-6">
         <ActivityChart samples={samples} minutes={minutes} onMinutesChange={setMinutes} />
       </div>
-      <div className="grid gap-4 px-4 lg:grid-cols-2 lg:px-6">
+      <div className="grid grid-cols-1 gap-4 px-4 lg:grid-cols-2 lg:px-6">
         <VertexCard vertices={status.data.vertices} />
         <LatticeCard status={status.data} />
       </div>

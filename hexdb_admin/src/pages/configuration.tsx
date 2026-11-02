@@ -265,7 +265,7 @@ function AiEstimateCard({ refreshKey, configured, readOnly }: { refreshKey: numb
           <TableBody>
             {rows.map((r) => (
               <TableRow key={r.tessellation}>
-                <TableCell className="font-medium">{r.tessellation}</TableCell>
+                <TableCell className="font-medium break-all whitespace-normal sm:break-normal sm:whitespace-nowrap">{r.tessellation}</TableCell>
                 <TableCell className="text-xs">
                   about {formatNumber(r.tagging.tokens_per_file)} tokens per file
                   {r.tagging.untagged > 0 && !readOnly && (
@@ -352,7 +352,7 @@ function HexesCard({ config }: { config: LatticeConfig }) {
               const lost = h.status !== "active"
               return (
                 <TableRow key={h.id}>
-                  <TableCell className="font-medium">
+                  <TableCell className="font-medium whitespace-normal sm:whitespace-nowrap">
                     {h.name} {h.is_self && <span className="text-muted-foreground text-xs">(this hex)</span>}
                   </TableCell>
                   <TableCell>{h.role}</TableCell>
@@ -422,7 +422,7 @@ function HistoryCard({ refreshKey, onRolledBack, readOnly }: { refreshKey: numbe
                       <span className="text-destructive">Failed verification: {v.problem}</span>
                     )}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-mono text-xs break-all whitespace-normal sm:break-normal">
                     {v.diff?.changed.map((k) => <div key={`c${k}`}>~ {k}</div>)}
                     {v.diff?.removed.map((k) => <div key={`r${k}`}>- {k}</div>)}
                   </TableCell>

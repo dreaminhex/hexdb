@@ -217,12 +217,12 @@ export function TessellationsPage() {
         <Table>
           <TableHeader className="bg-muted/60">
             <TableRow>
-              <TableHead className="pl-6">Name</TableHead>
+              <TableHead className="pl-4 sm:pl-6">Name</TableHead>
               <TableHead className="text-right">Documents</TableHead>
-              <TableHead className="text-right">Total size</TableHead>
-              <TableHead>Indexes</TableHead>
-              <TableHead>Created</TableHead>
-              <TableHead className="w-24 pr-6" />
+              <TableHead className="hidden text-right sm:table-cell">Total size</TableHead>
+              <TableHead className="hidden sm:table-cell">Indexes</TableHead>
+              <TableHead className="hidden md:table-cell">Created</TableHead>
+              <TableHead className="w-28 pr-4 sm:w-24 sm:pr-6" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -234,7 +234,7 @@ export function TessellationsPage() {
               return [
                 firstSystem && (
                   <TableRow key="__system" className="bg-muted/40 hover:bg-muted/40">
-                    <TableCell colSpan={6} className="text-muted-foreground py-2 pl-6 text-xs font-medium tracking-wide uppercase">
+                    <TableCell colSpan={6} className="text-muted-foreground py-2 pl-4 text-xs font-medium tracking-wide whitespace-normal uppercase sm:pl-6">
                       <span className="inline-flex items-center gap-1.5">
                         <IconLock className="size-3.5" />
                         System tessellations
@@ -250,7 +250,7 @@ export function TessellationsPage() {
                   className={cn(user ? "cursor-pointer" : "bg-muted/15 text-muted-foreground hover:bg-muted/25")}
                   onClick={user ? () => navigate(openRoute(t)) : undefined}
                 >
-                  <TableCell className="pl-6 font-medium">
+                  <TableCell className="pl-4 font-medium whitespace-normal break-all sm:pl-6 sm:whitespace-nowrap sm:break-normal">
                     <span className="flex items-center gap-2.5">
                       <span
                         className={cn(
@@ -275,7 +275,7 @@ export function TessellationsPage() {
                       ) : (
                         <span className="flex min-w-0 flex-col">
                           <span className="font-mono text-sm font-normal">{t.name}</span>
-                          <span className="text-xs font-normal">{systemPurpose(t.name)}</span>
+                          <span className="text-xs font-normal whitespace-normal">{systemPurpose(t.name)}</span>
                         </span>
                       )}
                       {!user && (
@@ -293,8 +293,8 @@ export function TessellationsPage() {
                   <TableCell className="text-right tabular-nums">
                     {m ? formatNumber(m.document_count) : counts.data?.[t.name] !== undefined ? formatNumber(counts.data[t.name]) : "—"}
                   </TableCell>
-                  <TableCell className="text-right tabular-nums">{m ? formatBytes(m.total_size_bytes) : "—"}</TableCell>
-                  <TableCell>
+                  <TableCell className="hidden text-right tabular-nums sm:table-cell">{m ? formatBytes(m.total_size_bytes) : "—"}</TableCell>
+                  <TableCell className="hidden sm:table-cell">
                     {user && (can(me, "manage", t.name) || t.indexes.length > 0) ? (
                       <Button
                         variant="ghost"
@@ -307,16 +307,36 @@ export function TessellationsPage() {
                         }}
                       >
                         <IconKey className="size-3.5" />
-                        {t.indexes.length ? `${t.indexes.length} index${t.indexes.length === 1 ? "" : "es"}` : "Add"}
+                        {t.indexes.length ? (
+                          <>
+                            {t.indexes.length}
+                            <span className="hidden sm:inline">{` index${t.indexes.length === 1 ? "" : "es"}`}</span>
+                          </>
+                        ) : (
+                          "Add"
+                        )}
                       </Button>
                     ) : (
                       <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-sm">{formatTimestamp(t.created)}</TableCell>
-                  <TableCell className="pr-6">
+                  <TableCell className="text-muted-foreground hidden text-sm md:table-cell">{formatTimestamp(t.created)}</TableCell>
+                  <TableCell className="pr-4 sm:pr-6">
                     {user && can(me, "manage", t.name) && (
                       <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-muted-foreground size-8 sm:hidden"
+                          aria-label={`Indexes of ${t.name}`}
+                          title={t.indexes.length ? t.indexes.join(", ") : "Manage indexes"}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setIndexing(t.name)
+                          }}
+                        >
+                          <IconKey />
+                        </Button>
                         {!files && (
                         <Button
                           variant="ghost"

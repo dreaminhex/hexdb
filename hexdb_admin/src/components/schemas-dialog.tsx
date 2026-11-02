@@ -358,7 +358,7 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
         </div>
       )}
       {error && <p className="text-destructive text-sm whitespace-pre-wrap">{error}</p>}
-      <div className="flex justify-end gap-2">
+      <div className="flex flex-wrap justify-end gap-2">
         <Button variant="outline" disabled={!!busy || !draft} onClick={() => void run("check")}>
           {busy === "check" ? <IconLoader2 className="animate-spin" /> : <IconCheck />} Check
         </Button>
