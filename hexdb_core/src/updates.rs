@@ -156,13 +156,21 @@ pub fn spawn_update_check(engine: Arc<HexDBEngine>, config: UpdatesConfig, shutd
 // ---------- hosted rolling updates ----------
 
 static STEPPING_DOWN: AtomicBool = AtomicBool::new(false);
+static WITHDRAWN: AtomicBool = AtomicBool::new(false);
 static ROLLOUT: Mutex<Option<Rollout>> = Mutex::new(None);
 
-/// True while this Overseer hands its role over for an update: it refuses
-/// writes and stops being a candidate in elections.
+/// True while this Overseer hands its role over: it takes no more writes
+/// (the API holds them for the next Overseer).
 pub fn stepping_down() -> bool {
     STEPPING_DOWN.load(AtomicOrdering::Relaxed)
 }
+
+/// True once a stepping-down Overseer's replicas have everything it wrote: it
+/// is no longer a candidate, so the next election picks another hex.
+pub fn withdrawn() -> bool {
+    WITHDRAWN.load(AtomicOrdering::Relaxed)
+}
+
 
 /// The Fly.io Machine this hex runs on, if it does.
 pub fn machine_id() -> String {
@@ -318,6 +326,7 @@ async fn run_rollout(engine: Arc<HexDBEngine>, config: UpdatesConfig, hexes: Vec
         let result = if hex.id == self_id { update_self(&engine, &config, hex, &target).await } else { update_replica(&engine, &config, hex, &target).await };
         if let Err(e) = result {
             STEPPING_DOWN.store(false, AtomicOrdering::Relaxed);
+            WITHDRAWN.store(false, AtomicOrdering::Relaxed);
             set_step(&hex.id, "failed");
             let message = format!("{}: {:#}", hex.name, e);
             warn!("❌ The rolling update to HexDB {} stopped at {}.", target, message);
@@ -367,8 +376,10 @@ async fn update_self(engine: &HexDBEngine, config: &UpdatesConfig, me: &PeerHex,
 }
 
 /// Hand the Overseer role to another hex: stop taking writes, wait until every
-/// replica has applied everything, then stop being a candidate and wait for
-/// the lattice to elect someone else.
+/// replica has applied everything, then stop being a candidate and ask the
+/// lattice to elect someone else now rather than at its next discovery round.
+/// The order matters: a replica elected before it caught up would lack the
+/// last writes.
 async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
     STEPPING_DOWN.store(true, AtomicOrdering::Relaxed);
     // Writes already past the check finish committing.
@@ -385,9 +396,11 @@ async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    // The next discovery rounds see this hex as a replicant and elect another.
+    // Discovery now shows this hex as a replicant; every hex re-elects.
+    WITHDRAWN.store(true, AtomicOrdering::Relaxed);
     let deadline = Instant::now() + Duration::from_secs(5 * 60);
     loop {
+        crate::network::discovery::elect_everywhere(engine).await;
         let elected = engine.peers.lock().await.iter().any(|p| p.status == "active" && p.hex.role == crate::network::discovery::ROLE_OVERSEER);
         if elected && !engine.is_writable() {
             return Ok(());
@@ -395,7 +408,7 @@ async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
         if Instant::now() > deadline {
             anyhow::bail!("no other hex took the Overseer role within 5 minutes");
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 

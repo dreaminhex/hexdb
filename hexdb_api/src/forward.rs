@@ -18,8 +18,12 @@
 // no size limit or timeout here; other bodies are read first (up to
 // `limits.max_request_mb`).
 //
-// Without a reachable Overseer, the request is handled locally, which refuses
-// writes with 421 `read_only_replica`.
+// While there's no Overseer (an election), or while this hex hands its role
+// over, a write waits up to `HOLD_FOR_OVERSEER` for one instead of failing,
+// and one whose connection to the Overseer was refused is tried again then (a
+// refused connection never reached it, so it can't run twice). Without an
+// Overseer after that, the request is handled locally, which refuses writes
+// with 421 `read_only_replica`.
 //
 // A sliced replica (`replication.slicing`) keeps only some of the data, so
 // it forwards reads of user data too, and refuses live feeds (WebSocket and
@@ -34,8 +38,26 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use hexdb_core::{engine::HexDBEngine, network::discovery::ROLE_OVERSEER};
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tracing::{debug, warn};
+
+/// How long a write waits for an Overseer (an election, a handover) before it's refused.
+const HOLD_FOR_OVERSEER: Duration = Duration::from_secs(30);
+
+/// The Overseer to pass a request to, waiting until `until` while there's none.
+/// A hex handing its role over waits for another hex to hold it.
+async fn overseer_until(engine: &HexDBEngine, until: Instant) -> Option<hexdb_core::network::discovery::PeerHex> {
+    loop {
+        let found = engine.peers.lock().await.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone());
+        if found.is_some() || Instant::now() >= until {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
 
 /// The client address a replica forwarded a request for.
 pub const FORWARDED_FOR_HEADER: &str = "x-hexdb-forwarded-for";
@@ -198,13 +220,13 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     }
     // A sliced replica only has some of the data: everything that reads it goes to the Overseer.
     let partial = !engine.is_writable() && engine.is_partial_replica() && !answers_without_data(&path);
-    if !partial && (engine.is_writable() || !engine.config.replication.forward_writes || handled_locally(request.method(), &path)) {
+    // An Overseer handing its role over passes writes on to the next one.
+    let writing_here = engine.is_writable() && !hexdb_core::updates::stepping_down();
+    if !partial && (writing_here || !engine.config.replication.forward_writes || handled_locally(request.method(), &path)) {
         return next.run(request).await;
     }
-    let overseer = {
-        let peers = engine.peers.lock().await;
-        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone())
-    };
+    let until = Instant::now() + HOLD_FOR_OVERSEER;
+    let overseer = overseer_until(&engine, until).await;
     let Some(overseer) = overseer else {
         if partial {
             return crate::handlers::ApiError::new(
@@ -244,7 +266,6 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
 
     let client = crate::auth::client_address(&parts.extensions);
     let path_and_query = parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or(path.clone());
-    let url = format!("{}{}", hexdb_core::replication::peer_base_url(&overseer), path_and_query);
     let Some(http) = forward_client(&engine) else {
         return next.run(Request::from_parts(parts, Body::from(bytes))).await;
     };
@@ -258,17 +279,30 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
         headers.insert(HeaderName::from_static(FORWARD_SIGNATURE_HEADER), s);
     }
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
-    debug!("↪️ Forwarding {} {} to the Overseer '{}'.", parts.method, path, overseer.name);
-    let response = match http.request(method, &url).timeout(timeout).headers(headers).body(bytes.clone()).send().await {
-        Ok(response) => response,
-        Err(e) => {
-            warn!("⚠️ Forwarding {} {} to the Overseer failed: {}", parts.method, path, e);
-            return crate::handlers::ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                "overseer_unreachable",
-                format!("This hex is a replica and couldn't reach the Overseer '{}' to make the change. Try again shortly.", overseer.name),
-            )
-            .into_response();
+    let mut overseer = overseer;
+    let response = loop {
+        debug!("↪️ Forwarding {} {} to the Overseer '{}'.", parts.method, path, overseer.name);
+        let url = format!("{}{}", hexdb_core::replication::peer_base_url(&overseer), path_and_query);
+        match http.request(method.clone(), &url).timeout(timeout).headers(headers.clone()).body(bytes.clone()).send().await {
+            Ok(response) => break response,
+            Err(e) => {
+                // A refused connection never reached the Overseer (it's restarting, or
+                // gone): try the Overseer the lattice has once one is there.
+                if e.is_connect() && Instant::now() < until {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    if let Some(next) = overseer_until(&engine, until).await {
+                        overseer = next;
+                        continue;
+                    }
+                }
+                warn!("⚠️ Forwarding {} {} to the Overseer failed: {}", parts.method, path, e);
+                return crate::handlers::ApiError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "overseer_unreachable",
+                    format!("This hex is a replica and couldn't reach the Overseer '{}' to make the change. Try again shortly.", overseer.name),
+                )
+                .into_response();
+            }
         }
     };
     let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);

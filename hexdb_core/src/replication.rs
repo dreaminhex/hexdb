@@ -125,10 +125,15 @@ pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_jso
         peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone())
     }
     .ok_or_else(|| anyhow!("no Overseer is reachable"))?;
-    let url = format!("{}{}", peer_base_url(&overseer), path);
+    post_to_peer(engine, &overseer, path, body).await
+}
+
+/// POST a JSON body to a hex's lattice API, signed with the lattice key.
+pub async fn post_to_peer(engine: &HexDBEngine, peer: &crate::network::discovery::PeerHex, path: &str, body: &serde_json::Value) -> Result<()> {
+    let url = format!("{}{}", peer_base_url(peer), path);
     let bytes = serde_json::to_vec(body)?;
     let client = lattice_client(&engine.config, Duration::from_secs(10))?;
-    // An Overseer that hasn't been given a new lattice secret yet accepts a previous one.
+    // A hex that hasn't been given a new lattice secret yet accepts a previous one.
     for index in 0..engine.lattice_keys.len() {
         let signature = engine.lattice_keys.sign_request_with(index, "POST", path, &bytes);
         let response = client

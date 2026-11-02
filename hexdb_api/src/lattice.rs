@@ -308,6 +308,21 @@ pub async fn throttle(method: Method, uri: Uri, headers: HeaderMap, axum::extrac
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Run a discovery round now: another hex of the lattice asks when the
+/// candidates change (an Overseer handing its role over), so the election
+/// doesn't wait for the next scheduled round. Any hex answers; a burst of asks
+/// runs one round.
+pub async fn elect(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    verify_signature(&engine, &headers, &method, &uri, &body)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    if now - LAST.swap(now, Ordering::Relaxed) >= 300 {
+        tokio::spawn(async move { hexdb_core::network::discovery::elect_now(&engine).await });
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 /// Store an audit event recorded on a replica.
 pub async fn audit(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, &body)?;

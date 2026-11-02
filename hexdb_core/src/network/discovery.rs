@@ -190,8 +190,8 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         api_endpoint: advertised(config, &config.network.api_endpoint),
         ram_mb: config.memory.ram_mb,
         disk_mb: config.storage.disk_mb,
-        // An Overseer handing over its role for an update stops being a candidate.
-        preference: if crate::updates::stepping_down() {
+        // An Overseer handing over its role stops being a candidate once its replicas caught up.
+        preference: if crate::updates::withdrawn() {
             "replicant".into()
         } else {
             parse_preference(&config.identity.role).unwrap_or_else(|_| "auto".into())
@@ -279,7 +279,7 @@ async fn answer_identity(engine: &HexDBEngine) -> PeerHex {
     match cached {
         Some(mut identity) => {
             identity.role = engine.role();
-            if crate::updates::stepping_down() {
+            if crate::updates::withdrawn() {
                 identity.preference = "replicant".into();
             }
             identity
@@ -613,6 +613,28 @@ pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, shutdo
             }
         }
     });
+}
+
+/// Run a discovery round on this hex and ask every active peer to run one now,
+/// so a change of candidates (an Overseer handing over) is decided in a
+/// moment instead of at the next scheduled rounds. These extra rounds count no
+/// missed answers, so a slow peer isn't declared lost sooner.
+pub async fn elect_everywhere(engine: &HexDBEngine) {
+    let peers: Vec<PeerHex> = engine.peers.lock().await.iter().filter(|p| p.status == "active").map(|p| p.hex.clone()).collect();
+    let nudges = peers.iter().map(|peer| async move {
+        let asked = tokio::time::timeout(Duration::from_secs(2), crate::replication::post_to_peer(engine, peer, "/lattice/elect", &serde_json::json!({}))).await;
+        if !matches!(asked, Ok(Ok(()))) {
+            debug!("📡 Couldn't ask '{}' to re-elect now; it will at its next round.", peer.name);
+        }
+    });
+    futures::future::join_all(nudges).await;
+    elect_now(engine).await;
+}
+
+/// One discovery round now, outside the schedule (counting no missed answers).
+pub async fn elect_now(engine: &HexDBEngine) {
+    let interval = Duration::from_secs(engine.config.network.discovery_interval_seconds.max(1));
+    discovery_round(engine, interval, false).await;
 }
 
 /// One discovery round: probe, update members, and re-elect. A peer is lost

@@ -275,3 +275,65 @@ fn a_taken_discovery_port_stops_startup() -> Result<()> {
     assert!(error.contains("Failed to bind the discovery endpoint"), "{}", error);
     Ok(())
 }
+
+#[test]
+fn restarting_the_overseer_fails_no_write_and_copies_nothing_again() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let cluster = Cluster::new(3)?;
+    let mut overseer = TestServer::start_with(cluster.options(0, 4096, "auto"))?;
+    let replica = TestServer::start_with(cluster.options(1, 2048, "auto"))?;
+    let other = TestServer::start_with(cluster.options(2, 1024, "auto"))?;
+    wait_until(Duration::from_secs(30), "all hexes to see each other", || {
+        Ok([&overseer, &replica, &other].iter().map(|s| active_hexes(s)).collect::<Result<Vec<_>>>()?.iter().all(|n| *n == 3))
+    })?;
+    assert_eq!(role(&overseer)?, "Overseer");
+    let first = overseer.insert("orders", &json!({ "n": 0 }))?;
+    wait_until(Duration::from_secs(30), "the replicas' first sync", || Ok(doc_on(&replica, "orders", &first)?.is_some() && doc_on(&other, "orders", &first)?.is_some()))?;
+    let synced = [replication(&replica)?["last_sync"].clone(), replication(&other)?["last_sync"].clone()];
+
+    // Writes through a replica (forwarded to the Overseer) the whole time.
+    let (url, token) = (replica.url("/orders"), replica.token().to_string());
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stop = stop.clone();
+        std::thread::spawn(move || -> Result<(Vec<String>, Vec<String>)> {
+            let http = hexdb_tests::http().timeout(Duration::from_secs(60)).build()?;
+            let (mut written, mut failed) = (Vec::new(), Vec::new());
+            let mut n = 0;
+            while !stop.load(Ordering::Relaxed) {
+                n += 1;
+                match http.post(&url).bearer_auth(&token).json(&json!({ "n": n })).send() {
+                    Ok(r) if r.status().is_success() => written.push(r.json::<Value>()?["id"].as_str().unwrap_or_default().to_string()),
+                    Ok(r) => failed.push(format!("#{} {}: {}", n, r.status(), r.text().unwrap_or_default())),
+                    Err(e) => failed.push(format!("#{} {}", n, e)),
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok((written, failed))
+        })
+    };
+    std::thread::sleep(Duration::from_secs(2));
+
+    // A restart (an upgrade): the replicas hold writes until the Overseer is back.
+    overseer.restart()?;
+    wait_until(Duration::from_secs(30), "the Overseer to be back", || Ok(role(&overseer)? == "Overseer"))?;
+    std::thread::sleep(Duration::from_secs(2));
+    stop.store(true, Ordering::Relaxed);
+    let (written, failed) = writer.join().expect("the writer thread")?;
+
+    assert!(failed.is_empty(), "no write may fail across the restart ({} of {} failed): {:?}", failed.len(), written.len() + failed.len(), failed);
+    assert!(written.len() > 20, "writes kept flowing: {}", written.len());
+    assert_eq!(role(&replica)?, "Harvester", "the restarted Overseer keeps its role");
+    for id in &written {
+        assert!(doc_on(&overseer, "orders", id)?.is_some(), "write {} is missing after the restart", id);
+    }
+    // The replicas resumed where they were instead of copying everything again.
+    wait_until(Duration::from_secs(30), "the replicas to catch up", || {
+        let last = written.last().unwrap();
+        Ok(doc_on(&replica, "orders", last)?.is_some() && doc_on(&other, "orders", last)?.is_some())
+    })?;
+    assert_eq!([replication(&replica)?["last_sync"].clone(), replication(&other)?["last_sync"].clone()], synced, "no full sync after the restart");
+    Ok(())
+}
