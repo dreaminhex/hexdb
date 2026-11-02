@@ -259,6 +259,11 @@ pub struct HexDBEngine {
     pub overseer_endpoint: std::sync::RwLock<Option<String>>,
     /// What this hex's replication is doing.
     pub replication: std::sync::Mutex<crate::replication::ReplicationStatus>,
+    /// The history this hex took over as Overseer, if it was promoted (see `crate::replication`).
+    pub(crate) continuation: std::sync::RwLock<Option<crate::replication::Continuation>>,
+    /// As a replica: the Overseer's history and position it last applied, with
+    /// this hex's own position right after (taken when it's promoted).
+    pub(crate) replica_position: std::sync::Mutex<Option<crate::replication::Continuation>>,
     /// A sliced replica's recent changes of every slice (see replication).
     pub recent_changes: std::sync::Mutex<crate::replication::RecentChanges>,
     /// Loaded plugins and their delivery state.
@@ -538,6 +543,8 @@ impl HexDBEngine {
             indexes: std::sync::RwLock::new(crate::index::Indexes::default()),
             overseer_endpoint: std::sync::RwLock::new(None),
             replication: std::sync::Mutex::new(crate::replication::ReplicationStatus::default()),
+            continuation: std::sync::RwLock::new(None),
+            replica_position: std::sync::Mutex::new(None),
             recent_changes: std::sync::Mutex::new(crate::replication::RecentChanges::default()),
             plugins: crate::plugins::PluginRegistry::default(),
             login_throttle,
@@ -640,6 +647,13 @@ impl HexDBEngine {
             let mut status = self.replication.lock().unwrap();
             status.rebuilding = None;
             status.waiting_for.clear();
+        }
+        // A replica becoming the Overseer continues the history it followed, from
+        // exactly where it is: taken before it can accept a write as the Overseer.
+        if role == crate::network::discovery::ROLE_OVERSEER && self.role() != role {
+            if let Some(position) = self.replica_position.lock().unwrap().take().filter(|p| p.source_id != self.history_id()) {
+                *self.continuation.write().unwrap() = Some(position);
+            }
         }
         let previous = std::mem::replace(&mut *self.role.write().unwrap(), role.to_string());
         // A hex that (re)gains leadership reloads queue state another Overseer may have changed.

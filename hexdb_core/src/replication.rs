@@ -17,8 +17,16 @@
 // The cursor names the Overseer's history (`Catalog::history_id`, kept in its
 // data directory) and a sequence number in it. After an Overseer restart the
 // history is the same, so a replica resumes from its cursor, reading older
-// changes from the Overseer's on-disk change history if needed. A new
-// Overseer (failover) has a different history, so replicas take a full sync.
+// changes from the Overseer's on-disk change history if needed.
+//
+// A new Overseer (failover, handover) has a history of its own. A replica it
+// was promoted from had applied the old history up to some position A; it
+// records that as a `Continuation`: its own position L0 holds exactly the
+// old history up to A. A replica whose cursor is exactly A in the old history
+// holds the same data, so it resumes after L0 instead of copying everything
+// again: after a clean handover (writes stopped, replicas caught up), every
+// replica does, and the old Overseer too (a hex that led a history is at its
+// last position in it). A replica at another position takes a full sync.
 //
 // Each poll for changes after N acknowledges N, which gives the Overseer each
 // replica's exact position (for lag, and for `replication.min_acks`). With
@@ -267,6 +275,18 @@ pub struct SnapshotMeta {
     /// (hex). Every hex in a lattice names a chunk the same way.
     #[serde(default)]
     pub content_key: String,
+    /// The history this Overseer took over, if it was promoted (see `Continuation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<Continuation>,
+}
+
+/// A promoted Overseer's link to the history it took over: its own position
+/// `local_seq` holds exactly `source_id`'s history up to `seq`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Continuation {
+    pub source_id: String,
+    pub seq: u64,
+    pub local_seq: u64,
 }
 
 /// `GET /lattice/snapshot/{tessellation}`: one page of documents with versions.
@@ -313,6 +333,7 @@ impl HexDBEngine {
             seq,
             tessellations: self.tessellation_details().into_iter().filter(|(name, _)| name != REPLICATION_TESSELLATION).collect(),
             content_key: self.sealed_content_key(),
+            continues: self.continuation.read().unwrap().clone(),
         }
     }
 }
@@ -430,6 +451,14 @@ impl Follower {
                 };
             }
             if self.was_leading != Some(true) {
+                // A replica promoted from another history (taken in `set_role`):
+                // keep it, so replicas resume from here after a restart too.
+                let taken = self.engine.continuation.read().unwrap().clone();
+                if let Some(continuation) = taken {
+                    if let Err(e) = self.engine.record_continuation(continuation).await {
+                        warn!("⚠️ Couldn't record the history this hex took over: {:#}", e);
+                    }
+                }
                 // Remember that this hex leads its own history now, so after a
                 // restart it reports where it really is (see restore_replication_state).
                 let led = ReplicaCursor { source_id: self.engine.history_id(), applied_seq: self.engine.changes.published_seq(), held_slices: ALL_SLICES };
@@ -519,9 +548,21 @@ impl Follower {
             s.source_id = Some(overseer.hex.id.clone());
             s.source_name = Some(overseer.hex.name.clone());
         });
-        if let Some(cursor) = self.engine.load_replica_cursor().await {
-            // Resume if the Overseer has the same history and still reaches back to the cursor.
+        if let Some(mut cursor) = self.engine.load_replica_cursor().await {
+            // A hex that led its history is at its last position in it.
+            if cursor.source_id == self.engine.history_id() {
+                cursor = ReplicaCursor { applied_seq: self.engine.changes.published_seq(), held_slices: ALL_SLICES, ..cursor };
+            }
             let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
+            // The Overseer continues the history this hex followed, from exactly where this hex is.
+            if let Some(c) = meta.continues.as_ref().filter(|c| c.source_id == cursor.source_id && c.seq == cursor.applied_seq) {
+                if c.local_seq >= meta.available_after && c.local_seq <= meta.seq {
+                    info!("🔁 '{}' took over the history this hex followed, at its position; continuing without a full sync.", overseer.hex.name);
+                    cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: c.local_seq, held_slices: cursor.held_slices };
+                    self.engine.apply_replicated(Vec::new(), Some(&cursor)).await?;
+                }
+            }
+            // Resume if the Overseer has the same history and still reaches back to the cursor.
             if cursor.source_id == meta.source_id && cursor.applied_seq >= meta.available_after && cursor.applied_seq <= meta.seq {
                 info!("🔁 Resuming replication from '{}' after sequence {}.", overseer.hex.name, cursor.applied_seq);
                 let held = cursor.held_slices;

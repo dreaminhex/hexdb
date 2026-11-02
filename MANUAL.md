@@ -1980,7 +1980,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 1. On each hex in turn, set the new `lattice_secret` and add the old one to `network.previous_lattice_secrets`. Use the word `derived` for the key derived from the storage key, when moving from no secret to an explicit one. Restart that hex.
 2. Hexes sign with the current key and accept any listed key. A hex whose request isn't accepted retries with its previous keys, so mixed hexes keep talking.
-3. Once every hex has the new secret, remove `previous_lattice_secrets`. API keys are re-hashed with the new key as they're used. Sessions signed with an old key end when it's removed.
+3. Once every hex has the new secret, remove `previous_lattice_secrets`. An API key is re-hashed with the new key when the Overseer checks it: on any request to the Overseer, and on any write, which every hex passes on to the Overseer. A key used only for reads on replicas while the old secret was accepted stops working when it's removed; use it once for a write, or against the Overseer, before step 3. Sessions signed with an old key end when it's removed.
 
 ### Local files
 
@@ -2032,13 +2032,23 @@ The Overseer keeps all the data. With two or more replicas, they share it in sli
 **Resuming.**
 - The cursor names the Overseer's history ID, kept in its catalog, and a position in it.
 - After an Overseer restart the history is the same, so replicas resume from their cursor, reading older changes from the Overseer's change history if needed.
-- After a failover the new Overseer has a different history, so replicas take a full sync from it.
+- A new Overseer (after a failover or a handover) starts a history of its own, but records where it took the old one over. A replica at exactly that position in the old history holds the same data, so it continues from there without copying anything: after a handover every replica does, and after a failover on a quiet lattice usually all of them. A replica at another position takes a full sync.
 
 **Schemas, indexes and tessellations.** Replicas copy these definitions from the Overseer's catalog. Each change-feed response carries a fingerprint of the catalog, and a replica re-reads the catalog as soon as the fingerprint changes. A new schema version or index is therefore on every hex within one poll (a few seconds), and a replica that takes over as Overseer enforces the same schemas. A periodic check every 15 seconds backs this up.
 
 **Progress.** Each poll for changes after N acknowledges N, which gives the Overseer each replica's exact position. `/status` shows the lag per replica, and the dashboard's lattice card shows it too.
 
 **Reads and writes.** Replicas serve reads. A write sent to a replica is forwarded to the Overseer (`replication.forward_writes`, default true), signed with the lattice key, and the response carries `X-HexDB-Forwarded-To`. While the Overseer restarts (an upgrade, say) or an election is under way, a replica holds the write for up to 30 seconds and passes it on as soon as an Overseer answers, instead of failing it; a connection the Overseer refused is tried again then, since it never reached it, so no write runs twice. The writes wait; none fail. With forwarding off, the write fails with 421 `read_only_replica`, naming the Overseer. Requests about the hex itself stay on the hex they're sent to: `PUT /settings` (its runtime settings), `POST /backup`, `/scrub`, `/flush`, `/compact` and `/shutdown`.
+
+### Restarts and upgrades
+
+Stopping a hex gracefully (SIGTERM, Ctrl+C, `hexdb stop`, the Windows service) fails no write and copies no data:
+
+- **A replica** just stops, and catches up from where it was when it's back.
+- **The Overseer, with replicas keeping full copies** (`slicing = false`), hands its role to a caught-up replica first: it stops taking writes (they're held, not refused), waits until every replica has everything, steps aside, and every hex re-elects at once. The new Overseer continues its history, so the replicas and the old Overseer, when it's back, carry on without a full sync. It takes a second or two; after 20 seconds the hex stops anyway.
+- **The Overseer of a sliced lattice** (the default) keeps its role across the restart: a new Overseer would first have to collect every slice it doesn't keep. Replicas hold writes until it's back, up to 30 seconds, and it's elected again since a sitting Overseer keeps the role.
+
+To upgrade a lattice, restart one hex at a time, the replicas first and the Overseer last, each once the one before is back. Give a stopping hex time to hand over and flush: on Fly.io set `kill_timeout = "60s"` (the default kills it after 5 seconds); the Helm chart gives pods 60 seconds. HexDB Enterprise does all of this from the dashboard.
 
 ### Durability options
 

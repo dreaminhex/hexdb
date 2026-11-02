@@ -465,7 +465,8 @@ pub async fn openapi() -> Response {
     ([(header::CONTENT_TYPE, "application/json")], include_str!("../openapi.json")).into_response()
 }
 
-/// Lets the shutdown endpoint trigger the server's graceful shutdown.
+/// Lets the shutdown endpoint request the server's graceful shutdown (an
+/// Overseer may hand its role over first; see `hexdb_core::updates`).
 /// The token is generated at startup and written to the runtime file in the data directory.
 #[derive(Clone)]
 pub struct ShutdownHandle {

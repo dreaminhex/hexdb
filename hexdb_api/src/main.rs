@@ -268,8 +268,11 @@ async fn server() -> anyhow::Result<()> {
             .collect();
     }
 
-    // Create channels for shutdown signals
+    // Create channels for shutdown signals. A stop is requested on `stop_tx`
+    // (signals, the Windows service, POST /shutdown); the server keeps serving
+    // while an Overseer hands its role over, then `shutdown_tx` stops everything.
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    let (stop_tx, mut stop_rx) = watch::channel(());
 
     // Answer other hexes' discovery handshakes.
     // Bound here, so a hex that can't be reached stops instead of running without its lattice.
@@ -360,9 +363,10 @@ async fn server() -> anyhow::Result<()> {
     // The runtime file lets the CLI find this process and stop it gracefully.
     let tls = config.tls.enabled();
     let runtime = RuntimeInfo::for_current_process(&config.network.api_endpoint, started_at, tls)?;
+    let stop_tx = Arc::new(stop_tx);
     let shutdown_handle = ShutdownHandle {
         token: Arc::new(runtime.shutdown_token.clone()),
-        trigger: shutdown_tx.clone(),
+        trigger: stop_tx.clone(),
     };
 
     // Locate the admin UI.
@@ -387,10 +391,18 @@ async fn server() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
-    // Spawn a task to listen for shutdown signals and notify all tasks.
-    let signal_tx = shutdown_tx.clone();
+    // Spawn a task to listen for shutdown signals and request a stop.
     tokio::spawn(async move {
         shutdown_signal().await;
+        let _ = stop_tx.send(());
+    });
+    // A requested stop: an Overseer may first hand its role to another hex,
+    // still serving, so writes it holds go on to the new Overseer; then every task stops.
+    let stopping = engine.clone();
+    let signal_tx = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let _ = stop_rx.changed().await;
+        hexdb_core::updates::hand_over_before_stopping(&stopping, hexdb_core::updates::HAND_OVER_LIMIT).await;
         let _ = signal_tx.send(());
     });
 

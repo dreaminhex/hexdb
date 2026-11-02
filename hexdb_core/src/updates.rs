@@ -8,6 +8,13 @@
 // release newer than the version it runs, it logs a warning and records an
 // `update.available` audit event, so administrators hear about it.
 //
+// Stopping an Overseer (SIGTERM, Ctrl+C, the Windows service, `POST /shutdown`)
+// hands its role to a caught-up replica first when the replicas keep full
+// copies (`hand_over_before_stopping`): the new Overseer continues its history,
+// so nothing is copied and writes don't pause. With the data in slices, a new
+// Overseer would have to collect every slice it lacks, so the Overseer keeps
+// its role across the restart and replicas hold writes until it's back.
+//
 // Hosted lattices (HexDB Enterprise, `updates.control_url`) can also update
 // themselves, one hex at a time, from the admin UI. The Overseer runs the
 // rollout: it asks the control service to move each replica's machine to the
@@ -169,6 +176,37 @@ pub fn stepping_down() -> bool {
 /// is no longer a candidate, so the next election picks another hex.
 pub fn withdrawn() -> bool {
     WITHDRAWN.load(AtomicOrdering::Relaxed)
+}
+
+/// How long a stopping Overseer may spend handing its role over before it stops anyway.
+pub const HAND_OVER_LIMIT: Duration = Duration::from_secs(20);
+
+/// Before this hex stops: if it's the Overseer, another hex can take the role,
+/// and the replicas keep full copies, hand the role over (see `step_down`).
+/// Gives up after `limit` and stops anyway.
+pub async fn hand_over_before_stopping(engine: &HexDBEngine, limit: Duration) {
+    if !engine.is_writable() || stepping_down() {
+        return;
+    }
+    let (candidates, replicas) = {
+        let peers = engine.peers.lock().await;
+        let active: Vec<_> = peers.iter().filter(|p| p.status == "active").collect();
+        (active.iter().filter(|p| matches!(p.hex.preference.as_str(), "auto" | "overseer")).count(), active.len())
+    };
+    // Sliced replicas each lack most of the data, which a new Overseer would collect.
+    if candidates == 0 || (engine.config.replication.slicing && replicas >= 2) {
+        return;
+    }
+    info!("🤝 Handing the Overseer role over before stopping...");
+    let started = Instant::now();
+    match tokio::time::timeout(limit, step_down(engine)).await {
+        Ok(Ok(())) => {
+            let overseer = engine.peers.lock().await.iter().find(|p| p.status == "active" && p.hex.role == crate::network::discovery::ROLE_OVERSEER).map(|p| p.hex.name.clone());
+            info!("🤝 '{}' is the Overseer now ({} ms); stopping.", overseer.unwrap_or_default(), started.elapsed().as_millis());
+        }
+        Ok(Err(e)) => warn!("⚠️ Couldn't hand the Overseer role over ({:#}); stopping anyway.", e),
+        Err(_) => warn!("⚠️ Handing the Overseer role over took over {} s; stopping anyway.", limit.as_secs()),
+    }
 }
 
 

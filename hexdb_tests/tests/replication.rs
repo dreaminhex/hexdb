@@ -77,8 +77,11 @@ fn replicas_resume_after_an_overseer_restart_without_a_full_sync() -> Result<()>
     assert!(synced_at.is_string(), "{}", replication(&replica)?);
 
     // While the Overseer is down and after it restarts, writes happen; the
-    // replica picks them up from its cursor.
-    overseer.restart()?;
+    // replica picks them up from its cursor. A crash and a quick restart: the
+    // Overseer keeps its role (stopped gracefully, it would hand the role to
+    // the replica; see tests/lattice.rs).
+    overseer.kill();
+    overseer.launch()?;
     let ids: Vec<String> = (0..20).map(|i| overseer.insert("notes", &json!({ "n": i }))).collect::<Result<_>>()?;
     wait_until(Duration::from_secs(30), "resumed streaming", || has(&replica, ids.last().unwrap()))?;
     for id in &ids {

@@ -118,6 +118,10 @@ fn the_lattice_secret_rotates_one_hex_at_a_time() -> Result<()> {
     overseer.set_options(pair_options(ports, 0, 4096, &rotated));
     overseer.launch()?;
     assert_eq!(overseer.request_as(Some(&key), Method::GET, "/notes", None, &[])?.status, 200, "API key after rotation");
+    // Keys are re-hashed with the new secret where the Overseer checks them, so
+    // use it there (the role moves as hexes restart: a stopping Overseer hands it over).
+    let leader = if overseer.request(Method::GET, "/status", None, &[])?.body["hex_type"] == "Overseer" { &overseer } else { &replica };
+    assert_eq!(leader.request_as(Some(&key), Method::GET, "/notes", None, &[])?.status, 200, "the key, on the Overseer");
     let third = overseer.insert("notes", &json!({ "step": 3 }))?;
     replicated(&replica, "notes", &third)?;
 

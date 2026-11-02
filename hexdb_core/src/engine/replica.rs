@@ -48,6 +48,11 @@ fn cursor_id() -> Ulid {
     Ulid::from(1u128)
 }
 
+/// Fixed document ID of the continuation (see `crate::replication::Continuation`).
+fn continuation_id() -> Ulid {
+    Ulid::from(2u128)
+}
+
 /// One write received from the Overseer.
 #[derive(Debug, Clone)]
 pub enum ReplicaWrite {
@@ -245,6 +250,11 @@ impl HexDBEngine {
             items.push(BatchItem { key: DocKey::new(REPLICATION_TESSELLATION, doc.id), op: WalOp::Put(doc), expected_seq: None });
         }
         self.commit_replicated(items).await?;
+        if let Some(cursor) = cursor {
+            // Taken right after the commit, so the pair always matches the data.
+            *self.replica_position.lock().unwrap() =
+                Some(crate::replication::Continuation { source_id: cursor.source_id.clone(), seq: cursor.applied_seq, local_seq: self.changes.published_seq() });
+        }
         // Fetch the content of the files that arrived.
         for manifest in manifests {
             self.queue_chunk_sync(manifest);
@@ -257,6 +267,7 @@ impl HexDBEngine {
     /// that starts as the Overseer with only some slices marks itself as
     /// rebuilding (see `crate::replication`).
     pub async fn restore_replication_state(&self) {
+        *self.continuation.write().unwrap() = self.load_continuation().await;
         let own = self.history_id();
         let cursor = self.load_replica_cursor().await;
         // A hex that led its own history (the Overseer since the start, or one
@@ -274,6 +285,8 @@ impl HexDBEngine {
             return;
         }
         let Some(cursor) = cursor else { return };
+        *self.replica_position.lock().unwrap() =
+            Some(crate::replication::Continuation { source_id: cursor.source_id.clone(), seq: cursor.applied_seq, local_seq: self.changes.published_seq() });
         let writable = self.is_writable();
         let mut status = self.replication.lock().unwrap();
         status.slices_held = cursor.held_slices;
@@ -282,6 +295,32 @@ impl HexDBEngine {
         if writable && cursor.held_slices != crate::slicing::ALL_SLICES {
             status.rebuilding = Some("This hex started as the Overseer with only some of the lattice's slices and is collecting the rest; try again shortly.".into());
         }
+    }
+
+    /// Record that this hex, promoted to Overseer, continues another history.
+    pub(crate) async fn record_continuation(&self, continuation: crate::replication::Continuation) -> Result<()> {
+        self.ensure_system_tessellation(REPLICATION_TESSELLATION)?;
+        let mut data = crate::document::CompactFields::new();
+        data.insert("source_id".into(), FieldValue::String(continuation.source_id.clone()));
+        data.insert("seq".into(), FieldValue::Integer(continuation.seq as i64));
+        data.insert("local_seq".into(), FieldValue::Integer(continuation.local_seq as i64));
+        let doc = Document { id: continuation_id(), tessellation: REPLICATION_TESSELLATION.into(), data, ttl: None };
+        self.commit_replicated(vec![BatchItem { key: DocKey::new(REPLICATION_TESSELLATION, doc.id), op: WalOp::Put(doc), expected_seq: None }]).await?;
+        *self.continuation.write().unwrap() = Some(continuation);
+        Ok(())
+    }
+
+    async fn load_continuation(&self) -> Option<crate::replication::Continuation> {
+        if !self.tessellation_exists(REPLICATION_TESSELLATION) {
+            return None;
+        }
+        let (doc, _) = self.read_latest(&DocKey::new(REPLICATION_TESSELLATION, continuation_id())).await.ok()?;
+        let data = doc?.data_json();
+        Some(crate::replication::Continuation {
+            source_id: data.get("source_id")?.as_str()?.to_string(),
+            seq: data.get("seq")?.as_u64()?,
+            local_seq: data.get("local_seq")?.as_u64()?,
+        })
     }
 
     /// The saved replication cursor, if this hex has been a replica.

@@ -339,3 +339,81 @@ fn restarting_the_overseer_fails_no_write_and_copies_nothing_again() -> Result<(
     assert_eq!([replication(&replica)?["last_sync"].clone(), replication(&other)?["last_sync"].clone()], synced, "no full sync after the restart");
     Ok(())
 }
+
+#[test]
+fn a_stopping_overseer_hands_over_and_nothing_is_copied_again() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // Full copies on the replicas: a stopping Overseer hands its role over (a
+    // sliced lattice keeps it across the restart instead; see the test above).
+    let cluster = Cluster::new(3)?;
+    let full = |i: usize, ram_mb: u64| TestOptions {
+        extra_toml: "\n[replication]\nslicing = false\n".into(),
+        discovery_interval_seconds: Some(5),
+        ..cluster.options(i, ram_mb, "auto")
+    };
+    let mut overseer = TestServer::start_with(full(0, 4096))?;
+    let replica = TestServer::start_with(full(1, 2048))?;
+    let other = TestServer::start_with(full(2, 1024))?;
+    wait_until(Duration::from_secs(60), "all hexes to see each other", || {
+        Ok([&overseer, &replica, &other].iter().map(|s| active_hexes(s)).collect::<Result<Vec<_>>>()?.iter().all(|n| *n == 3))
+    })?;
+    assert_eq!(role(&overseer)?, "Overseer");
+    let first = overseer.insert("orders", &json!({ "n": 0 }))?;
+    wait_until(Duration::from_secs(30), "the replicas' first sync", || Ok(doc_on(&replica, "orders", &first)?.is_some() && doc_on(&other, "orders", &first)?.is_some()))?;
+    let synced = [replication(&replica)?["last_sync"].clone(), replication(&other)?["last_sync"].clone()];
+
+    let (url, token) = (replica.url("/orders"), replica.token().to_string());
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stop = stop.clone();
+        std::thread::spawn(move || -> Result<(Vec<String>, Vec<String>)> {
+            let http = hexdb_tests::http().timeout(Duration::from_secs(60)).build()?;
+            let (mut written, mut failed) = (Vec::new(), Vec::new());
+            let mut n = 0;
+            while !stop.load(Ordering::Relaxed) {
+                n += 1;
+                match http.post(&url).bearer_auth(&token).json(&json!({ "n": n })).send() {
+                    Ok(r) if r.status().is_success() => written.push(r.json::<Value>()?["id"].as_str().unwrap_or_default().to_string()),
+                    Ok(r) => failed.push(format!("#{} {}: {}", n, r.status(), r.text().unwrap_or_default())),
+                    Err(e) => failed.push(format!("#{} {}", n, e)),
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok((written, failed))
+        })
+    };
+    std::thread::sleep(Duration::from_secs(2));
+
+    // A graceful stop (SIGTERM, `hexdb stop`): the role moves before the hex goes.
+    let started = Instant::now();
+    overseer.stop()?;
+    let stopped_in = started.elapsed();
+    let leader = if role(&replica)? == "Overseer" { &replica } else { &other };
+    assert_eq!(role(leader)?, "Overseer", "another hex took over before the old Overseer stopped");
+    std::thread::sleep(Duration::from_secs(2));
+    stop.store(true, Ordering::Relaxed);
+    let (written, failed) = writer.join().expect("the writer thread")?;
+    assert!(failed.is_empty(), "no write may fail across the handover ({} of {} failed): {:?}", failed.len(), written.len() + failed.len(), failed);
+    assert!(written.len() > 20, "writes kept flowing: {}", written.len());
+    assert!(stopped_in < Duration::from_secs(15), "the handover took {:?}", stopped_in);
+    for id in &written {
+        assert!(doc_on(leader, "orders", id)?.is_some(), "write {} is missing after the handover", id);
+    }
+    // The remaining replica continued the history instead of copying it again.
+    let follower = if std::ptr::eq(leader, &replica) { &other } else { &replica };
+    let last = written.last().unwrap();
+    wait_until(Duration::from_secs(30), "the replica to follow the new Overseer", || Ok(doc_on(follower, "orders", last)?.is_some()))?;
+    let index = if std::ptr::eq(follower, &replica) { 0 } else { 1 };
+    assert_eq!(replication(follower)?["last_sync"], synced[index], "no full sync after the handover");
+
+    // The old Overseer comes back as a replica, also without a full sync.
+    overseer.launch()?;
+    wait_until(Duration::from_secs(60), "the old Overseer to follow", || Ok(replication(&overseer)?["state"] == "streaming"))?;
+    let after = leader.insert("orders", &json!({ "n": "after" }))?;
+    wait_until(Duration::from_secs(30), "it to catch up", || Ok(doc_on(&overseer, "orders", &after)?.is_some()))?;
+    assert!(replication(&overseer)?["last_sync"].is_null(), "the old Overseer resumed: {}", replication(&overseer)?);
+    assert_eq!(role(leader)?, "Overseer");
+    Ok(())
+}
