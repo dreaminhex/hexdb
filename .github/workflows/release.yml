@@ -414,6 +414,20 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { throw "wingetcreate failed ($LASTEXITCODE)" }
 
+          # A version waits for review, and the next release opens another PR beside
+          # it; moderators look at one. Keep the newest open and close the rest.
+          $env:GH_TOKEN = $env:WINGET_TOKEN
+          $prs = @(gh pr list --repo microsoft/winget-pkgs --author "@me" --state open --search "DreamInHex.HexDB in:title" --json number,title,createdAt |
+            ConvertFrom-Json | Where-Object { $_.title -like "DreamInHex.HexDB version *" } | Sort-Object createdAt -Descending)
+          if ($prs.Count -gt 1) {
+            foreach ($pr in $prs | Select-Object -Skip 1) {
+              gh pr close $pr.number --repo microsoft/winget-pkgs --comment "Superseded by #$($prs[0].number) ($($prs[0].title)), the version to review."
+              if ($LASTEXITCODE -ne 0) { Write-Warning "Couldn't close winget-pkgs #$($pr.number)." }
+            }
+          }
+          # Tidying up is best effort: the submission above is what matters.
+          $global:LASTEXITCODE = 0
+
   npm:
     runs-on: ubuntu-latest
     env:

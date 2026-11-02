@@ -98,6 +98,8 @@ The `homebrew` job writes `Formula/hexdb.rb` into the tap with the version and c
 
 On the first release, the `winget` job submits the manifests in [packaging/winget](winget) with the MSI's checksum filled in; after that, it runs `wingetcreate update`. The first pull request needs two things from you on GitHub: agree to Microsoft's CLA when the bot asks (comment `@microsoft-github-policy-service agree`), and answer any reviewer questions. Validation and review usually take one to three days. `winget install DreamInHex.HexDB` works once it's merged.
 
+Each release opens a new pull request. So that reviewers see one submission, the job then closes the token account's older open `DreamInHex.HexDB version ...` pull requests, each with a note pointing to the new one. A pull request that Microsoft Defender's installer scan blocks (`Validation-Defender-Error`) waits for the MSI to be cleared: submit it as a false positive at https://www.microsoft.com/wdsi/filesubmission. Signing the MSI avoids this (see [Signing the installers](#signing-the-installers-optional-recommended)).
+
 ### Chocolatey
 
 1. Create an account at https://community.chocolatey.org/account/Register and confirm the email.
