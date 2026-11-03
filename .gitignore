@@ -42,3 +42,6 @@ plugins/**/changes.ndjson
 
 # JDBC driver build output
 drivers/java/target/
+
+# Claude Code settings and permissions for this machine (not shared)
+.claude/
