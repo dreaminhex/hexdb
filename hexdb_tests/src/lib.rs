@@ -159,6 +159,8 @@ pub struct TestOptions {
     pub extra_toml: String,
     /// Extra `key = value` lines for the `[network]` section.
     pub network_toml: String,
+    /// Extra lines for the `[identity]` section (e.g. `region = "iad"`).
+    pub identity_toml: String,
     /// Extra `key = value` lines for the `[storage]` section.
     pub storage_toml: String,
     /// Extra `key = value` lines for the `[security]` section.
@@ -311,6 +313,7 @@ discovery_interval_seconds = {interval}
 
 [identity]
 role = "{role}"
+{identity_extra}
 
 [memory]
 ram_mb = {ram_mb}
@@ -339,6 +342,7 @@ admin_email = "admin@example.com"
             previous = self.options.previous_encryption_keys.iter().map(|k| format!("\"{}\"", k)).collect::<Vec<_>>().join(", "),
             admin = TEST_ADMIN_LOGIN,
             network_extra = self.options.network_toml,
+            identity_extra = self.options.identity_toml,
             storage_extra = self.options.storage_toml,
             security_extra = self.options.security_toml,
             disk_mb = self.options.disk_mb.unwrap_or(1024),

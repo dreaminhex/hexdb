@@ -142,6 +142,8 @@ pub struct LatticeHex {
     pub slices_held: u32,
     /// The HexDB version the hex runs.
     pub version: String,
+    /// Where it runs (`identity.region`, or Fly.io's region); empty when unknown.
+    pub region: String,
 }
 
 /// Report structure for the current lattice state.
@@ -149,6 +151,8 @@ pub struct LatticeHex {
 pub struct LatticeMetrics {
     pub name: String,
     pub hexes: Vec<LatticeHex>,
+    /// The distinct regions its active hexes run in (those that report one).
+    pub regions: Vec<String>,
 }
 
 /// Network metrics for the HexDB engine.
@@ -208,6 +212,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         slicing: me.slicing,
         slices_held: crate::slicing::count(me.slices_held),
         version: me.version,
+        region: me.region,
     }];
     for member in engine.peers.lock().await.iter() {
         lattice_hexes.push(LatticeHex {
@@ -227,6 +232,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             slicing: member.hex.slicing,
             slices_held: crate::slicing::count(member.hex.slices_held),
             version: member.hex.version.clone(),
+            region: member.hex.region.clone(),
         });
     }
     // On the Overseer, replicas' positions are exact: each poll for changes
@@ -310,6 +316,12 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             discovery_endpoint: engine.config.network.discovery_endpoint.clone(),
             lattice: LatticeMetrics {
                 name: engine.config.network.lattice_name.clone(),
+                regions: {
+                    let mut regions: Vec<String> = lattice_hexes.iter().filter(|h| h.status == "active" && !h.region.is_empty()).map(|h| h.region.clone()).collect();
+                    regions.sort();
+                    regions.dedup();
+                    regions
+                },
                 hexes: lattice_hexes,
             },
         },

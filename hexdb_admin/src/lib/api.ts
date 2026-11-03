@@ -197,6 +197,8 @@ export interface LatticeHex {
   slices_held?: number
   /** The HexDB version the hex runs. */
   version?: string
+  /** Where it runs (`identity.region`, or the cloud's region code such as `iad`); empty when unknown. */
+  region?: string
 }
 
 /** The newest HexDB release, from the hex's last check (updates.check). */
@@ -298,7 +300,7 @@ export interface Status {
   network: {
     api_endpoint: string
     discovery_endpoint: string
-    lattice: { name: string; hexes: LatticeHex[] }
+    lattice: { name: string; hexes: LatticeHex[]; /** Distinct regions of its active hexes. */ regions?: string[] }
   }
   replication: ReplicationStatus
 }

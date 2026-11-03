@@ -2050,6 +2050,16 @@ Stopping a hex gracefully (SIGTERM, Ctrl+C, `hexdb stop`, the Windows service) f
 
 To upgrade a lattice, restart one hex at a time, the replicas first and the Overseer last, each once the one before is back. Give a stopping hex time to hand over and flush: on Fly.io set `kill_timeout = "60s"` (the default kills it after 5 seconds); the Helm chart gives pods 60 seconds. HexDB Enterprise does all of this from the dashboard.
 
+### Regions
+
+A lattice can span cloud regions, and should: HexDB's first job is never to lose data, and hexes in one region share its fate. Spread over three or more regions, a lattice survives a whole region going down with no data lost, and keeps serving: the hexes elsewhere elect an Overseer if it was the Overseer's region.
+
+- **What it costs.** Hexes talk to each other on every write. Replicas follow the Overseer asynchronously by default, so writes don't wait for them; with `min_acks = 1`, a write waits for one replica, which adds the round trip to the nearest other region (about 20 ms within North America or Europe, 70-90 ms across the Atlantic). Reads are answered where they arrive.
+- **Where the Overseer goes.** Put the hex you'd rather lead in the region nearest your application, and give it the most memory (`memory.ram_mb`), which elections prefer. Any hex can take over.
+- **Slices across regions.** With slicing (the default), the Overseer keeps every slice and each slice is on another hex too, so losing any one region loses nothing. With `slice_copies = 2`, any two hexes can be lost.
+- **Seeing it.** Each hex reports its region (`identity.region`, or Fly.io's `FLY_REGION`), shown next to it on the dashboard's lattice card and in `/status` (`network.lattice.hexes[].region`); `network.lattice.regions` lists the regions the lattice spans.
+- **On Fly.io.** Machines of one app in several regions share the private network (`<app>.internal` resolves to all of them), so one app holds the whole lattice: `fly machine clone <id> --region ord` adds a hex in Chicago with its own volume, and it copies its data from the others. Give stopping hexes time (`kill_timeout = "60s"`).
+
 ### Durability options
 
 By default replication is asynchronous. A write the Overseer acknowledged, but no replica had received yet, is lost if the Overseer fails before it comes back. Two settings trade latency for safety:
@@ -2448,6 +2458,7 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `network.trusted_proxies` | `[]` | Proxies whose `X-Forwarded-For` is trusted |
 | `identity.role` | `auto` | `auto`, `overseer`, `harvester` or `replicant` |
 | `identity.name` | generated | The hex's name (1-64 characters); drawn and saved on the first start when empty |
+| `identity.region` | `FLY_REGION`, else empty | Where the hex runs (a region code such as `iad`), shown on the dashboard; see [Regions](#regions) |
 | `storage.path` | `./.hexdb` | Data directory |
 | `storage.encryption_key` | required | `base64:` plus 32 bytes |
 | `storage.previous_encryption_keys` | `[]` | Old keys still accepted for reading |

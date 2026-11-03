@@ -423,6 +423,9 @@ function LatticeCard({ status }: { status: Status }) {
         </CardTitle>
         <CardDescription>
           {lattice.name} · {active} of {lattice.hexes.length} hex{lattice.hexes.length === 1 ? "" : "es"} active
+          {(lattice.regions?.length ?? 0) > 1 && (
+            <span title={`Regions: ${lattice.regions?.join(", ")}. Losing any one of them loses no data.`}> · across {lattice.regions?.length} regions</span>
+          )}
         </CardDescription>
         {has(me, "admin") && (
           <CardAction>
@@ -447,6 +450,11 @@ function LatticeCard({ status }: { status: Status }) {
                   <IconCircleArrowUp className="text-status-warning size-4 shrink-0" role="img" aria-label="Needs an update">
                     <title>{updateReason(status, hex.version)}</title>
                   </IconCircleArrowUp>
+                )}
+                {hex.region && (
+                  <Badge variant="outline" className="h-4.5 px-1.5 font-mono text-[10px] font-normal tracking-wide uppercase" title={`Runs in ${hex.region}`}>
+                    {hex.region}
+                  </Badge>
                 )}
                 {hex.is_self && <span className="text-muted-foreground text-xs font-normal">(this hex)</span>}
                 {hex.status !== "active" && <span className="text-muted-foreground text-xs font-normal">· {hex.status}</span>}

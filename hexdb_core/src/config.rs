@@ -524,11 +524,26 @@ pub struct IdentityConfig {
     /// empty, HexDB picks a name on the first start and keeps it.
     #[serde(default)]
     pub name: String,
+    /// Where the hex runs (a cloud region or data center, e.g. `iad`), shown
+    /// with it on the dashboard. Empty: Fly.io's `FLY_REGION`, else none.
+    #[serde(default)]
+    pub region: String,
 }
 
 impl Default for IdentityConfig {
     fn default() -> Self {
-        IdentityConfig { role: default_role(), name: String::new() }
+        IdentityConfig { role: default_role(), name: String::new(), region: String::new() }
+    }
+}
+
+impl IdentityConfig {
+    /// The hex's region: `identity.region`, or Fly.io's `FLY_REGION`, or empty.
+    pub fn effective_region(&self) -> String {
+        let configured = self.region.trim();
+        if !configured.is_empty() {
+            return configured.chars().take(64).collect();
+        }
+        std::env::var("FLY_REGION").map(|r| r.trim().chars().take(64).collect()).unwrap_or_default()
     }
 }
 

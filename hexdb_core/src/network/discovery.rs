@@ -111,6 +111,9 @@ pub struct PeerHex {
     /// The Fly.io Machine the hex runs on (`FLY_MACHINE_ID`), for hosted rolling updates.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub machine_id: String,
+    /// Where the hex runs (`identity.region`, or Fly.io's region).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub region: String,
 }
 
 fn all_slices() -> crate::slicing::SliceMask {
@@ -210,6 +213,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         slices_held,
         replication_source,
         machine_id: crate::updates::machine_id(),
+        region: config.identity.effective_region(),
     }
 }
 
@@ -719,6 +723,7 @@ mod tests {
             slices_held: crate::slicing::ALL_SLICES,
             replication_source: String::new(),
             machine_id: String::new(),
+            region: String::new(),
         }
     }
 
