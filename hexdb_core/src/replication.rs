@@ -28,9 +28,12 @@
 // replica does, and the old Overseer too (a hex that led a history is at its
 // last position in it). The promoted hex also keeps its last few positions
 // before A (when it held every slice): its own changes after each are exactly
-// the old history's after it, so a replica a little behind (a change the old
-// Overseer made on its own as it stepped down, or a failover) resumes too. A
-// replica at another position takes a full sync.
+// the old history's after it. So a replica a little behind (a change the old
+// Overseer made on its own as it stepped down, or a failover) resumes from the
+// latest of them at or before its own position: it gets again the few changes
+// it already has, then the rest, in order, which leaves it exactly where the
+// new Overseer is (a replicated change is a whole document or a delete). A
+// replica ahead of A, or further behind, takes a full sync.
 //
 // Each poll for changes after N acknowledges N, which gives the Overseer each
 // replica's exact position (for lag, and for `replication.min_acks`). With
@@ -301,15 +304,17 @@ pub struct Continuation {
 pub const EARLIER_POSITIONS: usize = 256;
 
 impl Continuation {
-    /// This hex's own position holding exactly `source_id`'s history up to `seq`, if known.
-    pub fn local_for(&self, source_id: &str, seq: u64) -> Option<u64> {
-        if source_id != self.source_id {
+    /// Where in this hex's own history a replica that applied `source_id`'s
+    /// history up to `seq` resumes: the latest known position at or before it.
+    /// None when it's ahead of what this hex took over, or before every known position.
+    pub fn resume_at(&self, source_id: &str, seq: u64) -> Option<u64> {
+        if source_id != self.source_id || seq > self.seq {
             return None;
         }
         if seq == self.seq {
             return Some(self.local_seq);
         }
-        self.earlier.iter().find(|(s, _)| *s == seq).map(|(_, local)| *local)
+        self.earlier.iter().rev().find(|(s, _)| *s <= seq).map(|(_, local)| *local)
     }
 
     /// The position after applying the history up to `seq` (own position
@@ -592,8 +597,8 @@ impl Follower {
                 cursor = ReplicaCursor { applied_seq: self.engine.changes.published_seq(), held_slices: ALL_SLICES, ..cursor };
             }
             let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
-            // The Overseer continues the history this hex followed, from a position it knows this hex's to be.
-            if let Some(local) = meta.continues.as_ref().and_then(|c| c.local_for(&cursor.source_id, cursor.applied_seq)) {
+            // The Overseer continues the history this hex followed, from its position or just before it.
+            if let Some(local) = meta.continues.as_ref().and_then(|c| c.resume_at(&cursor.source_id, cursor.applied_seq)) {
                 if local >= meta.available_after && local <= meta.seq {
                     info!("🔁 '{}' took over the history this hex followed, at its position; continuing without a full sync.", overseer.hex.name);
                     cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: local, held_slices: cursor.held_slices };
@@ -1187,17 +1192,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_continuation_knows_recent_positions_of_the_same_whole_history() {
+    fn a_continuation_resumes_replicas_at_or_a_little_behind_its_position() {
         let mut position = None;
         for (seq, local) in [(10, 3), (12, 5), (15, 9)] {
             position = Some(Continuation::advanced(position, "old", seq, local, true));
         }
         let c = position.clone().unwrap();
-        assert_eq!(c.local_for("old", 15), Some(9));
-        assert_eq!(c.local_for("old", 12), Some(5));
-        assert_eq!(c.local_for("old", 10), Some(3));
-        assert_eq!(c.local_for("old", 11), None);
-        assert_eq!(c.local_for("other", 12), None);
+        assert_eq!(c.resume_at("old", 15), Some(9));
+        assert_eq!(c.resume_at("old", 12), Some(5));
+        assert_eq!(c.resume_at("old", 10), Some(3));
+        // Between two known positions: from the earlier one.
+        assert_eq!(c.resume_at("old", 14), Some(5));
+        assert_eq!(c.resume_at("old", 11), Some(3));
+        // Ahead of it (changes it never got), before everything it knows, or another history.
+        assert_eq!(c.resume_at("old", 16), None);
+        assert_eq!(c.resume_at("old", 9), None);
+        assert_eq!(c.resume_at("other", 12), None);
 
         // Another history, or only some slices held: earlier positions don't carry over.
         assert!(Continuation::advanced(position.clone(), "new", 1, 10, true).earlier.is_empty());
@@ -1210,7 +1220,7 @@ mod tests {
         }
         let c = position.unwrap();
         assert_eq!(c.earlier.len(), EARLIER_POSITIONS);
-        assert_eq!(c.local_for("old", 9), None);
-        assert_eq!(c.local_for("old", 10), Some(10));
+        assert_eq!(c.resume_at("old", 9), None);
+        assert_eq!(c.resume_at("old", 10), Some(10));
     }
 }
