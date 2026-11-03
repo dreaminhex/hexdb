@@ -26,7 +26,11 @@
 // holds the same data, so it resumes after L0 instead of copying everything
 // again: after a clean handover (writes stopped, replicas caught up), every
 // replica does, and the old Overseer too (a hex that led a history is at its
-// last position in it). A replica at another position takes a full sync.
+// last position in it). The promoted hex also keeps its last few positions
+// before A (when it held every slice): its own changes after each are exactly
+// the old history's after it, so a replica a little behind (a change the old
+// Overseer made on its own as it stepped down, or a failover) resumes too. A
+// replica at another position takes a full sync.
 //
 // Each poll for changes after N acknowledges N, which gives the Overseer each
 // replica's exact position (for lag, and for `replication.min_acks`). With
@@ -287,6 +291,40 @@ pub struct Continuation {
     pub source_id: String,
     pub seq: u64,
     pub local_seq: u64,
+    /// Earlier pairs of (`seq`, `local_seq`), oldest first, kept only while
+    /// the hex held every slice (see `EARLIER_POSITIONS`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<(u64, u64)>,
+}
+
+/// How many earlier positions a replica keeps for a continuation.
+pub const EARLIER_POSITIONS: usize = 256;
+
+impl Continuation {
+    /// This hex's own position holding exactly `source_id`'s history up to `seq`, if known.
+    pub fn local_for(&self, source_id: &str, seq: u64) -> Option<u64> {
+        if source_id != self.source_id {
+            return None;
+        }
+        if seq == self.seq {
+            return Some(self.local_seq);
+        }
+        self.earlier.iter().find(|(s, _)| *s == seq).map(|(_, local)| *local)
+    }
+
+    /// The position after applying the history up to `seq` (own position
+    /// `local_seq`), keeping this one as an earlier position when it's the
+    /// same history and `whole` (every slice held).
+    pub fn advanced(previous: Option<Continuation>, source_id: &str, seq: u64, local_seq: u64, whole: bool) -> Continuation {
+        let mut earlier = Vec::new();
+        if let Some(p) = previous.filter(|p| whole && p.source_id == source_id && p.seq < seq) {
+            earlier = p.earlier;
+            earlier.push((p.seq, p.local_seq));
+            let excess = earlier.len().saturating_sub(EARLIER_POSITIONS);
+            earlier.drain(..excess);
+        }
+        Continuation { source_id: source_id.to_string(), seq, local_seq, earlier }
+    }
 }
 
 /// `GET /lattice/snapshot/{tessellation}`: one page of documents with versions.
@@ -554,11 +592,11 @@ impl Follower {
                 cursor = ReplicaCursor { applied_seq: self.engine.changes.published_seq(), held_slices: ALL_SLICES, ..cursor };
             }
             let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
-            // The Overseer continues the history this hex followed, from exactly where this hex is.
-            if let Some(c) = meta.continues.as_ref().filter(|c| c.source_id == cursor.source_id && c.seq == cursor.applied_seq) {
-                if c.local_seq >= meta.available_after && c.local_seq <= meta.seq {
+            // The Overseer continues the history this hex followed, from a position it knows this hex's to be.
+            if let Some(local) = meta.continues.as_ref().and_then(|c| c.local_for(&cursor.source_id, cursor.applied_seq)) {
+                if local >= meta.available_after && local <= meta.seq {
                     info!("🔁 '{}' took over the history this hex followed, at its position; continuing without a full sync.", overseer.hex.name);
-                    cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: c.local_seq, held_slices: cursor.held_slices };
+                    cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: local, held_slices: cursor.held_slices };
                     self.engine.apply_replicated(Vec::new(), Some(&cursor)).await?;
                 }
             }
@@ -1141,5 +1179,38 @@ impl Follower {
 
     fn forget_cursor(&self) {
         self.set_status(|s| s.state = "syncing".into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_continuation_knows_recent_positions_of_the_same_whole_history() {
+        let mut position = None;
+        for (seq, local) in [(10, 3), (12, 5), (15, 9)] {
+            position = Some(Continuation::advanced(position, "old", seq, local, true));
+        }
+        let c = position.clone().unwrap();
+        assert_eq!(c.local_for("old", 15), Some(9));
+        assert_eq!(c.local_for("old", 12), Some(5));
+        assert_eq!(c.local_for("old", 10), Some(3));
+        assert_eq!(c.local_for("old", 11), None);
+        assert_eq!(c.local_for("other", 12), None);
+
+        // Another history, or only some slices held: earlier positions don't carry over.
+        assert!(Continuation::advanced(position.clone(), "new", 1, 10, true).earlier.is_empty());
+        assert!(Continuation::advanced(position, "old", 16, 10, false).earlier.is_empty());
+
+        // At most EARLIER_POSITIONS, oldest dropped first.
+        let mut position = None;
+        for seq in 1..=(EARLIER_POSITIONS as u64 + 10) {
+            position = Some(Continuation::advanced(position, "old", seq, seq, true));
+        }
+        let c = position.unwrap();
+        assert_eq!(c.earlier.len(), EARLIER_POSITIONS);
+        assert_eq!(c.local_for("old", 9), None);
+        assert_eq!(c.local_for("old", 10), Some(10));
     }
 }

@@ -252,8 +252,15 @@ impl HexDBEngine {
         self.commit_replicated(items).await?;
         if let Some(cursor) = cursor {
             // Taken right after the commit, so the pair always matches the data.
-            *self.replica_position.lock().unwrap() =
-                Some(crate::replication::Continuation { source_id: cursor.source_id.clone(), seq: cursor.applied_seq, local_seq: self.changes.published_seq() });
+            let mut position = self.replica_position.lock().unwrap();
+            let whole = cursor.held_slices == crate::slicing::ALL_SLICES;
+            *position = Some(crate::replication::Continuation::advanced(
+                position.take(),
+                &cursor.source_id,
+                cursor.applied_seq,
+                self.changes.published_seq(),
+                whole,
+            ));
         }
         // Fetch the content of the files that arrived.
         for manifest in manifests {
@@ -286,7 +293,7 @@ impl HexDBEngine {
         }
         let Some(cursor) = cursor else { return };
         *self.replica_position.lock().unwrap() =
-            Some(crate::replication::Continuation { source_id: cursor.source_id.clone(), seq: cursor.applied_seq, local_seq: self.changes.published_seq() });
+            Some(crate::replication::Continuation::advanced(None, &cursor.source_id, cursor.applied_seq, self.changes.published_seq(), false));
         let writable = self.is_writable();
         let mut status = self.replication.lock().unwrap();
         status.slices_held = cursor.held_slices;
@@ -304,6 +311,9 @@ impl HexDBEngine {
         data.insert("source_id".into(), FieldValue::String(continuation.source_id.clone()));
         data.insert("seq".into(), FieldValue::Integer(continuation.seq as i64));
         data.insert("local_seq".into(), FieldValue::Integer(continuation.local_seq as i64));
+        if !continuation.earlier.is_empty() {
+            data.insert("earlier".into(), FieldValue::String(serde_json::to_string(&continuation.earlier)?));
+        }
         let doc = Document { id: continuation_id(), tessellation: REPLICATION_TESSELLATION.into(), data, ttl: None };
         self.commit_replicated(vec![BatchItem { key: DocKey::new(REPLICATION_TESSELLATION, doc.id), op: WalOp::Put(doc), expected_seq: None }]).await?;
         *self.continuation.write().unwrap() = Some(continuation);
@@ -320,6 +330,7 @@ impl HexDBEngine {
             source_id: data.get("source_id")?.as_str()?.to_string(),
             seq: data.get("seq")?.as_u64()?,
             local_seq: data.get("local_seq")?.as_u64()?,
+            earlier: data.get("earlier").and_then(|e| serde_json::from_str(e.as_str()?).ok()).unwrap_or_default(),
         })
     }
 
