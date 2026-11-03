@@ -419,6 +419,23 @@ fn a_stopping_overseer_hands_over_and_nothing_is_copied_again() -> Result<()> {
 }
 
 #[test]
+fn a_hex_learns_the_hexes_that_probe_it() -> Result<()> {
+    // The first hex has no seeds at all; the second and third know only the
+    // first. Each probe tells the first where the prober is, so it probes
+    // them back, and through it they find each other.
+    let cluster = Cluster::new(3)?;
+    let seedless = TestServer::start_with(TestOptions { peers: Vec::new(), ..cluster.options(0, 4096, "auto") })?;
+    let first = format!("127.0.0.1:{}", cluster.ports[0]);
+    let joiner = TestServer::start_with(TestOptions { peers: vec![first.clone()], ..cluster.options(1, 2048, "auto") })?;
+    let other = TestServer::start_with(TestOptions { peers: vec![first], ..cluster.options(2, 1024, "auto") })?;
+    let seen = || [&seedless, &joiner, &other].iter().map(|s| active_hexes(s)).collect::<Result<Vec<_>>>();
+    let waited = wait_until(Duration::from_secs(60), "every hex to see the other two", || Ok(seen()?.iter().all(|n| *n == 3)));
+    assert!(waited.is_ok(), "hexes each see (seedless, joiner, other): {:?}", seen()?);
+    assert_eq!(role(&seedless)?, "Overseer");
+    Ok(())
+}
+
+#[test]
 fn hexes_report_their_regions_and_the_lattice_counts_them() -> Result<()> {
     let cluster = Cluster::new(2)?;
     let in_region = |i: usize, ram_mb: u64, region: &str| TestOptions { identity_toml: format!("region = \"{}\"", region), ..cluster.options(i, ram_mb, "auto") };

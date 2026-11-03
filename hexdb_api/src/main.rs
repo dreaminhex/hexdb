@@ -196,6 +196,7 @@ async fn server() -> anyhow::Result<()> {
         replication_source: String::new(),
         machine_id: hexdb_core::updates::machine_id(),
         region: config.identity.effective_region(),
+        knows: Vec::new(),
     };
     let role = elect(&provisional, &peers);
     match peers.iter().find(|p| p.role == ROLE_OVERSEER) {

@@ -8,7 +8,14 @@
 //
 // A background task probes the configured seed addresses (and, by default, the
 // local discovery ports 7702-7709) every `discovery_interval_seconds`, tracks
-// when each peer was last seen, and re-runs the role election:
+// when each peer was last seen, and re-runs the role election. A prober also
+// tells the hex it probed its own discovery address (a signed `HEXDB_SEEN`
+// line after the identity), and that hex probes it back from then on; and each
+// identity lists the discovery addresses of the hexes it sees (`knows`), which
+// the prober probes too. So a new hex needs only one seed address, and the
+// whole lattice sees it and it sees the whole lattice.
+//
+// The election:
 //
 // - Candidates for Overseer are live hexes whose preference is `auto` or
 //   `overseer`; if any prefer `overseer`, only those are considered.
@@ -45,6 +52,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a probe's answer may take to build before the last round's
 /// identity is sent instead (see `answer_identity`).
 const FRESH_IDENTITY_TIMEOUT: Duration = Duration::from_millis(250);
+/// At most this many addresses learned from probers (see `HEXDB_SEEN`).
+const MAX_LEARNED: usize = 64;
 /// A peer that didn't answer this many consecutive rounds is marked lost...
 const LOST_AFTER_ROUNDS: u32 = 3;
 /// ...and forgotten after this many.
@@ -114,6 +123,9 @@ pub struct PeerHex {
     /// Where the hex runs (`identity.region`, or Fly.io's region).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub region: String,
+    /// The discovery addresses of the hexes this one sees (see `learn`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knows: Vec<String>,
 }
 
 fn all_slices() -> crate::slicing::SliceMask {
@@ -214,6 +226,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         replication_source,
         machine_id: crate::updates::machine_id(),
         region: config.identity.effective_region(),
+        knows: engine.peers.lock().await.iter().filter(|m| m.status == "active").map(|m| m.hex.ip.clone()).collect(),
     }
 }
 
@@ -263,14 +276,60 @@ pub async fn start_discovery_listener(engine: Arc<HexDBEngine>, listener: Arc<Tc
                         return;
                     }
                     let identity = answer_identity(&engine).await;
-                    if let Ok(json) = serde_json::to_string(&identity) {
-                        let reply = engine.lattice_keys.identity_reply(key_index, &nonce, &json);
-                        let _ = socket.write_all(format!("{}\n", reply).as_bytes()).await;
+                    let Ok(json) = serde_json::to_string(&identity) else { return };
+                    let reply = engine.lattice_keys.identity_reply(key_index, &nonce, &json);
+                    if socket.write_all(format!("{}\n", reply).as_bytes()).await.is_err() {
+                        return;
+                    }
+                    // The prober's own address, so this hex probes it back. Hexes
+                    // before 2.3.3 don't send one and close the connection instead.
+                    let mut line = String::new();
+                    let read = tokio::time::timeout(PROBE_TIMEOUT, BufReader::new(&mut socket).take(512).read_line(&mut line)).await;
+                    if matches!(read, Ok(Ok(n)) if n > 0) {
+                        if let Some(addr) = engine.lattice_keys.check_seen(key_index, &nonce, &line) {
+                            learn(&engine, addr, socket.peer_addr().ok());
+                        }
                     }
                 });
             }
             Err(e) => warn!(%e, "❗ Discovery accept failed."),
         }
+    }
+}
+
+/// Remember a hex's discovery address, to probe it in the next rounds: a
+/// prober's own (`from` is where it connected from: a loopback or wildcard
+/// host is reached there), or one a peer knows.
+fn learn(engine: &HexDBEngine, addr: &str, from: Option<std::net::SocketAddr>) {
+    let mut addr = addr.to_string();
+    if is_local_or_wildcard(host_of(&addr)) {
+        let Some(from) = from else {
+            // A loopback address a peer knows is on its machine, which may be this one.
+            if !matches!(host_of(&addr), "0.0.0.0" | "[::]") {
+                remember(engine, addr);
+            }
+            return;
+        };
+        if !from.ip().is_loopback() {
+            let ip = match from.ip() {
+                std::net::IpAddr::V4(v4) => v4.to_string(),
+                std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or_else(|| format!("[{}]", v6)),
+            };
+            addr = with_host(&addr, &ip);
+        } else if matches!(host_of(&addr), "0.0.0.0" | "[::]") {
+            addr = with_host(&addr, "127.0.0.1");
+        }
+    }
+    remember(engine, addr);
+}
+
+fn remember(engine: &HexDBEngine, addr: String) {
+    let mut learned = engine.learned_peers.lock().unwrap();
+    if learned.len() >= MAX_LEARNED && !learned.contains_key(&addr) {
+        return;
+    }
+    if learned.insert(addr.clone(), std::time::Instant::now()).is_none() {
+        debug!(%addr, "📡 Learned of a hex; probing it from now on.");
     }
 }
 
@@ -397,10 +456,10 @@ async fn expand_targets(targets: Vec<String>) -> Vec<String> {
 /// Send an authenticated hello to one address and verify the reply. A hex
 /// that doesn't answer the current key is tried with previous keys (a
 /// lattice part-way through a secret rotation).
-async fn probe_peer(addr: String, keys: LatticeKeys) -> Option<PeerHex> {
+async fn probe_peer(addr: String, keys: LatticeKeys, me: String) -> Option<PeerHex> {
     let attempt = PROBE_TIMEOUT;
     for index in 0..keys.len() {
-        match tokio::time::timeout(attempt, probe_with_key(&addr, &keys, index)).await {
+        match tokio::time::timeout(attempt, probe_with_key(&addr, &keys, index, &me)).await {
             Ok(Probe::Found(peer)) => return Some(*peer),
             Ok(Probe::Unreachable) => return None,
             Ok(Probe::Refused) | Err(_) => continue,
@@ -417,7 +476,7 @@ enum Probe {
     Refused,
 }
 
-async fn probe_with_key(addr: &str, keys: &LatticeKeys, index: usize) -> Probe {
+async fn probe_with_key(addr: &str, keys: &LatticeKeys, index: usize, me: &str) -> Probe {
     let Ok(mut stream) = TcpStream::connect(addr).await else { return Probe::Unreachable };
     let (hello, nonce) = keys.hello_with(index);
     if stream.write_all(format!("{}\n", hello).as_bytes()).await.is_err() {
@@ -435,6 +494,10 @@ async fn probe_with_key(addr: &str, keys: &LatticeKeys, index: usize) -> Probe {
         return Probe::Refused;
     };
     let Ok(mut peer) = serde_json::from_str::<PeerHex>(payload) else { return Probe::Refused };
+    // Tell it where this hex is, so it probes back (see `learn`).
+    if !me.is_empty() {
+        let _ = stream.write_all(format!("{}\n", keys.seen_line(index, &nonce, me)).as_bytes()).await;
+    }
     Probe::Found(Box::new(fix_endpoint(addr, &mut peer)))
 }
 
@@ -455,6 +518,11 @@ fn fix_endpoint(addr: &str, peer: &mut PeerHex) -> PeerHex {
 
 /// Probe every target once and return the hexes in our lattice (excluding ourselves).
 pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str) -> Vec<PeerHex> {
+    discover_peers_with(config, local_id, local_name, Vec::new()).await
+}
+
+/// `discover_peers`, also probing `learned` addresses (hexes that probed this one).
+async fn discover_peers_with(config: &HexConfig, local_id: &str, local_name: &str, learned: Vec<String>) -> Vec<PeerHex> {
     let keys = match config.lattice_keys() {
         Ok(keys) => LatticeKeys::with_previous(&keys),
         Err(e) => {
@@ -462,10 +530,16 @@ pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str
             return Vec::new();
         }
     };
-    let probes = expand_targets(probe_targets(config)).await.into_iter().map(|addr| {
+    let me = advertised(config, &config.network.discovery_endpoint);
+    let mut targets = probe_targets(config);
+    targets.extend(learned.into_iter().filter(|t| *t != me));
+    targets.sort();
+    targets.dedup();
+    let probes = expand_targets(targets).await.into_iter().map(|addr| {
         let keys = keys.clone();
+        let me = me.clone();
         let budget = PROBE_TIMEOUT * keys.len() as u32;
-        async move { tokio::time::timeout(budget, probe_peer(addr, keys)).await.ok().flatten() }
+        async move { tokio::time::timeout(budget, probe_peer(addr, keys, me)).await.ok().flatten() }
     });
 
     let mut peers: Vec<PeerHex> = Vec::new();
@@ -646,7 +720,13 @@ pub async fn elect_now(engine: &HexDBEngine) {
 /// weren't `on_time` (this hex was starved) count no misses.
 pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: bool) {
     let started = std::time::Instant::now();
-    let found = discover_peers(&engine.config, &engine.id.to_string(), &engine.name).await;
+    // Addresses learned from probers, until they stop probing for as long as a lost peer is kept.
+    let learned: Vec<String> = {
+        let mut learned = engine.learned_peers.lock().unwrap();
+        learned.retain(|_, heard| heard.elapsed() <= interval * FORGET_AFTER_ROUNDS);
+        learned.keys().cloned().collect()
+    };
+    let found = discover_peers_with(&engine.config, &engine.id.to_string(), &engine.name, learned).await;
     // Probing itself took far longer than its timeout allows: this hex was starved while asking.
     let on_time = on_time && started.elapsed() <= PROBE_TIMEOUT * 2 + Duration::from_secs(1);
     let now = Utc::now();
@@ -655,6 +735,11 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: 
     let live: Vec<PeerHex> = {
         let mut members = engine.peers.lock().await;
         let answered: Vec<String> = found.iter().map(|p| p.id.clone()).collect();
+        for peer in &found {
+            for addr in &peer.knows {
+                learn(engine, addr, None);
+            }
+        }
         for peer in found {
             match members.iter_mut().find(|m| m.hex.id == peer.id) {
                 Some(member) => {
@@ -724,6 +809,7 @@ mod tests {
             replication_source: String::new(),
             machine_id: String::new(),
             region: String::new(),
+            knows: Vec::new(),
         }
     }
 

@@ -170,6 +170,21 @@ impl LatticeKeys {
         format!("HEXDB_IDENTITY {} {}", json, tag.to_hex())
     }
 
+    /// The line a prober sends after a genuine identity reply: its own
+    /// discovery address, so the hex it probed can probe it back.
+    pub fn seen_line(&self, index: usize, nonce: &str, addr: &str) -> String {
+        let tag = mac(&self.sets[index].discovery, &[b"seen", nonce.as_bytes(), addr.as_bytes()]);
+        format!("HEXDB_SEEN {} {}", addr, tag.to_hex())
+    }
+
+    /// Check a prober's `seen_line` for the hello's nonce; returns its address if genuine.
+    pub fn check_seen<'a>(&self, index: usize, nonce: &str, line: &'a str) -> Option<&'a str> {
+        let rest = line.trim_end().strip_prefix("HEXDB_SEEN ")?;
+        let (addr, tag) = rest.rsplit_once(' ')?;
+        let tag = parse_mac(tag)?;
+        (!addr.is_empty() && !addr.contains(' ') && mac(&self.sets[index].discovery, &[b"seen", nonce.as_bytes(), addr.as_bytes()]) == tag).then_some(addr)
+    }
+
     /// Check an identity reply to a hello sent with key `index`; returns the JSON if genuine.
     pub fn check_identity<'a>(&self, index: usize, nonce: &str, line: &'a str) -> Option<&'a str> {
         let rest = line.trim_end().strip_prefix("HEXDB_IDENTITY ")?;

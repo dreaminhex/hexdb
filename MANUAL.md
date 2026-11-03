@@ -2003,7 +2003,10 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 Every hex runs a TCP discovery listener (`network.discovery_endpoint`, default port 7702). A hex that can't open it (another program has the port) stops at startup with `Failed to bind the discovery endpoint`, as it does for the API port, since an unreachable hex can't replicate, vote or fail over. Every `discovery_interval_seconds` (10), it probes:
 - the seed addresses in `network.peers` (other hexes' discovery endpoints);
-- the local ports 7702-7709, unless `scan_local_ports = false`.
+- the local ports 7702-7709, unless `scan_local_ports = false`;
+- hexes it learned of (2.3.3 and later): any hex that probes it, and the hexes each peer sees.
+
+A hex that probes another tells it its own discovery address, and each hex's answer lists the hexes it sees. So one seed address is enough: a new hex that lists any one member finds the rest, and every member finds it, without changing their `peers`. A learned address is dropped once no hex has mentioned it for 30 rounds, and a hex keeps at most 64. Only hexes holding the lattice key can be learned. Hexes before 2.3.3 still see only the hexes in their own `peers`.
 
 A peer given by name is probed at every address the name resolves to, so one name can stand for a group of hexes: Fly.io's `<app>.internal`, a Kubernetes headless service, or round-robin DNS.
 
@@ -2125,7 +2128,7 @@ Spawned hexes live in `.hexdb-local/hex-N/` next to the config, on free ports, w
 For hexes on different machines:
 - bind `api_endpoint` and `discovery_endpoint` to `0.0.0.0` or the machine's address;
 - set `network.advertise_host` to the address other hexes should use;
-- list the other hexes in `peers`;
+- list at least one other hex in `peers` (the hexes find the rest; listing more helps when one of them is down);
 - open the API and discovery ports between them;
 - give every hex the same `lattice_name` and `lattice_secret`.
 

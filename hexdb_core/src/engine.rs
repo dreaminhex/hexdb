@@ -219,6 +219,8 @@ pub struct HexDBEngine {
     /// This hex's identity as of the last discovery round, for answering
     /// discovery when building a fresh one takes too long (see discovery).
     pub(crate) identity_cache: std::sync::RwLock<Option<crate::network::discovery::PeerHex>>,
+    /// Discovery addresses of hexes that probed this one, with when they last did.
+    pub(crate) learned_peers: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 
     storage_dir: PathBuf,
     wal_dir: PathBuf,
@@ -516,6 +518,7 @@ impl HexDBEngine {
             start_datetime: Utc::now(),
             peers: Arc::new(Mutex::new(Vec::new())),
             identity_cache: std::sync::RwLock::new(None),
+            learned_peers: std::sync::Mutex::new(std::collections::HashMap::new()),
             config,
             storage_dir,
             wal_dir,
