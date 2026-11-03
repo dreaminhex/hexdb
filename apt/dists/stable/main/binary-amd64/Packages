@@ -1,25 +1,5 @@
 Package: hexdb
 Architecture: amd64
-Version: 2.1.2-1
-Priority: optional
-Section: database
-Maintainer: Dream In Hex <matthew@dreaminhex.com>
-Installed-Size: 59388
-Depends: adduser, ca-certificates, libc6 (>= 2.28)
-Filename: pool/main/h/hexdb/hexdb_2.1.2-1_amd64.deb
-Size: 16106820
-MD5sum: 9e2e23cd997686d5e960134601bd050c
-SHA1: 5aceeebd6c57d404c719a2ae594ccb12d425d1f4
-SHA256: c3bbd721379908556306bfccb2d3b7abfea3d74534f252cc47295091615ffbb2
-SHA512: cbbd7396a80b506e5e7322eee3a2af696bc86dfd4348bbed070b89863e7e4de301706e186dfcb5097dea1b2b38e67579460f66a530601f576b36bbc9d3e7b3ae
-Homepage: https://hexdb-website.vercel.app
-Description: HexDB server: a document database with REST, GraphQL, replication and an admin
- UI
- HexDB, a document database: the server, the hexdb CLI, the admin UI and the
- ODBC driver.
-
-Package: hexdb
-Architecture: amd64
 Version: 2.1.3-1
 Priority: optional
 Section: database
@@ -92,6 +72,26 @@ MD5sum: 05b9f397fd3d1112cf7cb580a5fd2e9d
 SHA1: 32ca1475ac425f3c4d8feaa1a3ff08de79c44b8a
 SHA256: 2517d68230cc472126e9dc2cff5c109f457b7e05743a515315aba90c0d1c4e51
 SHA512: c177a44caa5b2f503176782c679c7cd1a7c201718cc479915c737d2f37ffc172175e41a7140155b4d32510d6e09d7361de0a2d7735bc7db3fa394a0de8af1e6e
+Homepage: https://hexdb.app
+Description: HexDB server: a document database with REST, GraphQL, replication and an admin
+ UI
+ HexDB, a document database: the server, the hexdb CLI, the admin UI and the
+ ODBC driver.
+
+Package: hexdb
+Architecture: amd64
+Version: 2.3.2-1
+Priority: optional
+Section: database
+Maintainer: Dream In Hex <matthew@dreaminhex.com>
+Installed-Size: 63556
+Depends: adduser, ca-certificates, libc6 (>= 2.28)
+Filename: pool/main/h/hexdb/hexdb_2.3.2-1_amd64.deb
+Size: 17215860
+MD5sum: 9f33559e12711e6e2b26c4ce4ce2fc29
+SHA1: a9921e80620acd2af3f8e87ca0ac954a1c61aec3
+SHA256: b0521c64ca9b75ddcb706da13269cef16f6350c7c620434f1d5080400f0fee4f
+SHA512: 47335661c159ff825f9fd5814770b3bd887a023ad05632c7391ef3ea0bc79bd79999ba32ca4c2db83ae37b2aff048bfb05bc743e5c7056e9bfcb5940e08e6d28
 Homepage: https://hexdb.app
 Description: HexDB server: a document database with REST, GraphQL, replication and an admin
  UI
