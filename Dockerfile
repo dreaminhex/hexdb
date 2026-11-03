@@ -8,6 +8,15 @@
 #
 # Configuration: /etc/hexdb/hexdb.toml (docker/hexdb.toml), overridable with
 # HEXDB_<SECTION>__<FIELD> variables. See docker-compose.yml for a lattice.
+#
+# By default everything is built from source. A release builds the binaries
+# natively for each architecture first and passes them in instead, so nothing
+# compiles under emulation (see .github/workflows/release.yml):
+#
+#   prebuilt/amd64/{hexdb_api,hexdb}  prebuilt/arm64/{hexdb_api,hexdb}  prebuilt/ui/
+#   docker buildx build --build-arg BINARIES=prebuilt --platform linux/amd64,linux/arm64 .
+
+ARG BINARIES=source
 
 FROM node:22-bookworm-slim AS ui
 WORKDIR /src/hexdb_admin
@@ -36,6 +45,18 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --locked --release -p hexdb_api -p hexdb_cli \
  && cp target/release/hexdb_api target/release/hexdb /usr/local/bin/
 
+# The binaries and the admin UI, from one of these two (BINARIES): the other isn't built.
+FROM scratch AS source-binaries
+COPY --from=build /usr/local/bin/hexdb_api /usr/local/bin/hexdb /usr/local/bin/
+COPY --from=ui /src/hexdb_admin/dist /usr/share/hexdb/ui
+
+FROM scratch AS prebuilt-binaries
+ARG TARGETARCH
+COPY --chmod=0755 prebuilt/${TARGETARCH}/hexdb_api prebuilt/${TARGETARCH}/hexdb /usr/local/bin/
+COPY prebuilt/ui /usr/share/hexdb/ui
+
+FROM ${BINARIES}-binaries AS binaries
+
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl python3 nodejs \
@@ -43,8 +64,8 @@ RUN apt-get update \
  && useradd --system --uid 10001 --home-dir /var/lib/hexdb --shell /usr/sbin/nologin hexdb \
  && mkdir -p /var/lib/hexdb /etc/hexdb \
  && chown hexdb:hexdb /var/lib/hexdb
-COPY --from=build /usr/local/bin/hexdb_api /usr/local/bin/hexdb /usr/local/bin/
-COPY --from=ui /src/hexdb_admin/dist /usr/share/hexdb/ui
+COPY --from=binaries /usr/local/bin/ /usr/local/bin/
+COPY --from=binaries /usr/share/hexdb/ui /usr/share/hexdb/ui
 COPY docker/hexdb.toml /etc/hexdb/hexdb.toml
 COPY LICENSE THIRD-PARTY-NOTICES.md /usr/share/doc/hexdb/
 COPY plugins /usr/share/hexdb/plugins

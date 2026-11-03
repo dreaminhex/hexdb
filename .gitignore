@@ -45,3 +45,6 @@ drivers/java/target/
 
 # Claude Code settings and permissions for this machine (not shared)
 .claude/
+
+# Binaries passed to the Docker build by a release (see Dockerfile)
+prebuilt/
