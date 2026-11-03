@@ -84,9 +84,10 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          # Ready once it can serve: a new or re-syncing replica copies the data first.
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: api
             periodSeconds: 5
           livenessProbe:

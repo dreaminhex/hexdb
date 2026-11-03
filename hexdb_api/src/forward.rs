@@ -98,6 +98,7 @@ fn answers_without_data(path: &str) -> bool {
         || matches!(
             path,
             "/" | "/health"
+                | "/ready"
                 | "/status"
                 | "/status/history"
                 | "/logs"

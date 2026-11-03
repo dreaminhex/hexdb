@@ -436,6 +436,26 @@ fn a_hex_learns_the_hexes_that_probe_it() -> Result<()> {
 }
 
 #[test]
+fn a_hex_is_ready_only_once_it_has_the_data() -> Result<()> {
+    let ready = |s: &TestServer| -> Result<(u16, Value)> {
+        let r = hexdb_tests::http().build()?.get(s.url("/ready")).send()?;
+        Ok((r.status().as_u16(), r.json()?))
+    };
+    // A Replicant on its own never leads and has nothing to copy: not ready.
+    let cluster = Cluster::new(2)?;
+    // (It has no users to sign in with yet, and /ready needs none.)
+    let replicant = TestServer::start_with(TestOptions { no_admin_password: true, ..cluster.options(1, 1024, "replicant") })?;
+    let (code, body) = ready(&replicant)?;
+    assert_eq!(code, 503, "{}", body);
+    assert_eq!(body["status"], "not_ready");
+    // Once an Overseer is there and it has copied the data, it is; so is the Overseer.
+    let overseer = TestServer::start_with(cluster.options(0, 4096, "auto"))?;
+    wait_until(Duration::from_secs(60), "the Replicant to be ready", || Ok(ready(&replicant)?.0 == 200))?;
+    assert_eq!(ready(&overseer)?, (200, json!({ "status": "ready" })));
+    Ok(())
+}
+
+#[test]
 fn hexes_report_their_regions_and_the_lattice_counts_them() -> Result<()> {
     let cluster = Cluster::new(2)?;
     let in_region = |i: usize, ram_mb: u64, region: &str| TestOptions { identity_toml: format!("region = \"{}\"", region), ..cluster.options(i, ram_mb, "auto") };

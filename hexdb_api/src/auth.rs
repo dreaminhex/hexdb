@@ -68,7 +68,7 @@ enum Via {
 fn is_public(method: &Method, path: &str) -> bool {
     path == "/"
         || crate::routes::is_ui_path(path)
-        || (path == "/health" && method == Method::GET)
+        || ((path == "/health" || path == "/ready") && method == Method::GET)
         || (path == "/openapi.json" && method == Method::GET)
         // A2A discovery; it says nothing unless a2a.enabled, and /a2a itself needs credentials.
         || ((path == "/.well-known/agent-card.json" || path == crate::a2a::JWKS_PATH) && method == Method::GET)
@@ -603,6 +603,7 @@ mod tests {
             (Method::POST, "/lattice/ai-usage"),
             (Method::POST, "/auth/login"),
             (Method::GET, "/health"),
+            (Method::GET, "/ready"),
             (Method::GET, "/_s/Ab3dE7fG"),
             (Method::GET, "/_s/Ab3dE7fG/content"),
             (Method::POST, "/_s/Ab3dE7fG/unlock"),

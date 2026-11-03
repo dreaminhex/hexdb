@@ -261,7 +261,7 @@ kubectl logs hexdb-0 | grep -A2 "first administrator"                        # t
 - **Secrets.** On first install the chart creates a Secret with a new storage encryption key and lattice secret, keeps them on upgrades, and leaves the Secret in place if the release is deleted (`helm.sh/resource-policy: keep`), so the volumes stay readable. Back the key up (the install notes show how). To bring your own, create a Secret with `encryption-key` and `lattice-secret` (each `base64:<32 bytes>`, from `hexdb secret`) and set `existingSecret`. Every hex of the release shares the key.
 - **Settings.** `latticeName`, `admin.login`, `admin.email` and `admin.password` (empty: generated and printed once), `ramMb` (memory before flushing; also ranks hexes in elections), `diskMb` (default 90% of the volume), `resources`, `service`, `ingress`, and `extraEnv` for any other `HEXDB_<SECTION>__<FIELD>` setting. Lattice-wide settings (AI, CORS, A2A, ...) are set once, in the admin UI or with `hexdb config`.
 - **Hardening.** Pods run as the image's unprivileged user (10001) with a read-only root file system, no Linux capabilities, no privilege escalation and the runtime's default seccomp profile; `/tmp` is an emptyDir.
-- **Probes.** Readiness and liveness use `GET /health`.
+- **Probes.** Readiness uses `GET /ready`, so a pod gets traffic only once it has the data; liveness uses `GET /health`.
 - **A forgotten admin password:** `kubectl exec hexdb-0 -- hexdb reset-password`, on the Overseer's pod (see [A forgotten password](#a-forgotten-password)).
 
 ### As a service
@@ -1642,7 +1642,7 @@ Setting one up:
 ### Authentication
 
 Every API request needs credentials except:
-- `GET /health`;
+- `GET /health` and `GET /ready`;
 - `POST /auth/login`;
 - `GET /openapi.json`;
 - discovery documents: `GET /.well-known/agent-card.json` and `GET /.well-known/jwks.json` (with A2A on), and `GET /.well-known/oauth-protected-resource` (with OAuth on);
@@ -2514,6 +2514,7 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 
 ```bash
 curl http://localhost:7700/health                       # public: {"status": "ok"}; signed-in users also get name, role, version
+curl http://localhost:7700/ready                        # public: 200 {"status": "ready"}, or 503 with the reason (see below)
 curl http://localhost:7700/status                       # documents, memory, disk, operations, vertices, lattice, replication
 curl "http://localhost:7700/status/history?minutes=60"  # a metrics sample every 15 s, kept for 6 hours (survives restarts)
 curl "http://localhost:7700/logs?level=warn&limit=100"  # recent log records; ?after= tails, ?q= searches, ?target= filters by module
@@ -2552,6 +2553,8 @@ Hard-linked backups share disk blocks with the live data, so they don't protect 
 - The systemd unit restarts on failure, with the same crash-loop limit (`StartLimitBurst=5` in 10 minutes). `docker-compose.yml` uses `restart: unless-stopped`, and Fly.io restarts crashed machines.
 
 A hex that didn't shut down cleanly leaves its runtime file behind, and the next start reports the crash: a warning in the log, a `server.recovered` audit event, and `restarts` in `/status`: `unclean_shutdowns`, and for the last ones when the crashed process started, its PID and version, its last panic (message, source location and thread, from `last-panic.json`), how it exited if the supervisor saw it, the supervisor's restart count, and how long storage took to open. The last 20 reports are kept in `crashes.json` in the data directory. `panics_since_start` counts panics the process survived. A request that panics fails. A background task that panics (flushing, compaction, replication, discovery, triggers, schedules, streams, extraction, a plugin's runner, ...) is started again, after 1 s and then waiting longer (up to 60 s) while it keeps panicking; `tasks` lists each task with its `restarts`, `last_panic` and whether it's `running`, and the overview page shows a notice, and `supervised` says whether `hexdb supervise` runs it.
+
+**Readiness.** `GET /ready` (2.3.3 and later) answers 503 `{"status": "not_ready", "reason": ...}` while a hex shouldn't get traffic: a replica that hasn't copied the lattice's data yet, or is copying it again (a full sync), and a new Overseer collecting slices after a failover. Otherwise it answers 200 `{"status": "ready"}`. Point a load balancer's readiness or health check at it, and keep liveness on `/health`, which answers as soon as the process is up. On Fly.io, use it as the `http_service` check's `path`: Fly then sends no requests to a hex that is still copying (until then it answers sign-ins with 401 and reads of new documents with 404, since it doesn't have them yet). A first sync of a large lattice can take longer than `fly deploy` waits for a check, so add a new hex with `fly machine clone` rather than a deploy.
 
 **Monitoring.** Use the `@sinks/otlp` plugin for metrics, a logs plugin for logs, and the audit trail for security events. `/status` is suitable for health checks that need more than `/health`.
 

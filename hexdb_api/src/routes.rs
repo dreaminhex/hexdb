@@ -58,6 +58,7 @@ pub fn app_router(
 
         // Utility, Health, Status
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/openapi.json", get(openapi))
         .route("/status", get(status))
         .route("/status/history", get(status_history))

@@ -629,6 +629,40 @@
         }
       }
     },
+    "/ready": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Readiness: 503 while a replica copies the data or a new Overseer collects slices",
+        "operationId": "get_ready",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Ready: {\"status\": \"ready\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Not ready: {\"status\": \"not_ready\", \"reason\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/status": {
       "get": {
         "tags": [

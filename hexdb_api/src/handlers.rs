@@ -501,6 +501,34 @@ pub async fn health(State(engine): Engine, MaybeAuth(principal): MaybeAuth) -> J
     Json(body)
 }
 
+/// Whether this hex should get traffic: 200 when it can serve requests, 503
+/// with the reason while a replica copies the data for the first time (or
+/// again) or a new Overseer collects slices. For a load balancer's readiness
+/// check; `/health` says only that the process is up.
+pub async fn ready(State(engine): Engine) -> (StatusCode, Json<Value>) {
+    match not_ready(&engine) {
+        None => (StatusCode::OK, Json(json!({ "status": "ready" }))),
+        Some(reason) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "status": "not_ready", "reason": reason }))),
+    }
+}
+
+fn not_ready(engine: &HexDBEngine) -> Option<String> {
+    if let Some(note) = engine.rebuilding() {
+        return Some(note);
+    }
+    if engine.is_writable() {
+        return None;
+    }
+    let status = engine.replication.lock().unwrap();
+    if status.state == "syncing" {
+        return Some("This hex is copying the lattice's data from the Overseer.".into());
+    }
+    if status.history.is_none() {
+        return Some("This hex hasn't copied the lattice's data yet.".into());
+    }
+    None
+}
+
 /// Begin a graceful shutdown. Requires the token from the runtime file in the `x-hexdb-shutdown-token` header.
 /// An administrator's session or API key also works.
 pub async fn shutdown(State(engine): Engine, Extension(handle): Extension<ShutdownHandle>, MaybeAuth(principal): MaybeAuth, headers: HeaderMap) -> StatusCode {
