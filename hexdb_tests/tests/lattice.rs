@@ -221,7 +221,13 @@ fn replicas_follow_the_overseer_and_resync_after_failover() -> Result<()> {
     }
     wait_until(Duration::from_secs(10), "zero lag", || {
         let r = replication(&medium)?;
-        Ok(r["state"] == "streaming" && r["lag"] == 0)
+        Ok(r["state"] == "streaming" && r["lag"] == 0 && r["lag_ms"] == 0)
+    })?;
+    // Every hex shows the replica's lag in time, from discovery (2.3.3).
+    wait_until(Duration::from_secs(30), "lag_ms in the lattice view", || {
+        let status = medium.request(Method::GET, "/status", None, &[])?.body;
+        let hexes = status["network"]["lattice"]["hexes"].as_array().cloned().unwrap_or_default();
+        Ok(hexes.iter().any(|h| h["is_self"] == true && h["lag_ms"] == 0))
     })?;
 
     // A replica forwards writes to the Overseer (REST and GraphQL mutations).

@@ -36,7 +36,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { usePoll } from "@/hooks/use-poll"
 import { api, errorMessage, type MetricsSample, type Status, type Updates, type VertexStatus } from "@/lib/api"
 import { has, useAuth } from "@/lib/auth"
-import { formatBytes, formatDuration, formatNumber, formatPercent } from "@/lib/format"
+import { formatBytes, formatDuration, formatLag, formatNumber, formatPercent } from "@/lib/format"
 import { href, linkHandler } from "@/lib/router"
 import { cn } from "@/lib/utils"
 import { compareVersions, isNewer } from "@/lib/version"
@@ -509,7 +509,7 @@ function replicationState(hex: Status["network"]["lattice"]["hexes"][number]): s
     case "leading":
       return `writes · seq ${formatNumber(hex.applied_seq)}`
     case "streaming":
-      return hex.lag === null || hex.lag === undefined ? "replicating" : hex.lag === 0 ? "in sync" : `${formatNumber(hex.lag)} behind`
+      return formatLag(hex.lag, hex.lag_ms) ?? "replicating"
     case "syncing":
       return "full sync…"
     case "waiting":
@@ -659,7 +659,7 @@ function ReplicaBanner({ status }: { status: Status }) {
         )}
       </span>
       <span className="text-muted-foreground ml-auto text-xs">
-        {r.state === "streaming" && (r.lag ? `${formatNumber(r.lag)} changes behind` : "in sync")}
+        {r.state === "streaming" && formatLag(r.lag ?? 0, r.lag_ms)}
         {r.state === "syncing" && "full sync in progress"}
         {r.state === "waiting" && (r.last_error ?? "waiting for an Overseer")}
         {r.state === "error" && (r.last_error ?? "replication error")}

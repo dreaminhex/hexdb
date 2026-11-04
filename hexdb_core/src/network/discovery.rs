@@ -126,6 +126,10 @@ pub struct PeerHex {
     /// The discovery addresses of the hexes this one sees (see `learn`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub knows: Vec<String>,
+    /// A streaming replica's lag in time (see `ReplicationStatus::lag_ms`), so
+    /// every hex can show every replica's (2.3.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag_ms: Option<u64>,
 }
 
 fn all_slices() -> crate::slicing::SliceMask {
@@ -187,10 +191,10 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
     let config = &engine.config;
     let lattice_config = engine.lattice_config();
     let replication = if engine.is_writable() {
-        ("leading".to_string(), engine.changes.published_seq())
+        ("leading".to_string(), engine.changes.published_seq(), None)
     } else {
         let status = engine.replication.lock().unwrap();
-        (status.state.clone(), status.applied_seq)
+        (status.state.clone(), status.applied_seq, status.lag_ms(chrono::Utc::now()))
     };
     let (slices_held, replication_source) = {
         let status = engine.replication.lock().unwrap();
@@ -227,6 +231,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         machine_id: crate::updates::machine_id(),
         region: config.identity.effective_region(),
         knows: engine.peers.lock().await.iter().filter(|m| m.status == "active").map(|m| m.hex.ip.clone()).collect(),
+        lag_ms: replication.2,
     }
 }
 
@@ -810,6 +815,7 @@ mod tests {
             machine_id: String::new(),
             region: String::new(),
             knows: Vec::new(),
+            lag_ms: None,
         }
     }
 

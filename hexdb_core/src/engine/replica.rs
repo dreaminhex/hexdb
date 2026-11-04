@@ -113,6 +113,15 @@ impl HexDBEngine {
         self.replica_progress.lock().unwrap().get(hex).filter(|p| p.seen.elapsed() < PROGRESS_STALE).map(|p| p.applied_seq)
     }
 
+    /// When the first change after `after` was committed: a replica at `after`
+    /// is behind by that change's age. None when nothing is published after it.
+    pub async fn change_time_after(&self, after: u64) -> Option<chrono::DateTime<chrono::Utc>> {
+        if after >= self.changes.published_seq() {
+            return None;
+        }
+        self.changes_after(after, 1).await.ok()?.first().map(|c| c.timestamp)
+    }
+
     /// Replicas (polled recently) that have applied `seq`.
     fn acks_for(&self, seq: u64) -> usize {
         self.replica_progress.lock().unwrap().values().filter(|p| p.seen.elapsed() < PROGRESS_STALE && p.applied_seq >= seq).count()

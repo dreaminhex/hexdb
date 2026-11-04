@@ -192,6 +192,8 @@ export interface LatticeHex {
   applied_seq: number
   /** Changes behind the Overseer (replicas only, when known). */
   lag: number | null
+  /** How far behind in time, in ms: the age of the oldest change not yet applied (2.3.3+). */
+  lag_ms?: number | null
   /** replication.slicing on this hex, and how many of the 64 slices it keeps. */
   slicing?: boolean
   slices_held?: number
@@ -242,6 +244,8 @@ export interface ReplicationStatus {
   last_sync: string | null
   last_error: string | null
   lag?: number
+  /** This replica's lag in time, in ms (2.3.3+; streaming only). */
+  lag_ms?: number | null
   /** Set while a newly elected Overseer collects slices from the replicas. */
   rebuilding?: string | null
   /** While rebuilding: unreachable hexes holding slices no reachable hex has. */

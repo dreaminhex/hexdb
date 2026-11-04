@@ -199,6 +199,10 @@ pub struct ReplicationStatus {
     pub rebuilding: Option<String>,
     /// While rebuilding: the hexes, not reachable now, that hold slices no reachable hex has.
     pub waiting_for: Vec<String>,
+    /// When the oldest change this hex hasn't applied was committed on the
+    /// Overseer, as of the last batch (None when it was caught up). `lag_ms` is its age.
+    #[serde(skip)]
+    pub pending_since: Option<DateTime<Utc>>,
 }
 
 /// The Overseer answered 503: it's still collecting slices after a failover.
@@ -238,6 +242,7 @@ impl Default for ReplicationStatus {
             history: None,
             rebuilding: None,
             waiting_for: Vec::new(),
+            pending_since: None,
         }
     }
 }
@@ -247,6 +252,20 @@ impl ReplicationStatus {
     pub fn lag(&self) -> u64 {
         self.source_seq.saturating_sub(self.applied_seq)
     }
+
+    /// How far behind the Overseer this hex is in time: the age of the oldest
+    /// change it hasn't applied, 0 when caught up. Known only while streaming.
+    pub fn lag_ms(&self, now: DateTime<Utc>) -> Option<u64> {
+        if self.state != "streaming" {
+            return None;
+        }
+        Some(self.pending_since.map_or(0, |at| age_ms(at, now)))
+    }
+}
+
+/// Milliseconds from `at` to `now` (0 if `at` is in the future, as clocks differ a little between hexes).
+pub fn age_ms(at: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
+    u64::try_from((now - at).num_milliseconds()).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +372,10 @@ pub struct ChangeBatch {
     /// catalog at once instead of waiting for its periodic check.
     #[serde(default)]
     pub catalog: String,
+    /// When the first change after `last_seq` was committed (None when there's
+    /// none yet), so the replica knows how far behind it is in time (2.3.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_since: Option<DateTime<Utc>>,
 }
 
 impl HexDBEngine {
@@ -871,10 +894,18 @@ impl Follower {
         // Guard entries are only needed until the feed passes their version.
         session.guard.retain(|_, seq| *seq > batch.last_seq);
         let applied = batch.last_seq;
+        // An Overseer before 2.3.3 doesn't say when the next change was made; while
+        // still behind, the last change received is the closest known (an upper bound).
+        let pending_since = if applied >= batch.published_seq {
+            None
+        } else {
+            batch.pending_since.or_else(|| batch.changes.last().map(|c| c.timestamp))
+        };
         self.set_status(|s| {
             s.state = "streaming".into();
             s.applied_seq = applied;
             s.source_seq = batch.published_seq.max(applied);
+            s.pending_since = pending_since;
             s.last_error = None;
         });
         Ok(Duration::ZERO)
@@ -1190,6 +1221,21 @@ impl Follower {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lag_in_time_is_the_age_of_the_oldest_unapplied_change() {
+        let now = Utc::now();
+        let mut status = ReplicationStatus { state: "streaming".into(), ..Default::default() };
+        assert_eq!(status.lag_ms(now), Some(0), "caught up");
+        status.pending_since = Some(now - chrono::Duration::milliseconds(7));
+        assert_eq!(status.lag_ms(now), Some(7));
+        // Another hex's clock a little ahead counts as no lag, not an underflow.
+        status.pending_since = Some(now + chrono::Duration::milliseconds(5));
+        assert_eq!(status.lag_ms(now), Some(0));
+        // Unknown unless streaming (a full sync, an Overseer, waiting).
+        status.state = "syncing".into();
+        assert_eq!(status.lag_ms(now), None);
+    }
 
     #[test]
     fn a_continuation_resumes_replicas_at_or_a_little_behind_its_position() {

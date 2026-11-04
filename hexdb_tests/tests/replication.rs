@@ -93,7 +93,7 @@ fn replicas_resume_after_an_overseer_restart_without_a_full_sync() -> Result<()>
     wait_until(Duration::from_secs(10), "zero lag on the Overseer's view", || {
         let status = overseer.request(Method::GET, "/status", None, &[])?.body;
         let hexes = status["network"]["lattice"]["hexes"].as_array().cloned().unwrap_or_default();
-        Ok(hexes.iter().any(|h| h["is_self"] == false && h["lag"] == 0))
+        Ok(hexes.iter().any(|h| h["is_self"] == false && h["lag"] == 0 && h["lag_ms"] == 0))
     })?;
     Ok(())
 }

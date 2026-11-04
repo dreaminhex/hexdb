@@ -245,6 +245,7 @@ pub async fn changes(
             last_seq,
             published_seq: engine.changes.published_seq(),
             catalog: engine.catalog_fingerprint(),
+            pending_since: engine.change_time_after(last_seq).await,
         })
         .into_response());
     }
@@ -264,6 +265,7 @@ pub async fn changes(
                 last_seq,
                 published_seq: engine.changes.published_seq(),
                 catalog: engine.catalog_fingerprint(),
+                pending_since: engine.change_time_after(last_seq).await,
             })
             .into_response());
         }

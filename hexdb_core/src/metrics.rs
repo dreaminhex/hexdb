@@ -137,6 +137,9 @@ pub struct LatticeHex {
     pub applied_seq: u64,
     /// Changes behind the Overseer (replicas only, when known).
     pub lag: Option<u64>,
+    /// How far behind in time: the age of the oldest change it hasn't applied,
+    /// 0 when caught up (streaming replicas only, when known; 2.3.3).
+    pub lag_ms: Option<u64>,
     /// Whether the hex has `replication.slicing` on, and how many of the 64 slices it keeps.
     pub slicing: bool,
     pub slices_held: u32,
@@ -209,6 +212,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         replication_state: me.replication_state,
         applied_seq: me.applied_seq,
         lag: None,
+        lag_ms: me.lag_ms,
         slicing: me.slicing,
         slices_held: crate::slicing::count(me.slices_held),
         version: me.version,
@@ -229,6 +233,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             replication_state: member.hex.replication_state.clone(),
             applied_seq: member.hex.applied_seq,
             lag: None,
+            lag_ms: member.hex.lag_ms,
             slicing: member.hex.slicing,
             slices_held: crate::slicing::count(member.hex.slices_held),
             version: member.hex.version.clone(),
@@ -243,6 +248,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             if let Some(applied) = engine.replica_applied(&hex.id) {
                 hex.applied_seq = applied;
                 hex.lag = Some(head.saturating_sub(applied));
+                hex.lag_ms = Some(engine.change_time_after(applied).await.map_or(0, |at| crate::replication::age_ms(at, now)));
             }
         }
     }
@@ -333,6 +339,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
                 value["applied_seq"] = engine.changes.published_seq().into();
             } else {
                 value["lag"] = status.lag().into();
+                value["lag_ms"] = status.lag_ms(now).into();
             }
             value["slices_held_count"] = crate::slicing::count(status.slices_held).into();
             value["sliced_documents"] = sliced_documents.into();

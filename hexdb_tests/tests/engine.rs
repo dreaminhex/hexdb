@@ -92,6 +92,26 @@ async fn compaction_drops_deleted_and_expired_documents() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_replica_behind_is_behind_by_its_next_change() -> Result<()> {
+    let dir = TempDir::new()?;
+    let engine = open(dir.path(), 64, &KEY).await?;
+    let start = engine.changes.published_seq();
+    engine.insert_json("t", json!({ "n": 1 }), None).await?;
+    let first = engine.changes.published_seq();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    engine.insert_json("t", json!({ "n": 2 }), None).await?;
+
+    // A replica at `start` is behind by the first insert, at `first` by the second.
+    let a = engine.change_time_after(start).await.expect("a change after start");
+    let b = engine.change_time_after(first).await.expect("a change after the first insert");
+    assert!(b > a, "the later change was committed later");
+    assert!((b - a).num_milliseconds() >= 15);
+    // Caught up: nothing after the head.
+    assert_eq!(engine.change_time_after(engine.changes.published_seq()).await, None);
+    engine.shutdown().await
+}
+
+#[tokio::test]
 async fn sequence_numbers_never_go_backwards() -> Result<()> {
     let dir = TempDir::new()?;
     let engine = open(dir.path(), 64, &KEY).await?;
