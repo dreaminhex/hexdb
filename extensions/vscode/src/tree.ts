@@ -110,7 +110,7 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
             `**${md(h.name)}** — ${md(h.role)}${h.is_self ? " (connected: this hex answered the connection)" : ""}`,
             `Region: ${md(describeRegion(h.region))}`,
             `Status: ${md(h.status)}${h.replication_state ? `, ${md(h.replication_state)}` : ""}`,
-            h.lag !== null && h.lag !== undefined ? `Lag: ${md(h.lag)} changes` : "",
+            h.lag !== null && h.lag !== undefined ? (h.lag === 0 ? "Lag: caught up" : `Lag: ${md(h.lag)} changes behind`) : "",
             h.slicing && h.slices_held !== null && h.slices_held !== undefined ? `Slices held: ${md(h.slices_held)} of 64` : "",
             h.version ? `Version: ${md(h.version)}` : "",
           ]

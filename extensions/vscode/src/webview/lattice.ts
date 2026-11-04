@@ -25,7 +25,7 @@ function render(l: LatticeView): void {
       "header",
       { className: "lattice-head" },
       el("div", {}, el("h1", {}, l.name || "Lattice"), el("div", { className: "sub" }, `${l.connection} · ${l.url}`)),
-      refresh,
+      el("div", { className: "head-actions" }, el("span", { className: "updated" }, `Updated ${new Date(l.fetchedAt).toLocaleTimeString()}`), refresh),
     ),
   )
   if (l.error) app.append(el("div", { className: "error" }, l.error))
@@ -39,6 +39,14 @@ function render(l: LatticeView): void {
   stat("Connected to", l.answeredBy, "The hex that answered this connection. With an address in front of several hexes (such as a Fly.io app), it's usually the nearest one.")
   stat("Version", l.version)
   app.append(stats)
+  app.append(
+    el(
+      "div",
+      { className: "callout" },
+      el("strong", {}, "Roles. "),
+      "The Overseer takes writes; Harvesters and Replicants serve reads and keep copies, and Replicants never lead.",
+    ),
+  )
   if (l.answeredBy) {
     const host = hostOf(l.url)
     app.append(
@@ -57,14 +65,14 @@ function render(l: LatticeView): void {
   const grid = el("div", { className: "hexes" })
   for (const h of [...l.hexes].sort((a, b) => rank(a.role) - rank(b.role) || a.name.localeCompare(b.name))) grid.append(card(h))
   app.append(grid)
-  app.append(el("div", { className: "foot" }, `Updated ${new Date(l.fetchedAt).toLocaleTimeString()}. The Overseer takes writes; Harvesters and Replicants serve reads and keep copies, and Replicants never lead.`))
 }
 
 function card(h: HexView): HTMLElement {
   const up = h.status === "active"
   const rows: [string, string][] = []
   if (h.replicationState) rows.push(["Replication", h.replicationState])
-  if (h.lag !== null && h.lag !== undefined) rows.push(["Lag", `${h.lag} ${h.lag === 1 ? "change" : "changes"}`])
+  // HexDB measures lag in changes (writes this replica hasn't applied yet), not time.
+  if (h.lag !== null && h.lag !== undefined) rows.push(["Lag", h.lag === 0 ? "Caught up" : `${h.lag.toLocaleString()} ${h.lag === 1 ? "change" : "changes"} behind`])
   if (h.slicing && h.slicesHeld !== null && h.slicesHeld !== undefined) rows.push(["Slices", `${h.slicesHeld} of 64`])
   if (h.version) rows.push(["Version", h.version])
   if (h.preference && h.preference !== "auto") rows.push(["Prefers", h.preference])

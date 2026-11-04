@@ -1,6 +1,6 @@
 {
   "name": "hexdb",
-  "displayName": "HexDB",
+  "displayName": "HexDB for VS Code",
   "description": "Browse HexDB lattices, run SQL and GraphQL, and edit stored functions.",
   "version": "0.1.0",
   "publisher": "dreaminhex",

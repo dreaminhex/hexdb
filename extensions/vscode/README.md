@@ -1,4 +1,4 @@
-# HexDB for Visual Studio Code
+# HexDB for VS Code
 
 Work with [HexDB](https://hexdb.app) lattices from VS Code: see every hex and where it runs, browse tessellations, run SQL and GraphQL, and edit stored functions.
 
