@@ -11,6 +11,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Line tables only (backtraces keep file and line) and no incremental state: the
+  # ~50 test binaries with full debug info filled the runner's disk on a cold build
+  # (a Dependabot Cargo update misses the cache).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
 
 jobs:
   rust:
