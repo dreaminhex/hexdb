@@ -39,9 +39,27 @@ try (Connection db = DriverManager.getConnection("jdbc:hexdb://127.0.0.1:7700", 
 ```
 
 **URLs.**
-- `jdbc:hexdb://host:port` connects over HTTP; add `?ssl=true` for HTTPS.
+- `jdbc:hexdb://...` and `jdbc:hexdbs://...` take a HexDB connection URI (below): HTTP on port 7700 by default, or HTTPS on port 443.
+- `jdbc:hexdb://host:port?ssl=true` connects over HTTPS to that port (port 443 if none is given).
 - `jdbc:hexdb:https://host:port` (or `http://`) names the scheme directly.
 - Properties can go in the URL (`?apiKey=...&pageSize=500`) or in the `Properties` object, which wins.
+
+**Connection URIs.** Everything after `jdbc:` is a connection URI, the same string the other drivers accept (see [Connection URIs](../../MANUAL.md#connection-uris) in the manual):
+
+```text
+jdbc:hexdb://[login[:password]@]host[:port][/path][?apiKey=...&timeout=...&pageSize=...&caFile=...]
+jdbc:hexdbs://...
+```
+
+- The login and password become the `user` and `password` properties. Percent-encode `@`, `:`, `/` and `%` in them, and in option values.
+- A path is kept as the base of every request, for a server behind a reverse proxy at a prefix.
+- Option names ignore case. The JDBC-only properties (`ssl`, `connectTimeout`) also work as options; options the driver doesn't know are ignored.
+- Properties passed to `connect` win over the URI's values. A `user` or `password` property replaces the URI's `apiKey`, an `apiKey` property replaces its login, and the URI's password is only used with its own login.
+- A URI with no host, more than one host, a bad port, a fragment, a login together with `apiKey`, or an invalid option value is refused with an `SQLException` (SQLSTATE `08001`) naming the problem.
+
+```java
+Connection db = DriverManager.getConnection("jdbc:hexdbs://db.example.com?apiKey=" + System.getenv("HEXDB_API_KEY"));
+```
 
 **Properties.**
 
@@ -52,7 +70,7 @@ try (Connection db = DriverManager.getConnection("jdbc:hexdb://127.0.0.1:7700", 
 | `ssl` | `true` for HTTPS with `jdbc:hexdb://`. |
 | `caFile` | A PEM file of CA certificates to trust, besides the JVM's own (for a lattice with a private CA). |
 | `pageSize` | Rows per request, 1 to 10,000 (default 1,000). `Statement.setFetchSize` overrides it per statement. |
-| `timeout` | Seconds a request may take (default 60). |
+| `timeout` | Seconds a request may take, a positive whole number (default 60). |
 | `connectTimeout` | Seconds to connect (default 10). |
 
 ## What it supports

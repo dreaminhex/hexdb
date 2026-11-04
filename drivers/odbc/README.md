@@ -57,11 +57,12 @@ unixODBC also accepts the library path directly: `Driver=/usr/local/lib/libhexdb
 Driver={HexDB};Server=http://127.0.0.1:7700;ApiKey=hxk_...
 DSN=hexdb;ApiKey=hxk_...
 Driver={HexDB};Server=https://db.example.com;UID=analyst;PWD=...
+Driver={HexDB};Server=hexdbs://db.example.com?apiKey=hxk_...
 ```
 
 | Key | Meaning |
 | --- | --- |
-| `Server` | The server's address: `http://host:port` or `https://host:port`. A bare `host:port` means `http://` |
+| `Server` | The server's address: `http://host:port` or `https://host:port`, or a `hexdb://` or `hexdbs://` connection URI (below). A bare `host:port` means `http://` |
 | `ApiKey` (or `Token`) | An API key (create one on the admin UI's Account page) or a session token |
 | `UID`, `PWD` | Sign in with a login and password instead. Accounts with MFA need an API key |
 | `DSN` | A data source to read the other keys from; keys in the connection string win |
@@ -71,6 +72,21 @@ Driver={HexDB};Server=https://db.example.com;UID=analyst;PWD=...
 | `CAFile` | A PEM file of certificates to trust for HTTPS instead of the system's trust store |
 
 The completed connection string the driver returns to applications leaves out `ApiKey` and `PWD`, so tools that save connection strings don't store credentials.
+
+### Connection URIs
+
+`Server` also takes a HexDB connection URI, the same string the other drivers accept (see [Connection URIs](../../MANUAL.md#connection-uris) in the manual):
+
+```text
+hexdb://[login[:password]@]host[:port][/path][?apiKey=...&timeout=...&pageSize=...&caFile=...]
+hexdbs://...
+```
+
+- `hexdb://` is HTTP, by default on port 7700; `hexdbs://` is HTTPS, by default on port 443. A path is kept as the base of every request.
+- The URI's login and password fill in `UID` and `PWD`, and its `apiKey`, `timeout`, `pageSize` and `caFile` options fill in `ApiKey`, `Timeout`, `PageSize` and `CAFile`. Percent-encode `@`, `:`, `/`, `;` and `%` in them. Option names ignore case, and other options are ignored.
+- Keys given in the connection string or the DSN win over the URI's values. An explicit `ApiKey` replaces the URI's login, an explicit `UID` or `PWD` replaces its `apiKey`, and the URI's password is only used with its own login.
+- A URI with no host, more than one host, a bad port, a fragment, a login together with `apiKey`, or an invalid option value is refused with SQLSTATE `08001` and a message naming the problem.
+- Brace the value if it contains `;`: `Server={hexdbs://db.example.com?apiKey=...}`. The completed connection string gives the server as its `http://` or `https://` URL, without the URI's credentials.
 
 ## What it supports
 

@@ -8,6 +8,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Arrays;
@@ -65,6 +68,121 @@ class UnitTest {
         p.setProperty("apiKey", "from-properties");
         assertEquals("from-properties", Client.settings("jdbc:hexdb://h?apiKey=from-url", p).get("apikey"));
         assertThrows(SQLException.class, () -> Client.settings("jdbc:hexdb:h:7700", null));
+    }
+
+    /** The shared vectors in drivers/testing/connection-uris.json, each prefixed with jdbc:. */
+    @Test
+    void connectionUriVectors() throws Exception {
+        Path file = Paths.get(System.getProperty("basedir", ".")).resolve("../testing/connection-uris.json");
+        Map<?, ?> vectors = (Map<?, ?>) Json.parse(Files.readString(file));
+        List<?> valid = (List<?>) vectors.get("valid");
+        List<?> invalid = (List<?>) vectors.get("invalid");
+        assertFalse(valid.isEmpty());
+        assertFalse(invalid.isEmpty());
+        for (Object v : valid) {
+            Map<?, ?> t = (Map<?, ?>) v;
+            String url = "jdbc:" + t.get("uri");
+            assertTrue(new HexDBDriver().acceptsURL(url), url);
+            Map<String, String> s = Client.settings(url, null);
+            assertEquals(t.get("url"), s.get("server"), url);
+            assertEquals(t.get("login"), s.get("user"), url);
+            assertEquals(t.get("password"), s.get("password"), url);
+            assertEquals(t.get("apiKey"), s.get("apikey"), url);
+            assertEquals(text(t.get("timeoutSeconds")), s.get("timeout"), url);
+            assertEquals(text(t.get("pageSize")), s.get("pagesize"), url);
+            assertEquals(t.get("caFile"), s.get("cafile"), url);
+        }
+        for (Object v : invalid) {
+            Map<?, ?> t = (Map<?, ?>) v;
+            String url = "jdbc:" + t.get("uri");
+            SQLException e = assertThrows(SQLException.class, () -> Client.settings(url, null), url);
+            assertEquals("08001", e.getSQLState(), url);
+            String reason = (String) t.get("reason");
+            String expected = reason.contains("host") ? "host"
+                : reason.contains("apiKey") ? "apiKey"
+                : reason.contains("timeout") ? "timeout"
+                : reason.contains("pageSize") ? "pageSize"
+                : reason.contains("port") ? "port"
+                : reason.contains("fragment") ? "fragment"
+                : reason.contains("//") ? "//"
+                : "hexdb";
+            assertTrue(e.getMessage().contains(expected), url + ": " + e.getMessage());
+        }
+    }
+
+    private static String text(Object number) {
+        return number == null ? null : number.toString();
+    }
+
+    @Test
+    void propertiesWinOverTheUri() throws SQLException {
+        Properties p = new Properties();
+        p.setProperty("timeout", "30");
+        p.setProperty("PageSize", "50");
+        p.setProperty("caFile", "/etc/ca.pem");
+        Map<String, String> s = Client.settings("jdbc:hexdbs://db.example.com?timeout=5&pageSize=500&caFile=x.pem&apiKey=from-uri", p);
+        assertEquals("30", s.get("timeout"));
+        assertEquals("50", s.get("pagesize"));
+        assertEquals("/etc/ca.pem", s.get("cafile"));
+        assertEquals("from-uri", s.get("apikey"));
+
+        // A login in the properties replaces the URI's API key, and an API key replaces its login.
+        Properties login = new Properties();
+        login.setProperty("user", "grace");
+        login.setProperty("password", "pw");
+        s = Client.settings("jdbc:hexdbs://db.example.com?apiKey=from-uri", login);
+        assertNull(s.get("apikey"));
+        assertEquals("grace", s.get("user"));
+        assertEquals("pw", s.get("password"));
+        Properties key = new Properties();
+        key.setProperty("apiKey", "hxk_props");
+        s = Client.settings("jdbc:hexdbs://ada:secret@db.example.com", key);
+        assertEquals("hxk_props", s.get("apikey"));
+        assertNull(s.get("user"));
+        assertNull(s.get("password"));
+        Properties other = new Properties();
+        other.setProperty("user", "grace");
+        other.setProperty("password", "pw2");
+        s = Client.settings("jdbc:hexdb://ada:secret@localhost", other);
+        assertEquals("grace", s.get("user"));
+        assertEquals("pw2", s.get("password"));
+
+        // The URI's password goes with its login only.
+        Properties userOnly = new Properties();
+        userOnly.setProperty("user", "grace");
+        s = Client.settings("jdbc:hexdb://ada:secret@localhost", userOnly);
+        assertEquals("grace", s.get("user"));
+        assertNull(s.get("password"));
+        Properties passwordOnly = new Properties();
+        passwordOnly.setProperty("password", "typed");
+        s = Client.settings("jdbc:hexdb://ada@localhost", passwordOnly);
+        assertEquals("ada", s.get("user"));
+        assertEquals("typed", s.get("password"));
+    }
+
+    @Test
+    void olderUrlFormsStillParse() throws SQLException {
+        assertEquals("http://h:7700", Client.settings("jdbc:hexdb://h:7700", null).get("server"));
+        assertEquals("https://h:8443", Client.settings("jdbc:hexdb://h:8443?ssl=true", null).get("server"));
+        assertEquals("https://h", Client.settings("jdbc:hexdb://h?ssl=true", null).get("server"));
+        assertEquals("https://h:7700", Client.settings("jdbc:hexdb://h:7700?tls=yes", null).get("server"));
+        Properties ssl = new Properties();
+        ssl.setProperty("ssl", "true");
+        assertEquals("https://h:7700", Client.settings("jdbc:hexdb://h:7700", ssl).get("server"));
+        assertEquals("http://127.0.0.1:7700", Client.settings("jdbc:hexdb:http://127.0.0.1:7700/", null).get("server"));
+        Map<String, String> s = Client.settings("jdbc:hexdb:https://h:8443/base?apiKey=k&connectTimeout=3", null);
+        assertEquals("https://h:8443/base", s.get("server"));
+        assertEquals("k", s.get("apikey"));
+        assertEquals("3", s.get("connecttimeout"));
+        s = Client.settings("jdbc:hexdb://h:7700?user=ada&password=p%40ss&connectTimeout=3", null);
+        assertEquals("ada", s.get("user"));
+        assertEquals("p@ss", s.get("password"));
+        assertEquals("3", s.get("connecttimeout"));
+        assertTrue(new HexDBDriver().acceptsURL("jdbc:hexdb:https://h"));
+        assertTrue(new HexDBDriver().acceptsURL("jdbc:hexdbs://h"));
+        assertTrue(new HexDBDriver().acceptsURL("JDBC:HEXDBS://h"));
+        assertFalse(new HexDBDriver().acceptsURL("jdbc:hexdbx://h"));
+        assertFalse(new HexDBDriver().acceptsURL(null));
     }
 
     @Test

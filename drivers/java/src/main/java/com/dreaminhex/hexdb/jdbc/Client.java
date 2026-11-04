@@ -34,7 +34,7 @@ import javax.net.ssl.X509TrustManager;
 
 /** HexDB's HTTP API, as the driver uses it: sign-in, /sql and the SQL catalog. */
 final class Client {
-    static final String PREFIX = "jdbc:hexdb:";
+    static final String JDBC = "jdbc:";
     static final int DEFAULT_PAGE_SIZE = 1000;
     static final int MAX_PAGE_SIZE = 10_000;
 
@@ -47,40 +47,87 @@ final class Client {
     String login = "";
     String serverVersion = "";
 
-    /** Settings from the URL and the connection properties (properties win). */
+    /** True for jdbc:hexdb:... and jdbc:hexdbs:... URLs (any case). */
+    static boolean accepts(String url) {
+        return url != null && url.regionMatches(true, 0, JDBC, 0, JDBC.length()) && ConnectionUri.hasScheme(url.substring(JDBC.length()));
+    }
+
+    /**
+     * Settings from the URL and the connection properties (properties win), by lowercased name,
+     * with "server" set to the HTTP base URL.
+     *
+     * <p>{@code jdbc:hexdb://...} and {@code jdbc:hexdbs://...} carry a connection URI (MANUAL.md,
+     * Connection URIs); its login and password become {@code user} and {@code password}, and
+     * {@code ssl=true} turns {@code hexdb://} into HTTPS (port 443 unless one is given).
+     * {@code jdbc:hexdb:http://...} and {@code jdbc:hexdb:https://...} name the server directly.
+     */
     static Map<String, String> settings(String url, Properties info) throws SQLException {
+        if (!accepts(url)) {
+            throw new SQLNonTransientConnectionException("Use jdbc:hexdb://host:port, jdbc:hexdbs://host or jdbc:hexdb:https://host:port.", "08001");
+        }
         Map<String, String> values = new LinkedHashMap<>();
-        String rest = url.substring(PREFIX.length());
-        int query = rest.indexOf('?');
-        if (query >= 0) {
-            for (String pair : rest.substring(query + 1).split("&")) {
-                if (pair.isEmpty()) {
-                    continue;
+        String rest = url.substring(JDBC.length());
+        String lower = rest.toLowerCase(Locale.ROOT);
+        ConnectionUri uri = null;
+        String server = null;
+        if (lower.startsWith("hexdb:http://") || lower.startsWith("hexdb:https://")) {
+            rest = rest.substring("hexdb:".length());
+            int query = rest.indexOf('?');
+            if (query >= 0) {
+                for (String pair : rest.substring(query + 1).split("&")) {
+                    if (pair.isEmpty()) {
+                        continue;
+                    }
+                    int eq = pair.indexOf('=');
+                    String key = eq < 0 ? pair : pair.substring(0, eq);
+                    String value = eq < 0 ? "" : pair.substring(eq + 1);
+                    values.put(key.toLowerCase(Locale.ROOT), URLDecoder.decode(value, StandardCharsets.UTF_8));
                 }
-                int eq = pair.indexOf('=');
-                String key = eq < 0 ? pair : pair.substring(0, eq);
-                String value = eq < 0 ? "" : pair.substring(eq + 1);
-                values.put(key.toLowerCase(Locale.ROOT), URLDecoder.decode(value, StandardCharsets.UTF_8));
+                rest = rest.substring(0, query);
             }
-            rest = rest.substring(0, query);
+            server = rest;
+            while (server.endsWith("/")) {
+                server = server.substring(0, server.length() - 1);
+            }
+        } else {
+            try {
+                uri = ConnectionUri.parse(rest);
+            } catch (IllegalArgumentException e) {
+                throw new SQLNonTransientConnectionException("Invalid HexDB URL: " + e.getMessage()
+                    + ". Use jdbc:hexdb://host:port, jdbc:hexdbs://host or jdbc:hexdb:https://host:port.", "08001");
+            }
+            // Every option, including JDBC-only ones such as ssl and connectTimeout.
+            values.putAll(uri.options);
+            if (uri.login != null) {
+                values.put("user", uri.login);
+                values.remove("password");
+                if (uri.password != null) {
+                    values.put("password", uri.password);
+                }
+            }
         }
         if (info != null) {
+            Map<String, String> given = new LinkedHashMap<>();
             for (String name : info.stringPropertyNames()) {
-                values.put(name.toLowerCase(Locale.ROOT), info.getProperty(name));
+                given.put(name.toLowerCase(Locale.ROOT), info.getProperty(name));
             }
+            // Credentials in the properties replace the URL's, whichever kind they are;
+            // the URL's password goes only with the URL's user.
+            if (given.containsKey("user") || given.containsKey("password")) {
+                values.remove("apikey");
+            }
+            if (given.containsKey("user") && !given.get("user").equals(values.get("user"))) {
+                values.remove("password");
+            }
+            if (given.containsKey("apikey")) {
+                values.remove("user");
+                values.remove("password");
+            }
+            values.putAll(given);
         }
-        // jdbc:hexdb://host:port, jdbc:hexdb:http://host:port or jdbc:hexdb:https://host:port
-        String server;
-        if (rest.startsWith("//")) {
-            boolean tls = isTrue(values.get("ssl")) || isTrue(values.get("tls"));
-            server = (tls ? "https:" : "http:") + rest;
-        } else if (rest.startsWith("http://") || rest.startsWith("https://")) {
-            server = rest;
-        } else {
-            throw new SQLNonTransientConnectionException("Use jdbc:hexdb://host:port (or jdbc:hexdb:https://host:port), not " + url + ".", "08001");
-        }
-        while (server.endsWith("/")) {
-            server = server.substring(0, server.length() - 1);
+        if (uri != null) {
+            boolean https = uri.secure || isTrue(values.get("ssl")) || isTrue(values.get("tls"));
+            server = uri.url(https);
         }
         values.put("server", server);
         return values;
@@ -111,7 +158,7 @@ final class Client {
         this.url = url;
         this.base = values.get("server");
         this.pageSize = number(values, "pageSize", DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE);
-        this.timeout = Duration.ofSeconds(number(values, "timeout", 60, 1, 3600));
+        this.timeout = Duration.ofSeconds(number(values, "timeout", 60, 1, Integer.MAX_VALUE));
         HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(number(values, "connectTimeout", 10, 1, 600)));
         String caFile = values.get("cafile");
         if (caFile != null && !caFile.isBlank()) {

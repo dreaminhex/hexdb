@@ -2731,7 +2731,7 @@ Driver={HexDB};Server=http://127.0.0.1:7700;ApiKey=hxk_...
 ```
 
 **Connection keys.**
-- `Server` and `ApiKey` (or `UID` and `PWD` to sign in) are the essentials.
+- `Server` and `ApiKey` (or `UID` and `PWD` to sign in) are the essentials. `Server` can be a [connection URI](#connection-uris) (`Server=hexdbs://...`; brace it if it contains `;`), whose credentials and options fill in the keys the connection string doesn't give.
 - `PageSize` sets rows per request (default 1,000).
 - `MaxStringLength` sets the size reported for text columns (default 4,000).
 - `Timeout` sets seconds per request (default 60).
@@ -2758,7 +2758,7 @@ The JDBC driver ([drivers/java](drivers/java)) is for Java tools and application
 Connection db = DriverManager.getConnection("jdbc:hexdb://127.0.0.1:7700?apiKey=" + System.getenv("HEXDB_API_KEY"));
 ```
 
-- **URLs and properties.** `jdbc:hexdb://host:port` (add `?ssl=true` for HTTPS, or write `jdbc:hexdb:https://host:port`), with `apiKey`, or `user` and `password`, plus `caFile`, `pageSize` and `timeout`.
+- **URLs and properties.** `jdbc:` followed by a [connection URI](#connection-uris): `jdbc:hexdb://host:port` (HTTP, port 7700 by default) or `jdbc:hexdbs://host` (HTTPS). `?ssl=true` and `jdbc:hexdb:https://host:port` still work. Credentials come from the URI or the `apiKey`, or `user` and `password`, properties, which win over the URI's; `caFile`, `pageSize` and `timeout` likewise. Before 2.3.3, `jdbc:hexdb://host` without a port meant port 80.
 - **Behavior.** Results are forward-only and read-only, fetched a page at a time. Types and the catalog follow the ODBC driver: booleans, `BIGINT`, `DOUBLE`, `VARCHAR`, and JSON text for objects and arrays; tessellations are tables in no catalog or schema, with `id` as the primary key. JDBC escape sequences are rewritten like ODBC's. There are no transactions: autocommit stays on, and `commit` and `rollback` do nothing.
 
 See [drivers/java/README.md](drivers/java/README.md) for every property, conversions, errors and limits.

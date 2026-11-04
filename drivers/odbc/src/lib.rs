@@ -5,7 +5,9 @@
 //! `GET /sql/columns`. It implements the Unicode (W) entry points; driver
 //! managers map ANSI calls onto them.
 //!
-//! Connection string keys: `Server` (http://host:7700), `ApiKey` (or `Token`),
+//! Connection string keys: `Server` (http://host:7700, or a hexdb:// or
+//! hexdbs:// connection URI whose credentials and options fill in the keys
+//! not given explicitly), `ApiKey` (or `Token`),
 //! `UID` and `PWD` (sign in instead of an API key), `PageSize` (rows per
 //! request, default 1000), `MaxStringLength` (size reported for text
 //! columns, default 4000), `Timeout` (seconds, default 60) and `CAFile` (PEM
@@ -21,6 +23,7 @@ pub mod ffi;
 mod info;
 mod stmt;
 mod text;
+mod uri;
 
 pub use api::*;
 

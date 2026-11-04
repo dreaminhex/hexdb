@@ -349,5 +349,21 @@ fn catalog_info_and_errors() -> Result<()> {
     assert_eq!(gone.0, "08001", "{:?}", gone);
     let none = connect("Driver={HexDB};ApiKey=x").err().expect("no server given");
     assert_eq!(none.0, "08001");
+
+    // A connection URI in Server= carries the credentials and options.
+    let host = server.url("").trim_start_matches("http://").trim_end_matches('/').to_string();
+    let encode = |s: &str| s.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{:02X}", b) }).collect::<String>();
+    let by_uri = format!("Driver={{HexDB}};Server={{hexdb://{}:{}@{}?pageSize=3}}", encode(TEST_ADMIN_LOGIN), encode(TEST_ADMIN_PASSWORD), host);
+    let odbc3 = connect(&by_uri).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let stmt = odbc3.query("SELECT COUNT(*) FROM orders")?;
+    assert_eq!(rows(stmt)?, vec![vec![Some("10".into())]]);
+    free(stmt);
+    let keyed = connect(&format!("Server={{hexdb://{}?apiKey={}}}", host, encode(server.token()))).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let stmt = keyed.query("SELECT COUNT(*) FROM orders")?;
+    assert_eq!(rows(stmt)?, vec![vec![Some("10".into())]]);
+    free(stmt);
+    let refused = connect(&format!("Server=hexdb://{}?pageSize=0;ApiKey=x", host)).err().expect("bad URI refused");
+    assert_eq!(refused.0, "08001", "{:?}", refused);
+    assert!(refused.1.contains("pageSize"), "{:?}", refused);
     Ok(())
 }

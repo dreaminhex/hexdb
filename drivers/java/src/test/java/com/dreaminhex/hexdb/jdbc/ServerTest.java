@@ -201,5 +201,29 @@ class ServerTest {
                 assertEquals(9, r.getInt(1));
             }
         }
+        // The same login in a connection URI, percent-encoded.
+        Assumptions.assumeTrue(URL.startsWith("http://"), "a plain HTTP test server");
+        String uri = "jdbc:" + URL.replaceFirst("^http://", "hexdb://" + enc(login) + ":" + enc(password) + "@") + "?pageSize=2";
+        try (Connection c = DriverManager.getConnection(uri)) {
+            assertEquals(login, c.getMetaData().getUserName());
+        }
+    }
+
+    @Test
+    void connectsWithAConnectionUri() throws SQLException {
+        Assumptions.assumeTrue(URL.startsWith("http://"), "a plain HTTP test server");
+        String uri = "jdbc:" + URL.replaceFirst("^http://", "hexdb://") + "?apiKey=" + enc(KEY) + "&pageSize=2&timeout=30";
+        try (Connection c = DriverManager.getConnection(uri);
+             ResultSet r = c.createStatement().executeQuery("SELECT n FROM jorders ORDER BY n")) {
+            int n = 0;
+            while (r.next()) {
+                assertEquals(n++, r.getInt(1));
+            }
+            assertEquals(9, n);
+        }
+    }
+
+    private static String enc(String s) {
+        return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20");
     }
 }

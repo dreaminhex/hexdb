@@ -12,7 +12,7 @@ import java.util.logging.Logger;
 
 /**
  * HexDB's JDBC driver. Connect with
- * {@code jdbc:hexdb://host:7700?apiKey=...} (or {@code jdbc:hexdb:https://host:7700},
+ * {@code jdbc:hexdb://host:7700?apiKey=...} or {@code jdbc:hexdbs://login:password@host} (or {@code jdbc:hexdb:https://host:7700},
  * or the user and password properties). See drivers/java/README.md.
  */
 public class HexDBDriver extends UnsupportedDriver {
@@ -51,7 +51,7 @@ public class HexDBDriver extends UnsupportedDriver {
 
     @Override
     public boolean acceptsURL(String url) {
-        return url != null && url.startsWith(Client.PREFIX);
+        return Client.accepts(url);
     }
 
     @Override

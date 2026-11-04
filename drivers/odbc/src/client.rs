@@ -57,7 +57,31 @@ impl Settings {
         let server = get("SERVER").or_else(|| get("URL")).ok_or_else(|| {
             OdbcError::new("08001", "No server given: add Server=http://host:7700 to the connection string or the DSN.")
         })?;
-        let server = if server.contains("://") { server } else { format!("http://{}", server) };
+        // A hexdb:// or hexdbs:// URI fills in the keys given neither here nor in the DSN.
+        let uri = if crate::uri::has_scheme(&server) {
+            Some(crate::uri::parse(&server).map_err(|e| OdbcError::new("08001", format!("Invalid Server URI: {}.", e)))?)
+        } else {
+            None
+        };
+        let server = match &uri {
+            Some(u) => u.url.clone(),
+            None if server.contains("://") => server,
+            None => format!("http://{}", server),
+        };
+        // Explicit keys win. An explicit API key replaces the URI's login, and an
+        // explicit UID or PWD the URI's API key; the URI's password goes only
+        // with the URI's login.
+        let (explicit_key, explicit_user, explicit_password) = (get("APIKEY").or_else(|| get("TOKEN")), get("UID"), get("PWD"));
+        let api_key = match (&explicit_key, &uri) {
+            (Some(k), _) => Some(k.clone()),
+            (None, Some(u)) if explicit_user.is_none() && explicit_password.is_none() => u.api_key.clone(),
+            _ => None,
+        };
+        let uri_login = uri.as_ref().filter(|_| explicit_key.is_none()).and_then(|u| u.login.clone());
+        let same_login = explicit_user.is_none() || explicit_user == uri_login;
+        let password = explicit_password.or_else(|| uri.as_ref().filter(|_| explicit_key.is_none() && same_login).and_then(|u| u.password.clone()));
+        let user = explicit_user.or(uri_login);
+        let uri_number = |f: fn(&crate::uri::ConnectionUri) -> Option<u32>, default: usize| uri.as_ref().and_then(f).map_or(default, |n| n as usize);
         let number = |k: &str, default: usize, min: usize, max: usize| -> Result<usize, OdbcError> {
             match get(k) {
                 None => Ok(default),
@@ -72,13 +96,13 @@ impl Settings {
             dsn: get("DSN"),
             driver: get("DRIVER"),
             server: server.trim_end_matches('/').to_string(),
-            api_key: get("APIKEY").or_else(|| get("TOKEN")),
-            user: get("UID"),
-            password: get("PWD"),
-            page_size: number("PAGESIZE", 1000, 1, 10_000)?,
+            api_key,
+            user,
+            password,
+            page_size: number("PAGESIZE", uri_number(|u| u.page_size, 1000), 1, 10_000)?,
             max_string_length: number("MAXSTRINGLENGTH", 4000, 1, 1 << 30)?,
-            timeout: Duration::from_secs(number("TIMEOUT", 60, 1, 86_400)? as u64),
-            ca_file: get("CAFILE"),
+            timeout: Duration::from_secs(number("TIMEOUT", uri_number(|u| u.timeout_seconds, 60), 1, u32::MAX as usize)? as u64),
+            ca_file: get("CAFILE").or_else(|| uri.as_ref().and_then(|u| u.ca_file.clone())),
         })
     }
 
@@ -248,4 +272,62 @@ fn percent_encode(text: &str) -> String {
             _ => format!("%{:02X}", b),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_takes_a_connection_uri() {
+        let s = Settings::resolve("Driver={HexDB};Server=hexdbs://db.example.com/hexdb?apiKey=hxk_1&timeout=10&pageSize=500&caFile=C%3A%5Cca.pem", None, None).unwrap();
+        assert_eq!(s.server, "https://db.example.com/hexdb");
+        assert_eq!(s.api_key.as_deref(), Some("hxk_1"));
+        assert_eq!(s.timeout, Duration::from_secs(10));
+        assert_eq!(s.page_size, 500);
+        assert_eq!(s.ca_file.as_deref(), Some(r"C:\ca.pem"));
+        assert_eq!(s.user, None);
+        // The completed connection string carries the HTTP URL, not the URI's credentials.
+        assert!(s.connection_string().contains("SERVER=https://db.example.com/hexdb;"));
+        assert!(!s.connection_string().contains("hxk_1"));
+
+        let s = Settings::resolve("Server=hexdb://ada:p%40ss@127.0.0.1", None, None).unwrap();
+        assert_eq!(s.server, "http://127.0.0.1:7700");
+        assert_eq!((s.user.as_deref(), s.password.as_deref()), (Some("ada"), Some("p@ss")));
+
+        let e = Settings::resolve("Server=hexdb://localhost?pageSize=0", None, None).unwrap_err();
+        assert_eq!(e.state, "08001");
+        assert!(e.message.contains("pageSize"), "{}", e.message);
+    }
+
+    #[test]
+    fn explicit_keys_win_over_the_uri() {
+        let uri = "Server=hexdbs://db.example.com?apiKey=hxk_uri&timeout=10&pageSize=500&caFile=uri.pem";
+        let s = Settings::resolve(&format!("{};ApiKey=hxk_mine;Timeout=30;PageSize=50;CAFile=mine.pem", uri), None, None).unwrap();
+        assert_eq!(s.api_key.as_deref(), Some("hxk_mine"));
+        assert_eq!(s.timeout, Duration::from_secs(30));
+        assert_eq!(s.page_size, 50);
+        assert_eq!(s.ca_file.as_deref(), Some("mine.pem"));
+
+        // A login given explicitly replaces the URI's API key, and an API key the URI's login.
+        let s = Settings::resolve(uri, Some("grace".into()), Some("pw".into())).unwrap();
+        assert_eq!((s.api_key.as_deref(), s.user.as_deref(), s.password.as_deref()), (None, Some("grace"), Some("pw")));
+        let s = Settings::resolve("Server=hexdb://ada:secret@localhost;ApiKey=hxk_mine", None, None).unwrap();
+        assert_eq!((s.api_key.as_deref(), s.user.as_deref(), s.password.as_deref()), (Some("hxk_mine"), None, None));
+
+        // The URI's password goes with its login only.
+        let s = Settings::resolve("Server=hexdb://ada:secret@localhost;UID=grace", None, None).unwrap();
+        assert_eq!((s.user.as_deref(), s.password.as_deref()), (Some("grace"), None));
+        let s = Settings::resolve("Server=hexdb://ada@localhost", None, Some("typed".into())).unwrap();
+        assert_eq!((s.user.as_deref(), s.password.as_deref()), (Some("ada"), Some("typed")));
+    }
+
+    #[test]
+    fn plain_servers_still_work() {
+        assert_eq!(Settings::resolve("Server=127.0.0.1:7700", None, None).unwrap().server, "http://127.0.0.1:7700");
+        assert_eq!(Settings::resolve("Server=https://db.example.com/;UID=a;PWD=b", None, None).unwrap().server, "https://db.example.com");
+        assert_eq!(Settings::resolve("URL=http://h:7710", None, None).unwrap().server, "http://h:7710");
+        let s = Settings::resolve("Server=http://h:7700;Timeout=5;PageSize=20", None, None).unwrap();
+        assert_eq!((s.timeout, s.page_size), (Duration::from_secs(5), 20));
+    }
 }
