@@ -2579,6 +2579,48 @@ The Node.js, Python and .NET drivers each cover:
 
 The Entity Framework Core provider and the ODBC and JDBC drivers, described below, build on them or on SQL. The three client drivers authenticate with an API key or a login, and retry 429 and 503 for reads and for writes that carry an idempotency key. Package names are as published by the release workflow. See [drivers/README.md](drivers/README.md) for examples and how to run their tests.
 
+### Connection URIs
+
+Every driver, and the VS Code extension, accepts one connection URI, so the same string works everywhere:
+
+```text
+hexdb://[login[:password]@]host[:port][/path][?option=value&...]
+hexdbs://...
+```
+
+- **Scheme.** `hexdb://` connects over HTTP, by default on port 7700. `hexdbs://` connects over HTTPS, by default on port 443. Plain `http://` and `https://` URLs still work wherever they did.
+- **Credentials.** A login and password before the host sign in with `POST /auth/login`. Percent-encode characters such as `@`, `:` and `/` in them (`p@ss` is `p%40ss`). Accounts with MFA need an API key instead.
+- **Host.** One host: a name, an IPv4 address, or an IPv6 address in brackets. Any hex of a lattice serves reads and passes writes to the Overseer, so point the URI at a name that reaches several hexes (Fly.io's `<app>.fly.dev`, a load balancer, round-robin DNS) rather than listing them.
+- **Path.** A path is kept as the base of every request, for a HexDB behind a reverse proxy at a prefix (`hexdbs://example.com/hexdb`).
+
+| Option | Meaning |
+| --- | --- |
+| `apiKey` | An API key (`hxk_...`), a session token, or an OAuth access token, sent as `Authorization: Bearer`. Not together with a login |
+| `timeout` | Seconds to wait for each request, a positive integer |
+| `pageSize` | Rows per request for drivers that page through SQL results (ODBC, JDBC, Entity Framework), 1 to 10,000 |
+| `caFile` | A PEM file of certificates to trust for HTTPS, where the platform allows it (ODBC, JDBC) |
+
+Option names ignore case. A driver ignores options it doesn't use, so one URI can be shared by tools in different languages. A URI that has no host, more than one host, a port outside 1 to 65535, a fragment, a login together with `apiKey`, or an option value that isn't valid is refused with an error naming the problem.
+
+```text
+hexdb://127.0.0.1:7700?apiKey=hxk_...
+hexdbs://analyst:s3cret%21@db.example.com
+hexdbs://hexdb-playground.fly.dev?timeout=10
+```
+
+Where each driver takes it:
+
+| Driver | Use |
+| --- | --- |
+| JavaScript | `new HexDB("hexdbs://...")`, or `HexDB.connect(uri)`, which also signs in |
+| Python | `HexDB("hexdbs://...")` signs in when the URI has a login |
+| .NET | `new HexDBClient("hexdbs://...")`, or `await HexDBClient.ConnectAsync(uri)`, which also signs in |
+| Entity Framework Core | `options.UseHexDB("hexdbs://...")` |
+| ODBC | `Driver={HexDB};Server=hexdbs://...`; keys in the connection string win over the URI's |
+| JDBC | `jdbc:hexdbs://...` (or `jdbc:hexdb://`); properties win over the URI's options |
+
+Keep credentials out of URIs that are logged or committed: give the URI without them and pass the API key separately, or read the whole URI from an environment variable. The test vectors every driver checks against are in [drivers/testing/connection-uris.json](drivers/testing/connection-uris.json).
+
 ### Entity Framework Core
 
 `HexDB.EntityFrameworkCore` (in [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore)) is an EF Core 9 provider built on `HexDB.Client`. Install it with `dotnet add package HexDB.EntityFrameworkCore` and configure a context:

@@ -39,7 +39,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test test/client.test.mjs"
+    "test": "npm run build && node --test test/uri.test.mjs test/client.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

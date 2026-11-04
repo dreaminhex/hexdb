@@ -3,6 +3,7 @@
 //
 //   import { HexDB } from "@dreaminhex/hexdb"
 //   const db = new HexDB({ url: "http://127.0.0.1:7700", apiKey: process.env.HEXDB_API_KEY })
+//   const db = new HexDB("hexdbs://db.example.com?apiKey=hxk_...")   // or a connection URI
 //   const orders = db.tessellation("orders")
 //   const { id } = await orders.insert({ customer: "ada", total: 12 })
 //   const page = await orders.query({ filter: { total: { $gt: 10 } }, sort: "-total" })
@@ -11,10 +12,17 @@
 //   await media.upload("photos/IMG_1.jpg", bytes)
 //   const hits = await media.search("glacier")  // names, tags and extracted metadata
 
+import { isConnectionUri, parseConnectionUri } from "./uri.js"
+
+export { isConnectionUri, parseConnectionUri, redactConnectionUri, type ConnectionUri } from "./uri.js"
+
 export interface Options {
-  /** Base URL of any hex, e.g. http://127.0.0.1:7700 (replicas forward writes to the Overseer). */
+  /**
+   * Base URL of any hex, e.g. http://127.0.0.1:7700 (replicas forward writes to the Overseer),
+   * or a connection URI (hexdb://, hexdbs://; see the manual's "Connection URIs").
+   */
   url: string
-  /** An API key (hxk_...) or a session token. */
+  /** An API key (hxk_...) or a session token. Wins over a connection URI's apiKey. */
   apiKey?: string
   /** Retries for 429 and 503 answers (honoring Retry-After). Default 3. */
   retries?: number
@@ -100,17 +108,55 @@ export class HexDB {
   private readonly retries: number
   private readonly timeoutMs: number
   private readonly fetcher: typeof fetch
+  /** A connection URI's login, signed in with before the first request. */
+  private pendingLogin?: { login: string; password: string }
+  private signingIn?: Promise<unknown>
 
-  constructor(options: Options) {
-    this.base = options.url.replace(/\/+$/, "")
-    this.token = options.apiKey
-    this.retries = options.retries ?? 3
-    this.timeoutMs = options.timeoutMs ?? 30_000
-    this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis)
+  /** Options, or a URL or connection URI (a URI's login signs in before the first request). */
+  constructor(options: Options | string) {
+    const opts: Options = typeof options === "string" ? { url: options } : options
+    let url = opts.url
+    let apiKey = opts.apiKey
+    let timeoutMs = opts.timeoutMs
+    if (isConnectionUri(url)) {
+      const uri = parseConnectionUri(url)
+      url = uri.url
+      apiKey ??= uri.apiKey ?? undefined
+      timeoutMs ??= uri.timeoutSeconds === null ? undefined : uri.timeoutSeconds * 1000
+      if (uri.login !== null && opts.apiKey === undefined) {
+        if (uri.password === null) throw new Error("The connection URI has a login but no password; use an API key for accounts without one")
+        this.pendingLogin = { login: uri.login, password: uri.password }
+      }
+    }
+    this.base = url.replace(/\/+$/, "")
+    this.token = apiKey
+    this.retries = opts.retries ?? 3
+    this.timeoutMs = timeoutMs ?? 30_000
+    this.fetcher = opts.fetch ?? globalThis.fetch.bind(globalThis)
+  }
+
+  /** Connect with a URL or connection URI and sign in now if it has a login (so bad credentials fail here). */
+  static async connect(options: Options | string): Promise<HexDB> {
+    const db = new HexDB(options)
+    await db.signInIfPending()
+    return db
+  }
+
+  /** The base URL requests go to. */
+  get url(): string {
+    return this.base
+  }
+
+  private async signInIfPending(): Promise<void> {
+    const pending = this.pendingLogin
+    if (!pending) return
+    this.signingIn ??= this.login(pending.login, pending.password).finally(() => (this.signingIn = undefined))
+    await this.signingIn
   }
 
   /** Send any request to the REST API and return the parsed JSON (undefined for 204). */
   async request<T = unknown>(method: Method, path: string, body?: unknown, headers: Record<string, string> = {}, timeoutMs = this.timeoutMs): Promise<T> {
+    if (this.pendingLogin && path !== "/auth/login") await this.signInIfPending()
     for (let attempt = 0; ; attempt++) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -150,6 +196,7 @@ export class HexDB {
 
   /** Send raw bytes (or nothing) and get the raw response; throws HexDBError on an error answer. */
   async requestRaw(method: Method, path: string, body?: BodyInit, headers: Record<string, string> = {}, timeoutMs = 600_000): Promise<Response> {
+    if (this.pendingLogin) await this.signInIfPending()
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     let response: Response
@@ -183,6 +230,7 @@ export class HexDB {
   async login(login: string, password: string, code?: string): Promise<{ user: unknown; expires_at: number }> {
     const result = await this.request<{ token: string; user: unknown; expires_at: number }>("POST", "/auth/login", { login, password, code, return_token: true })
     this.token = result.token
+    this.pendingLogin = undefined
     return { user: result.user, expires_at: result.expires_at }
   }
 
@@ -190,6 +238,7 @@ export class HexDB {
   async logout(): Promise<void> {
     await this.request("POST", "/auth/logout")
     this.token = undefined
+    this.pendingLogin = undefined
   }
 
   /** Whether the server is up (and, signed in, which hex answered). */

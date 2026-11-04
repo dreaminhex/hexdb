@@ -1,0 +1,40 @@
+{
+  "$comment": "Connection URI test vectors (MANUAL.md, Connection URIs). Every driver parses each `valid` URI to the fields given (null when absent; `url` has no trailing slash) and refuses each `invalid` one. Hosts are lowercased; option names ignore case.",
+  "valid": [
+    { "uri": "hexdb://localhost", "url": "http://localhost:7700", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdbs://hexdb-playground.fly.dev", "url": "https://hexdb-playground.fly.dev", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdbs://hexdb-playground.fly.dev/", "url": "https://hexdb-playground.fly.dev", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdb://127.0.0.1:7710?apiKey=hxk_abc123", "url": "http://127.0.0.1:7710", "login": null, "password": null, "apiKey": "hxk_abc123", "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdbs://ada:p%40ss%3Aw0rd%2F%25@db.example.com:8443/", "url": "https://db.example.com:8443", "login": "ada", "password": "p@ss:w0rd/%", "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdbs://db.example.com/hexdb?timeout=10&pageSize=500", "url": "https://db.example.com/hexdb", "login": null, "password": null, "apiKey": null, "timeoutSeconds": 10, "pageSize": 500, "caFile": null },
+    { "uri": "hexdbs://db.example.com/a/b/", "url": "https://db.example.com/a/b", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdb://[::1]:7700", "url": "http://[::1]:7700", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdb://[::1]", "url": "http://[::1]:7700", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "HEXDB://Db.Example.COM:7700?APIKEY=hxk_X&TimeOut=5", "url": "http://db.example.com:7700", "login": null, "password": null, "apiKey": "hxk_X", "timeoutSeconds": 5, "pageSize": null, "caFile": null },
+    { "uri": "hexdbs://db.example.com:443", "url": "https://db.example.com", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdb://db.example.com:80", "url": "http://db.example.com:80", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdbs://db.example.com?caFile=C%3A%5Ccerts%5Cca.pem", "url": "https://db.example.com", "login": null, "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": "C:\\certs\\ca.pem" },
+    { "uri": "hexdbs://db.example.com?apiKey=hxk_1&someOtherDriverOption=yes", "url": "https://db.example.com", "login": null, "password": null, "apiKey": "hxk_1", "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdb://ada@localhost:7700", "url": "http://localhost:7700", "login": "ada", "password": null, "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdb://ada:@localhost", "url": "http://localhost:7700", "login": "ada", "password": "", "apiKey": null, "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdbs://db.example.com?apiKey=hxk%2Ba%3Db", "url": "https://db.example.com", "login": null, "password": null, "apiKey": "hxk+a=b", "timeoutSeconds": null, "pageSize": null, "caFile": null },
+    { "uri": "hexdbs://db.example.com?pageSize=10000&timeout=1", "url": "https://db.example.com", "login": null, "password": null, "apiKey": null, "timeoutSeconds": 1, "pageSize": 10000, "caFile": null }
+  ],
+  "invalid": [
+    { "uri": "mongodb://localhost:27017", "reason": "not a hexdb or hexdbs URI" },
+    { "uri": "hexdb://", "reason": "no host" },
+    { "uri": "hexdb://:7700", "reason": "no host" },
+    { "uri": "hexdb://ada:pw@localhost?apiKey=hxk_1", "reason": "a login together with apiKey" },
+    { "uri": "hexdb://localhost?timeout=abc", "reason": "timeout isn't a positive integer" },
+    { "uri": "hexdb://localhost?timeout=0", "reason": "timeout isn't a positive integer" },
+    { "uri": "hexdb://localhost?pageSize=0", "reason": "pageSize outside 1 to 10,000" },
+    { "uri": "hexdb://localhost?pageSize=10001", "reason": "pageSize outside 1 to 10,000" },
+    { "uri": "hexdb://localhost:0", "reason": "port outside 1 to 65535" },
+    { "uri": "hexdb://localhost:65536", "reason": "port outside 1 to 65535" },
+    { "uri": "hexdb://localhost:abc", "reason": "port isn't a number" },
+    { "uri": "hexdb://a.example.com,b.example.com", "reason": "more than one host" },
+    { "uri": "hexdb://localhost#section", "reason": "a fragment" },
+    { "uri": "hexdb://localhost?apiKey=", "reason": "empty apiKey" },
+    { "uri": "hexdb:localhost", "reason": "no // after the scheme" }
+  ]
+}

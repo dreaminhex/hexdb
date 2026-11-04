@@ -17,4 +17,11 @@ await orders.insert({ customer: "ada", total: 12 })
 const page = await orders.query({ filter: { total: { $gt: 10 } }, sort: "-total" })
 ```
 
-Create an API key on the admin UI's Account page. The [driver documentation](https://github.com/dreaminhex/hexdb/tree/main/drivers) and the [manual](https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md) cover the rest. Licensed under the Apache License 2.0.
+Create an API key on the admin UI's Account page. A connection URI works too, the same one the other HexDB drivers take:
+
+```ts
+const db = new HexDB(process.env.HEXDB_URI!)              // e.g. hexdbs://db.example.com?apiKey=hxk_...
+const db2 = await HexDB.connect("hexdbs://ada:pw@db.example.com")  // signs in now; new HexDB(uri) signs in on first use
+```
+
+`parseConnectionUri` and `redactConnectionUri` are exported for tools that store URIs. The [driver documentation](https://github.com/dreaminhex/hexdb/tree/main/drivers) and the [manual](https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md) cover the rest. Licensed under the Apache License 2.0.
