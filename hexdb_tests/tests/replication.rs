@@ -41,32 +41,6 @@ fn has(server: &TestServer, id: &str) -> Result<bool> {
 }
 
 #[test]
-fn the_change_feed_survives_restarts() -> Result<()> {
-    let mut server = TestServer::start()?;
-    let ids: Vec<String> = (0..3).map(|i| server.insert("notes", &json!({ "n": i }))).collect::<Result<_>>()?;
-    server.restart()?;
-
-    // The in-memory feed starts empty after a restart; older changes come from disk.
-    let res = server.request(Method::GET, "/changes?after=0&limit=100", None, &[])?;
-    assert_eq!(res.status, 200, "{}", res.body);
-    let seen: Vec<&str> = res.body["changes"].as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
-    for id in &ids {
-        assert!(seen.contains(&id.as_str()), "{} in {:?}", id, seen);
-    }
-    assert_eq!(res.body["changes"][0]["op"], "put");
-    assert!(res.body["changes"][0]["document"]["n"].is_number());
-
-    // Without a change history, positions before the restart are gone.
-    let mut bare = TestServer::start_with(TestOptions { storage_toml: "change_history_hours = 0".into(), ..Default::default() })?;
-    bare.insert("notes", &json!({ "n": 1 }))?;
-    bare.restart()?;
-    let res = bare.request(Method::GET, "/changes?after=0", None, &[])?;
-    assert_eq!(res.status, 410, "{}", res.body);
-    assert_eq!(res.error_code(), Some("history_expired"));
-    Ok(())
-}
-
-#[test]
 fn replicas_resume_after_an_overseer_restart_without_a_full_sync() -> Result<()> {
     let ports = [TestServer::free_port()?, TestServer::free_port()?];
     let mut overseer = TestServer::start_with(pair(ports, 0, 4096, ""))?;
@@ -145,7 +119,7 @@ fn an_overseer_without_quorum_refuses_writes() -> Result<()> {
 }
 
 #[test]
-fn schemas_and_indexes_reach_every_hex_promptly() -> Result<()> {
+fn catalog_changes_and_sealed_fields_reach_the_replica() -> Result<()> {
     let ports = [TestServer::free_port()?, TestServer::free_port()?];
     let overseer = TestServer::start_with(pair(ports, 0, 4096, ""))?;
     let replica = TestServer::start_with(pair(ports, 1, 1024, ""))?;
@@ -178,21 +152,14 @@ fn schemas_and_indexes_reach_every_hex_promptly() -> Result<()> {
     let good = replica.request(Method::POST, "/customers", Some(&json!({ "email": "grace@example.com" })), &[])?;
     assert_eq!(good.status.as_u16(), 201, "{}", good.body);
     assert_eq!(good.body["_schema"], 1, "stamped with the lattice's schema version: {}", good.body);
-    Ok(())
-}
 
-#[test]
-fn sealed_fields_replicate_and_read_on_every_hex() -> Result<()> {
-    let ports = [TestServer::free_port()?, TestServer::free_port()?];
-    let overseer = TestServer::start_with(pair(ports, 0, 4096, ""))?;
-    let replica = TestServer::start_with(pair(ports, 1, 1024, ""))?;
+    // A masked field is sealed in replication: the replica receives the card sealed
+    // and opens it for reads, and masks still apply per caller.
     let role = json!({ "name": "clerk", "permissions": ["read"], "restrictions": { "payments": { "mask": { "card": { "show_last": 4 } } } } });
     let res = overseer.request(Method::POST, "/roles", Some(&role), &[])?;
     assert!(res.status.is_success(), "{}", res.body);
     let clerk = overseer.user_with_roles("cleo", json!([{ "name": "clerk", "tessellations": ["payments"] }]))?;
     let id = overseer.insert("payments", &json!({ "card": "4111111111111111", "amount": 25 }))?;
-
-    // The replica receives the card sealed and opens it for reads; masks still apply per caller.
     wait_until(Duration::from_secs(30), "the payment on the replica", || Ok(replica.get_doc("payments", &id)?.is_some()))?;
     assert_eq!(replica.get_doc("payments", &id)?.unwrap()["card"], "4111111111111111");
     let masked = replica.request_as(Some(&clerk), Method::GET, &format!("/payments/{}", id), None, &[])?;

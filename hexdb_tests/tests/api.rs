@@ -144,6 +144,11 @@ fn tessellation_lifecycle() -> Result<()> {
 
     let res = server.request(Method::POST, "/tessellations", Some(&json!({ "name": "../etc" })), &[])?;
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    // Names are checked the same when an insert creates the tessellation.
+    for name in ["has.dot", "bad%20name", "x".repeat(65).as_str()] {
+        let status = server.post_status(&format!("/{}", name), &json!({ "title": "x" }))?;
+        assert_eq!(status.as_u16(), 400, "name {:?} should be rejected", name);
+    }
 
     // Empty tessellations survive restarts.
     server.restart()?;
@@ -335,19 +340,6 @@ fn concurrent_requests_with_one_key_write_once() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Users and roles
 // ---------------------------------------------------------------------------
-
-#[test]
-fn roles_are_listed() -> Result<()> {
-    let server = TestServer::start()?;
-    let res = server.request(Method::GET, "/roles", None, &[])?;
-    let names: Vec<&str> = res.body["roles"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
-    for role in ["admin", "reader", "writer", "owner"] {
-        assert!(names.contains(&role), "{:?}", names);
-    }
-    assert_eq!(server.request(Method::GET, "/roles/admin", None, &[])?.status, StatusCode::OK);
-    assert_eq!(server.request(Method::GET, "/roles/nope", None, &[])?.status, StatusCode::NOT_FOUND);
-    Ok(())
-}
 
 #[test]
 fn user_lifecycle() -> Result<()> {

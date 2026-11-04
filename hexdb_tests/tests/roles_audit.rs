@@ -53,6 +53,8 @@ fn custom_roles_grant_exactly_their_permission_sets() -> Result<()> {
         assert!(names.contains(&name), "{} in {:?}", name, names);
     }
     assert_eq!(roles.body["permissions"].as_array().unwrap().len(), 16);
+    assert_eq!(server.request(Method::GET, "/roles/admin", None, &[])?.status, 200);
+    assert_eq!(server.request(Method::GET, "/roles/nope", None, &[])?.status, 404);
     Ok(())
 }
 

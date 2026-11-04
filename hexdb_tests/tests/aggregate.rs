@@ -19,7 +19,7 @@ fn seed(server: &TestServer) -> Result<()> {
 }
 
 #[test]
-fn aggregate_over_rest() -> Result<()> {
+fn aggregate_over_rest_and_graphql() -> Result<()> {
     let server = TestServer::start()?;
     seed(&server)?;
 
@@ -56,14 +56,8 @@ fn aggregate_over_rest() -> Result<()> {
     assert!(res.body["error"]["message"].as_str().unwrap().contains("$median"), "{}", res.body);
     let res = server.request(Method::POST, "/nothing_here/_aggregate", Some(&json!({})), &[])?;
     assert_eq!(res.status.as_u16(), 404);
-    Ok(())
-}
 
-#[test]
-fn aggregate_over_graphql() -> Result<()> {
-    let server = TestServer::start()?;
-    seed(&server)?;
-
+    // The same aggregations through GraphQL.
     let query = r#"{
         aggregate(
             tessellation: "orders",

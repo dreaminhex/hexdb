@@ -171,5 +171,15 @@ fn lattice_answers_are_signed_for_their_request() -> Result<()> {
     let res = client.get(server.url("/lattice/snapshot")).send()?;
     assert_eq!(res.status().as_u16(), 401);
     assert!(res.headers().get(hexdb_core::replication::LATTICE_RESPONSE_HEADER).is_none());
+
+    // Only a fresh lattice signature is a credential: not an admin session, the old
+    // static token header, or a malformed signature.
+    for path in ["/lattice/snapshot", "/lattice/catalog", "/lattice/changes?after=0", "/lattice/snapshot/users"] {
+        assert_eq!(server.request_as(None, Method::GET, path, None, &[])?.status.as_u16(), 401, "{}", path);
+        assert_eq!(server.request(Method::GET, path, None, &[("x-hexdb-lattice-token", "anything")])?.status.as_u16(), 401, "{}", path);
+        assert_eq!(server.request_as(None, Method::GET, path, None, &[("x-hexdb-lattice-signature", "1.2.3")])?.status.as_u16(), 401, "{}", path);
+    }
+    let res = server.request_as(None, Method::POST, "/lattice/revoke", Some(&json!({ "session_id": "x", "expires_at": 0 })), &[])?;
+    assert_eq!(res.status.as_u16(), 401);
     Ok(())
 }

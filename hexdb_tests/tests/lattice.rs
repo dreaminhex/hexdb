@@ -72,9 +72,10 @@ impl Cluster {
 #[test]
 fn hexes_elect_one_overseer_fail_over_and_do_not_flap() -> Result<()> {
     let cluster = Cluster::new(3)?;
-    let mut big = TestServer::start_with(cluster.options(0, 4096, "auto"))?;
-    let medium = TestServer::start_with(cluster.options(1, 2048, "auto"))?;
-    let replicant = TestServer::start_with(cluster.options(2, 8192, "replicant"))?;
+    let in_region = |i: usize, ram_mb: u64, role: &str, region: &str| TestOptions { identity_toml: format!("region = \"{}\"", region), ..cluster.options(i, ram_mb, role) };
+    let mut big = TestServer::start_with(in_region(0, 4096, "auto", "iad"))?;
+    let medium = TestServer::start_with(in_region(1, 2048, "auto", "ord"))?;
+    let replicant = TestServer::start_with(in_region(2, 8192, "replicant", "lhr"))?;
     let all = [&big, &medium, &replicant];
 
     // Everyone finds everyone.
@@ -98,6 +99,18 @@ fn hexes_elect_one_overseer_fail_over_and_do_not_flap() -> Result<()> {
             .map(|h| h["name"].as_str().unwrap())
             .collect();
         assert_eq!(overseers.len(), 1, "{:?}", overseers);
+        // ...and where each hex runs, and which regions the lattice spans.
+        let lattice = &s["network"]["lattice"];
+        assert_eq!(lattice["regions"], json!(["iad", "lhr", "ord"]), "{}", lattice);
+        let mut regions: Vec<(String, String)> = lattice["hexes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| (h["role"].as_str().unwrap_or_default().to_string(), h["region"].as_str().unwrap_or_default().to_string()))
+            .collect();
+        regions.sort();
+        let expected = [("Harvester", "ord"), ("Overseer", "iad"), ("Replicant", "lhr")];
+        assert_eq!(regions, expected.map(|(r, g)| (r.to_string(), g.to_string())).to_vec());
     }
 
     // Kill the Overseer: the medium hex takes over (the replicant still never leads).
@@ -108,6 +121,8 @@ fn hexes_elect_one_overseer_fail_over_and_do_not_flap() -> Result<()> {
         let s = status(&medium)?;
         Ok(s["network"]["lattice"]["hexes"].as_array().unwrap().iter().any(|h| h["status"] == "lost"))
     })?;
+    // The lattice counts only the regions of hexes that are up.
+    assert_eq!(status(&medium)?["network"]["lattice"]["regions"], json!(["lhr", "ord"]));
 
     // The big hex comes back but doesn't take leadership back.
     big.launch()?;
@@ -461,24 +476,3 @@ fn a_hex_is_ready_only_once_it_has_the_data() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn hexes_report_their_regions_and_the_lattice_counts_them() -> Result<()> {
-    let cluster = Cluster::new(2)?;
-    let in_region = |i: usize, ram_mb: u64, region: &str| TestOptions { identity_toml: format!("region = \"{}\"", region), ..cluster.options(i, ram_mb, "auto") };
-    let iad = TestServer::start_with(in_region(0, 4096, "iad"))?;
-    let lhr = TestServer::start_with(in_region(1, 2048, "lhr"))?;
-    wait_until(Duration::from_secs(20), "both hexes to see each other", || Ok(active_hexes(&iad)? == 2 && active_hexes(&lhr)? == 2))?;
-    for server in [&iad, &lhr] {
-        let lattice = status(server)?["network"]["lattice"].clone();
-        assert_eq!(lattice["regions"], json!(["iad", "lhr"]), "{}", lattice);
-        let mut regions: Vec<(String, String)> = lattice["hexes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|h| (h["role"].as_str().unwrap_or_default().to_string(), h["region"].as_str().unwrap_or_default().to_string()))
-            .collect();
-        regions.sort();
-        assert_eq!(regions, vec![("Harvester".to_string(), "lhr".to_string()), ("Overseer".to_string(), "iad".to_string())]);
-    }
-    Ok(())
-}

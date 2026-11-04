@@ -1,176 +1,73 @@
 //! Storage end-to-end tests: documents written through the API must read back
 //! correctly, including across graceful restarts, crashes, and flushes to SSTables.
-//!
-//! Tests marked `#[ignore]` describe known bugs (see TODO.md). Run them with:
-//!
-//!     cargo test -p hexdb_tests -- --ignored
-//!
-//! Remove the `#[ignore]` once the bug is fixed.
+//! (Single-document create, patch, replace and delete over REST are in api.rs.)
 
 use anyhow::Result;
 use hexdb_tests::{field, TestServer};
 use serde_json::json;
 use std::{fs::OpenOptions, io::Write, thread, time::Duration};
 
-// ---------------------------------------------------------------------------
-// Behavior that works today
-// ---------------------------------------------------------------------------
-
 #[test]
-fn server_reports_health() -> Result<()> {
+fn values_round_trip_with_their_types() -> Result<()> {
     let server = TestServer::start()?;
-    let health: serde_json::Value = server.get("/health")?.error_for_status()?.json()?;
-    assert_eq!(health["status"], "ok");
-    Ok(())
-}
-
-#[test]
-fn insert_then_read_back() -> Result<()> {
-    let server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "title": "Quantum Tessellation", "views": 445, "published": true }))?;
+    let id = server.insert(
+        "articles",
+        &json!({
+            "title": "Quantum Tessellation", "views": 445, "published": true,
+            // Strings stay strings, even ones that look like base64 ("abcd") or a word ("Test").
+            "name": "Test", "code": "abcd",
+            "tags": ["hexdb", "rust", "ai"], "author": { "name": "Ada", "id": 7 },
+        }),
+    )?;
 
     assert_eq!(server.count("articles")?, 1);
     let doc = server.get_doc("articles", &id)?.expect("document should exist");
     assert_eq!(field(&doc, "title"), Some(json!("Quantum Tessellation")));
     assert_eq!(field(&doc, "views"), Some(json!(445)));
     assert_eq!(field(&doc, "published"), Some(json!(true)));
-    Ok(())
-}
-
-#[test]
-fn patch_updates_only_given_fields() -> Result<()> {
-    let server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "title": "Original title", "views": 1 }))?;
-
-    server.patch("articles", &json!({ "id": id, "views": 2 }))?;
-
-    let doc = server.get_doc("articles", &id)?.expect("document should exist");
-    assert_eq!(field(&doc, "title"), Some(json!("Original title")));
-    assert_eq!(field(&doc, "views"), Some(json!(2)));
-    Ok(())
-}
-
-#[test]
-fn delete_removes_document() -> Result<()> {
-    let server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "title": "Doomed" }))?;
-
-    server.delete("articles", &id)?;
-
-    assert!(server.get_doc("articles", &id)?.is_none());
-    assert_eq!(server.count("articles")?, 0);
-    Ok(())
-}
-
-#[test]
-fn documents_survive_graceful_restart() -> Result<()> {
-    let mut server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "title": "Persistent" }))?;
-    server.insert("articles", &json!({ "title": "Also persistent" }))?;
-
-    server.restart()?;
-
-    assert_eq!(server.count("articles")?, 2);
-    let doc = server.get_doc("articles", &id)?.expect("document should survive restart");
-    assert_eq!(field(&doc, "title"), Some(json!("Persistent")));
-    Ok(())
-}
-
-#[test]
-fn acknowledged_writes_survive_crash() -> Result<()> {
-    let mut server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "title": "Crash survivor" }))?;
-
-    server.crash_and_restart()?;
-
-    assert!(server.get_doc("articles", &id)?.is_some());
-    Ok(())
-}
-
-#[test]
-fn delete_survives_restart_without_flush() -> Result<()> {
-    let mut server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "title": "Doomed" }))?;
-    server.delete("articles", &id)?;
-
-    server.restart()?;
-
-    assert!(server.get_doc("articles", &id)?.is_none());
-    Ok(())
-}
-
-#[test]
-fn documents_survive_flush_and_restart() -> Result<()> {
-    let mut server = TestServer::start()?;
-    let ids: Vec<String> = (0..5)
-        .map(|i| server.insert("articles", &json!({ "title": format!("Doc {}", i) })))
-        .collect::<Result<_>>()?;
-
-    server.flush()?;
-    server.restart()?;
-
-    assert_eq!(server.count("articles")?, 5);
-    for id in &ids {
-        assert!(server.get_doc("articles", id)?.is_some(), "missing {}", id);
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Phase 2 regressions (these were bugs before Phase 2)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn delete_after_flush_survives_restart() -> Result<()> {
-    let mut server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "title": "Doomed" }))?;
-    server.flush()?;
-    server.delete("articles", &id)?;
-
-    server.restart()?;
-
-    assert!(server.get_doc("articles", &id)?.is_none(), "deleted document came back");
-    assert_eq!(server.count("articles")?, 0);
-    Ok(())
-}
-
-#[test]
-fn update_after_flush_survives_restart() -> Result<()> {
-    let mut server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "title": "Draft", "views": 1 }))?;
-    server.flush()?;
-    server.patch("articles", &json!({ "id": id, "views": 2 }))?;
-
-    server.restart()?;
-
-    let doc = server.get_doc("articles", &id)?.expect("document should exist");
-    assert_eq!(field(&doc, "views"), Some(json!(2)), "an older version won after restart");
-    Ok(())
-}
-
-#[test]
-fn strings_keep_their_type() -> Result<()> {
-    let server = TestServer::start()?;
-    let id = server.insert("articles", &json!({ "name": "Test", "code": "abcd", "title": "hello" }))?;
-
-    let doc = server.get_doc("articles", &id)?.expect("document should exist");
     assert_eq!(field(&doc, "name"), Some(json!("Test")));
     assert_eq!(field(&doc, "code"), Some(json!("abcd")));
-    assert_eq!(field(&doc, "title"), Some(json!("hello")));
+    assert_eq!(field(&doc, "tags"), Some(json!(["hexdb", "rust", "ai"])));
+    assert_eq!(field(&doc, "author"), Some(json!({ "name": "Ada", "id": 7 })));
     Ok(())
 }
 
+/// Writes in SSTables, writes only in the WAL, and changes to flushed documents
+/// all survive a graceful restart, with deletes and updates winning over older versions.
+/// Each case has its own tessellation, so the counts check exactly that case.
 #[test]
-fn arrays_and_objects_round_trip() -> Result<()> {
-    let server = TestServer::start()?;
-    let id = server.insert(
-        "articles",
-        &json!({ "tags": ["hexdb", "rust", "ai"], "author": { "name": "Ada", "id": 7 } }),
-    )?;
+fn writes_survive_restart_whether_flushed_or_not() -> Result<()> {
+    let mut server = TestServer::start()?;
 
-    let doc = server.get_doc("articles", &id)?.expect("document should exist");
-    assert_eq!(field(&doc, "tags"), Some(json!(["hexdb", "rust", "ai"])));
-    assert_eq!(field(&doc, "author"), Some(json!({ "name": "Ada", "id": 7 })));
+    // Flushed to SSTables, then a delete and an update that exist only in the WAL
+    // (before Phase 2, the older flushed versions came back after a restart).
+    let flushed: Vec<String> = (0..5).map(|i| server.insert("flushed", &json!({ "title": format!("Doc {}", i) }))).collect::<Result<_>>()?;
+    let deleted_after_flush = server.insert("deleted_after_flush", &json!({ "title": "Doomed" }))?;
+    let updated_after_flush = server.insert("updated_after_flush", &json!({ "title": "Draft", "views": 1 }))?;
+    server.flush()?;
+    server.delete("deleted_after_flush", &deleted_after_flush)?;
+    server.patch("updated_after_flush", &json!({ "id": updated_after_flush, "views": 2 }))?;
+
+    // Never flushed: inserts, and a delete of a document that was never on disk.
+    let unflushed = server.insert("unflushed", &json!({ "title": "Persistent" }))?;
+    server.insert("unflushed", &json!({ "title": "Also persistent" }))?;
+    let deleted_unflushed = server.insert("deleted_unflushed", &json!({ "title": "Doomed" }))?;
+    server.delete("deleted_unflushed", &deleted_unflushed)?;
+
+    server.restart()?;
+
+    assert_eq!(server.count("flushed")?, 5);
+    for id in &flushed {
+        assert!(server.get_doc("flushed", id)?.is_some(), "flushed document {} is missing", id);
+    }
+    assert!(server.get_doc("deleted_after_flush", &deleted_after_flush)?.is_none(), "deleted document came back");
+    assert_eq!(server.count("deleted_after_flush")?, 0);
+    let doc = server.get_doc("updated_after_flush", &updated_after_flush)?.expect("updated document should exist");
+    assert_eq!(field(&doc, "views"), Some(json!(2)), "an older version won after restart");
+    assert_eq!(server.count("unflushed")?, 2);
+    let doc = server.get_doc("unflushed", &unflushed)?.expect("document should survive restart");
+    assert_eq!(field(&doc, "title"), Some(json!("Persistent")));
+    assert!(server.get_doc("deleted_unflushed", &deleted_unflushed)?.is_none());
     Ok(())
 }
 
@@ -192,10 +89,6 @@ fn torn_wal_tail_does_not_block_startup() -> Result<()> {
     assert!(server.get_doc("articles", &id)?.is_some());
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Phase 2 regressions (continued)
-// ---------------------------------------------------------------------------
 
 /// Concurrent writes followed immediately by a graceful restart must all survive.
 ///
@@ -233,10 +126,6 @@ fn concurrent_writes_survive_immediate_graceful_restart() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Phase 2 features
-// ---------------------------------------------------------------------------
-
 #[test]
 fn ttl_expires_documents() -> Result<()> {
     let mut server = TestServer::start()?;
@@ -267,15 +156,5 @@ fn deleted_tessellation_stays_deleted_after_crash() -> Result<()> {
 
     assert!(server.get_doc("scratch", &id)?.is_none());
     assert_eq!(server.get("/scratch/count")?.status().as_u16(), 404, "the tessellation should be gone");
-    Ok(())
-}
-
-#[test]
-fn unsafe_tessellation_names_are_rejected() -> Result<()> {
-    let server = TestServer::start()?;
-    for name in ["has.dot", "bad%20name", "x".repeat(65).as_str()] {
-        let status = server.post_status(&format!("/{}", name), &json!({ "title": "x" }))?;
-        assert_eq!(status.as_u16(), 400, "name {:?} should be rejected", name);
-    }
     Ok(())
 }

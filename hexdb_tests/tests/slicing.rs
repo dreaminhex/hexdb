@@ -53,9 +53,9 @@ fn seed(server: &TestServer, from: usize, count: usize) -> Result<()> {
 }
 
 #[test]
-fn replicas_split_the_slices_and_rebalance() -> Result<()> {
+fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     let ports = [TestServer::free_port()?, TestServer::free_port()?, TestServer::free_port()?];
-    let overseer = TestServer::start_with(hex(&ports, 0, 4096))?;
+    let mut overseer = TestServer::start_with(hex(&ports, 0, 4096))?;
     let first = TestServer::start_with(hex(&ports, 1, 1024))?;
     seed(&overseer, 0, 200)?;
 
@@ -87,36 +87,22 @@ fn replicas_split_the_slices_and_rebalance() -> Result<()> {
     // Live feeds aren't proxied: a sliced replica names the Overseer instead.
     let feed = second.request(Method::GET, "/changes/stream", None, &[])?;
     assert_eq!(feed.status, 421, "{}", feed.body);
-    Ok(())
-}
 
-#[test]
-fn a_failover_rebuilds_from_the_replicas() -> Result<()> {
-    let ports = [TestServer::free_port()?, TestServer::free_port()?, TestServer::free_port()?];
-    let mut overseer = TestServer::start_with(hex(&ports, 0, 4096))?;
-    let a = TestServer::start_with(hex(&ports, 1, 1024))?;
-    let b = TestServer::start_with(hex(&ports, 2, 1024))?;
-    seed(&overseer, 0, 150)?;
-    wait_until(Duration::from_secs(90), "the replicas to split the slices", || {
-        let (x, y) = (kept(&a)?, kept(&b)?);
-        Ok(x.0 + y.0 == 64 && x.0 > 0 && y.0 > 0 && x.1 + y.1 == 150)
-    })?;
-    // Both replicas have applied everything before the Overseer goes.
+    // A failover: both replicas have applied everything before the Overseer goes.
     let published = status(&overseer)?["replication"]["applied_seq"].as_u64().unwrap_or(0);
     wait_until(Duration::from_secs(30), "the replicas to catch up", || {
-        Ok(status(&a)?["replication"]["applied_seq"].as_u64() >= Some(published) && status(&b)?["replication"]["applied_seq"].as_u64() >= Some(published))
+        Ok(status(&first)?["replication"]["applied_seq"].as_u64() >= Some(published) && status(&second)?["replication"]["applied_seq"].as_u64() >= Some(published))
     })?;
-
     overseer.kill();
 
     // A replica is elected, collects the slices it lacks from the other, and
     // then answers with everything.
     let mut leader: Option<&TestServer> = None;
     wait_until(Duration::from_secs(90), "a new Overseer with every document", || {
-        for server in [&a, &b] {
+        for server in [&first, &second] {
             if status(server)?["hex_type"] == "Overseer" {
                 let res = server.request(Method::GET, "/items/count", None, &[])?;
-                if res.status == 200 && res.body["count"] == 150 {
+                if res.status == 200 && res.body["count"] == 250 {
                     leader = Some(server);
                     return Ok(true);
                 }
@@ -125,15 +111,15 @@ fn a_failover_rebuilds_from_the_replicas() -> Result<()> {
         Ok(false)
     })?;
     let leader = leader.unwrap();
-    let follower = if std::ptr::eq(leader, &a) { &b } else { &a };
-    assert_eq!(kept(leader)?, (64, 150));
-    for n in [0, 74, 149] {
+    let follower = if std::ptr::eq(leader, &first) { &second } else { &first };
+    assert_eq!(kept(leader)?, (64, 250));
+    for n in [0, 124, 249] {
         let res = leader.request(Method::POST, "/items/_query", Some(&json!({ "filter": { "n": n } })), &[])?;
         assert_eq!(res.body["documents"].as_array().map(|d| d.len()), Some(1), "n = {}: {}", n, res.body);
     }
 
     // Writes work again, and the last replica (alone now) keeps everything.
-    seed(leader, 150, 10)?;
-    wait_until(Duration::from_secs(90), "the remaining replica to keep everything", || Ok(kept(follower)? == (64, 160)))?;
+    seed(leader, 250, 10)?;
+    wait_until(Duration::from_secs(90), "the remaining replica to keep everything", || Ok(kept(follower)? == (64, 260)))?;
     Ok(())
 }

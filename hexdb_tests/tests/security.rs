@@ -241,8 +241,6 @@ fn roles_grant_exactly_their_permissions() -> Result<()> {
     let list = server.request_as(Some(&reader), M::GET, "/tessellations", None, &[])?;
     let names: Vec<&str> = list.body["tessellations"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["notes"]);
-    let changes = server.request_as(Some(&reader), M::GET, "/changes?after=0", None, &[]);
-    let _ = changes; // history may predate startup; covered below with a fresh cursor
     let cursor = server.request_as(Some(&reader), M::GET, "/changes", None, &[])?.body["last_seq"].as_u64().unwrap();
     server.insert("secret", &json!({ "pin": 9 }))?;
     server.insert("notes", &json!({ "visible": true }))?;
@@ -338,23 +336,6 @@ fn tessellations_named_like_the_ui_get_api_headers() -> Result<()> {
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(res.headers.get("cache-control").map(|v| v.to_str().unwrap()), Some("no-store"));
     assert_eq!(res.headers["content-security-policy"].to_str()?, "default-src 'none'; frame-ancestors 'none'");
-    Ok(())
-}
-
-#[test]
-fn lattice_endpoints_need_a_fresh_signature() -> Result<()> {
-    let server = TestServer::start()?;
-    for path in ["/lattice/snapshot", "/lattice/catalog", "/lattice/changes?after=0", "/lattice/snapshot/users"] {
-        let res = server.request_as(None, Method::GET, path, None, &[])?;
-        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{}", path);
-        // An admin session is not a lattice credential, and neither is the old static token header.
-        let res = server.request(Method::GET, path, None, &[("x-hexdb-lattice-token", "anything")])?;
-        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{}", path);
-        let res = server.request_as(None, Method::GET, path, None, &[("x-hexdb-lattice-signature", "1.2.3")])?;
-        assert_eq!(res.status, StatusCode::UNAUTHORIZED, "{}", path);
-    }
-    let res = server.request_as(None, Method::POST, "/lattice/revoke", Some(&json!({ "session_id": "x", "expires_at": 0 })), &[])?;
-    assert_eq!(res.status, StatusCode::UNAUTHORIZED);
     Ok(())
 }
 

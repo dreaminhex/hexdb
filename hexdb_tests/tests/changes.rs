@@ -154,11 +154,17 @@ fn server_sent_events_stream_backlog_and_live_changes() -> Result<()> {
 #[test]
 fn history_survives_restarts_unless_disabled() -> Result<()> {
     // With the change history (the default), older changes are read from disk.
+    // The in-memory feed starts empty after a restart.
     let mut server = TestServer::start()?;
-    server.insert("notes", &json!({ "n": 1 }))?;
+    let ids: Vec<String> = (1..=3).map(|n| server.insert("notes", &json!({ "n": n }))).collect::<Result<_>>()?;
     server.restart()?;
-    let res = server.request(Method::GET, "/changes?after=0", None, &[])?;
+    let res = server.request(Method::GET, "/changes?after=0&limit=100", None, &[])?;
     assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    let seen: Vec<&str> = res.body["changes"].as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
+    for id in &ids {
+        assert!(seen.contains(&id.as_str()), "{} in {:?}", id, seen);
+    }
+    assert_eq!(res.body["changes"][0]["op"], "put");
     assert_eq!(res.body["changes"][0]["document"]["n"], 1);
 
     // Without it, history starts at startup.
