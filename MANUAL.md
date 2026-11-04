@@ -2598,7 +2598,7 @@ hexdbs://...
 | `apiKey` | An API key (`hxk_...`), a session token, or an OAuth access token, sent as `Authorization: Bearer`. Not together with a login |
 | `timeout` | Seconds to wait for each request, a positive integer |
 | `pageSize` | Rows per request for drivers that page through SQL results (ODBC, JDBC, Entity Framework), 1 to 10,000 |
-| `caFile` | A PEM file of certificates to trust for HTTPS, where the platform allows it (ODBC, JDBC) |
+| `caFile` | A PEM file of certificates to trust for HTTPS, where the driver supports it (Python, ODBC, JDBC) |
 
 Option names ignore case. A driver ignores options it doesn't use, so one URI can be shared by tools in different languages. A URI that has no host, more than one host, a port outside 1 to 65535, a fragment, a login together with `apiKey`, or an option value that isn't valid is refused with an error naming the problem.
 

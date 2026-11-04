@@ -3,6 +3,7 @@
     from hexdb import HexDB
 
     db = HexDB("http://127.0.0.1:7700", api_key=os.environ["HEXDB_API_KEY"])
+    db = HexDB("hexdbs://ada:s3cret@db.example.com")   # a connection URI; signs in
     orders = db.tessellation("orders")
     doc = orders.insert({"customer": "ada", "total": 12})
     page = orders.query(filter={"total": {"$gt": 10}}, sort="-total")
@@ -25,7 +26,9 @@ import urllib.parse
 import urllib.request
 from typing import Any, BinaryIO, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
-__all__ = ["HexDB", "HexDBError", "Tessellation", "Stream", "Files"]
+from .connection_uri import ConnectionUri, is_connection_uri, parse_connection_uri
+
+__all__ = ["HexDB", "HexDBError", "Tessellation", "Stream", "Files", "ConnectionUri", "parse_connection_uri"]
 __version__ = "2.3.2"
 
 Json = Any
@@ -67,7 +70,12 @@ def _quote(text: str) -> str:
 
 
 class HexDB:
-    """A connection to a HexDB server (any hex; replicas forward writes)."""
+    """A connection to a HexDB server (any hex; replicas forward writes).
+
+    `url` is an http(s) URL or a hexdb:// / hexdbs:// connection URI. A URI with a login
+    signs in here (POST /auth/login); its apiKey, timeout and caFile options apply unless
+    the matching argument is given, which wins. An explicit `api_key` also skips the sign-in.
+    """
 
     def __init__(
         self,
@@ -75,18 +83,31 @@ class HexDB:
         api_key: Optional[str] = None,
         *,
         retries: int = 3,
-        timeout: float = 30.0,
+        timeout: Optional[float] = None,
         ca_file: Optional[str] = None,
     ):
+        uri = parse_connection_uri(url) if is_connection_uri(url) else None
+        if uri is not None:
+            url = uri.url
+            if api_key is None:
+                api_key = uri.api_key
+            if timeout is None:
+                timeout = uri.timeout_seconds
+            if ca_file is None:
+                ca_file = uri.ca_file
         self.base = url.rstrip("/")
         self.token = api_key
         self.retries = retries
-        self.timeout = timeout
+        self.timeout = timeout or 30.0
         self._context = ssl.create_default_context(cafile=ca_file) if ca_file else None
         handlers: List[Any] = [_SameOriginAuth()]
         if self._context is not None:
             handlers.append(urllib.request.HTTPSHandler(context=self._context))
         self._opener = urllib.request.build_opener(*handlers)
+        if uri is not None and uri.login is not None and api_key is None:
+            if uri.password is None:
+                raise ValueError("The connection URI has a login but no password; use an API key for accounts without one")
+            self.login(uri.login, uri.password)
 
     # -- transport ---------------------------------------------------------
 

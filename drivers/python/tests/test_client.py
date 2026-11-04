@@ -213,6 +213,7 @@ class RedirectTests(unittest.TestCase):
         client.request("GET", "/elsewhere")
         self.assertEqual(seen["first"], "Bearer hxk_secret")
         self.assertIsNone(seen["other"], "dropped for another server")
-        first.shutdown()
-        other.shutdown()
+        for httpd in (first, other):
+            httpd.shutdown()
+            httpd.server_close()
 
