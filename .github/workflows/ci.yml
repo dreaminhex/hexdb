@@ -172,3 +172,24 @@ jobs:
       - name: Build
         run: npm run build
         timeout-minutes: 5
+
+  vscode-extension:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            drivers/node/package-lock.json
+            extensions/vscode/package-lock.json
+      # The extension bundles the JavaScript driver from drivers/node.
+      - run: npm ci
+        working-directory: drivers/node
+      - run: npm ci
+        working-directory: extensions/vscode
+      # Type checks, build, unit tests (the integration tests need a desktop VS Code).
+      - run: npm test
+        working-directory: extensions/vscode

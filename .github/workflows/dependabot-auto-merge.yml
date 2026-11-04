@@ -1,0 +1,28 @@
+name: Dependabot auto-merge
+
+# Minor and patch updates from Dependabot merge themselves, but only once every
+# check the main branch requires has passed (the "Required checks" ruleset:
+# clippy and the full test suite on Linux x86-64, Linux ARM and Windows, the
+# drivers, ODBC, the admin UI, the VS Code extension and the dependency audit).
+# A failing check leaves the pull request open. Major updates always wait for
+# a person.
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@v3
+      # For a grouped update, update-type is the largest in the group.
+      - if: steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

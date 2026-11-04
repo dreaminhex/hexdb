@@ -1,18 +1,25 @@
 # Dependency updates as reviewable pull requests. Cargo.lock and the
 # package-lock files are tracked, so nothing changes in a build until one of
 # these is merged; CI runs cargo audit and npm audit on each.
+#
+# Monthly, at most two pull requests per ecosystem: one for minor and patch
+# updates, which merge themselves once every CI check passes (see
+# workflows/dependabot-auto-merge.yml), and one for major updates, which wait
+# for a person. Security updates still come as soon as an advisory is published.
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
     groups:
       rust: { patterns: ["*"], update-types: [minor, patch] }
+      rust-major: { patterns: ["*"], update-types: [major] }
   - package-ecosystem: npm
     directory: /hexdb_admin
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
     groups:
       admin-ui: { patterns: ["*"], update-types: [minor, patch] }
+      admin-ui-major: { patterns: ["*"], update-types: [major] }
     ignore:
       # typescript-eslint (the admin UI's linter) doesn't support TypeScript 7
       # yet, so `npm run lint` fails on it. Remove this once it does.
@@ -20,29 +27,40 @@ updates:
         versions: [">=7"]
   - package-ecosystem: npm
     directory: /drivers/node
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
+    groups:
+      node-driver: { patterns: ["*"], update-types: [minor, patch] }
+      node-driver-major: { patterns: ["*"], update-types: [major] }
   - package-ecosystem: npm
     directory: /extensions/vscode
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
     groups:
       vscode-extension: { patterns: ["*"], update-types: [minor, patch] }
+      vscode-extension-major: { patterns: ["*"], update-types: [major] }
     ignore:
       # Its engine is ^1.100.0; @types/vscode must not be newer than the oldest VS Code it supports.
       - dependency-name: "@types/vscode"
   - package-ecosystem: pip
     directory: /drivers/python
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
+    groups:
+      python-driver: { patterns: ["*"], update-types: [minor, patch] }
+      python-driver-major: { patterns: ["*"], update-types: [major] }
   - package-ecosystem: nuget
     directory: /drivers/dotnet
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
+    groups:
+      dotnet: { patterns: ["*"], update-types: [minor, patch] }
+      dotnet-major: { patterns: ["*"], update-types: [major] }
   - package-ecosystem: maven
     directory: /drivers/java
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
     groups:
       jdbc: { patterns: ["*"], update-types: [minor, patch] }
+      jdbc-major: { patterns: ["*"], update-types: [major] }
   - package-ecosystem: github-actions
     directory: /
-    schedule: { interval: weekly }
-    # One pull request for all action updates, majors included.
+    schedule: { interval: monthly }
     groups:
-      actions: { patterns: ["*"] }
+      actions: { patterns: ["*"], update-types: [minor, patch] }
+      actions-major: { patterns: ["*"], update-types: [major] }
