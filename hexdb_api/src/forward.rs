@@ -280,6 +280,15 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
         headers.insert(HeaderName::from_static(FORWARD_SIGNATURE_HEADER), s);
     }
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
+    // A write the Overseer makes idempotent carries a key (the client's, or one added
+    // here), so it can be sent again after an error that leaves open whether the
+    // Overseer got it: the Overseer replays the first answer instead of writing twice.
+    let resendable = idempotent_with_key(&engine, &parts.method, &path);
+    if resendable && !headers.contains_key(crate::handlers::IDEMPOTENCY_KEY_HEADER) {
+        if let Ok(key) = HeaderValue::from_str(&format!("{}{}", hexdb_core::engine::FORWARDED_KEY_PREFIX, ulid::Ulid::generate())) {
+            headers.insert(HeaderName::from_static(crate::handlers::IDEMPOTENCY_KEY_HEADER), key);
+        }
+    }
     let mut overseer = overseer;
     let response = loop {
         debug!("↪️ Forwarding {} {} to the Overseer '{}'.", parts.method, path, overseer.name);
@@ -288,8 +297,10 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
             Ok(response) => break response,
             Err(e) => {
                 // A refused connection never reached the Overseer (it's restarting, or
-                // gone): try the Overseer the lattice has once one is there.
-                if e.is_connect() && Instant::now() < until {
+                // gone): try the Overseer the lattice has once one is there. Other send
+                // errors (a connection the stopping Overseer closed) may have reached it,
+                // so only a keyed write is sent again. A timeout isn't: it may still be running.
+                if (e.is_connect() || (resendable && !e.is_timeout())) && Instant::now() < until {
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     if let Some(next) = overseer_until(&engine, until).await {
                         overseer = next;
@@ -318,6 +329,19 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     }
     out.headers_mut().remove(header::CONTENT_LENGTH);
     out
+}
+
+/// Writes the Overseer makes idempotent with an `Idempotency-Key` header: documents
+/// in user tessellations (single, bulk, `_update`) and transactions.
+fn idempotent_with_key(engine: &HexDBEngine, method: &Method, path: &str) -> bool {
+    if !matches!(*method, Method::POST | Method::PUT | Method::PATCH | Method::DELETE) {
+        return false;
+    }
+    if path == "/transactions" {
+        return true;
+    }
+    let first = path.trim_start_matches('/').split('/').next().unwrap_or_default();
+    engine.tessellation_info(first).is_some_and(|t| t.kind == "user")
 }
 
 #[cfg(test)]

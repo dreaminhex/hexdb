@@ -38,6 +38,12 @@ use ulid::Ulid;
 pub const IDEMPOTENCY_TESSELLATION: &str = "_idempotency";
 /// How long idempotency records are kept.
 pub const IDEMPOTENCY_TTL_MILLIS: i64 = 24 * 60 * 60 * 1000;
+/// Keys a replica adds to the writes it forwards, so it can retry one the
+/// Overseer may have received (see hexdb_api's forward.rs). They only need to
+/// outlast the replica's 30-second hold, so their records are kept briefly.
+pub const FORWARDED_KEY_PREFIX: &str = "hexdb-forwarded-";
+/// How long the records of forwarded writes' keys are kept.
+pub const FORWARDED_IDEMPOTENCY_TTL_MILLIS: i64 = 2 * 60 * 1000;
 /// Most documents accepted in one bulk request.
 pub const MAX_BULK_ITEMS: usize = 10_000;
 /// Most documents one update-by-filter may modify.
@@ -1038,7 +1044,7 @@ impl HexDBEngine {
             id: k.doc_id(),
             tessellation: IDEMPOTENCY_TESSELLATION.into(),
             data,
-            ttl: Some(now + IDEMPOTENCY_TTL_MILLIS),
+            ttl: Some(now + if k.key.starts_with(FORWARDED_KEY_PREFIX) { FORWARDED_IDEMPOTENCY_TTL_MILLIS } else { IDEMPOTENCY_TTL_MILLIS }),
         };
         Ok(BatchItem {
             key: DocKey::new(IDEMPOTENCY_TESSELLATION, doc.id),

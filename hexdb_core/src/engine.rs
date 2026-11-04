@@ -59,7 +59,7 @@ pub use vectors::{spawn_embedding_task, SimilarQuery, MAX_K as MAX_SIMILAR};
 pub(crate) mod writes;
 pub use transactions::{parse_transaction, TransactionResult, TxOpKind, TxOperation, TxResult, MAX_TRANSACTION_OPS};
 pub use writes::{
-    DocumentQuery, IdempotencyKey, ListPage, Outcome, QueryPage, UpdateSummary, UpsertSummary, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
+    DocumentQuery, IdempotencyKey, ListPage, Outcome, QueryPage, UpdateSummary, UpsertSummary, FORWARDED_KEY_PREFIX, IDEMPOTENCY_TESSELLATION, MAX_BULK_ITEMS,
 };
 
 /// The identity of this hex within its lattice, decided before the engine is built.
