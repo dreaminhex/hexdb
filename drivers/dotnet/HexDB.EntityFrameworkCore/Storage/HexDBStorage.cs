@@ -28,7 +28,9 @@ public sealed class HexDBConnection : IDisposable
     {
         var extension = options.FindExtension<HexDBOptionsExtension>() ?? throw new InvalidOperationException("The context isn't configured with UseHexDB.");
         Options = extension;
-        Client = new HexDBClient(extension.Url!, extension.ApiKey, extension.HttpClient);
+        Client = extension.ConnectionUri is { } uri
+            ? new HexDBClient(uri, extension.ApiKey, extension.HttpClient)
+            : new HexDBClient(extension.Url!, extension.ApiKey, extension.HttpClient);
     }
 
     public HexDBClient Client { get; }

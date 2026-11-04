@@ -16,6 +16,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The connection URI test vectors every driver shares. -->
+    <None Include="..\..\testing\connection-uris.json" Link="connection-uris.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\HexDB.Client\HexDB.Client.csproj" />
   </ItemGroup>
 

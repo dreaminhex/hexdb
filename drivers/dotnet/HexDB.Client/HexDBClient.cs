@@ -81,19 +81,93 @@ public sealed class HexDBClient : IDisposable
 {
     private readonly HttpClient _http;
     private readonly bool _ownsHttp;
+    private readonly object _gate = new();
     private string? _token;
+    private (string Login, string Password)? _pendingLogin;
+    private Task? _signIn;
 
     internal static readonly JsonSerializerOptions Json = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
-    /// <param name="url">Base URL of any hex.</param>
+    /// <param name="url">Base URL of any hex. A path is kept as the base of every request.</param>
     /// <param name="apiKey">An API key (hxk_...) or session token.</param>
     /// <param name="http">An HttpClient to use (for custom certificates or handlers).</param>
     public HexDBClient(Uri url, string? apiKey = null, HttpClient? http = null)
     {
+        ArgumentNullException.ThrowIfNull(url);
         _http = http ?? new HttpClient();
         _ownsHttp = http is null;
-        _http.BaseAddress = url;
+        // A trailing slash keeps a base path (https://example.com/hexdb) when requests resolve against it.
+        _http.BaseAddress = url.AbsolutePath.EndsWith('/') ? url : new UriBuilder(url) { Path = url.AbsolutePath + "/" }.Uri;
         _token = apiKey;
+    }
+
+    /// <summary>
+    /// Connect with a connection URI (<c>hexdb://</c> or <c>hexdbs://</c>, see <see cref="HexDBConnectionUri"/>)
+    /// or a plain <c>http://</c> or <c>https://</c> URL, which behaves like <c>new HexDBClient(new Uri(url))</c>.
+    /// </summary>
+    /// <remarks>
+    /// A constructor can't wait for a network call, so when the URI has a login this one signs in
+    /// lazily: the first request sends <c>POST /auth/login</c>, and a failed sign-in surfaces as a
+    /// <see cref="HexDBException"/> from that request (the next request tries again). Use
+    /// <see cref="ConnectAsync(string, CancellationToken)"/> to sign in up front and find bad
+    /// credentials immediately. The URI's <c>timeout</c> applies to an HttpClient the client creates;
+    /// set <see cref="HttpClient.Timeout"/> yourself on one you pass in. <c>pageSize</c> and <c>caFile</c> aren't used.
+    /// </remarks>
+    /// <param name="connectionString">The connection URI or URL.</param>
+    /// <param name="apiKey">An API key to use instead of the URI's <c>apiKey</c> or login.</param>
+    /// <param name="http">An HttpClient to use (for custom certificates or handlers).</param>
+    /// <exception cref="FormatException">The URI isn't valid; the message names the problem.</exception>
+    public HexDBClient(string connectionString, string? apiKey = null, HttpClient? http = null)
+        : this(HexDBConnectionUri.Parse(connectionString), apiKey, http)
+    {
+    }
+
+    /// <summary>Connect with a parsed connection URI; see <see cref="HexDBClient(string, string?, HttpClient?)"/>.</summary>
+    /// <param name="uri">The parsed connection URI.</param>
+    /// <param name="apiKey">An API key to use instead of the URI's <c>apiKey</c> or login.</param>
+    /// <param name="http">An HttpClient to use (for custom certificates or handlers).</param>
+    public HexDBClient(HexDBConnectionUri uri, string? apiKey = null, HttpClient? http = null)
+        : this((uri ?? throw new ArgumentNullException(nameof(uri))).Url, apiKey ?? uri.ApiKey, http)
+    {
+        if (http is null && uri.Timeout is { } timeout) _http.Timeout = timeout;
+        if (apiKey is null && uri.Login is not null)
+        {
+            if (uri.Password is null) throw new ArgumentException("The connection URI has a login but no password; use an API key for accounts without one.", nameof(uri));
+            _pendingLogin = (uri.Login, uri.Password);
+        }
+    }
+
+    /// <summary>
+    /// Connect with a connection URI or URL (see <see cref="HexDBClient(string, string?, HttpClient?)"/>),
+    /// signing in first when the URI has a login.
+    /// </summary>
+    /// <exception cref="FormatException">The URI isn't valid.</exception>
+    /// <exception cref="HexDBException">Signing in failed.</exception>
+    public static Task<HexDBClient> ConnectAsync(string uri, CancellationToken ct = default) => ConnectCoreAsync(uri, null, ct);
+
+    /// <summary>Connect with a connection URI or URL through <paramref name="http"/>, signing in first when the URI has a login.</summary>
+    /// <exception cref="FormatException">The URI isn't valid.</exception>
+    /// <exception cref="HexDBException">Signing in failed.</exception>
+    public static Task<HexDBClient> ConnectAsync(string uri, HttpClient http, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(http);
+        return ConnectCoreAsync(uri, http, ct);
+    }
+
+    private static async Task<HexDBClient> ConnectCoreAsync(string uri, HttpClient? http, CancellationToken ct)
+    {
+        var parsed = HexDBConnectionUri.Parse(uri);
+        var client = new HexDBClient(parsed, null, http);
+        try
+        {
+            if (parsed.Login is not null) await client.LoginAsync(parsed.Login, parsed.Password ?? "", null, ct).ConfigureAwait(false);
+            return client;
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Retries for 429 and 503 answers on reads and idempotent writes.</summary>
@@ -106,6 +180,44 @@ public sealed class HexDBClient : IDisposable
 
     /// <summary>Send any request; returns the JSON answer (null for 204).</summary>
     public async Task<JsonNode?> RequestAsync(HttpMethod method, string path, object? body = null, string? idempotencyKey = null, CancellationToken cancel = default)
+    {
+        await SignInIfPendingAsync(cancel).ConfigureAwait(false);
+        return await SendJsonAsync(method, path, body, idempotencyKey, cancel).ConfigureAwait(false);
+    }
+
+    // Signs in with a connection URI's login before the first request (see the string constructor).
+    // Concurrent first requests share one sign-in; a failed one is tried again by the next request.
+    private Task SignInIfPendingAsync(CancellationToken cancel)
+    {
+        Task signIn;
+        lock (_gate)
+        {
+            if (_pendingLogin is not { } credentials) return Task.CompletedTask;
+            if (_signIn is null || _signIn.IsFaulted || _signIn.IsCanceled) _signIn = SignInAsync(credentials);
+            signIn = _signIn;
+        }
+        return signIn.WaitAsync(cancel);
+    }
+
+    private async Task SignInAsync((string Login, string Password) credentials)
+    {
+        var token = await SignInCoreAsync(credentials.Login, credentials.Password, null, CancellationToken.None).ConfigureAwait(false);
+        lock (_gate)
+        {
+            // An explicit LoginAsync or LogoutAsync in the meantime wins.
+            if (_pendingLogin != credentials) return;
+            _token = token;
+            _pendingLogin = null;
+        }
+    }
+
+    private async Task<string> SignInCoreAsync(string login, string password, string? code, CancellationToken cancel)
+    {
+        var result = await SendJsonAsync(HttpMethod.Post, "/auth/login", new { login, password, code, return_token = true }, null, cancel).ConfigureAwait(false);
+        return result!["token"]!.GetValue<string>();
+    }
+
+    private async Task<JsonNode?> SendJsonAsync(HttpMethod method, string path, object? body, string? idempotencyKey, CancellationToken cancel)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -157,13 +269,14 @@ public sealed class HexDBClient : IDisposable
     /// <summary>Sign in (with a one-time code if MFA is on); later requests use the session.</summary>
     public async Task LoginAsync(string login, string password, string? code = null, CancellationToken cancel = default)
     {
-        var result = await RequestAsync(HttpMethod.Post, "/auth/login", new { login, password, code, return_token = true }, null, cancel).ConfigureAwait(false);
-        _token = result!["token"]!.GetValue<string>();
+        lock (_gate) _pendingLogin = null;
+        _token = await SignInCoreAsync(login, password, code, cancel).ConfigureAwait(false);
     }
 
     public async Task LogoutAsync(CancellationToken cancel = default)
     {
-        await RequestAsync(HttpMethod.Post, "/auth/logout", null, null, cancel).ConfigureAwait(false);
+        lock (_gate) _pendingLogin = null;
+        await SendJsonAsync(HttpMethod.Post, "/auth/logout", null, null, cancel).ConfigureAwait(false);
         _token = null;
     }
 
@@ -179,6 +292,7 @@ public sealed class HexDBClient : IDisposable
     /// <summary>Send raw content and get the raw response (dispose it); throws <see cref="HexDBException"/> on an error answer.</summary>
     public async Task<HttpResponseMessage> SendRawAsync(HttpMethod method, string path, HttpContent? content = null, IDictionary<string, string>? headers = null, CancellationToken cancel = default)
     {
+        await SignInIfPendingAsync(cancel).ConfigureAwait(false);
         using var request = new HttpRequestMessage(method, path.TrimStart('/')) { Content = content };
         if (_token is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
         foreach (var (name, value) in headers ?? new Dictionary<string, string>()) request.Headers.TryAddWithoutValidation(name, value);

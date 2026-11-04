@@ -1,6 +1,7 @@
 // The options UseHexDB records on a DbContext, and the services the provider
 // adds to EF Core's internal service provider.
 
+using HexDB.Client;
 using HexDB.EntityFrameworkCore.Metadata;
 using HexDB.EntityFrameworkCore.Query;
 using HexDB.EntityFrameworkCore.Storage;
@@ -26,6 +27,7 @@ public class HexDBOptionsExtension : IDbContextOptionsExtension
     {
         Url = copyFrom.Url;
         ApiKey = copyFrom.ApiKey;
+        ConnectionUri = copyFrom.ConnectionUri;
         HttpClient = copyFrom.HttpClient;
         PageSize = copyFrom.PageSize;
     }
@@ -35,6 +37,9 @@ public class HexDBOptionsExtension : IDbContextOptionsExtension
 
     /// <summary>An API key (hxk_...) or session token.</summary>
     public virtual string? ApiKey { get; private set; }
+
+    /// <summary>The parsed connection URI or URL given to <c>UseHexDB</c>, or null when set through <c>WithConnection(Uri, string?)</c>.</summary>
+    public virtual HexDBConnectionUri? ConnectionUri { get; private set; }
 
     /// <summary>An HttpClient to use (custom certificates or handlers).</summary>
     public virtual HttpClient? HttpClient { get; private set; }
@@ -51,6 +56,21 @@ public class HexDBOptionsExtension : IDbContextOptionsExtension
         var clone = Clone();
         clone.Url = url;
         clone.ApiKey = apiKey;
+        clone.ConnectionUri = null;
+        return clone;
+    }
+
+    /// <summary>
+    /// Connect with a parsed connection URI. <paramref name="apiKey"/>, when given, is used instead of
+    /// the URI's <c>apiKey</c> or login.
+    /// </summary>
+    public virtual HexDBOptionsExtension WithConnection(HexDBConnectionUri uri, string? apiKey)
+    {
+        ArgumentNullException.ThrowIfNull(uri);
+        var clone = Clone();
+        clone.Url = uri.Url;
+        clone.ApiKey = apiKey ?? uri.ApiKey;
+        clone.ConnectionUri = uri;
         return clone;
     }
 

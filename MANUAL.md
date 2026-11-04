@@ -2597,7 +2597,7 @@ hexdbs://...
 | --- | --- |
 | `apiKey` | An API key (`hxk_...`), a session token, or an OAuth access token, sent as `Authorization: Bearer`. Not together with a login |
 | `timeout` | Seconds to wait for each request, a positive integer |
-| `pageSize` | Rows per request for drivers that page through SQL results (ODBC, JDBC, Entity Framework), 1 to 10,000 |
+| `pageSize` | Rows per request for drivers that page through results (ODBC, JDBC, and Entity Framework, which caps it at 1,000), 1 to 10,000 |
 | `caFile` | A PEM file of certificates to trust for HTTPS, where the driver supports it (Python, ODBC, JDBC) |
 
 Option names ignore case. A driver ignores options it doesn't use, so one URI can be shared by tools in different languages. A URI that has no host, more than one host, a port outside 1 to 65535, a fragment, a login together with `apiKey`, or an option value that isn't valid is refused with an error naming the problem.
@@ -2650,7 +2650,7 @@ await db.SaveChangesAsync();
 var big = await db.Orders.Where(o => o.Total > 10).OrderByDescending(o => o.Total).Take(20).ToListAsync();
 ```
 
-`UseHexDB(url, apiKey, o => ...)` takes two options: `o.HttpClient(client)` to supply your own `HttpClient`, and `o.PageSize(n)` (1 to 1000, default 500), which sets how many documents each request reads.
+`UseHexDB(url, apiKey, o => ...)` takes two options: `o.HttpClient(client)` to supply your own `HttpClient`, and `o.PageSize(n)` (1 to 1000, default 500), which sets how many documents each request reads. `UseHexDB("hexdbs://...")` takes a [connection URI](#connection-uris) instead; its `pageSize` is capped at 1000 and `o.PageSize(n)` overrides it (`UseHexDB(uri, null, o => ...)`).
 
 **Mapping.**
 - Each entity type is a tessellation, named after its `DbSet` property (or the class name). Override it with `modelBuilder.Entity<T>().ToTessellation("name")`.
