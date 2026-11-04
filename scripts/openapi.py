@@ -55,6 +55,7 @@ ROUTES = [
     ("delete", "/auth/keys/{id}", "Authentication", "Revoke an API key", {"parameters": [param("id")], "responses": no_content()}),
     # Server
     ("get", "/health", "Server", "Liveness (identity and version for signed-in users)", {"security": [], "responses": ok()}),
+    ("get", "/ready", "Server", "Readiness: 503 while a replica copies the data or a new Overseer collects slices", {"security": [], "responses": {**ok("Ready: {\"status\": \"ready\"}"), **ok("Not ready: {\"status\": \"not_ready\", \"reason\"}", status="503")}}),
     ("get", "/status", "Server", "Status and metrics (status permission)", {"responses": ok()}),
     ("get", "/status/history", "Server", "Metrics samples over time", {"parameters": [param("minutes", "query", "", {"type": "integer"})], "responses": ok()}),
     ("get", "/logs", "Server", "Recent server log records (logs permission)", {"parameters": [param(n, "query") for n in ("level", "after", "before", "q", "target", "limit")], "responses": ok()}),
@@ -230,7 +231,7 @@ def build():
         "openapi": "3.1.0",
         "info": {
             "title": "HexDB REST API",
-            "version": "2.3.2",
+            "version": "2.3.3",
             "description": "HexDB's REST API. Authenticate with `Authorization: Bearer <API key or session token>` or the `hexdb_session` cookie (admin UI). Errors are `{\"error\": {\"code\", \"message\"}}`. See MANUAL.md for filters, aggregations, permissions and everything else.",
         },
         "servers": [{"url": "http://127.0.0.1:7700"}],

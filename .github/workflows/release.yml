@@ -19,7 +19,7 @@ name: Release
 #   - the APT repository on GitHub Pages     APT_GPG_PRIVATE_KEY (+ APT_GPG_PASSPHRASE)
 #   - the Homebrew tap                       HOMEBREW_TAP_TOKEN
 #   - Chocolatey                             CHOCOLATEY_API_KEY
-#   - winget                                 WINGET_TOKEN
+#   - winget                                 WINGET_TOKEN, and the variable WINGET_ENABLED=true
 #   - npm, PyPI, NuGet                       NPM_TOKEN, PYPI_TOKEN, NUGET_USER (or NUGET_API_KEY)
 #   - Maven Central (the JDBC driver)        MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD,
 #                                            MAVEN_GPG_PRIVATE_KEY (+ MAVEN_GPG_PASSPHRASE)
@@ -407,6 +407,8 @@ jobs:
 
   winget:
     needs: publish
+    # Off until the repository variable WINGET_ENABLED is "true" (paused 2026-11-04: PRs stuck in review).
+    if: vars.WINGET_ENABLED == 'true'
     runs-on: windows-latest
     env:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}

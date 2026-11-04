@@ -314,7 +314,9 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | ODBC | [drivers/odbc](drivers/odbc) | Windows, Linux (unixODBC); 64-bit |
 | JDBC | [drivers/java](drivers/java) | Java 11+, no dependencies |
 
-See [drivers/README.md](drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](hexdb_api/openapi.json)).
+Every driver takes the same connection URI, such as `hexdbs://db.example.com?apiKey=hxk_...` (see [Connection URIs](MANUAL.md#connection-uris)). See [drivers/README.md](drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](hexdb_api/openapi.json)).
+
+**HexDB for VS Code** ([extensions/vscode](extensions/vscode)) browses a lattice (hexes, regions, lag, tessellations), runs SQL and GraphQL, and edits documents and stored functions. Install it from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=dreaminhex.hexdb).
 
 ## Installing
 
@@ -345,6 +347,7 @@ hexdb_cli/      the hexdb command
 hexdb_admin/    admin UI (React, Vite)
 hexdb_tests/    end-to-end tests that run real servers
 drivers/        client libraries
+extensions/     HexDB for VS Code
 plugins/        plugin SDK and example plugins
 packaging/      installers and service files
 docker/         container configuration

@@ -1,6 +1,6 @@
 [package]
 name = "hexdb_bench"
-version = "2.3.2"
+version = "2.3.3"
 license = "Apache-2.0"
 edition = "2021"
 publish = false
