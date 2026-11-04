@@ -48,6 +48,8 @@ export interface HexView {
   country?: string
   version?: string
   lag?: number | null
+  /** Lag in time, in ms (HexDB 2.3.3+). */
+  lagMs?: number | null
   slicesHeld?: number | null
   slicing?: boolean
   replicationState?: string

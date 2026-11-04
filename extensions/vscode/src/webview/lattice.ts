@@ -1,5 +1,6 @@
 // The lattice view's script: a card per hex (Overseer first), each saying where it runs.
 
+import { formatLag } from "../shared/format"
 import type { FromLattice, HexView, LatticeView, ToLattice } from "../shared/messages"
 
 declare function acquireVsCodeApi(): { postMessage(message: FromLattice): void }
@@ -71,8 +72,9 @@ function card(h: HexView): HTMLElement {
   const up = h.status === "active"
   const rows: [string, string][] = []
   if (h.replicationState) rows.push(["Replication", h.replicationState])
-  // HexDB measures lag in changes (writes this replica hasn't applied yet), not time.
-  if (h.lag !== null && h.lag !== undefined) rows.push(["Lag", h.lag === 0 ? "Caught up" : `${h.lag.toLocaleString()} ${h.lag === 1 ? "change" : "changes"} behind`])
+  // In time (HexDB 2.3.3+) and in changes: writes this replica hasn't applied yet.
+  const lag = formatLag(h.lag, h.lagMs)
+  if (lag) rows.push(["Lag", lag])
   if (h.slicing && h.slicesHeld !== null && h.slicesHeld !== undefined) rows.push(["Slices", `${h.slicesHeld} of 64`])
   if (h.version) rows.push(["Version", h.version])
   if (h.preference && h.preference !== "auto") rows.push(["Prefers", h.preference])

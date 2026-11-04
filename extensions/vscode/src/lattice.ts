@@ -82,6 +82,7 @@ export class LatticePanels implements vscode.Disposable {
           ...place(h.region),
           version: h.version,
           lag: h.lag,
+          lagMs: h.lag_ms,
           slicesHeld: h.slices_held,
           slicing: h.slicing,
           replicationState: h.replication_state,

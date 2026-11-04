@@ -27,7 +27,7 @@ const contexts = await Promise.all([
     ...common,
     minify: false,
     sourcemap: false,
-    entryPoints: { lib: "src/lib.ts", regions: "src/regions.ts" },
+    entryPoints: { lib: "src/lib.ts", regions: "src/regions.ts", format: "src/shared/format.ts" },
     outdir: "out",
     outExtension: { ".js": ".mjs" },
     platform: "node",

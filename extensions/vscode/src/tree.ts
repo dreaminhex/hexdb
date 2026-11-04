@@ -4,6 +4,7 @@ import * as vscode from "vscode"
 
 import { errorMessage, type Connections, type SavedConnection, type Session } from "./connections"
 import { describeRegion } from "./regions"
+import { formatLag } from "./shared/format"
 
 export interface TessellationInfo {
   name: string
@@ -29,6 +30,8 @@ export interface LatticeHex {
   region?: string
   version?: string
   lag?: number | null
+  /** Lag in time, in ms (HexDB 2.3.3+). */
+  lag_ms?: number | null
   is_self?: boolean
   slices_held?: number | null
   slicing?: boolean
@@ -110,7 +113,7 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
             `**${md(h.name)}** — ${md(h.role)}${h.is_self ? " (connected: this hex answered the connection)" : ""}`,
             `Region: ${md(describeRegion(h.region))}`,
             `Status: ${md(h.status)}${h.replication_state ? `, ${md(h.replication_state)}` : ""}`,
-            h.lag !== null && h.lag !== undefined ? (h.lag === 0 ? "Lag: caught up" : `Lag: ${md(h.lag)} changes behind`) : "",
+            formatLag(h.lag, h.lag_ms) ? `Lag: ${md(formatLag(h.lag, h.lag_ms))}` : "",
             h.slicing && h.slices_held !== null && h.slices_held !== undefined ? `Slices held: ${md(h.slices_held)} of 64` : "",
             h.version ? `Version: ${md(h.version)}` : "",
           ]

@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 
 import { can, duration, graphqlTessellation, parseParam, singleTable, sqlIdent, statementAt, tabulate, toConnectionUri, toCsv, withoutCredentials } from "../out/lib.mjs"
+import { formatLag, formatLagMs } from "../out/format.mjs"
 import { describeRegion, place } from "../out/regions.mjs"
 
 test("connection URIs from what was typed", () => {
@@ -81,6 +82,16 @@ test("function parameters are typed", () => {
   assert.equal(parseParam("any", "plain text"), "plain text")
   assert.throws(() => parseParam("object", "{bad"))
   assert.equal(parseParam("string", " keep spaces "), " keep spaces ")
+})
+
+test("lag in time and changes", () => {
+  assert.equal(formatLag(0, 0), "In sync · 0 ms")
+  assert.equal(formatLag(12, 7), "7 ms behind (12 changes)")
+  assert.equal(formatLag(1, 1500), "1.5 s behind (1 change)")
+  assert.equal(formatLag(2500, null), "2,500 changes behind")
+  assert.equal(formatLag(0, undefined), "In sync")
+  assert.equal(formatLag(null, null), undefined)
+  assert.equal(formatLagMs(185_000), "3 min")
 })
 
 test("regions and durations", () => {
