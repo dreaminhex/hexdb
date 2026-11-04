@@ -621,7 +621,22 @@ impl Follower {
             }
             let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
             // The Overseer continues the history this hex followed, from its position or just before it.
-            if let Some(local) = meta.continues.as_ref().and_then(|c| c.resume_at(&cursor.source_id, cursor.applied_seq)) {
+            let resume_at = meta.continues.as_ref().and_then(|c| c.resume_at(&cursor.source_id, cursor.applied_seq));
+            if cursor.source_id != meta.source_id && !resume_at.is_some_and(|local| local >= meta.available_after && local <= meta.seq) {
+                // Why a hex that followed the old history copies everything again.
+                info!(
+                    "📥 '{}' doesn't continue this hex's history from its position (it followed {} up to {}; continues: {}; mapped to {:?}; '{}' keeps changes {}..={}).",
+                    overseer.hex.name,
+                    cursor.source_id,
+                    cursor.applied_seq,
+                    meta.continues.as_ref().map_or("none".to_string(), |c| format!("{:?}", c)),
+                    resume_at,
+                    overseer.hex.name,
+                    meta.available_after,
+                    meta.seq
+                );
+            }
+            if let Some(local) = resume_at {
                 if local >= meta.available_after && local <= meta.seq {
                     info!("🔁 '{}' took over the history this hex followed, at its position; continuing without a full sync.", overseer.hex.name);
                     cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: local, held_slices: cursor.held_slices };
