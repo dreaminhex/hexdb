@@ -21,6 +21,14 @@ updates:
   - package-ecosystem: npm
     directory: /drivers/node
     schedule: { interval: weekly }
+  - package-ecosystem: npm
+    directory: /extensions/vscode
+    schedule: { interval: weekly }
+    groups:
+      vscode-extension: { patterns: ["*"], update-types: [minor, patch] }
+    ignore:
+      # Its engine is ^1.100.0; @types/vscode must not be newer than the oldest VS Code it supports.
+      - dependency-name: "@types/vscode"
   - package-ecosystem: pip
     directory: /drivers/python
     schedule: { interval: weekly }
