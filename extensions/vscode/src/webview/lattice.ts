@@ -39,6 +39,20 @@ function render(l: LatticeView): void {
   stat("Connected to", l.answeredBy, "The hex that answered this connection. With an address in front of several hexes (such as a Fly.io app), it's usually the nearest one.")
   stat("Version", l.version)
   app.append(stats)
+  if (l.answeredBy) {
+    const host = hostOf(l.url)
+    app.append(
+      el(
+        "p",
+        { className: "explain" },
+        el("strong", {}, `Connected to ${l.answeredBy}`),
+        ", the hex that answered this connection (marked “connected” below; the admin UI says “this hex”). ",
+        l.hexes.length > 1
+          ? `When an address such as ${host} reaches several hexes (a Fly.io app, a load balancer, round-robin DNS), each connection goes to one of them, usually the nearest. It doesn't matter which: every hex serves reads and passes writes to the Overseer.`
+          : "",
+      ),
+    )
+  }
 
   const grid = el("div", { className: "hexes" })
   for (const h of [...l.hexes].sort((a, b) => rank(a.role) - rank(b.role) || a.name.localeCompare(b.name))) grid.append(card(h))
@@ -70,6 +84,14 @@ function card(h: HexView): HTMLElement {
     el("div", { className: "hex-where" }, el("span", { className: "pin", ariaHidden: "true" }, "◆"), el("span", {}, where), h.region && h.city ? el("span", { className: "region-code" }, h.region) : null),
     el("dl", {}, ...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)])),
   )
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return url
+  }
 }
 
 function rank(role: string): number {

@@ -147,3 +147,5 @@ pre { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-edi
 .hex dt { color: var(--vscode-descriptionForeground); }
 .hex dd { margin: 0; }
 .foot { padding: 14px 20px; color: var(--vscode-descriptionForeground); font-size: 0.9em; }
+.explain { margin: 0 20px 8px; max-width: 900px; color: var(--vscode-descriptionForeground); line-height: 1.5; }
+.explain strong { color: var(--vscode-foreground); font-weight: 600; }
