@@ -113,6 +113,12 @@ impl HexDBEngine {
         self.replica_progress.lock().unwrap().get(hex).filter(|p| p.seen.elapsed() < PROGRESS_STALE).map(|p| p.applied_seq)
     }
 
+    /// Replicas that polled for changes within `within`: they follow this hex now,
+    /// whether or not discovery has listed them yet.
+    pub fn polling_replicas(&self, within: std::time::Duration) -> Vec<String> {
+        self.replica_progress.lock().unwrap().iter().filter(|(_, p)| p.seen.elapsed() < within).map(|(id, _)| id.clone()).collect()
+    }
+
     /// When the first change after `after` was committed: a replica at `after`
     /// is behind by that change's age. None when nothing is published after it.
     pub async fn change_time_after(&self, after: u64) -> Option<chrono::DateTime<chrono::Utc>> {

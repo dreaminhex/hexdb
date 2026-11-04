@@ -428,7 +428,15 @@ async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
         // they all hold exactly what this hex holds, and whichever is elected
         // continues the history from the very position the others are at.
         let head = engine.changes.published_seq();
-        let replicas: Vec<String> = engine.peers.lock().await.iter().filter(|p| p.status == "active").map(|p| p.hex.id.clone()).collect();
+        // The hexes discovery lists, and any replica polling for changes that it
+        // hasn't listed yet (one that just started): either could be elected or
+        // must resume, so each must be at the head.
+        let mut replicas: Vec<String> = engine.peers.lock().await.iter().filter(|p| p.status == "active").map(|p| p.hex.id.clone()).collect();
+        for id in engine.polling_replicas(Duration::from_secs(10)) {
+            if !replicas.contains(&id) {
+                replicas.push(id);
+            }
+        }
         let caught_up = replicas.iter().all(|id| engine.replica_applied(id).is_some_and(|applied| applied >= head));
         if caught_up && engine.changes.published_seq() == head {
             break;
