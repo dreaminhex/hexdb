@@ -1,0 +1,415 @@
+{
+  "name": "hexdb",
+  "displayName": "HexDB",
+  "description": "Browse HexDB lattices, run SQL and GraphQL, and edit stored functions.",
+  "version": "0.1.0",
+  "publisher": "dreaminhex",
+  "license": "Apache-2.0",
+  "icon": "media/icon.png",
+  "homepage": "https://hexdb.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dreaminhex/hexdb.git",
+    "directory": "extensions/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/dreaminhex/hexdb/issues"
+  },
+  "keywords": [
+    "hexdb",
+    "database",
+    "sql",
+    "graphql",
+    "document database"
+  ],
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "hexdb",
+          "title": "HexDB",
+          "icon": "media/hexdb.svg"
+        }
+      ]
+    },
+    "views": {
+      "hexdb": [
+        {
+          "id": "hexdb.connections",
+          "name": "Connections",
+          "icon": "media/hexdb.svg",
+          "contextualTitle": "HexDB"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "hexdb.connections",
+        "contents": "Connect to a HexDB lattice with a connection URI, such as hexdbs://db.example.com?apiKey=hxk_...\n[Add Connection](command:hexdb.addConnection)\nOr try the public playground, a lattice of four hexes in four regions:\n[Connect to the Playground](command:hexdb.addPlayground)\n[About connection URIs](https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md#connection-uris)"
+      }
+    ],
+    "languages": [
+      {
+        "id": "graphql",
+        "aliases": [
+          "GraphQL",
+          "graphql"
+        ],
+        "extensions": [
+          ".graphql",
+          ".gql"
+        ],
+        "configuration": "./syntaxes/graphql.language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "graphql",
+        "scopeName": "source.graphql.hexdb",
+        "path": "./syntaxes/graphql.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "hexdb.addConnection",
+        "title": "Add Connection",
+        "category": "HexDB",
+        "icon": "$(add)"
+      },
+      {
+        "command": "hexdb.addPlayground",
+        "title": "Connect to the Playground",
+        "category": "HexDB"
+      },
+      {
+        "command": "hexdb.editConnection",
+        "title": "Edit Connection",
+        "category": "HexDB",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "hexdb.removeConnection",
+        "title": "Remove Connection",
+        "category": "HexDB",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "hexdb.copyConnectionUri",
+        "title": "Copy Connection URI (without credentials)",
+        "category": "HexDB"
+      },
+      {
+        "command": "hexdb.refresh",
+        "title": "Refresh",
+        "category": "HexDB",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "hexdb.openLattice",
+        "title": "Show Lattice",
+        "category": "HexDB",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "hexdb.newSqlQuery",
+        "title": "New SQL Query",
+        "category": "HexDB",
+        "icon": "$(database)"
+      },
+      {
+        "command": "hexdb.newGraphqlQuery",
+        "title": "New GraphQL Query",
+        "category": "HexDB",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "hexdb.runQuery",
+        "title": "Run Query",
+        "category": "HexDB",
+        "icon": "$(play)"
+      },
+      {
+        "command": "hexdb.useConnection",
+        "title": "Use Connection for This Editor",
+        "category": "HexDB",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "hexdb.browseTessellation",
+        "title": "Browse Documents",
+        "category": "HexDB",
+        "icon": "$(table)"
+      },
+      {
+        "command": "hexdb.queryTessellation",
+        "title": "New SQL Query on This Tessellation",
+        "category": "HexDB",
+        "icon": "$(database)"
+      },
+      {
+        "command": "hexdb.openDocument",
+        "title": "Open Document by ID",
+        "category": "HexDB",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "hexdb.newFunction",
+        "title": "New Function",
+        "category": "HexDB",
+        "icon": "$(add)"
+      },
+      {
+        "command": "hexdb.openFunction",
+        "title": "Open Function",
+        "category": "HexDB"
+      },
+      {
+        "command": "hexdb.openFunctionDefinition",
+        "title": "Open Function Definition (JSON)",
+        "category": "HexDB",
+        "icon": "$(json)"
+      },
+      {
+        "command": "hexdb.runFunction",
+        "title": "Run Function",
+        "category": "HexDB",
+        "icon": "$(play)"
+      },
+      {
+        "command": "hexdb.deleteFunction",
+        "title": "Delete Function",
+        "category": "HexDB",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "hexdb.signOut",
+        "title": "Disconnect",
+        "category": "HexDB",
+        "icon": "$(debug-disconnect)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "hexdb.addConnection",
+          "when": "view == hexdb.connections",
+          "group": "navigation@1"
+        },
+        {
+          "command": "hexdb.refresh",
+          "when": "view == hexdb.connections",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "hexdb.newSqlQuery",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "inline@1"
+        },
+        {
+          "command": "hexdb.openLattice",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "inline@2"
+        },
+        {
+          "command": "hexdb.newSqlQuery",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "1_query@1"
+        },
+        {
+          "command": "hexdb.newGraphqlQuery",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "1_query@2"
+        },
+        {
+          "command": "hexdb.openLattice",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "2_view@1"
+        },
+        {
+          "command": "hexdb.openDocument",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "2_view@2"
+        },
+        {
+          "command": "hexdb.editConnection",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "3_edit@1"
+        },
+        {
+          "command": "hexdb.copyConnectionUri",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "3_edit@2"
+        },
+        {
+          "command": "hexdb.signOut",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "3_edit@3"
+        },
+        {
+          "command": "hexdb.removeConnection",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "3_edit@4"
+        },
+        {
+          "command": "hexdb.openLattice",
+          "when": "view == hexdb.connections && viewItem == lattice",
+          "group": "inline"
+        },
+        {
+          "command": "hexdb.browseTessellation",
+          "when": "view == hexdb.connections && viewItem =~ /^tessellation/",
+          "group": "inline@1"
+        },
+        {
+          "command": "hexdb.browseTessellation",
+          "when": "view == hexdb.connections && viewItem =~ /^tessellation/",
+          "group": "1_query@1"
+        },
+        {
+          "command": "hexdb.queryTessellation",
+          "when": "view == hexdb.connections && viewItem =~ /^tessellation/",
+          "group": "1_query@2"
+        },
+        {
+          "command": "hexdb.openDocument",
+          "when": "view == hexdb.connections && viewItem =~ /^tessellation/",
+          "group": "1_query@3"
+        },
+        {
+          "command": "hexdb.newFunction",
+          "when": "view == hexdb.connections && viewItem == functions-admin",
+          "group": "inline"
+        },
+        {
+          "command": "hexdb.runFunction",
+          "when": "view == hexdb.connections && viewItem =~ /^function/",
+          "group": "inline@1"
+        },
+        {
+          "command": "hexdb.runFunction",
+          "when": "view == hexdb.connections && viewItem =~ /^function/",
+          "group": "1_run@1"
+        },
+        {
+          "command": "hexdb.openFunctionDefinition",
+          "when": "view == hexdb.connections && viewItem =~ /^function/",
+          "group": "2_edit@1"
+        },
+        {
+          "command": "hexdb.deleteFunction",
+          "when": "view == hexdb.connections && viewItem == function-admin",
+          "group": "2_edit@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "hexdb.runQuery",
+          "when": "editorLangId == sql || editorLangId == graphql",
+          "group": "navigation@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "hexdb.editConnection",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.removeConnection",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.copyConnectionUri",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.signOut",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.browseTessellation",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.queryTessellation",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.openFunction",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.openFunctionDefinition",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.deleteFunction",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.runQuery",
+          "when": "editorLangId == sql || editorLangId == graphql"
+        },
+        {
+          "command": "hexdb.useConnection",
+          "when": "editorLangId == sql || editorLangId == graphql"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "hexdb.runQuery",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && hexdb.editorBound"
+      }
+    ],
+    "configuration": {
+      "title": "HexDB",
+      "properties": {
+        "hexdb.pageSize": {
+          "type": "integer",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 10000,
+          "description": "Rows fetched per page of SQL results (Load More fetches the next page)."
+        },
+        "hexdb.latticeRefreshSeconds": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 0,
+          "description": "How often an open lattice view refreshes, in seconds. 0 turns it off."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "driver": "npm run build --prefix ../../drivers/node",
+    "build": "npm run driver && node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "npm run driver && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.webview.json --noEmit",
+    "test": "npm run check && node esbuild.mjs && node --test \"test/*.test.mjs\"",
+    "package": "npm test && vsce package --no-dependencies",
+    "vscode:prepublish": "npm run build",
+    "test:integration": "node esbuild.mjs && node test/integration/run.mjs"
+  },
+  "devDependencies": {
+    "@dreaminhex/hexdb": "file:../../drivers/node",
+    "@types/node": "^20.19.0",
+    "@types/vscode": "~1.100.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.28.2",
+    "typescript": "~7.0.2"
+  }
+}

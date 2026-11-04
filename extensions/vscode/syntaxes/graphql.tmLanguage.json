@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "GraphQL",
+  "scopeName": "source.graphql.hexdb",
+  "patterns": [
+    { "name": "comment.line.number-sign.graphql", "match": "#.*$" },
+    { "name": "string.quoted.block.graphql", "begin": "\"\"\"", "end": "\"\"\"" },
+    {
+      "name": "string.quoted.double.graphql",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "name": "constant.character.escape.graphql", "match": "\\(u[0-9A-Fa-f]{4}|.)" }]
+    },
+    { "name": "keyword.operation.graphql", "match": "\b(query|mutation|subscription|fragment|on)\b" },
+    { "name": "storage.type.graphql", "match": "\b(type|input|enum|interface|union|scalar|schema|directive|extend|implements)\b" },
+    { "name": "constant.language.graphql", "match": "\b(true|false|null)\b" },
+    { "name": "variable.other.graphql", "match": "\$[_A-Za-z][_0-9A-Za-z]*" },
+    { "name": "entity.name.function.directive.graphql", "match": "@[_A-Za-z][_0-9A-Za-z]*" },
+    { "name": "keyword.operator.spread.graphql", "match": "\.\.\." },
+    { "name": "constant.numeric.graphql", "match": "-?\b\d+(\.\d+)?([eE][+-]?\d+)?\b" },
+    {
+      "match": "\b([_A-Za-z][_0-9A-Za-z]*)\s*(:)",
+      "captures": { "1": { "name": "variable.parameter.graphql" }, "2": { "name": "punctuation.separator.graphql" } }
+    },
+    {
+      "match": "\b([_A-Za-z][_0-9A-Za-z]*)\s*(?=\()",
+      "captures": { "1": { "name": "entity.name.function.graphql" } }
+    },
+    { "name": "support.type.graphql", "match": "\b[A-Z][_0-9A-Za-z]*\b" },
+    { "name": "variable.other.field.graphql", "match": "\b[_a-z][_0-9A-Za-z]*\b" }
+  ]
+}
