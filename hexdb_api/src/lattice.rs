@@ -68,6 +68,18 @@ fn verify_signature(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, 
     Ok(())
 }
 
+/// Checked again before answering a poll for changes. A hex that stopped being the
+/// Overseer while a long poll waited (a handover) goes on to write its own bookkeeping
+/// as a replica; those positions must not reach the replicas as part of the history,
+/// or a replica ends up ahead of where the new Overseer took over and has to copy
+/// everything again.
+fn still_overseer(engine: &HexDBEngine) -> Result<(), ApiError> {
+    if engine.is_writable() {
+        return Ok(());
+    }
+    Err(ApiError::new(StatusCode::CONFLICT, "not_overseer", format!("This hex is a {} now; replicate from the Overseer.", engine.role())))
+}
+
 /// A signed request to an endpoint only the Overseer serves.
 fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &Uri, body: &[u8]) -> Result<(), ApiError> {
     verify_signature(engine, headers, method, uri, body)?;
@@ -239,6 +251,7 @@ pub async fn changes(
         let taken = engine.changes_after(params.after, limit).await.map_err(gone)?;
         let last_seq = taken.last().map_or(params.after, |c| c.seq);
         let changes = taken.iter().filter(|c| c.tessellation != REPLICATION_TESSELLATION).map(|c| (**c).clone()).collect();
+        still_overseer(&engine)?;
         return Ok(Json(ChangeBatch {
             source_id: engine.history_id(),
             changes,
@@ -259,6 +272,7 @@ pub async fn changes(
                 .filter(|c| c.tessellation != REPLICATION_TESSELLATION)
                 .map(|c| (**c).clone())
                 .collect();
+            still_overseer(&engine)?;
             return Ok(Json(ChangeBatch {
                 source_id: engine.history_id(),
                 changes,
