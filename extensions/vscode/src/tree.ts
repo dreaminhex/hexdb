@@ -107,12 +107,12 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
         item.iconPath = new vscode.ThemeIcon(roleIcon[h.role] ?? "circle-outline", h.status === "active" ? undefined : new vscode.ThemeColor("errorForeground"))
         const tip = new vscode.MarkdownString(
           [
-            `**${h.name}** — ${h.role}${h.is_self ? " (answered this connection)" : ""}`,
-            `Region: ${describeRegion(h.region)}`,
-            `Status: ${h.status}${h.replication_state ? `, ${h.replication_state}` : ""}`,
-            h.lag !== null && h.lag !== undefined ? `Lag: ${h.lag} changes` : "",
-            h.slicing && h.slices_held !== null && h.slices_held !== undefined ? `Slices held: ${h.slices_held} of 64` : "",
-            h.version ? `Version: ${h.version}` : "",
+            `**${md(h.name)}** — ${md(h.role)}${h.is_self ? " (connected: this hex answered the connection)" : ""}`,
+            `Region: ${md(describeRegion(h.region))}`,
+            `Status: ${md(h.status)}${h.replication_state ? `, ${md(h.replication_state)}` : ""}`,
+            h.lag !== null && h.lag !== undefined ? `Lag: ${md(h.lag)} changes` : "",
+            h.slicing && h.slices_held !== null && h.slices_held !== undefined ? `Slices held: ${md(h.slices_held)} of 64` : "",
+            h.version ? `Version: ${md(h.version)}` : "",
           ]
             .filter(Boolean)
             .join("\n\n"),
@@ -160,9 +160,9 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
         item.description = f.kind === "script" ? `script · ${f.runtime ?? ""}` : f.tessellation ? `${f.kind} · ${f.tessellation}` : f.kind
         item.tooltip = new vscode.MarkdownString(
           [
-            `**${f.name}** (${f.kind}${f.runtime ? `, ${f.runtime}` : ""})`,
-            f.description ?? "",
-            f.params?.length ? `Parameters: ${f.params.map((p) => `\`${p.name}: ${p.type}${p.required ? "" : "?"}\``).join(", ")}` : "",
+            `**${md(f.name)}** (${md(f.kind)}${f.runtime ? `, ${md(f.runtime)}` : ""})`,
+            md(f.description),
+            f.params?.length ? `Parameters: ${f.params.map((p) => `${md(p.name)}: ${md(p.type)}${p.required ? "" : "?"}`).join(", ")}` : "",
           ]
             .filter(Boolean)
             .join("\n\n"),
@@ -247,6 +247,11 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
     nodes.push({ kind: "tessellations", connection }, { kind: "functions", connection, admin: session.isAdmin })
     return nodes
   }
+}
+
+/** Server text as literal Markdown, so a hostile server can't add links or remote images to a tooltip. */
+function md(value: unknown): string {
+  return String(value ?? "").replace(/[\\`*_{}[\]()#+\-.!|<>~:]/g, "\\$&")
 }
 
 function rank(role: string): number {

@@ -31,6 +31,12 @@
   },
   "main": "./dist/extension.js",
   "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -156,6 +162,12 @@
         "icon": "$(database)"
       },
       {
+        "command": "hexdb.graphqlTessellation",
+        "title": "New GraphQL Query on This Tessellation",
+        "category": "HexDB",
+        "icon": "$(symbol-structure)"
+      },
+      {
         "command": "hexdb.openDocument",
         "title": "Open Document by ID",
         "category": "HexDB",
@@ -217,9 +229,14 @@
           "group": "inline@1"
         },
         {
-          "command": "hexdb.openLattice",
+          "command": "hexdb.newGraphqlQuery",
           "when": "view == hexdb.connections && viewItem == connection",
           "group": "inline@2"
+        },
+        {
+          "command": "hexdb.openLattice",
+          "when": "view == hexdb.connections && viewItem == connection",
+          "group": "inline@3"
         },
         {
           "command": "hexdb.newSqlQuery",
@@ -282,9 +299,14 @@
           "group": "1_query@2"
         },
         {
-          "command": "hexdb.openDocument",
+          "command": "hexdb.graphqlTessellation",
           "when": "view == hexdb.connections && viewItem =~ /^tessellation/",
           "group": "1_query@3"
+        },
+        {
+          "command": "hexdb.openDocument",
+          "when": "view == hexdb.connections && viewItem =~ /^tessellation/",
+          "group": "1_query@4"
         },
         {
           "command": "hexdb.newFunction",
@@ -363,6 +385,10 @@
         {
           "command": "hexdb.useConnection",
           "when": "editorLangId == sql || editorLangId == graphql"
+        },
+        {
+          "command": "hexdb.graphqlTessellation",
+          "when": "false"
         }
       ]
     },

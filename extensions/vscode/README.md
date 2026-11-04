@@ -18,9 +18,9 @@ An `http://` or `https://` address works too. The same URI works with every HexD
 
 ## What you can do
 
-- **Lattice.** Each connection shows its lattice: every hex with its role (Overseer, Harvester, Replicant), status and region. **Show Lattice** opens a view of the hexes grouped by location, with replication state, lag, slices and versions, refreshed every few seconds.
+- **Lattice.** Each connection shows its lattice: every hex with its role (Overseer, Harvester, Replicant), status and region. **Show Lattice** opens a card per hex, with its location, replication state, lag, slices and version, refreshed every few seconds. "Connected" marks the hex that answered your connection.
 - **Tessellations.** Each tessellation lists its columns, marking indexed ones. **Browse Documents** shows its documents a page at a time. Click a document's `id` to open it as JSON; with write permission, saving it (Ctrl+S) replaces the document.
-- **SQL and GraphQL.** **New SQL Query** and **New GraphQL Query** open an editor bound to the connection (shown in the status bar; click it to change). Ctrl+Enter (Cmd+Enter) runs the statement at the cursor, or the selection. Saved `.sql`, `.graphql` and `.gql` files work too. SQL editors complete tessellation and column names.
+- **SQL and GraphQL.** The SQL and GraphQL buttons on a connection's row (or **New SQL/GraphQL Query on This Tessellation** when you right-click a tessellation) open an editor bound to the connection (shown in the status bar; click it to change). Ctrl+Enter (Cmd+Enter) runs the statement at the cursor, or the selection. Saved `.sql`, `.graphql` and `.gql` files work too. SQL editors complete tessellation and column names.
 - **Results.** Each run opens a tab in the results panel, with a table or JSON view, a row filter, Load More for the next page, copying, and export to CSV or JSON.
 - **Functions.** Run any function, giving its parameters. Administrators can create functions (Python, TypeScript or JavaScript scripts, or query, aggregate and transaction functions), edit a script's code or any function's JSON definition, save with Ctrl+S, and delete them.
 

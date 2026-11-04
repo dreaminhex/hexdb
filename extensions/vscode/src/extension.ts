@@ -96,6 +96,15 @@ export function activate(context: vscode.ExtensionContext): { connections: Conne
       const ident = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : `"${name}"`
       await queries.newQuery("sql", node.connection, `SELECT *\nFROM ${ident}\nLIMIT 100;\n`)
     }),
+    command("hexdb.graphqlTessellation", async (node?: Node) => {
+      if (node?.kind !== "tessellation") return
+      const name = JSON.stringify(node.tessellation.name)
+      await queries.newQuery(
+        "graphql",
+        node.connection,
+        `# Ctrl+Enter runs the query (or the selection).\n\n{\n  count(tessellation: ${name})\n  documents(tessellation: ${name}, limit: 20) {\n    total\n    documents { id data }\n  }\n}\n`,
+      )
+    }),
     command("hexdb.openDocument", async (node?: Node) => {
       const connection = await target(node)
       if (!connection) return
@@ -191,6 +200,15 @@ async function connectionWizard(connections: Connections, existing?: SavedConnec
     }
 
     const host = new URL(parsed.url).host
+    if (parsed.url.startsWith("http:") && !isLocal(new URL(parsed.url).hostname)) {
+      const go = "Connect Anyway"
+      const warn = await vscode.window.showWarningMessage(
+        `${host} is reached over plain HTTP, so your credentials and data cross the network unencrypted. Use hexdbs:// if the server has HTTPS.`,
+        { modal: true },
+        go,
+      )
+      if (warn !== go) continue
+    }
     const name =
       existing?.name ??
       (await vscode.window.showInputBox({ title: "Name this connection", value: host, ignoreFocusOut: true, validateInput: (v) => (v.trim() ? undefined : "Enter a name") }))
@@ -204,6 +222,22 @@ async function connectionWizard(connections: Connections, existing?: SavedConnec
     if (choice === keep) return connections.save(name.trim(), uri, existing?.id)
     if (choice !== retry) return undefined
   }
+}
+
+/** Loopback and private addresses, where plain HTTP doesn't leave the machine or the local network. */
+function isLocal(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase()
+  return (
+    h === "localhost" ||
+    h.endsWith(".localhost") ||
+    h.endsWith(".internal") ||
+    h === "::1" ||
+    /^127\./.test(h) ||
+    /^10\./.test(h) ||
+    /^192\.168\./.test(h) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+    /^f[cd][0-9a-f]{2}:/.test(h)
+  )
 }
 
 /** Sign in and read /auth/me; returns the problem, if any. */
