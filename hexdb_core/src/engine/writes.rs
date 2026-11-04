@@ -1149,6 +1149,12 @@ impl HexDBEngine {
 
         let (ack, first, changes) = {
             let mut state = self.state.lock().await;
+            // Checked again under the lock that assigns sequence numbers: a write that
+            // passed `ensure_writable` just before a step-down began takes none, so the
+            // stepping-down Overseer's last change is final (see `updates::step_down`).
+            if !replicated && self.is_writable() && crate::updates::stepping_down() {
+                return Err(EngineError::Unavailable("This Overseer is handing its role to another hex for an update; try again in a few seconds.".into()).into());
+            }
             for item in &items {
                 if let Some(expected) = item.expected_seq {
                     if self.current_seq(&state, &item.key).await != expected {

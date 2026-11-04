@@ -427,7 +427,19 @@ async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
         // Every replica at the last change, with nothing committed since: then
         // they all hold exactly what this hex holds, and whichever is elected
         // continues the history from the very position the others are at.
+        // The last change is the last sequence number assigned, not published: a
+        // write still waiting for its WAL sync would otherwise be published after
+        // the check, reach only the replicas still polling, and leave them ahead
+        // of the new Overseer (so they'd copy everything again).
+        let assigned = engine.stats().await.next_seq.saturating_sub(1);
         let head = engine.changes.published_seq();
+        if head < assigned {
+            if Instant::now() > deadline {
+                anyhow::bail!("a write didn't finish committing within a minute, so this hex kept its role");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
         // The hexes discovery lists, and any replica polling for changes that it
         // hasn't listed yet (one that just started): either could be elected or
         // must resume, so each must be at the head.
