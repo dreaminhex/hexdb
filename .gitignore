@@ -34,6 +34,7 @@ hexdb.pid
 *.hexdb.pid
 # Local notes
 /TODO.md
+/TODO.archive.md
 plugins/**/changes.ndjson
 
 # Local secrets (see hexdb_core config: hexdb.local.toml)
