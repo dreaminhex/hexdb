@@ -68,7 +68,7 @@ jobs:
         if: env.DOCKERHUB_TOKEN != ''
         # The image is what matters; a page update refused (a token without the Delete scope) only warns.
         continue-on-error: true
-        uses: peter-evans/dockerhub-description@v4
+        uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
