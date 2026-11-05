@@ -49,6 +49,21 @@ resources:
   limits:
     memory: 3Gi
 
+# Malware scanning of uploads (files.scan): a ClamAV the hexes share. Every
+# upload is scanned before it's stored, and an infected one is quarantined.
+# Disabled, the hexes scan with HexDB's built-in YARA rules only (and say so).
+clamav:
+  enabled: true
+  image: clamav/clamav:1.5
+  # ClamAV asks for 3-4 GB: the engine takes about 1.2 GB and briefly twice
+  # that while it reloads new signatures.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 3Gi
+    limits:
+      memory: 4Gi
+
 service:
   type: ClusterIP
   port: 7700

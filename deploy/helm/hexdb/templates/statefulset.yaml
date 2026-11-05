@@ -54,6 +54,10 @@ spec:
               value: "$(POD_NAME).{{ include "hexdb.headless" . }}.{{ .Release.Namespace }}.svc.cluster.local"
             - name: HEXDB_NETWORK__LATTICE_NAME
               value: {{ .Values.latticeName | quote }}
+            {{- if .Values.clamav.enabled }}
+            - name: HEXDB_FILES__SCAN__CLAMD
+              value: "tcp://{{ include "hexdb.fullname" . }}-clamav.{{ .Release.Namespace }}.svc.cluster.local:3310"
+            {{- end }}
             - name: HEXDB_NETWORK__PEERS
               value: {{ include "hexdb.peers" . | quote }}
             - name: HEXDB_STORAGE__ENCRYPTION_KEY

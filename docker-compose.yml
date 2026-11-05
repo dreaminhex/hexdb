@@ -26,6 +26,8 @@ x-hex: &hex
     HEXDB_NETWORK__LATTICE_NAME: "Compose Lattice"
     HEXDB_NETWORK__LATTICE_SECRET: ${HEXDB_LATTICE_SECRET:?set HEXDB_LATTICE_SECRET (see the top of this file)}
     HEXDB_NETWORK__PEERS: "hex1:7702,hex2:7702,hex3:7702"
+    # Every upload is scanned by the ClamAV below before it's stored.
+    HEXDB_FILES__SCAN__CLAMD: "tcp://clamav:3310"
 
 services:
   hex1:
@@ -63,7 +65,18 @@ services:
       HEXDB_STORAGE__ENCRYPTION_KEY: ${HEX3_KEY:-base64:MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=}
       HEXDB_IDENTITY__ROLE: replicant
 
+  # ClamAV for malware scanning (files.scan), one for the lattice. It needs 3-4 GB
+  # of memory and a minute or two to load its signatures; until then uploads are
+  # held (503), never stored unscanned. Signatures update themselves.
+  clamav:
+    image: clamav/clamav:1.5
+    restart: unless-stopped
+    volumes:
+      - clamav:/var/lib/clamav
+      - ./deploy/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+
 volumes:
   hex1:
   hex2:
   hex3:
+  clamav:

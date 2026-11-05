@@ -1,0 +1,92 @@
+{{- if .Values.clamav.enabled }}
+# ClamAV for malware scanning of uploads (files.scan): one for the whole lattice,
+# since its signatures take 1-2.5 GB of memory and its update servers rate-limit
+# many hosts. Its pods are labelled apart from the hexes' so HexDB's services
+# never select them.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hexdb.fullname" . }}-clamav
+  labels:
+    {{- include "hexdb.labels" . | nindent 4 }}
+data:
+  # The limits match files.scan.max_size_mb (2000); see deploy/clamav/clamd.conf.
+  clamd.conf: |
+    Foreground yes
+    LogTime yes
+    PidFile /tmp/clamd.pid
+    LocalSocket /tmp/clamd.sock
+    TCPSocket 3310
+    DatabaseDirectory /var/lib/clamav
+    StreamMaxLength 2000M
+    MaxFileSize 2000M
+    MaxScanSize 4000M
+    MaxScanTime 300000
+    MaxRecursion 17
+    MaxFiles 10000
+    AlertExceedsMax yes
+    AlertBrokenExecutables yes
+    AlertEncryptedArchive no
+    AlertEncryptedDoc no
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hexdb.fullname" . }}-clamav
+  labels:
+    {{- include "hexdb.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hexdb-clamav
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hexdb-clamav
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: clamav
+          image: {{ .Values.clamav.image | quote }}
+          ports:
+            - name: clamd
+              containerPort: 3310
+          # Signatures load for a minute or two at first start; until then HexDB
+          # holds uploads (503), it never stores them unscanned.
+          readinessProbe:
+            tcpSocket:
+              port: clamd
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.clamav.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/clamav/clamd.conf
+              subPath: clamd.conf
+            - name: signatures
+              mountPath: /var/lib/clamav
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "hexdb.fullname" . }}-clamav
+        - name: signatures
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hexdb.fullname" . }}-clamav
+  labels:
+    {{- include "hexdb.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: hexdb-clamav
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: clamd
+      port: 3310
+      targetPort: clamd
+{{- end }}

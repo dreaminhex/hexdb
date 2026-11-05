@@ -260,6 +260,7 @@ kubectl logs hexdb-0 | grep -A2 "first administrator"                        # t
 - **Hexes.** Each pod is a hex with its own volume (`persistence.size`, the cluster's default storage class unless `persistence.storageClass` is set). They find each other through a headless Service that lists pods before they're ready, so the lattice forms while they start, and each announces its own DNS name (`hexdb-0.hexdb-hexes.<namespace>.svc.cluster.local`). The `hexdb` Service sends requests to any hex; replicas answer reads and forward writes to the Overseer. Use an odd number of replicas, 3 or more, for failover.
 - **Secrets.** On first install the chart creates a Secret with a new storage encryption key and lattice secret, keeps them on upgrades, and leaves the Secret in place if the release is deleted (`helm.sh/resource-policy: keep`), so the volumes stay readable. Back the key up (the install notes show how). To bring your own, create a Secret with `encryption-key` and `lattice-secret` (each `base64:<32 bytes>`, from `hexdb secret`) and set `existingSecret`. Every hex of the release shares the key.
 - **Settings.** `latticeName`, `admin.login`, `admin.email` and `admin.password` (empty: generated and printed once), `ramMb` (memory before flushing; also ranks hexes in elections), `diskMb` (default 90% of the volume), `resources`, `service`, `ingress`, and `extraEnv` for any other `HEXDB_<SECTION>__<FIELD>` setting. Lattice-wide settings (AI, CORS, A2A, ...) are set once, in the admin UI or with `hexdb config`.
+- **Malware scanning.** The chart runs one ClamAV for the release (`clamav.enabled`, on by default; `clamav.image`, `clamav.resources`, 3-4 GB of memory) with [deploy/clamav/clamd.conf](deploy/clamav/clamd.conf)'s limits, and points every hex at it, so uploads are scanned by ClamAV and YARA-X (see [Malware scanning](#malware-scanning)). Its pods are labelled apart from the hexes'. Until its signatures load, uploads are held.
 - **Hardening.** Pods run as the image's unprivileged user (10001) with a read-only root file system, no Linux capabilities, no privilege escalation and the runtime's default seccomp profile; `/tmp` is an emptyDir.
 - **Probes.** Readiness uses `GET /ready`, so a pod gets traffic only once it has the data; liveness uses `GET /health`.
 - **A forgotten admin password:** `kubectl exec hexdb-0 -- hexdb reset-password`, on the Overseer's pod (see [A forgotten password](#a-forgotten-password)).
@@ -1289,6 +1290,44 @@ Deleting a file's document (`DELETE /media/{id}`, or a delete in a transaction o
 | `DELETE /media/_trash` | Empties the trash |
 
 Dropping a files tessellation drops its trashed files too.
+
+### Malware scanning
+
+Every uploaded file is scanned before it's stored (`files.scan`, on by default), on the Overseer, which takes every upload. The scan runs after the file's chunks are on disk and before its document commits, so a file that doesn't pass never becomes a document in its tessellation and never reaches another hex.
+
+**Engines.** Both are free and need no account.
+- **ClamAV**, reached through its daemon, `clamd`, over TCP or a Unix socket. HexDB never links ClamAV's library, so the daemon's GPL licence stays with it. The daemon holds its signatures in memory and updates them several times a day.
+- **YARA-X**, built into HexDB (VirusTotal's Rust implementation of YARA rules), with HexDB's own rules always loaded (starting with the EICAR test file) and any rules you add in `files.scan.yara_rules` (a directory of `.yar` and `.yara` files, searched recursively). 32-bit builds leave YARA-X out.
+
+**Results.** A clean file records the verdict on its document as `scan`: `status` (`clean`), the `engines` that scanned it with their versions (ClamAV's includes its signature version), and `scanned_at`. A file over `files.scan.max_size_mb` (2000) isn't sent to ClamAV, and one over `files.scan.yara_max_mb` (128) skips YARA-X, which reads the whole file into memory; such a file is stored with `status` `not_scanned` and `skipped` saying why, never as clean.
+
+**Quarantine.** A file either engine flags isn't stored. The upload answers 422 `file_quarantined`, naming what matched, and the file is kept in quarantine instead: on the Overseer only, never replicated, never downloadable. Administrators review it on the Quarantine page or with:
+
+| Endpoint | |
+| --- | --- |
+| `GET /quarantine` | Quarantined files, newest first: tessellation, path, name, size, uploader and `scan` with its `detections` |
+| `POST /quarantine/{id}/release` | A false positive: store it in its tessellation as a normal file (or a new version), recorded as `scan.released_by` |
+| `DELETE /quarantine/{id}` | Delete it for good; its content goes with the next garbage collection |
+
+Quarantining, releasing and deleting are audited (`file.quarantined`, `file.released`, `file.quarantine_deleted`). Asked on a replica, these requests are passed to the Overseer. Quarantine stays with the hex that scanned the file: after a failover, the files quarantined on the old Overseer are on that hex, not the new one.
+
+**When the scanner can't answer.** If ClamAV is configured (or was found, below) but can't answer, an upload answers 503 `scanner_unavailable` with `Retry-After` and nothing is stored: no file enters the lattice unscanned. This is also the case for a minute or two after ClamAV starts, while it loads its signatures.
+
+**Without ClamAV.** `files.scan.clamd` is `auto` by default: at startup HexDB looks for a ClamAV on its own machine (`127.0.0.1:3310` and the usual Unix sockets). If there's none, uploads are scanned by YARA-X's rules alone, which catch far less, and HexDB says so in its startup log, in `/status` (`storage.scan.warning`) and on the dashboard. `files.scan.enabled = false` turns scanning off (also said loudly).
+
+**Setting up ClamAV.**
+1. Install it: `sudo apt install clamav-daemon clamav-freshclam` (Debian, Ubuntu), `brew install clamav` (macOS), the installer from clamav.net (Windows), or the official `clamav/clamav` image. The Docker Compose file and the Helm chart run one for the lattice already.
+2. Let `freshclam` keep the signatures current; the packages and the image run it. ClamAV's download servers limit how often a host may update, and expect a private mirror (`cvdupdate`) for more than about ten hosts, so run one ClamAV per lattice, not one per hex.
+3. Raise clamd's limits to HexDB's: by default clamd refuses streams over 25 MB and checks only the first 100 MB of a file, answering "clean" for the rest. [deploy/clamav/clamd.conf](deploy/clamav/clamd.conf) sets `StreamMaxLength` and `MaxFileSize` to 2000M and `AlertExceedsMax`, so a file clamd couldn't fully check is reported rather than passed. Use it as `/etc/clamav/clamd.conf` (the image) or merge it into your `clamd.conf`.
+4. Point HexDB at it. On the same machine, `auto` finds it. Elsewhere, give every hex the same address, since any hex can become the Overseer:
+
+   ```toml
+   [files.scan]
+   clamd = "tcp://scanner.internal:3310"   # or HEXDB_FILES__SCAN__CLAMD
+   ```
+5. Check it: `/status` and the dashboard show ClamAV's version and signature date, and uploading the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/) (harmless, flagged by every scanner) puts it in quarantine.
+
+ClamAV needs 3-4 GB of memory: its engine takes about 1.2 GB, and twice that briefly while it loads new signatures. The connection to clamd isn't encrypted, so keep it on a private network.
 
 ### Upload quotas
 
@@ -2482,6 +2521,12 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `quotas.default_mb`, `default_files` | 0, 0 | Upload quota per user (lattice configuration; 0: none; see [Upload quotas](#upload-quotas)) |
 | `sharing.enabled`, `default_days`, `max_days`, `require_password` | true, 7, 30, false | Sharing links (lattice configuration; see [Sharing links](#sharing-links)) |
 | `files.sandbox`, `sandbox_memory_mb` | true, 1024 | Parse files in a restricted worker process, and its memory limit (see [the parser sandbox](#metadata-extraction)) |
+| `files.scan.enabled` | true | Scan every upload for malware before it's stored (see [Malware scanning](#malware-scanning)) |
+| `files.scan.clamd` | `auto` | ClamAV's daemon: `auto` (look on this machine), `tcp://host:3310`, `host:3310`, a Unix socket path, or `off` |
+| `files.scan.timeout_seconds` | 300 | Seconds clamd may take for one file |
+| `files.scan.max_size_mb` | 2000 | Larger files are stored as not scanned; clamd's limits must be at least this |
+| `files.scan.yara_rules` | (none) | A directory of extra YARA rules, besides HexDB's own |
+| `files.scan.yara_max_mb` | 128 | Larger files skip YARA-X, which reads a file into memory |
 | `files.text_kb` | 64 | Text kept per file for full-text search |
 | `files.thumbnails`, `thumbnail_px` | `true`, 320 | Image thumbnails and their size (32-2048) |
 | `memory.ram_mb` | 1024 | Memory budget for documents |

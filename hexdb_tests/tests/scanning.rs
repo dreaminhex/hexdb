@@ -9,7 +9,7 @@ use anyhow::{bail, Result};
 use hexdb_core::scan::eicar_test_file;
 use hexdb_tests::{TestOptions, TestServer};
 use reqwest::{Method, StatusCode};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
@@ -226,5 +226,27 @@ fn quarantine_never_reaches_a_replica() -> Result<()> {
     let released = overseer.request(Method::POST, &format!("/quarantine/{}/release", id), None, &[])?;
     assert_eq!(released.status, StatusCode::OK, "{}", released.body);
     wait_until(Duration::from_secs(30), "the released file on the replica", || Ok(replica.get_bytes("/media/_files/docs/bad.bin", &[])?.0 == StatusCode::OK))?;
+    Ok(())
+}
+
+/// Against a real ClamAV, when HEXDB_TEST_CLAMD names one (tcp://host:3310), e.g.
+/// docker run -p 3310:3310 -v ./deploy/clamav/clamd.conf:/etc/clamav/clamd.conf clamav/clamav:1.5
+#[test]
+fn a_real_clamav_finds_the_eicar_test_file() -> Result<()> {
+    let Ok(clamd) = std::env::var("HEXDB_TEST_CLAMD") else {
+        eprintln!("HEXDB_TEST_CLAMD isn't set; skipping the test against a real ClamAV");
+        return Ok(());
+    };
+    let server = files_server(TestOptions { extra_toml: scanning(&clamd), ..Default::default() })?;
+    let clean = put(&server, "docs/a.txt", b"hello")?;
+    assert_eq!(clean.body["scan"]["status"], "clean", "{}", clean.body);
+    let eicar = put(&server, "docs/eicar.com", &eicar_test_file())?;
+    assert_eq!(eicar.error_code(), Some("file_quarantined"), "{}", eicar.body);
+    let files = server.request(Method::GET, "/quarantine", None, &[])?.body["files"].clone();
+    let detections = files[0]["scan"]["detections"].as_array().cloned().unwrap_or_default();
+    assert!(detections.iter().any(|d| d["engine"] == "ClamAV" && d["name"].as_str().unwrap_or("").to_lowercase().contains("eicar")), "{:?}", detections);
+    // A larger file streams in many pieces.
+    let big: Vec<u8> = (0..20_000_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    assert_eq!(put(&server, "docs/big.bin", &big)?.body["scan"]["status"], "clean");
     Ok(())
 }

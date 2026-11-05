@@ -302,7 +302,7 @@ fn collect_rule_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) 
 }
 
 /// Where a ClamAV is looked for on this machine with `clamd = "auto"`.
-const LOCAL_CLAMD: &[&str] = &["127.0.0.1:3310", "/var/run/clamav/clamd.ctl", "/run/clamav/clamd.ctl", "/var/run/clamd.scan/clamd.sock", "/tmp/clamd.socket"];
+const LOCAL_CLAMD: &[&str] = &["127.0.0.1:3310", "/var/run/clamav/clamd.ctl", "/run/clamav/clamd.ctl", "/var/run/clamd.scan/clamd.sock", "/tmp/clamd.sock", "/tmp/clamd.socket"];
 
 /// The configured engines.
 pub struct Scanner {

@@ -347,8 +347,8 @@ pub struct ScanConfig {
     /// Seconds clamd may take to scan one file.
     #[serde(default = "default_scan_timeout_seconds")]
     pub timeout_seconds: u64,
-    /// Files larger than this (MB) aren't scanned; their documents say so.
-    /// Raise clamd's StreamMaxLength to match.
+    /// Files larger than this (MB) aren't scanned; their documents say so. clamd's
+    /// StreamMaxLength and MaxFileSize must be at least this (deploy/clamav/clamd.conf).
     #[serde(default = "default_scan_max_size_mb")]
     pub max_size_mb: u64,
     /// A directory of extra YARA rules (`.yar`, `.yara`, searched recursively) for YARA-X,
@@ -369,7 +369,7 @@ fn default_scan_timeout_seconds() -> u64 {
 }
 
 fn default_scan_max_size_mb() -> u64 {
-    2048
+    2000
 }
 
 fn default_yara_max_mb() -> u64 {
