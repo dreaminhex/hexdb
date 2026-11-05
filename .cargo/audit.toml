@@ -4,4 +4,12 @@ ignore = [
     # paste: unmaintained, not vulnerable. A compile-time macro crate used only
     # by lofty (audio tag extraction). Revisit when lofty drops it.
     "RUSTSEC-2024-0436",
+    # rsa 0.10 (Marvin attack: timing side channel in RSA *decryption* with a private
+    # key). Only YARA-X uses it, to verify Authenticode signatures in its pe module:
+    # public keys only (RsaPublicKey, Pkcs1v15Sign verification), no decryption, so
+    # the attack doesn't apply. No fixed version exists. Revisit when yara-x moves.
+    "RUSTSEC-2023-0071",
+    # bincode: unmaintained, not vulnerable. YARA-X uses it to serialize its compiled
+    # rules in memory; HexDB never decodes untrusted bincode with it.
+    "RUSTSEC-2025-0141",
 ]
