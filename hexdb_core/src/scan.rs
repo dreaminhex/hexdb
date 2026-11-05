@@ -247,6 +247,8 @@ pub struct Yara {
     count: usize,
     /// A hash of the rule sources, so a changed rule set rescans stored files.
     fingerprint: String,
+    /// Rule files that didn't compile and were left out (file: error).
+    failed: Vec<String>,
 }
 
 #[cfg(feature = "yara")]
@@ -266,6 +268,7 @@ impl Yara {
             }
         }
         let dir = dir.unwrap_or(std::path::Path::new(""));
+        let mut failed = Vec::new();
         let mut hasher = blake3::Hasher::new();
         hasher.update(BUILT_IN_RULES.as_bytes());
         for file in &files {
@@ -274,12 +277,18 @@ impl Yara {
             hasher.update(source.as_bytes());
             let namespace = file.strip_prefix(dir).unwrap_or(file).to_string_lossy().replace(['\\', '/', '.', '-', ' '], "_");
             compiler.new_namespace(&namespace);
-            compiler.add_source(source.as_str()).map_err(|e| anyhow::anyhow!("{}: {}", file.display(), e))?;
+            // A file that doesn't compile is left out (and reported) rather than
+            // stopping HexDB: the other rules and ClamAV keep scanning.
+            if let Err(e) = compiler.add_source(source.as_str()) {
+                let first_line = e.to_string().lines().next().unwrap_or_default().to_string();
+                tracing::error!("❌ YARA rules {} don't compile and are left out: {}", file.display(), e);
+                failed.push(format!("{}: {}", file.display(), first_line));
+            }
         }
         let rules = compiler.build();
         let count = rules.iter().count();
         let fingerprint = format!("{} rules, {}", count, &hasher.finalize().to_hex()[..16]);
-        Ok(Yara { rules, count, fingerprint })
+        Ok(Yara { rules, count, fingerprint, failed })
     }
 
     /// Names (`namespace:rule`) of the rules that match.
@@ -377,6 +386,10 @@ impl Scanner {
     /// Why scanning is weaker than it should be, if it is: shown at startup, in
     /// `/status` and on the dashboard. None while ClamAV is still being looked for.
     pub fn warning(&self) -> Option<String> {
+        #[cfg(feature = "yara")]
+        if let Some(yara) = self.yara.as_ref().filter(|y| !y.failed.is_empty()) {
+            return Some(format!("{} YARA rule file(s) don't compile and are left out: {}", yara.failed.len(), yara.failed.join("; ")));
+        }
         match self.clamd.get() {
             None | Some(Some(_)) => return None,
             Some(None) => {}
@@ -540,6 +553,36 @@ mod tests {
         let yara = Yara::load(None).unwrap();
         assert_eq!(yara.scan(&eicar_test_file()).unwrap(), vec!["hexdb:EICAR_Test_File".to_string()]);
         assert!(yara.scan(b"hello, world").unwrap().is_empty());
+    }
+
+    #[cfg(feature = "yara")]
+    #[test]
+    fn a_rule_file_that_doesnt_compile_is_left_out() {
+        let dir = std::env::temp_dir().join(format!("hexdb-yara-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("good.yar"), "rule Good_Rule { strings: $a = \"hexdb-good-marker\" condition: $a }").unwrap();
+        std::fs::write(dir.join("broken.yar"), "rule Broken_Rule { condition: this is not yara }").unwrap();
+        let yara = Yara::load(Some(&dir)).unwrap();
+        assert_eq!(yara.failed.len(), 1, "{:?}", yara.failed);
+        assert!(yara.failed[0].contains("broken.yar"));
+        assert_eq!(yara.scan(b"... hexdb-good-marker ...").unwrap(), vec!["good_yar:Good_Rule".to_string()]);
+        assert!(!yara.scan(&eicar_test_file()).unwrap().is_empty(), "the built-in rules still load");
+        let scanner = Scanner { clamd: tokio::sync::OnceCell::new_with(Some(None)), timeout: Duration::from_secs(1), yara: Some(Arc::new(yara)), max_bytes: 1 << 20, yara_max_bytes: 1 << 20 };
+        assert!(scanner.warning().unwrap().contains("broken.yar"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Compiles a rules directory named by HEXDB_TEST_YARA_RULES (e.g. YARA Forge's core
+    /// package): `cargo test -p hexdb_core yara_rules_from -- --ignored --nocapture`.
+    #[cfg(feature = "yara")]
+    #[test]
+    #[ignore]
+    fn yara_rules_from_hexdb_test_yara_rules() {
+        let dir = std::env::var("HEXDB_TEST_YARA_RULES").expect("HEXDB_TEST_YARA_RULES");
+        let started = std::time::Instant::now();
+        let yara = Yara::load(Some(std::path::Path::new(&dir))).unwrap();
+        println!("{} in {:?}", yara.fingerprint, started.elapsed());
+        assert!(yara.scan(&eicar_test_file()).unwrap().contains(&"hexdb:EICAR_Test_File".to_string()));
     }
 
     /// A fake clamd: answers PING and VERSION, and flags INSTREAM content that contains

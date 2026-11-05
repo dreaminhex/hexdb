@@ -1299,6 +1299,15 @@ Every uploaded file is scanned before it's stored (`files.scan`, on by default),
 - **ClamAV**, reached through its daemon, `clamd`, over TCP or a Unix socket. HexDB never links ClamAV's library, so the daemon's GPL licence stays with it. The daemon holds its signatures in memory and updates them several times a day.
 - **YARA-X**, built into HexDB (VirusTotal's Rust implementation of YARA rules), with HexDB's own rules always loaded (starting with the EICAR test file) and any rules you add in `files.scan.yara_rules` (a directory of `.yar` and `.yara` files, searched recursively). 32-bit builds leave YARA-X out.
 
+**More YARA rules.** HexDB doesn't ship third-party rules: community sets keep their authors' licences, which include share-alike and non-commercial terms, so each installation downloads them for itself. [YARA Forge](https://github.com/YARAHQ/yara-forge) collects vetted rules from many sources each week; its core package (about 5,000 rules) compiles with YARA-X:
+
+```bash
+curl -L -o core.zip https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-core.zip
+unzip -o core.zip -d /var/lib/hexdb-yara        # then files.scan.yara_rules = "/var/lib/hexdb-yara"
+```
+
+Rules are compiled when HexDB starts (a few seconds for the core package), so restart the hexes after updating them; changed rules then rescan stored files (below). A rule file that doesn't compile is left out and named in the warning, rather than stopping HexDB. Each rule's `license` and `author` are in its `meta` section.
+
 **Results.** A clean file records the verdict on its document as `scan`: `status` (`clean`), the `engines` that scanned it with their versions (ClamAV's includes its signature version), and `scanned_at`. A file over `files.scan.max_size_mb` (2000) isn't sent to ClamAV, and one over `files.scan.yara_max_mb` (128) skips YARA-X, which reads the whole file into memory; such a file is stored with `status` `not_scanned` and `skipped` saying why, never as clean.
 
 **Quarantine.** A file either engine flags isn't stored. The upload answers 422 `file_quarantined`, naming what matched, and the file is kept in quarantine instead: on the Overseer only, never replicated, never downloadable. Administrators review it on the Quarantine page or with:
