@@ -82,6 +82,8 @@ export interface QuarantinedFile {
 
 /** `/status` `storage.scan`: null when scanning is off. */
 export interface ScanStatus {
+  /** False while the lattice setting files.scanning is off. */
+  enabled?: boolean
   engines: { engine: string; version: string | null; reachable: boolean; error?: string }[]
   /** Why scanning is weaker than it should be (no ClamAV), if it is. */
   warning: string | null

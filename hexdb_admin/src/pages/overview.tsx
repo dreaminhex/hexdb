@@ -416,7 +416,13 @@ function ScanCard({ status }: { status: Status }) {
   const { me } = useAuth()
   const scan = status.storage.scan
   if (scan === undefined) return null
-  const warning = scan === null ? "Malware scanning is off (files.scan.enabled = false): uploads aren't scanned." : scan.warning
+  const off = scan === null || scan.enabled === false
+  const warning =
+    scan === null
+      ? "Malware scanning is off (files.scan.enabled = false): uploads aren't scanned."
+      : scan.enabled === false
+        ? "Malware scanning is turned off in Settings (files.scanning): uploads are stored unscanned."
+        : scan.warning
   return (
     <Card>
       <CardHeader>
@@ -427,7 +433,7 @@ function ScanCard({ status }: { status: Status }) {
         <CardAction>
           {warning ? (
             <Badge variant="outline" className="gap-1">
-              <IconAlertTriangle className="text-status-warning size-3.5" /> {scan === null ? "Off" : "Limited"}
+              <IconAlertTriangle className="text-status-warning size-3.5" /> {off ? "Off" : "Limited"}
             </Badge>
           ) : (
             <Badge variant="outline" className="gap-1">

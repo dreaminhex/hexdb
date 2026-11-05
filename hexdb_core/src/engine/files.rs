@@ -300,6 +300,7 @@ impl HexDBEngine {
         E: std::fmt::Display,
     {
         self.files_tessellation(tess)?;
+        self.ensure_uploads()?;
         self.ensure_writable()?;
         let (path, name) = files::split_file_path(file_path)?;
         self.check_file_space(0)?;
@@ -369,7 +370,7 @@ impl HexDBEngine {
         // Scanned before anything commits: an infected file never becomes a document
         // in its tessellation, so it never reaches another hex. A scanner that can't
         // answer holds the upload (nothing is stored but chunks GC removes).
-        let scan = match (scanned, self.scanner.clone()) {
+        let scan = match (scanned, self.active_scanner()) {
             (Some(scanned), _) => Some(scanned),
             (None, Some(scanner)) => {
                 let report = self.scan_content(&scanner, &manifest, size).await?;
@@ -503,6 +504,7 @@ impl HexDBEngine {
     /// Start a resumable upload to `file_path`. `size`, if given, is checked at completion.
     pub async fn begin_upload(&self, tess: &str, file_path: &str, options: UploadOptions, size: Option<u64>) -> Result<Value> {
         self.files_tessellation(tess)?;
+        self.ensure_uploads()?;
         self.ensure_writable()?;
         let (path, name) = files::split_file_path(file_path)?;
         let max = self.config.files.max_file_mb.saturating_mul(1024 * 1024);
@@ -611,6 +613,7 @@ impl HexDBEngine {
 
     /// Finish an upload: the file is created (or gets a new version).
     pub async fn complete_upload(&self, tess: &str, upload_id: &str) -> Result<UploadResult> {
+        self.ensure_uploads()?;
         self.ensure_writable()?;
         let (session, seq, map) = self.upload_session(tess, upload_id).await?;
         let size = map.get("offset").and_then(Value::as_u64).unwrap_or(0);
@@ -1685,13 +1688,35 @@ impl HexDBEngine {
         let scanner = self.scanner.clone()?;
         let quarantined = if self.tessellation_exists(QUARANTINE_TESSELLATION) { self.tessellation_stats(QUARANTINE_TESSELLATION).await.document_count } else { 0 };
         let rescan = self.rescan.lock().unwrap().clone();
-        Some(json!({ "engines": scanner.engines().await, "warning": scanner.warning(), "quarantined": quarantined, "rescan": rescan }))
+        Some(json!({
+            "enabled": self.active_scanner().is_some(),
+            "engines": scanner.engines().await,
+            "warning": scanner.warning(),
+            "quarantined": quarantined,
+            "rescan": rescan,
+        }))
+    }
+
+    /// The scanner, unless the lattice has scanning turned off (`files.scanning`).
+    pub(crate) fn active_scanner(&self) -> Option<Arc<crate::scan::Scanner>> {
+        self.scanner.clone().filter(|_| self.config_value("files.scanning") != json!(false))
+    }
+
+    /// Uploads are refused when this hex has them turned off (`files.uploads`).
+    fn ensure_uploads(&self) -> Result<()> {
+        if self.config.files.uploads {
+            return Ok(());
+        }
+        Err(EngineError::Forbidden("File uploads are turned off on this lattice (files.uploads = false).".into()).into())
     }
 
     /// Start a rescan of every stored file now (an administrator asked).
     pub fn request_rescan(&self) -> Result<()> {
         if self.scanner.is_none() {
             return Err(invalid("Malware scanning is off (files.scan.enabled = false)."));
+        }
+        if self.active_scanner().is_none() {
+            return Err(invalid("Malware scanning is turned off for the lattice (files.scanning)."));
         }
         self.rescan.lock().unwrap().requested = true;
         self.rescan_now.notify_one();
@@ -1826,7 +1851,7 @@ pub fn spawn_rescan_task(engine: Arc<HexDBEngine>, shutdown_rx: tokio::sync::wat
                     let p = engine.rescan.lock().unwrap();
                     (p.requested, p.fingerprint.clone(), p.finished_at.clone(), p.position.is_some())
                 };
-                if !engine.is_writable() || (!requested && hours == 0) {
+                if !engine.is_writable() || (!requested && hours == 0) || engine.active_scanner().is_none() {
                     continue;
                 }
                 let Some(fingerprint) = scanner.fingerprint().await else { continue };

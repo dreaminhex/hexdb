@@ -29,7 +29,7 @@ export function QuarantinePage() {
           instead, on the Overseer only: it isn't in its tessellation, can't be downloaded, and never reaches another hex. Release a false positive to
           store it as a normal file, or delete it.
         </p>
-        {scan && (
+        {scan && scan.enabled !== false && (
           <Button
             variant="outline"
             size="sm"
@@ -57,6 +57,11 @@ export function QuarantinePage() {
       {scan === null && (
         <p className="text-destructive flex items-center gap-2 text-sm">
           <IconAlertTriangle className="size-4" /> Malware scanning is off (files.scan.enabled = false): uploads aren't scanned.
+        </p>
+      )}
+      {scan?.enabled === false && (
+        <p className="text-destructive flex items-center gap-2 text-sm">
+          <IconAlertTriangle className="size-4" /> Malware scanning is turned off in Settings (files.scanning): uploads are stored unscanned.
         </p>
       )}
       {scan?.warning && (

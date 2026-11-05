@@ -1325,7 +1325,11 @@ Quarantining, releasing and deleting are audited (`file.quarantined`, `file.rele
 
 **When the scanner can't answer.** If ClamAV is configured (or was found, below) but can't answer, an upload answers 503 `scanner_unavailable` with `Retry-After` and nothing is stored: no file enters the lattice unscanned. This is also the case for a minute or two after ClamAV starts, while it loads its signatures.
 
-**Without ClamAV.** `files.scan.clamd` is `auto` by default: at startup HexDB looks for a ClamAV on its own machine (`127.0.0.1:3310` and the usual Unix sockets). If there's none, uploads are scanned by YARA-X's rules alone, which catch far less, and HexDB says so in its startup log, in `/status` (`storage.scan.warning`) and on the dashboard. `files.scan.enabled = false` turns scanning off (also said loudly).
+**Without ClamAV.** `files.scan.clamd` is `auto` by default: at startup HexDB looks for a ClamAV on its own machine (`127.0.0.1:3310` and the usual Unix sockets). If there's none, uploads are scanned by YARA-X's rules alone, which catch far less, and HexDB says so in its startup log, in `/status` (`storage.scan.warning`) and on the dashboard. `files.scan.enabled = false` turns scanning off on a hex (also said loudly).
+
+**Turning it off and on.** An administrator can turn scanning off for the whole lattice, and back on, under Settings > Files (the lattice setting `files.scanning`, which takes effect at once, without a restart). While it's off, uploads are stored unscanned, stored files aren't rescanned, and the dashboard says so. Files stored while it was off are scanned by the next rescan after it's back on, once the signatures change, or at once with `POST /quarantine/rescan`.
+
+**Turning uploads off.** `files.uploads = false` on a hex refuses new uploads (403) while files already stored can still be read, moved and deleted; a host whose plan has no scanner uses it.
 
 **Setting up ClamAV.**
 1. Install it: `sudo apt install clamav-daemon clamav-freshclam` (Debian, Ubuntu), `brew install clamav` (macOS), the installer from clamav.net (Windows), or the official `clamav/clamav` image. The Docker Compose file and the Helm chart run one for the lattice already.
@@ -2522,6 +2526,7 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `storage.compaction_frequency` | 1800 | Seconds between compactions |
 | `storage.change_history_hours`, `change_history_mb` | 24, 512 | Change history kept on disk |
 | `storage.backup_path` | `backups` next to the data directory | Where backups are written; must be outside the data directory |
+| `files.uploads` | true | Accept uploads (false: refuse them with 403; stored files stay readable) |
 | `files.max_file_mb` | 0 (no limit) | Largest file accepted |
 | `files.trash_days` | 30 | Days a deleted file stays in the trash |
 | `files.max_versions`, `version_days` | 10, 0 | Earlier versions kept per file, and for how long (0: until pushed out) |
@@ -2531,6 +2536,7 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `files.extract` | `true` | Read metadata from uploaded files |
 | `files.extract_max_mb`, `extract_timeout_seconds` | 64, 30 | What extraction may read and how long it may take, per file |
 | `quotas.default_mb`, `default_files` | 0, 0 | Upload quota per user (lattice configuration; 0: none; see [Upload quotas](#upload-quotas)) |
+| `files.scanning` | true | Malware scanning for the whole lattice (lattice configuration; see [Malware scanning](#malware-scanning)) |
 | `sharing.enabled`, `default_days`, `max_days`, `require_password` | true, 7, 30, false | Sharing links (lattice configuration; see [Sharing links](#sharing-links)) |
 | `files.sandbox`, `sandbox_memory_mb` | true, 1024 | Parse files in a restricted worker process, and its memory limit (see [the parser sandbox](#metadata-extraction)) |
 | `files.scan.enabled` | true | Scan every upload for malware before it's stored (see [Malware scanning](#malware-scanning)) |

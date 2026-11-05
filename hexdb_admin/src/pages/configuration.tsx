@@ -586,6 +586,7 @@ export function ConfigurationPage() {
       <fieldset disabled={readOnly} className="grid min-w-0 gap-4">
         {section("AI", "AI features use this lattice's own provider and key, never anyone else's. Everything is off until you turn it on.", "ai.")}
         {section("Quotas", "How much each user may upload. A user's own quota (Users page) comes first; 0 means no limit.", "quotas.")}
+        {section("Files", "Malware scanning of uploads. Which scanners run (ClamAV, YARA rules) is set on each hex, under files.scan.", "files.")}
         {section("Sharing", "Links that give people without an account a file or a folder (users with the share permission make them on the Files page).", "sharing.")}
         {section("A2A", "Other AI agents can ask this lattice questions over the Agent2Agent protocol, answered by the chat as the calling user.", "a2a.")}
         {section("Cross-origin access", "Web apps on other sites that may call the API from a browser, with an API key or bearer token of their own.", "cors.")}

@@ -198,6 +198,39 @@ fn without_clamav_the_built_in_rules_scan_alone_and_say_so() -> Result<()> {
 }
 
 #[test]
+fn scanning_can_be_turned_off_for_the_lattice_and_uploads_for_a_hex() -> Result<()> {
+    let clamd = fake_clamd();
+    let server = files_server(TestOptions { extra_toml: scanning(&format!("tcp://{}", clamd)), ..Default::default() })?;
+    let status = |server: &TestServer| -> Result<serde_json::Value> { Ok(server.request(Method::GET, "/status", None, &[])?.body["storage"]["scan"].clone()) };
+    assert_eq!(status(&server)?["enabled"], true);
+
+    // Off in the lattice settings: uploads are stored unscanned, rescans refused.
+    let res = server.request(Method::PUT, "/config", Some(&json!({ "changes": { "files.scanning": false } })), &[])?;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    let unscanned = put(&server, "docs/report.bin", &infected_with_marker())?;
+    assert_eq!(unscanned.status, StatusCode::CREATED, "{}", unscanned.body);
+    assert!(unscanned.body.get("scan").is_none_or(|s| s.is_null()), "{}", unscanned.body);
+    assert_eq!(status(&server)?["enabled"], false);
+    assert_eq!(server.request(Method::POST, "/quarantine/rescan", None, &[])?.status, StatusCode::BAD_REQUEST);
+
+    // On again: scanned as before.
+    let res = server.request(Method::PUT, "/config", Some(&json!({ "changes": { "files.scanning": true } })), &[])?;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.body);
+    assert_eq!(put(&server, "docs/again.bin", &infected_with_marker())?.error_code(), Some("file_quarantined"));
+    drop(server);
+
+    // files.uploads = false: nothing new is stored, by either kind of upload.
+    let server = files_server(TestOptions { extra_toml: "
+[files]
+uploads = false
+".into(), ..Default::default() })?;
+    assert_eq!(put(&server, "docs/a.txt", b"hello")?.status, StatusCode::FORBIDDEN);
+    let begin = server.request(Method::POST, "/media/_uploads", Some(&json!({ "path": "docs/b.txt", "size": 5 })), &[])?;
+    assert_eq!(begin.status, StatusCode::FORBIDDEN, "{}", begin.body);
+    Ok(())
+}
+
+#[test]
 fn quarantine_never_reaches_a_replica() -> Result<()> {
     let clamd = fake_clamd();
     let ports = [TestServer::free_port()?, TestServer::free_port()?];

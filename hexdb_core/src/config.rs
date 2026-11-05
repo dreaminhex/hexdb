@@ -281,6 +281,10 @@ impl Default for ReplicationConfig {
 /// Binary file storage: files tessellations and the chunk store.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct FilesConfig {
+    /// Accept uploads. Off: files already stored can still be read, moved and
+    /// deleted, but nothing new is stored (a host's plan without a scanner, say).
+    #[serde(default = "default_true")]
+    pub uploads: bool,
     /// Largest file accepted, in MB (0: no limit beyond `storage.disk_mb`).
     #[serde(default)]
     pub max_file_mb: u64,
@@ -437,6 +441,7 @@ fn default_scrub_hours() -> u64 {
 impl Default for FilesConfig {
     fn default() -> Self {
         FilesConfig {
+            uploads: true,
             max_file_mb: 0,
             trash_days: default_trash_days(),
             max_versions: default_max_versions(),
