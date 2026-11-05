@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HexDB REST API",
-    "version": "2.3.3",
+    "version": "2.4.0",
     "description": "HexDB's REST API. Authenticate with `Authorization: Bearer <API key or session token>` or the `hexdb_session` cookie (admin UI). Errors are `{\"error\": {\"code\", \"message\"}}`. See MANUAL.md for filters, aggregations, permissions and everything else."
   },
   "servers": [
@@ -2029,6 +2029,148 @@
                 }
               }
             }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quarantine": {
+      "get": {
+        "tags": [
+          "Files"
+        ],
+        "summary": "Uploads the malware scan flagged, with what matched (administrators)",
+        "operationId": "get_quarantine",
+        "responses": {
+          "200": {
+            "description": "{\"files\": [{\"id\", \"tessellation\", \"path\", \"name\", \"size\", \"scan\", \"uploaded_by\", \"uploaded_at\"}]}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quarantine/{id}/release": {
+      "post": {
+        "tags": [
+          "Files"
+        ],
+        "summary": "Store a quarantined file in its tessellation as a normal file: a false positive (administrators; audited)",
+        "operationId": "post_quarantine_id_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{\"document\", \"created\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quarantine/rescan": {
+      "post": {
+        "tags": [
+          "Files"
+        ],
+        "summary": "Scan every stored file again now (administrators; audited)",
+        "operationId": "post_quarantine_rescan",
+        "responses": {
+          "202": {
+            "description": "{\"rescan\": \"started\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quarantine/{id}": {
+      "delete": {
+        "tags": [
+          "Files"
+        ],
+        "summary": "Delete a quarantined file for good (administrators; audited)",
+        "operationId": "delete_quarantine_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Done"
           },
           "default": {
             "description": "An error: {\"error\": {\"code\", \"message\"}}",
