@@ -440,6 +440,81 @@ fn a_stopping_overseer_hands_over_and_nothing_is_copied_again() -> Result<()> {
 }
 
 #[test]
+fn a_preferred_overseer_that_comes_back_takes_the_role_by_handover_and_loses_no_writes() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    // Full copies, so the preferred hex hands over when it stops (hxl-control, 2026-11-05).
+    let cluster = Cluster::new(2)?;
+    let full = |i: usize, role: &str| TestOptions {
+        extra_toml: "\n[replication]\nslicing = false\n".into(),
+        ..cluster.options(i, 2048, role)
+    };
+    let mut preferred = TestServer::start_with(full(0, "overseer"))?;
+    let other = TestServer::start_with(full(1, "auto"))?;
+    wait_until(Duration::from_secs(60), "both hexes to see each other", || Ok(active_hexes(&preferred)? == 2 && active_hexes(&other)? == 2))?;
+    assert_eq!(role(&preferred)?, "Overseer");
+    let first = preferred.insert("orders", &json!({ "n": 0 }))?;
+    wait_until(Duration::from_secs(30), "the other hex's first sync", || Ok(doc_on(&other, "orders", &first)?.is_some()))?;
+    let synced = replication(&other)?["last_sync"].clone();
+
+    // Writes through the other hex the whole time.
+    let (url, token) = (other.url("/orders"), other.token().to_string());
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stop = stop.clone();
+        std::thread::spawn(move || -> Result<(Vec<String>, Vec<String>)> {
+            let http = hexdb_tests::http().timeout(Duration::from_secs(60)).build()?;
+            let (mut written, mut failed) = (Vec::new(), Vec::new());
+            let mut n = 0;
+            while !stop.load(Ordering::Relaxed) {
+                n += 1;
+                match http.post(&url).bearer_auth(&token).json(&json!({ "n": n })).send() {
+                    Ok(r) if r.status().is_success() => written.push(r.json::<Value>()?["id"].as_str().unwrap_or_default().to_string()),
+                    Ok(r) => failed.push(format!("#{} {}: {}", n, r.status(), r.text().unwrap_or_default())),
+                    Err(e) => failed.push(format!("#{} {}", n, e)),
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok((written, failed))
+        })
+    };
+
+    std::thread::sleep(Duration::from_secs(2));
+
+    // The preferred hex stops: the other takes over and keeps taking writes while it's away.
+    preferred.stop()?;
+    assert_eq!(role(&other)?, "Overseer");
+    std::thread::sleep(Duration::from_secs(3));
+    let while_away = other.insert("orders", &json!({ "n": "while away" }))?;
+
+    // It comes back. It must not simply take the role: the writes made while it
+    // was away are only on the other hex. It follows, catches up, then gets the
+    // role by handover.
+    preferred.launch()?;
+    wait_until(Duration::from_secs(60), "the preferred hex to lead again", || Ok(role(&preferred)? == "Overseer" && role(&other)? == "Harvester"))?;
+    std::thread::sleep(Duration::from_secs(2));
+    stop.store(true, Ordering::Relaxed);
+    let (written, failed) = writer.join().expect("the writer thread")?;
+    assert!(failed.is_empty(), "no write may fail ({} of {} failed): {:?}", failed.len(), written.len() + failed.len(), failed);
+    assert!(written.len() > 20, "writes kept flowing: {}", written.len());
+
+    // Nothing written while it was away is lost, on either hex, and neither copied everything again.
+    assert!(doc_on(&preferred, "orders", &while_away)?.is_some(), "the write made while the preferred hex was away is missing on it");
+    let last = written.last().unwrap();
+    wait_until(Duration::from_secs(30), "the other hex to follow", || Ok(doc_on(&other, "orders", last)?.is_some()))?;
+    for id in &written {
+        assert!(doc_on(&preferred, "orders", id)?.is_some(), "write {} is missing on the preferred hex", id);
+        assert!(doc_on(&other, "orders", id)?.is_some(), "write {} is missing on the other hex", id);
+    }
+    // (No full sync since it followed again reads as null; its first one as the original time.)
+    let last_sync = replication(&other)?["last_sync"].clone();
+    assert!(last_sync.is_null() || last_sync == synced, "the other hex copied everything again after handing back: {}", last_sync);
+    assert!(replication(&preferred)?["last_sync"].is_null(), "the preferred hex resumed rather than copying everything: {}", replication(&preferred)?);
+    Ok(())
+}
+
+#[test]
 fn a_hex_learns_the_hexes_that_probe_it() -> Result<()> {
     // The first hex has no seeds at all; the second and third know only the
     // first. Each probe tells the first where the prober is, so it probes

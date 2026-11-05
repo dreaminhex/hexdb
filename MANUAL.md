@@ -2071,10 +2071,12 @@ Discovery is answered from a thread of its own, with the hex's identity as of it
 
 Every hex runs the same election over the same view, so they agree without a consensus round:
 
-1. Candidates are live hexes whose `identity.role` is `auto` or `overseer`. If any prefer `overseer`, only those count.
-2. A hex that is already Overseer keeps the role while it's alive, so leadership doesn't flap when a larger hex joins. If two claim it (after a partition heals), the better-ranked one wins.
-3. Otherwise, in a sliced lattice, the hex furthest along the change history wins, and among those equally far along, the one holding the most slices, so a hex with every slice is preferred to one that would have to collect them first. Then (and in a lattice without slicing) candidates are ranked by RAM, then disk, then ID.
+1. Candidates are live hexes whose `identity.role` is `auto` or `overseer`.
+2. A hex that is already Overseer keeps the role while it's alive, whatever the others prefer, so leadership doesn't flap when a larger hex joins and no hex takes the role without the writes the sitting Overseer accepted. If two claim it (after a partition heals), one that prefers `overseer` wins, then the better-ranked one.
+3. Otherwise, if any candidates prefer `overseer`, only those count. Then, in a sliced lattice, the hex furthest along the change history wins, and among those equally far along, the one holding the most slices, so a hex with every slice is preferred to one that would have to collect them first. Then (and in a lattice without slicing) candidates are ranked by RAM, then disk, then ID.
 4. Every other hex is a Harvester, or a Replicant if it prefers that. `harvester` and `replicant` hexes never lead.
+
+**A hex that prefers to lead gets the role back by handover.** When a hex with `identity.role = "overseer"` comes back while another hex leads (it was away, or handed over when it stopped), it follows like any replica. Once it has every change, the sitting Overseer hands the role to it, the same way an Overseer hands over before stopping (writes are held for a moment, not refused), and carries on as a replica. If the handover can't finish, the sitting Overseer keeps the role and tries again five minutes later.
 
 A hex that restarts reports where its data really is: an Overseer that restarts reports its last write and every slice, so it gets its role back instead of passing it to a replica that would rebuild.
 

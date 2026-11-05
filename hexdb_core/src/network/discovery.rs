@@ -641,13 +641,20 @@ fn rank(a: &PeerHex, b: &PeerHex) -> Ordering {
 pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
     let all: Vec<&PeerHex> = std::iter::once(local).chain(live_peers.iter()).collect();
     let mut candidates: Vec<&PeerHex> = all.iter().copied().filter(|h| h.preference == "auto" || h.preference == "overseer").collect();
-    if candidates.iter().any(|h| h.preference == "overseer") {
+
+    // A sitting Overseer keeps the role, whatever the others prefer: a hex that
+    // took it would lack the writes the sitting one accepted, and the sitting one
+    // would then copy the taker's data and drop them. A hex that prefers to lead
+    // gets the role back through a handover once it has caught up
+    // (`updates::hand_over_to_preferred`). Among several sitting Overseers (two
+    // sides of a healed partition), a preferred one, then the best-ranked, wins.
+    let sitting: Vec<&PeerHex> = candidates.iter().copied().filter(|h| h.role == ROLE_OVERSEER).collect();
+    if sitting.is_empty() && candidates.iter().any(|h| h.preference == "overseer") {
         candidates.retain(|h| h.preference == "overseer");
     }
-
-    // A sitting Overseer keeps the role; among several, the best-ranked wins.
-    let sitting: Vec<&PeerHex> = candidates.iter().copied().filter(|h| h.role == ROLE_OVERSEER).collect();
-    let leader = if sitting.is_empty() && local.slicing {
+    let leader = if !sitting.is_empty() {
+        sitting.into_iter().min_by(|a, b| (b.preference == "overseer").cmp(&(a.preference == "overseer")).then(rank(a, b)))
+    } else if local.slicing {
         // Sliced replicas each hold part of the data; the one furthest along
         // the old Overseer's history rebuilds the rest most completely. Among
         // those equally far along, the one holding the most slices has the
@@ -659,8 +666,7 @@ pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
                 .then(rank(a, b))
         })
     } else {
-        let pool = if sitting.is_empty() { candidates } else { sitting };
-        pool.into_iter().min_by(|a, b| rank(a, b))
+        candidates.into_iter().min_by(|a, b| rank(a, b))
     };
 
     match leader {
@@ -693,6 +699,9 @@ pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, shutdo
                 }
                 last_round = std::time::Instant::now();
                 discovery_round(&engine, interval, on_time).await;
+                // Its own task: a handover waits for the replicas, and discovery must keep running meanwhile.
+                let handing = engine.clone();
+                tokio::spawn(async move { crate::updates::hand_over_to_preferred(&handing).await });
             }
         }
     });
@@ -832,6 +841,22 @@ mod tests {
         // A sitting Overseer keeps the role regardless.
         let overseer = hex("c", ROLE_OVERSEER, "auto", 10);
         assert_eq!(elect(&a, &[b, overseer]), ROLE_HARVESTER);
+    }
+
+    #[test]
+    fn a_sitting_overseer_keeps_the_role_from_a_hex_that_prefers_to_lead() {
+        // The preferred hex is back after a handover: it follows; the sitting one hands back later.
+        let sitting = hex("sitting", ROLE_OVERSEER, "auto", 1000);
+        let preferred = hex("preferred", ROLE_HARVESTER, "overseer", 8000);
+        assert_eq!(elect(&preferred, std::slice::from_ref(&sitting)), ROLE_HARVESTER);
+        assert_eq!(elect(&sitting, std::slice::from_ref(&preferred)), ROLE_OVERSEER);
+        // With no Overseer sitting, the preferred hex is elected.
+        let follower = hex("sitting", ROLE_HARVESTER, "auto", 1000);
+        assert_eq!(elect(&preferred, std::slice::from_ref(&follower)), ROLE_OVERSEER);
+        // Two sitting (a healed partition): the preferred one keeps it.
+        let both = hex("preferred", ROLE_OVERSEER, "overseer", 10);
+        assert_eq!(elect(&both, std::slice::from_ref(&sitting)), ROLE_OVERSEER);
+        assert_eq!(elect(&sitting, std::slice::from_ref(&both)), ROLE_HARVESTER);
     }
 
     #[test]

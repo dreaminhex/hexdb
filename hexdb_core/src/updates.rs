@@ -209,6 +209,58 @@ pub async fn hand_over_before_stopping(engine: &HexDBEngine, limit: Duration) {
     }
 }
 
+/// When a hand-back to a preferred hex last failed, so a lagging hex isn't asked every round.
+static HAND_BACK_FAILED: Mutex<Option<Instant>> = Mutex::new(None);
+static HANDING_BACK: AtomicBool = AtomicBool::new(false);
+const HAND_BACK_RETRY: Duration = Duration::from_secs(5 * 60);
+
+/// A sitting Overseer that doesn't prefer to lead hands the role to a hex that
+/// does (`identity.role = "overseer"`), once that hex has every change: the
+/// election never takes the role from a sitting Overseer (it would lose the
+/// writes the taker lacks), so this is how a preferred hex that was away gets
+/// it back. Uses the same handover as an Overseer stopping (`step_down`), then
+/// this hex carries on as a replica. Called after each discovery round.
+pub async fn hand_over_to_preferred(engine: &HexDBEngine) {
+    if !engine.is_writable() || stepping_down() || HANDING_BACK.load(AtomicOrdering::Relaxed) {
+        return;
+    }
+    if crate::network::discovery::parse_preference(&engine.config.identity.role).ok().as_deref() == Some("overseer") {
+        return;
+    }
+    if HAND_BACK_FAILED.lock().unwrap().is_some_and(|at| at.elapsed() < HAND_BACK_RETRY) {
+        return;
+    }
+    let head = engine.changes.published_seq();
+    let preferred = {
+        let peers = engine.peers.lock().await;
+        peers
+            .iter()
+            .filter(|p| p.status == "active" && p.hex.preference == "overseer")
+            // Sliced: it must hold every slice, or it would have to collect the rest first.
+            .filter(|p| !p.hex.slicing || p.hex.slices_held == crate::slicing::ALL_SLICES)
+            .find(|p| engine.replica_applied(&p.hex.id).is_some_and(|applied| applied >= head))
+            .map(|p| p.hex.name.clone())
+    };
+    let Some(preferred) = preferred else { return };
+    HANDING_BACK.store(true, AtomicOrdering::Relaxed);
+    info!("🤝 '{}' prefers to lead and has every change; handing the Overseer role to it...", preferred);
+    let result = step_down(engine).await;
+    // This hex keeps running, as a replica: it takes writes (forwarding them) and is a candidate again.
+    STEPPING_DOWN.store(false, AtomicOrdering::Relaxed);
+    WITHDRAWN.store(false, AtomicOrdering::Relaxed);
+    match result {
+        Ok(()) => {
+            *HAND_BACK_FAILED.lock().unwrap() = None;
+            info!("🤝 Handed the Overseer role to '{}'.", preferred);
+            engine.audit("system", "lattice.handover", &preferred, serde_json::json!({ "reason": "preferred" })).await;
+        }
+        Err(e) => {
+            *HAND_BACK_FAILED.lock().unwrap() = Some(Instant::now());
+            warn!("⚠️ Couldn't hand the Overseer role to '{}' ({:#}); this hex keeps it and tries again in {} minutes.", preferred, e, HAND_BACK_RETRY.as_secs() / 60);
+        }
+    }
+    HANDING_BACK.store(false, AtomicOrdering::Relaxed);
+}
 
 /// The Fly.io Machine this hex runs on, if it does.
 pub fn machine_id() -> String {
