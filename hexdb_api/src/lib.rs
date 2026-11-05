@@ -20,5 +20,6 @@ pub mod a2a;
 pub mod a2a_push;
 pub mod shares;
 pub mod queues;
+pub mod quarantine;
 pub mod grpc;
 pub mod live;

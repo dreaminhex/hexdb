@@ -49,7 +49,7 @@ mod reads;
 mod history;
 mod schemas;
 mod replica;
-pub use replica::{ReplicaCursor, ReplicaWrite, REPLICATION_TESSELLATION, SKIP_ACKS};
+pub use replica::{is_local_only, ReplicaCursor, ReplicaWrite, LOCAL_ONLY_TESSELLATIONS, REPLICATION_TESSELLATION, SKIP_ACKS};
 pub use schemas::MigrationStatus;
 pub use history::ChangeReader;
 mod transactions;
@@ -105,6 +105,10 @@ pub enum EngineError {
     Unavailable(String),
     /// An upload would take a user past their quota (507).
     QuotaExceeded(String),
+    /// The malware scanner can't give a verdict, so the upload is held (503).
+    ScannerUnavailable(String),
+    /// The upload was infected and is quarantined (422).
+    Quarantined(String),
 }
 
 impl fmt::Display for EngineError {
@@ -126,6 +130,8 @@ impl fmt::Display for EngineError {
             | EngineError::NoQuorum(m)
             | EngineError::Unavailable(m)
             | EngineError::QuotaExceeded(m)
+            | EngineError::ScannerUnavailable(m)
+            | EngineError::Quarantined(m)
             | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }
@@ -266,6 +272,8 @@ pub struct HexDBEngine {
     /// As a replica: the Overseer's history and position it last applied, with
     /// this hex's own position right after (taken when it's promoted).
     pub(crate) replica_position: std::sync::Mutex<Option<crate::replication::Continuation>>,
+    /// Malware scanning of uploads (`files.scan`; None when it's off).
+    pub(crate) scanner: Option<Arc<crate::scan::Scanner>>,
     /// A sliced replica's recent changes of every slice (see replication).
     pub recent_changes: std::sync::Mutex<crate::replication::RecentChanges>,
     /// Loaded plugins and their delivery state.
@@ -351,8 +359,8 @@ const METRICS_FILE: &str = "metrics-history.hxe";
 /// The query advisor's saved statistics.
 const QUERY_STATS_FILE: &str = "query-stats.hxe";
 
-/// API routes added in 2.0 that a new tessellation can't be named (see `create_tessellation`).
-const NEW_ROUTE_NAMES: &[&str] = &["queues", "shares", "mcp"];
+/// API routes added since 2.0 that a new tessellation can't be named (see `create_tessellation`).
+const NEW_ROUTE_NAMES: &[&str] = &["queues", "shares", "mcp", "quarantine"];
 
 impl HexDBEngine {
     /// Open (or create) the storage directory, recover from SSTables and the
@@ -366,6 +374,7 @@ impl HexDBEngine {
         let token_key = crate::tokens::TokenKey::new(&config.lattice_key()?);
         std::fs::create_dir_all(&storage_dir)
             .with_context(|| format!("Failed to create {}", storage_dir.display()))?;
+        let scanner = crate::scan::Scanner::from_config(&config.files.scan).context("files.scan")?.map(Arc::new);
 
         let legacy = wal::legacy_wal_files(&storage_dir);
         if !legacy.is_empty() {
@@ -548,6 +557,7 @@ impl HexDBEngine {
             replication: std::sync::Mutex::new(crate::replication::ReplicationStatus::default()),
             continuation: std::sync::RwLock::new(None),
             replica_position: std::sync::Mutex::new(None),
+            scanner: scanner.clone(),
             recent_changes: std::sync::Mutex::new(crate::replication::RecentChanges::default()),
             plugins: crate::plugins::PluginRegistry::default(),
             login_throttle,
@@ -593,6 +603,18 @@ impl HexDBEngine {
         engine.rebuild_indexes().await?;
         engine.load_metrics_history();
         engine.refresh_disk_usage().await;
+        // Look for a ClamAV (clamd = "auto") without holding up the start; say loudly
+        // if uploads will be scanned by the built-in rules only.
+        if let Some(scanner) = scanner {
+            tokio::spawn(async move {
+                scanner.clamd().await;
+                if let Some(warning) = scanner.warning() {
+                    warn!("⚠️ Malware scanning: {}", warning);
+                }
+            });
+        } else {
+            warn!("⚠️ Malware scanning is off (files.scan.enabled = false): uploads aren't scanned.");
+        }
 
         Ok(engine)
     }

@@ -39,9 +39,23 @@ tokio::task_local! {
 }
 
 /// Writes to these tessellations never wait for replica acknowledgements
-/// (bookkeeping that a request shouldn't stall on).
-const NO_ACK_TESSELLATIONS: &[&str] =
-    &[crate::audit::AUDIT_TESSELLATION, crate::auth::THROTTLE_TESSELLATION, REPLICATION_TESSELLATION, crate::plugins::PLUGIN_CURSORS_TESSELLATION];
+/// (bookkeeping that a request shouldn't stall on, and what never replicates).
+const NO_ACK_TESSELLATIONS: &[&str] = &[
+    crate::audit::AUDIT_TESSELLATION,
+    crate::auth::THROTTLE_TESSELLATION,
+    REPLICATION_TESSELLATION,
+    crate::plugins::PLUGIN_CURSORS_TESSELLATION,
+    super::files::QUARANTINE_TESSELLATION,
+];
+
+/// Tessellations that stay on the hex that wrote them and never replicate: the
+/// replication cursor, and quarantined files (kept where they were scanned).
+pub const LOCAL_ONLY_TESSELLATIONS: &[&str] = &[REPLICATION_TESSELLATION, super::files::QUARANTINE_TESSELLATION];
+
+/// Whether `name` stays on its hex (see `LOCAL_ONLY_TESSELLATIONS`).
+pub fn is_local_only(name: &str) -> bool {
+    LOCAL_ONLY_TESSELLATIONS.contains(&name)
+}
 
 /// Fixed document ID of the cursor.
 fn cursor_id() -> Ulid {

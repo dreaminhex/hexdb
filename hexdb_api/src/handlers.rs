@@ -129,6 +129,8 @@ impl From<anyhow::Error> for ApiError {
             Some(EngineError::NoQuorum(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no_quorum", m.clone()),
             Some(EngineError::Unavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "content_unavailable", m.clone()),
             Some(EngineError::QuotaExceeded(m)) => ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "quota_exceeded", m.clone()),
+            Some(EngineError::ScannerUnavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "scanner_unavailable", m.clone()).with_retry_after(10),
+            Some(EngineError::Quarantined(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "file_quarantined", m.clone()),
             Some(EngineError::TooLarge(m)) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "document_too_large", m.clone()),
             Some(EngineError::SchemaViolation(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "schema_violation", m.clone()),
             Some(EngineError::TriggerRejected(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "trigger_rejected", m.clone()),

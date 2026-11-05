@@ -77,7 +77,8 @@ pub fn signed_target(path_and_query: &str, client: &str) -> String {
 
 fn handled_locally(method: &Method, path: &str) -> bool {
     // A rolling update runs on the Overseer, so it's the one that can say how it's going.
-    (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && path != "/updates")
+    // Quarantine lives on the Overseer (it scans every upload), so reads of it go there too.
+    (matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) && path != "/updates" && !path.starts_with("/quarantine"))
         || path.starts_with("/lattice/")
         || crate::routes::is_ui_path(path)
         || matches!(path, "/auth/login" | "/auth/logout" | "/shutdown" | "/flush" | "/compact" | "/scrub" | "/backup" | "/settings" | "/analyzers/_analyze")

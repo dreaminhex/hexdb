@@ -63,6 +63,8 @@ fn to_gql(e: anyhow::Error) -> async_graphql::Error {
         Some(EngineError::NoQuorum(m)) => gql_error("NO_QUORUM", m.clone()),
         Some(EngineError::Unavailable(m)) => gql_error("CONTENT_UNAVAILABLE", m.clone()),
         Some(EngineError::QuotaExceeded(m)) => gql_error("QUOTA_EXCEEDED", m.clone()),
+        Some(EngineError::ScannerUnavailable(m)) => gql_error("SCANNER_UNAVAILABLE", m.clone()),
+        Some(EngineError::Quarantined(m)) => gql_error("FILE_QUARANTINED", m.clone()),
         Some(EngineError::TooLarge(m)) => gql_error("DOCUMENT_TOO_LARGE", m.clone()),
         Some(EngineError::SchemaViolation(m)) => gql_error("SCHEMA_VIOLATION", m.clone()),
         Some(EngineError::TriggerRejected(m)) => gql_error("TRIGGER_REJECTED", m.clone()),

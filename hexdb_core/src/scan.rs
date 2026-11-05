@@ -306,9 +306,10 @@ const LOCAL_CLAMD: &[&str] = &["127.0.0.1:3310", "/var/run/clamav/clamd.ctl", "/
 
 /// The configured engines.
 pub struct Scanner {
-    clamd: Option<Clamd>,
-    /// `clamd = "auto"`: look for one with `detect`.
-    detect_clamd: bool,
+    /// ClamAV: set at once when configured (or off); with `clamd = "auto"`, the first
+    /// call to `clamd()` looks for one on this machine (HexDB starts that in the background).
+    clamd: tokio::sync::OnceCell<Option<Clamd>>,
+    timeout: Duration,
     #[cfg(feature = "yara")]
     yara: Option<Arc<Yara>>,
     max_bytes: u64,
@@ -322,10 +323,10 @@ impl Scanner {
             return Ok(None);
         }
         let timeout = Duration::from_secs(config.timeout_seconds.max(1));
-        let (clamd, detect_clamd) = match config.clamd.trim() {
-            "auto" => (None, true),
-            "" | "off" | "none" => (None, false),
-            address => (Some(Clamd::new(ClamdAddress::parse(address)?, timeout)), false),
+        let clamd = match config.clamd.trim() {
+            "auto" => tokio::sync::OnceCell::new(),
+            "" | "off" | "none" => tokio::sync::OnceCell::new_with(Some(None)),
+            address => tokio::sync::OnceCell::new_with(Some(Some(Clamd::new(ClamdAddress::parse(address)?, timeout)))),
         };
         #[cfg(feature = "yara")]
         let yara = {
@@ -338,7 +339,7 @@ impl Scanner {
         }
         Ok(Some(Scanner {
             clamd,
-            detect_clamd,
+            timeout,
             #[cfg(feature = "yara")]
             yara,
             max_bytes: config.max_size_mb.saturating_mul(1024 * 1024),
@@ -346,32 +347,32 @@ impl Scanner {
         }))
     }
 
-    pub fn has_clamd(&self) -> bool {
-        self.clamd.is_some()
-    }
-
-    /// With `clamd = "auto"`: use the first ClamAV that answers on this machine. Once
-    /// found it's required like a configured one (uploads are held while it's down).
-    pub async fn detect(&mut self, timeout: Duration) {
-        if !self.detect_clamd || self.clamd.is_some() {
-            return;
-        }
-        for candidate in LOCAL_CLAMD {
-            let Ok(address) = ClamdAddress::parse(candidate) else { continue };
-            let clamd = Clamd::new(address, timeout);
-            if tokio::time::timeout(Duration::from_secs(2), clamd.ping()).await.is_ok_and(|r| r.is_ok()) {
-                tracing::info!("🛡️ Found ClamAV at {} for malware scanning.", candidate);
-                self.clamd = Some(clamd);
-                return;
-            }
-        }
+    /// ClamAV, once known: with `clamd = "auto"`, the first call looks for one on this
+    /// machine. Once found it's required like a configured one (uploads are held while
+    /// it's down); without one, YARA-X scans alone.
+    pub async fn clamd(&self) -> Option<&Clamd> {
+        self.clamd
+            .get_or_init(|| async {
+                for candidate in LOCAL_CLAMD {
+                    let Ok(address) = ClamdAddress::parse(candidate) else { continue };
+                    let clamd = Clamd::new(address, self.timeout);
+                    if tokio::time::timeout(Duration::from_secs(2), clamd.ping()).await.is_ok_and(|r| r.is_ok()) {
+                        tracing::info!("🛡️ Found ClamAV at {} for malware scanning.", candidate);
+                        return Some(clamd);
+                    }
+                }
+                None
+            })
+            .await
+            .as_ref()
     }
 
     /// Why scanning is weaker than it should be, if it is: shown at startup, in
-    /// `/status` and on the dashboard.
+    /// `/status` and on the dashboard. None while ClamAV is still being looked for.
     pub fn warning(&self) -> Option<String> {
-        if self.clamd.is_some() {
-            return None;
+        match self.clamd.get() {
+            None | Some(Some(_)) => return None,
+            Some(None) => {}
         }
         #[cfg(feature = "yara")]
         let yara = self.yara.is_some();
@@ -387,7 +388,7 @@ impl Scanner {
     /// The engines and their versions, for `/status` (reaches clamd).
     pub async fn engines(&self) -> Vec<EngineStatus> {
         let mut engines = Vec::new();
-        if let Some(clamd) = &self.clamd {
+        if let Some(clamd) = self.clamd().await {
             engines.push(match clamd.version().await {
                 Ok(version) => EngineStatus { engine: "ClamAV".into(), version: Some(version), reachable: true, error: None },
                 Err(e) => EngineStatus { engine: "ClamAV".into(), version: None, reachable: false, error: Some(format!("{:#}", e)) },
@@ -415,7 +416,7 @@ impl Scanner {
         let mut kept: Option<Vec<u8>> = wants_yara.then(|| Vec::with_capacity(size as usize));
 
         let mut scanned = false;
-        if let Some(clamd) = &self.clamd {
+        if let Some(clamd) = self.clamd().await {
             let verdict = clamd.scan(&mut pieces, &mut kept, self.yara_max_bytes).await.map_err(|e| ScanUnavailable(format!("ClamAV: {:#}", e)))?;
             // clamd may answer before it has everything (over its limit): YARA-X still reads the rest.
             while let Some(piece) = pieces.recv().await {
@@ -589,6 +590,7 @@ mod tests {
     async fn clamd_and_yara_give_one_verdict() {
         let address = fake_clamd(b"MALWARE", 1024 * 1024).await;
         let scanner = Scanner::from_config(&config(&address)).unwrap().unwrap();
+        assert!(scanner.clamd().await.is_some());
         assert!(scanner.warning().is_none(), "ClamAV configured");
 
         let clean = scanner.scan(11, pieces(vec![b"hello, ".to_vec(), b"world".to_vec()])).await.unwrap();

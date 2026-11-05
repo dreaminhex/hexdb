@@ -220,7 +220,7 @@ fn manifests_of(map: &Map<String, Value>) -> Vec<ChunkId> {
 /// The fields describing one version's content, for `versions`.
 fn version_entry(map: &Map<String, Value>) -> Value {
     let mut entry = Map::new();
-    for key in ["version", "size", "content_type", "sha256", "content", "modified_at", "uploaded_at", "uploaded_by"] {
+    for key in ["version", "size", "content_type", "sha256", "content", "scan", "modified_at", "uploaded_at", "uploaded_by"] {
         if let Some(value) = map.get(key) {
             entry.insert(key.into(), value.clone());
         }
@@ -351,17 +351,37 @@ impl HexDBEngine {
         }
         let content_type = content_type.unwrap_or_else(|| files::sniff_type(&head, &name, options.content_type.as_deref()));
         let staged = Staged { manifest, size, sha256: hex::encode(sha.finalize()), content_type, compressed };
-        self.commit_file(tess, &path, &name, &options, staged, pins).await
+        self.commit_file(tess, &path, &name, &options, staged, pins, None).await
     }
 
-    /// Store a file's manifest and make its chunks durable, then create the
-    /// file at `path` + `name`, or add a version to the file already there.
-    async fn commit_file(&self, tess: &str, path: &str, name: &str, options: &UploadOptions, staged: Staged, pins: Pins) -> Result<UploadResult> {
+    /// Store a file's manifest and make its chunks durable, scan the file, then
+    /// create the file at `path` + `name`, or add a version to the file already there.
+    /// `scanned`: the scan record of a file already scanned (a quarantined file released).
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_file(&self, tess: &str, path: &str, name: &str, options: &UploadOptions, staged: Staged, pins: Pins, scanned: Option<Value>) -> Result<UploadResult> {
         let Staged { manifest, size, sha256, content_type, compressed } = staged;
         let (pins, stored) = self.put_chunk(pins, manifest.encode(), true).await?;
         let store = self.blobs.clone();
         tokio::task::spawn_blocking(move || store.sync()).await.map_err(|e| anyhow!("{}", e))??;
         let content = json!({ "manifest": blobs::chunk_hex(&stored.id), "chunks": manifest.chunks.len(), "compressed": compressed });
+
+        // Scanned before anything commits: an infected file never becomes a document
+        // in its tessellation, so it never reaches another hex. A scanner that can't
+        // answer holds the upload (nothing is stored but chunks GC removes).
+        let scan = match (scanned, self.scanner.clone()) {
+            (Some(scanned), _) => Some(scanned),
+            (None, Some(scanner)) => {
+                let report = self.scan_content(&scanner, &manifest, size).await?;
+                if report.is_infected() {
+                    let quarantined = Quarantined { tess, path, name, size, sha256: &sha256, content_type: &content_type, content: &content, report: &report };
+                    let error = self.quarantine(quarantined).await;
+                    drop(pins);
+                    return Err(error);
+                }
+                Some(json!(report))
+            }
+            (None, None) => None,
+        };
 
         let (read, write) = (self.caller_scope(tess, Action::Read), self.caller_scope(tess, Action::Upload));
         let login = caller_login();
@@ -393,6 +413,10 @@ impl HexDBEngine {
                     map.insert("content_type".into(), json!(content_type));
                     map.insert("sha256".into(), json!(sha256));
                     map.insert("content".into(), content.clone());
+                    match &scan {
+                        Some(scan) => map.insert("scan".into(), scan.clone()),
+                        None => map.remove("scan"),
+                    };
                     map.insert("modified_at".into(), json!(modified));
                     map.insert("uploaded_at".into(), json!(now));
                     map.insert("uploaded_by".into(), json!(login));
@@ -410,7 +434,10 @@ impl HexDBEngine {
                         "created_at": created_at, "modified_at": modified, "uploaded_at": now, "uploaded_by": login,
                         "extract": { "status": "pending" },
                     });
-                    let Value::Object(map) = map else { unreachable!() };
+                    let Value::Object(mut map) = map else { unreachable!() };
+                    if let Some(scan) = &scan {
+                        map.insert("scan".into(), scan.clone());
+                    }
                     (document(tess, Ulid::generate(), map, None), 0, true)
                 }
             };
@@ -626,7 +653,7 @@ impl HexDBEngine {
         let parse = |k: &str| map.get(k).and_then(Value::as_str).and_then(|t| DateTime::parse_from_rfc3339(t).ok()).map(|t| t.with_timezone(&Utc));
         let options = UploadOptions { content_type: declared.clone(), modified_at: parse("modified_at"), created_at: parse("created_at") };
         let staged = Staged { manifest, size, sha256: hex::encode(sha.finalize()), content_type, compressed };
-        let result = self.commit_file(tess, &path, &name, &options, staged, pins).await?;
+        let result = self.commit_file(tess, &path, &name, &options, staged, pins, None).await?;
         let items = vec![BatchItem {
             key: DocKey::new(UPLOADS_TESSELLATION, session.id),
             op: WalOp::Delete { tessellation: UPLOADS_TESSELLATION.into(), id: session.id },
@@ -1464,7 +1491,7 @@ impl HexDBEngine {
         let holders: Vec<String> = self
             .tessellation_details()
             .into_iter()
-            .filter(|(name, info)| info.is_files() || name == TRASH_TESSELLATION || name == UPLOADS_TESSELLATION)
+            .filter(|(name, info)| info.is_files() || name == TRASH_TESSELLATION || name == UPLOADS_TESSELLATION || name == QUARANTINE_TESSELLATION)
             .map(|(name, _)| name)
             .collect();
         for tess in holders {
@@ -1507,6 +1534,156 @@ impl HexDBEngine {
             );
         }
         Ok(report)
+    }
+}
+
+/// Infected uploads, kept on the hex that scanned them (the Overseer): never
+/// replicated (see `replica::LOCAL_ONLY_TESSELLATIONS`) and never downloadable.
+pub const QUARANTINE_TESSELLATION: &str = "_quarantine";
+
+/// An infected upload on its way to quarantine.
+struct Quarantined<'a> {
+    tess: &'a str,
+    path: &'a str,
+    name: &'a str,
+    size: u64,
+    sha256: &'a str,
+    content_type: &'a str,
+    content: &'a Value,
+    report: &'a crate::scan::ScanReport,
+}
+
+impl HexDBEngine {
+    /// Scan a stored file's content (read back from its chunks) with `scanner`.
+    async fn scan_content(&self, scanner: &crate::scan::Scanner, manifest: &Manifest, size: u64) -> Result<crate::scan::ScanReport> {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let store = self.blobs.clone();
+        let ids: Vec<ChunkId> = manifest.chunks.iter().map(|(id, _)| *id).collect();
+        let reader = tokio::task::spawn_blocking(move || {
+            for id in ids {
+                let piece = store.get(&id).map_err(|e| std::io::Error::other(format!("{:#}", e)));
+                let failed = piece.is_err();
+                // The scanner stopped reading (a verdict before the end): stop too.
+                if tx.blocking_send(piece).is_err() || failed {
+                    break;
+                }
+            }
+        });
+        let report = scanner.scan(size, rx).await;
+        let _ = reader.await;
+        report.map_err(|e| {
+            EngineError::ScannerUnavailable(format!("The malware scanner can't check files right now, so the upload wasn't stored; try again shortly. ({})", e)).into()
+        })
+    }
+
+    /// Keep an infected upload in quarantine, audited; returns the error the upload answers with.
+    async fn quarantine(&self, q: Quarantined<'_>) -> anyhow::Error {
+        let found: Vec<String> = q.report.detections.iter().map(|d| format!("{} ({})", d.name, d.engine)).collect();
+        let login = caller_login();
+        let id = Ulid::generate();
+        let map = json!({
+            "tessellation": q.tess, "path": q.path, "name": q.name, "size": q.size, "sha256": q.sha256,
+            "content_type": q.content_type, "content": q.content, "uploaded_by": login, "uploaded_at": now_text(),
+            "scan": q.report,
+        });
+        let Value::Object(map) = map else { unreachable!() };
+        let stored = async {
+            self.ensure_system_tessellation(QUARANTINE_TESSELLATION)?;
+            let doc = document(QUARANTINE_TESSELLATION, id, map, None);
+            self.commit(vec![BatchItem { key: DocKey::new(QUARANTINE_TESSELLATION, id), op: WalOp::Put(doc), expected_seq: None }]).await
+        }
+        .await;
+        if let Err(e) = stored {
+            return e.context("The upload is infected, and quarantining it failed");
+        }
+        warn!("🦠 Quarantined '{}{}' in '{}' uploaded by {}: {}.", q.path, q.name, q.tess, login, found.join(", "));
+        self.audit(&login, "file.quarantined", &format!("{}{}", q.path, q.name), json!({ "tessellation": q.tess, "id": id.to_string(), "detections": q.report.detections, "sha256": q.sha256 }))
+            .await;
+        EngineError::Quarantined(format!(
+            "'{}' was not stored: it matched {}. It's quarantined (ID {}); an administrator can review it.",
+            q.name,
+            found.join(", "),
+            id
+        ))
+        .into()
+    }
+
+    /// Quarantined files, newest first.
+    pub async fn quarantined_files(&self) -> Result<Vec<Value>> {
+        if !self.tessellation_exists(QUARANTINE_TESSELLATION) {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.list_documents(QUARANTINE_TESSELLATION, after, 1000).await?;
+            out.extend(page.documents.iter().map(Document::to_api_json));
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    async fn quarantined_file(&self, id: &str) -> Result<(Document, u64)> {
+        let missing = || EngineError::NotFound(format!("No quarantined file '{}'.", id));
+        let ulid = Ulid::from_string(id).map_err(|_| missing())?;
+        if !self.tessellation_exists(QUARANTINE_TESSELLATION) {
+            return Err(missing().into());
+        }
+        let (doc, seq) = self.read_latest(&DocKey::new(QUARANTINE_TESSELLATION, ulid)).await.map_err(|_| missing())?;
+        Ok((doc.ok_or_else(missing)?, seq))
+    }
+
+    /// Release a quarantined file (a false positive) into its tessellation, as a
+    /// normal file (or a new version), by an administrator. Audited.
+    pub async fn release_quarantined(&self, id: &str, by: &str) -> Result<UploadResult> {
+        let (doc, seq) = self.quarantined_file(id).await?;
+        let map = as_map(&doc);
+        let text = |key: &str| map.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        let tess = text("tessellation");
+        self.files_tessellation(&tess)?;
+        let manifest_id = map.get("content").and_then(|c| c.get("manifest")).and_then(Value::as_str).and_then(blobs::parse_chunk_id).ok_or_else(|| anyhow!("The quarantined file has no content."))?;
+        let manifest = Manifest::decode(&self.read_file_chunk(manifest_id).await?)?;
+        let compressed = map.get("content").and_then(|c| c.get("compressed")).and_then(Value::as_bool).unwrap_or(false);
+        let staged = Staged { manifest, size: map.get("size").and_then(Value::as_u64).unwrap_or(0), sha256: text("sha256"), content_type: text("content_type"), compressed };
+        let mut scan = map.get("scan").cloned().unwrap_or(Value::Null);
+        if let Value::Object(scan) = &mut scan {
+            scan.insert("released_by".into(), json!(by));
+            scan.insert("released_at".into(), json!(now_text()));
+        }
+        let result = self.commit_file(&tess, &text("path"), &text("name"), &UploadOptions::default(), staged, Pins::new(self.blobs.clone()), Some(scan)).await?;
+        self.remove_quarantined(&doc, seq).await?;
+        warn!("🦠 Released quarantined '{}{}' into '{}' ({}).", text("path"), text("name"), tess, by);
+        self.audit(by, "file.released", &format!("{}{}", text("path"), text("name")), json!({ "tessellation": tess, "quarantine_id": id, "id": result.document.id.to_string(), "detections": map.get("scan").and_then(|s| s.get("detections")) })).await;
+        Ok(result)
+    }
+
+    /// Delete a quarantined file for good (its content goes with the next garbage collection). Audited.
+    pub async fn delete_quarantined(&self, id: &str, by: &str) -> Result<()> {
+        let (doc, seq) = self.quarantined_file(id).await?;
+        let map = as_map(&doc);
+        self.remove_quarantined(&doc, seq).await?;
+        let name = format!("{}{}", map.get("path").and_then(Value::as_str).unwrap_or_default(), map.get("name").and_then(Value::as_str).unwrap_or_default());
+        self.audit(by, "file.quarantine_deleted", &name, json!({ "tessellation": map.get("tessellation"), "quarantine_id": id, "detections": map.get("scan").and_then(|s| s.get("detections")) })).await;
+        Ok(())
+    }
+
+    async fn remove_quarantined(&self, doc: &Document, seq: u64) -> Result<()> {
+        let item = BatchItem { key: DocKey::new(QUARANTINE_TESSELLATION, doc.id), op: WalOp::Delete { tessellation: QUARANTINE_TESSELLATION.into(), id: doc.id }, expected_seq: Some(seq) };
+        if !self.commit(vec![item]).await? {
+            return Err(EngineError::Conflict("The quarantined file was changed meanwhile; try again.".into()).into());
+        }
+        Ok(())
+    }
+
+    /// The scanner's state for `/status` (reaches clamd): None when scanning is off.
+    pub async fn scan_status(&self) -> Option<Value> {
+        let scanner = self.scanner.clone()?;
+        let quarantined = if self.tessellation_exists(QUARANTINE_TESSELLATION) { self.tessellation_stats(QUARANTINE_TESSELLATION).await.document_count } else { 0 };
+        Some(json!({ "engines": scanner.engines().await, "warning": scanner.warning(), "quarantined": quarantined }))
     }
 }
 

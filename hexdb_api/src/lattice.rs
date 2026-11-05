@@ -23,7 +23,7 @@ use axum::{
 use hexdb_core::{
     engine::HexDBEngine,
     replication::{ChangeBatch, SnapshotPage},
-    LATTICE_SIGNATURE_HEADER, REPLICATION_TESSELLATION,
+    LATTICE_SIGNATURE_HEADER,
 };
 use serde::Deserialize;
 use std::time::Duration;
@@ -250,7 +250,7 @@ pub async fn changes(
     if params.after < engine.changes.available_after() {
         let taken = engine.changes_after(params.after, limit).await.map_err(gone)?;
         let last_seq = taken.last().map_or(params.after, |c| c.seq);
-        let changes = taken.iter().filter(|c| c.tessellation != REPLICATION_TESSELLATION).map(|c| (**c).clone()).collect();
+        let changes = taken.iter().filter(|c| !hexdb_core::engine::is_local_only(&c.tessellation)).map(|c| (**c).clone()).collect();
         still_overseer(&engine)?;
         return Ok(Json(ChangeBatch {
             source_id: engine.history_id(),
@@ -269,7 +269,7 @@ pub async fn changes(
             let last_seq = taken.last().map_or(params.after, |c| c.seq);
             let changes = taken
                 .iter()
-                .filter(|c| c.tessellation != REPLICATION_TESSELLATION)
+                .filter(|c| !hexdb_core::engine::is_local_only(&c.tessellation))
                 .map(|c| (**c).clone())
                 .collect();
             still_overseer(&engine)?;

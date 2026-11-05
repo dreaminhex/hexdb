@@ -61,7 +61,7 @@ use crate::{
     changes::{Change, ChangeKind},
     config::HexConfig,
     document::Document,
-    engine::{HexDBEngine, ReplicaCursor, ReplicaWrite, REPLICATION_TESSELLATION},
+    engine::{HexDBEngine, ReplicaCursor, ReplicaWrite},
     hex::DocKey,
     network::discovery::{LatticeMember, ROLE_OVERSEER},
 };
@@ -382,7 +382,7 @@ impl HexDBEngine {
     /// Fingerprint of what replicas copy from the catalog (see `ChangeBatch::catalog`).
     pub fn catalog_fingerprint(&self) -> String {
         let details: Vec<(String, crate::catalog::TessellationInfo)> =
-            self.tessellation_details().into_iter().filter(|(name, _)| name != REPLICATION_TESSELLATION).collect();
+            self.tessellation_details().into_iter().filter(|(name, _)| !crate::engine::is_local_only(name)).collect();
         let bytes = serde_json::to_vec(&details).unwrap_or_default();
         blake3::hash(&bytes).to_hex()[..16].to_string()
     }
@@ -397,7 +397,7 @@ impl HexDBEngine {
             hex_id: self.id.to_string(),
             available_after: self.history_available_after(),
             seq,
-            tessellations: self.tessellation_details().into_iter().filter(|(name, _)| name != REPLICATION_TESSELLATION).collect(),
+            tessellations: self.tessellation_details().into_iter().filter(|(name, _)| !crate::engine::is_local_only(name)).collect(),
             content_key: self.sealed_content_key(),
             continues: self.continuation.read().unwrap().clone(),
         }
@@ -731,7 +731,7 @@ impl Follower {
         let slices = self.wanted_slices(overseer).await;
         let wanted: HashSet<&str> = meta.tessellations.iter().map(|(n, _)| n.as_str()).collect();
         for (name, _) in engine.tessellation_details() {
-            if name != REPLICATION_TESSELLATION && !wanted.contains(name.as_str()) {
+            if !crate::engine::is_local_only(name.as_str()) && !wanted.contains(name.as_str()) {
                 engine.drop_replicated_tessellation(&name).await?;
             }
         }

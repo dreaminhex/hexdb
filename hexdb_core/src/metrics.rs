@@ -103,6 +103,9 @@ pub struct StorageMetrics {
     pub sstable_files_on_old_keys: usize,
     /// The chunk store holding files tessellations' content.
     pub files: crate::blobs::BlobStats,
+    /// Malware scanning of uploads: engines and versions, a warning when it's weaker
+    /// than it should be, and how many files are quarantined. Null when it's off.
+    pub scan: Option<serde_json::Value>,
 }
 
 /// Operation counters since startup.
@@ -311,6 +314,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             next_sequence: stats.next_seq,
             sstable_files_on_old_keys: engine.sst_files_needing_rewrite().await,
             files: engine.files_stats(),
+            scan: engine.scan_status().await,
         },
         operations: OperationMetrics {
             reads_total: stats.reads_total,
