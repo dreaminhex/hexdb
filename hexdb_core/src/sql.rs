@@ -111,7 +111,8 @@ enum Body {
         group_by: Vec<String>,
         aggregates: Vec<AggregateSpec>,
         sort: Vec<SortKey>,
-        having: Option<(Having, String)>,
+        /// Boxed: the condition and its text are large, and rare.
+        having: Option<Box<(Having, String)>>,
         /// Output columns: a key of the aggregation's rows, or a literal.
         columns: Vec<(String, Source)>,
         /// Only COUNT(*) without GROUP BY or HAVING: answered by a count.
@@ -343,8 +344,8 @@ impl SqlQuery {
                         "aggregate".into(),
                         json!({ "filter": filter, "group_by": group_by, "aggregates": aggregates, "sort": sort }),
                     );
-                    if let Some((_, text)) = having {
-                        out.insert("having".into(), json!(text));
+                    if let Some(h) = having {
+                        out.insert("having".into(), json!(h.1));
                     }
                 }
             }
@@ -778,7 +779,7 @@ impl<'a> Translator<'a> {
         }
 
         let having = match having {
-            Some(expr) => Some((self.having(expr, &group_by, &mut aggregates, items)?, expr.to_string())),
+            Some(expr) => Some(Box::new((self.having(expr, &group_by, &mut aggregates, items)?, expr.to_string()))),
             None => None,
         };
 
@@ -1607,7 +1608,7 @@ impl HexDBEngine {
                     let count = self.count_matching(tess, &filter).await?;
                     let row: Map<String, Value> = aggregates.iter().map(|a| (a.name.clone(), json!(count))).collect();
                     (if start == 0 { vec![row] } else { Vec::new() }, false)
-                } else if let Some((having, _)) = having {
+                } else if let Some(having) = having.as_deref().map(|(h, _)| h) {
                     let all = Aggregation::new(filter, group_by.clone(), aggregates.clone(), sort.clone(), 0, MAX_GROUPS)?;
                     let result = self.aggregate(tess, &all).await?;
                     let kept: Vec<_> = guard(result.rows).into_iter().filter(|row| having.eval(row) == Some(true)).collect();

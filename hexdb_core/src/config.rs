@@ -328,6 +328,65 @@ pub struct FilesConfig {
     /// Memory a parser worker may use, in MB.
     #[serde(default = "default_sandbox_memory_mb")]
     pub sandbox_memory_mb: u64,
+    /// Malware scanning of uploads (see `crate::scan`).
+    #[serde(default)]
+    pub scan: ScanConfig,
+}
+
+/// `[files.scan]`: scan every uploaded file before it's stored (see `crate::scan`).
+/// On by default. An infected file is quarantined; while a ClamAV that's configured
+/// (or was found) can't answer, uploads are refused.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ScanConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// ClamAV's daemon: `auto` (look for one on this machine at startup), `tcp://host:3310`,
+    /// `host:3310`, a Unix socket path, or `off`.
+    #[serde(default = "default_clamd")]
+    pub clamd: String,
+    /// Seconds clamd may take to scan one file.
+    #[serde(default = "default_scan_timeout_seconds")]
+    pub timeout_seconds: u64,
+    /// Files larger than this (MB) aren't scanned; their documents say so.
+    /// Raise clamd's StreamMaxLength to match.
+    #[serde(default = "default_scan_max_size_mb")]
+    pub max_size_mb: u64,
+    /// A directory of extra YARA rules (`.yar`, `.yara`, searched recursively) for YARA-X,
+    /// besides the rules built into HexDB.
+    #[serde(default)]
+    pub yara_rules: String,
+    /// YARA-X reads a file into memory: files larger than this (MB) skip it.
+    #[serde(default = "default_yara_max_mb")]
+    pub yara_max_mb: u64,
+}
+
+fn default_clamd() -> String {
+    "auto".into()
+}
+
+fn default_scan_timeout_seconds() -> u64 {
+    300
+}
+
+fn default_scan_max_size_mb() -> u64 {
+    2048
+}
+
+fn default_yara_max_mb() -> u64 {
+    128
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        ScanConfig {
+            enabled: true,
+            clamd: default_clamd(),
+            timeout_seconds: default_scan_timeout_seconds(),
+            max_size_mb: default_scan_max_size_mb(),
+            yara_rules: String::new(),
+            yara_max_mb: default_yara_max_mb(),
+        }
+    }
 }
 
 fn default_sandbox_memory_mb() -> u64 {
@@ -384,6 +443,7 @@ impl Default for FilesConfig {
             thumbnail_px: default_thumbnail_px(),
             sandbox: true,
             sandbox_memory_mb: default_sandbox_memory_mb(),
+            scan: ScanConfig::default(),
         }
     }
 }

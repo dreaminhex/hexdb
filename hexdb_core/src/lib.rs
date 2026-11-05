@@ -34,6 +34,7 @@ pub mod lattice_config;
 pub mod ai;
 pub mod shares;
 pub mod queues;
+pub mod scan;
 pub mod process;
 pub mod analysis;
 pub mod advisor;

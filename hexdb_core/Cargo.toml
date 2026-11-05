@@ -55,6 +55,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 # Video thumbnails: Cisco's OpenH264, built from source into the binary (BSD-2). Only an H.264
 # keyframe is ever decoded. Optional so a build can leave H.264 out (--no-default-features).
 openh264 = { version = "0.9.8", optional = true }
+yara-x = { version = "1.23.0", optional = true, default-features = false, features = ["constant-folding", "default-modules", "exact-atoms", "fast-regexp"] }
 
 # The parser sandbox (crate::extract::sandbox): rlimits on Unix, a seccomp filter on Linux.
 [target.'cfg(unix)'.dependencies]
@@ -67,5 +68,9 @@ seccompiler = "0.5"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [features]
-default = ["video-thumbnails"]
+default = ["video-thumbnails", "yara"]
 video-thumbnails = ["dep:openh264"]
+# YARA-X for malware scanning (see src/scan.rs). It compiles rules with wasmtime,
+# which needs a 64-bit target: build 32-bit ARM with --no-default-features
+# --features video-thumbnails (ClamAV through clamd still works).
+yara = ["dep:yara-x"]
