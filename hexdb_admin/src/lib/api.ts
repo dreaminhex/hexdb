@@ -52,6 +52,42 @@ export const UNAUTHORIZED_EVENT = "hexdb:unauthorized"
 export type Action = "read" | "write" | "manage" | "upload" | "delete" | "restore" | "status" | "logs" | "audit" | "plugins" | "maintenance" | "admin" | "ai" | "chat" | "share" | "detokenize"
 
 /** A sharing link, as its maker sees it. */
+/** A malware scan's verdict, kept on every scanned file (`scan`). */
+export interface ScanReport {
+  /** clean, infected, or not_scanned (over every engine's size limit). */
+  status: "clean" | "infected" | "not_scanned"
+  detections: { engine: string; name: string }[]
+  /** The engines that scanned it, with versions (ClamAV's includes its signature version). */
+  engines: string[]
+  skipped?: string[]
+  scanned_at: string
+  /** Set on a quarantined file an administrator released. */
+  released_by?: string
+  released_at?: string
+}
+
+/** An upload the scan flagged, kept on the Overseer (GET /quarantine). */
+export interface QuarantinedFile {
+  id: string
+  tessellation: string
+  path: string
+  name: string
+  size: number
+  content_type: string
+  sha256: string
+  uploaded_by: string
+  uploaded_at: string
+  scan: ScanReport
+}
+
+/** `/status` `storage.scan`: null when scanning is off. */
+export interface ScanStatus {
+  engines: { engine: string; version: string | null; reachable: boolean; error?: string }[]
+  /** Why scanning is weaker than it should be (no ClamAV), if it is. */
+  warning: string | null
+  quarantined: number
+}
+
 export interface ShareLink {
   code: string
   path: string
@@ -298,6 +334,8 @@ export interface Status {
     disk_bytes: number
     sstable_files: number
     next_sequence: number
+    /** Malware scanning; null when it's off (files.scan.enabled = false). */
+    scan?: ScanStatus | null
   }
   operations: { reads_total: number; writes_total: number; queries_total: number }
   updates?: ReleaseCheck
@@ -769,6 +807,8 @@ export interface FileDoc {
   ai?: { status: "done" | "failed" | "skipped"; tags?: string[]; description?: string; model?: string; input_tokens?: number; output_tokens?: number; error?: string; at?: string }
   meta?: Record<string, unknown>
   extract?: { status: "pending" | "done"; version?: number; extractors?: string[]; errors?: string[]; at?: string }
+  /** The malware scan before it was stored (none if scanning was off). */
+  scan?: ScanReport
   /** Trashed files only. */
   trashed_at?: string
   trashed_by?: string
@@ -1009,6 +1049,9 @@ export const api = {
   createShare: (body: { tessellation: string; file_id?: string; folder?: string; expires_in_days?: number; password?: string; max_downloads?: number; note?: string }) =>
     request<ShareLink>("POST", "/shares", body),
   deleteShare: (code: string) => request<void>("DELETE", `/shares/${encodeURIComponent(code)}`),
+  quarantine: () => request<{ files: QuarantinedFile[] }>("GET", "/quarantine"),
+  releaseQuarantined: (id: string) => request<{ document: Record<string, unknown>; created: boolean }>("POST", `/quarantine/${encodeURIComponent(id)}/release`),
+  deleteQuarantined: (id: string) => request<void>("DELETE", `/quarantine/${encodeURIComponent(id)}`),
   chat: (question: string, history: { role: "user" | "assistant"; content: string }[]) => request<ChatAnswer>("POST", "/ai/chat", { question, history }),
   login: (login: string, password: string, code?: string) =>
     request<{ user: Me; expires_at: number }>("POST", "/auth/login", code ? { login, password, code } : { login, password }),

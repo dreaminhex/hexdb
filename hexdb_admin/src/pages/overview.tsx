@@ -14,6 +14,7 @@ import {
   IconLock,
   IconPlus,
   IconRefresh,
+  IconShieldCheck,
 } from "@tabler/icons-react"
 import { toast } from "sonner"
 
@@ -405,6 +406,64 @@ function VertexCard({ vertices }: { vertices: VertexStatus[] }) {
             </div>
           ))}
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/** Malware scanning of uploads: the engines and their versions, a warning when it's weaker than it should be, and the quarantine. */
+function ScanCard({ status }: { status: Status }) {
+  const { me } = useAuth()
+  const scan = status.storage.scan
+  if (scan === undefined) return null
+  const warning = scan === null ? "Malware scanning is off (files.scan.enabled = false): uploads aren't scanned." : scan.warning
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <IconShieldCheck className="text-muted-foreground size-5" /> Malware scanning
+        </CardTitle>
+        <CardDescription>Every upload is scanned before it's stored; a file that matches is quarantined and never reaches another hex.</CardDescription>
+        <CardAction>
+          {warning ? (
+            <Badge variant="outline" className="gap-1">
+              <IconAlertTriangle className="text-status-warning size-3.5" /> {scan === null ? "Off" : "Limited"}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="gap-1">
+              <IconCircleCheck className="text-status-good size-3.5" /> Scanning
+            </Badge>
+          )}
+        </CardAction>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3 text-sm">
+        {warning && (
+          <p className="flex items-start gap-2 text-amber-600 dark:text-amber-400">
+            <IconAlertTriangle className="mt-0.5 size-4 shrink-0" /> {warning}
+          </p>
+        )}
+        {scan && (
+          <div className="flex flex-wrap items-center gap-x-8 gap-y-2">
+            {scan.engines.map((e) => (
+              <span key={e.engine} className="flex items-center gap-1.5" title={e.error ?? undefined}>
+                {e.reachable ? <IconCircleCheck className="text-status-good size-3.5" aria-label="reachable" /> : <IconAlertTriangle className="text-status-warning size-3.5" aria-label="unreachable" />}
+                <span className="font-medium">{e.engine}</span>
+                <span className="text-muted-foreground font-mono text-xs">{e.reachable ? e.version : "unreachable: uploads are held"}</span>
+              </span>
+            ))}
+            <span className="text-muted-foreground">
+              {scan.quarantined === 0 ? (
+                "Nothing quarantined"
+              ) : me?.is_admin ? (
+                <a className="hover:underline" href={href("/quarantine")} onClick={linkHandler("/quarantine")}>
+                  {formatNumber(scan.quarantined)} quarantined
+                </a>
+              ) : (
+                `${formatNumber(scan.quarantined)} quarantined`
+              )}
+            </span>
+          </div>
+        )}
       </CardContent>
     </Card>
   )
@@ -862,6 +921,9 @@ export function OverviewPage() {
       <div className="grid grid-cols-1 gap-4 px-4 lg:grid-cols-2 lg:px-6">
         <VertexCard vertices={status.data.vertices} />
         <LatticeCard status={status.data} />
+      </div>
+      <div className="px-4 lg:px-6">
+        <ScanCard status={status.data} />
       </div>
       <div className="px-4 lg:px-6">
         <TessellationTable status={status.data} />

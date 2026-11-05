@@ -14,6 +14,7 @@ import { LoginPage } from "@/pages/login"
 const AccountPage = lazy(() => import("@/pages/account").then((m) => ({ default: m.AccountPage })))
 const AskPage = lazy(() => import("@/pages/ask").then((m) => ({ default: m.AskPage })))
 const SharesPage = lazy(() => import("@/pages/shares").then((m) => ({ default: m.SharesPage })))
+const QuarantinePage = lazy(() => import("@/pages/quarantine").then((m) => ({ default: m.QuarantinePage })))
 const AuditPage = lazy(() => import("@/pages/audit").then((m) => ({ default: m.AuditPage })))
 const ConfigurationPage = lazy(() => import("@/pages/configuration").then((m) => ({ default: m.ConfigurationPage })))
 const LogsPage = lazy(() => import("@/pages/logs").then((m) => ({ default: m.LogsPage })))
@@ -53,6 +54,7 @@ const PAGES: Record<string, Page> = {
   "/users": { title: "Users", element: UsersPage, requires: "admin" },
   "/roles": { title: "Roles", element: RolesPage, requires: "admin" },
   "/audit": { title: "Audit Trail", element: AuditPage, requires: "audit" },
+  "/quarantine": { title: "Quarantine", element: QuarantinePage, requires: "admin" },
   "/logs": { title: "Logs", element: LogsPage, requires: "logs" },
   "/plugins": { title: "Plugins", element: PluginsPage, requires: "plugins" },
   "/configuration": { title: "Configuration", element: ConfigurationPage, requires: "view_config" },

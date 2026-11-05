@@ -671,6 +671,16 @@ function FileDetails({
                   </dd>
                   <dt className="text-muted-foreground">SHA-256</dt>
                   <dd className="font-mono text-xs break-all">{file.sha256}</dd>
+                  <dt className="text-muted-foreground">Malware scan</dt>
+                  <dd title={file.scan?.skipped?.join("; ")}>
+                    {!file.scan
+                      ? "Not scanned (scanning was off)"
+                      : file.scan.status === "not_scanned"
+                        ? `Not scanned: ${file.scan.skipped?.join("; ") || "too large"}`
+                        : file.scan.released_by
+                          ? `Released by ${file.scan.released_by} (matched ${file.scan.detections.map((d) => d.name).join(", ")})`
+                          : `Clean (${file.scan.engines.join(", ")}), ${formatTimestamp(file.scan.scanned_at)}`}
+                  </dd>
                 </dl>
                 {file.extract?.status === "pending" && (
                   <p className="text-muted-foreground flex items-center gap-2 text-xs">

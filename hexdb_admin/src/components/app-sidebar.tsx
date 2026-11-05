@@ -7,6 +7,7 @@ import {
   IconFileDescription,
   IconHexagon3d,
   IconListCheck,
+  IconVirus,
   IconMathFunction,
   IconMessageChatbot,
   IconLink,
@@ -79,6 +80,7 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
       { title: "Users", route: "/users", icon: IconUserCircle, requires: "admin" },
       { title: "Roles", route: "/roles", icon: IconUserCheck, requires: "admin" },
       { title: "Audit Trail", route: "/audit", icon: IconListCheck, requires: "audit" },
+      { title: "Quarantine", route: "/quarantine", icon: IconVirus, requires: "admin" },
     ],
   },
   {
