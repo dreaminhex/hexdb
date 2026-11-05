@@ -29,6 +29,7 @@ use crate::{
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures::{Stream, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, sync::Arc, sync::atomic::Ordering, time::Duration};
@@ -1683,8 +1684,191 @@ impl HexDBEngine {
     pub async fn scan_status(&self) -> Option<Value> {
         let scanner = self.scanner.clone()?;
         let quarantined = if self.tessellation_exists(QUARANTINE_TESSELLATION) { self.tessellation_stats(QUARANTINE_TESSELLATION).await.document_count } else { 0 };
-        Some(json!({ "engines": scanner.engines().await, "warning": scanner.warning(), "quarantined": quarantined }))
+        let rescan = self.rescan.lock().unwrap().clone();
+        Some(json!({ "engines": scanner.engines().await, "warning": scanner.warning(), "quarantined": quarantined, "rescan": rescan }))
     }
+
+    /// Start a rescan of every stored file now (an administrator asked).
+    pub fn request_rescan(&self) -> Result<()> {
+        if self.scanner.is_none() {
+            return Err(invalid("Malware scanning is off (files.scan.enabled = false)."));
+        }
+        self.rescan.lock().unwrap().requested = true;
+        self.rescan_now.notify_one();
+        Ok(())
+    }
+
+    /// Scan every stored file's current version again; quarantine what's found.
+    /// Resumes from `progress.position` if a pass was interrupted.
+    async fn rescan_pass(&self, scanner: &crate::scan::Scanner, fingerprint: &str) -> Result<()> {
+        let max = self.config.files.scan.max_size_mb.saturating_mul(1024 * 1024);
+        let mut holders: Vec<String> = self.tessellation_details().into_iter().filter(|(_, info)| info.is_files()).map(|(name, _)| name).collect();
+        holders.sort();
+        let resume = self.rescan.lock().unwrap().position.clone();
+        let start = resume.as_ref().map(|(tess, _)| tess.clone());
+        for tess in holders.into_iter().filter(|t| start.as_ref().is_none_or(|s| t >= s)) {
+            let mut after = resume.as_ref().filter(|(t, _)| *t == tess).and_then(|(_, id)| Ulid::from_string(id).ok());
+            loop {
+                if !self.is_writable() {
+                    // No longer the Overseer: its successor scans.
+                    return Ok(());
+                }
+                let page = self.list_documents(&tess, after, 100).await?;
+                for doc in &page.documents {
+                    let map = as_map(doc);
+                    let size = map.get("size").and_then(Value::as_u64).unwrap_or(0);
+                    let manifest_id = map.get("content").and_then(|c| c.get("manifest")).and_then(Value::as_str).and_then(blobs::parse_chunk_id);
+                    if let (Some(manifest_id), true) = (manifest_id, size <= max) {
+                        let manifest = Manifest::decode(&self.read_file_chunk(manifest_id).await?)?;
+                        let report = self.scan_content(scanner, &manifest, size).await?;
+                        if report.is_infected() {
+                            self.quarantine_stored(&tess, doc, &map, &report).await?;
+                            self.rescan.lock().unwrap().found += 1;
+                        }
+                    }
+                    {
+                        let mut progress = self.rescan.lock().unwrap();
+                        progress.scanned += 1;
+                        progress.position = Some((tess.clone(), doc.id.to_string()));
+                    }
+                    // Background work: leave room for uploads.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+        }
+        let mut progress = self.rescan.lock().unwrap();
+        progress.position = None;
+        progress.fingerprint = Some(fingerprint.to_string());
+        progress.finished_at = Some(now_text());
+        Ok(())
+    }
+
+    /// Move a stored file a rescan flagged into quarantine: one commit takes it out
+    /// of its tessellation (which replicates, so every hex drops it) and keeps it here.
+    async fn quarantine_stored(&self, tess: &str, doc: &Document, map: &Map<String, Value>, report: &crate::scan::ScanReport) -> Result<()> {
+        let (_, seq) = self.read_latest(&DocKey::new(tess, doc.id)).await?;
+        let text = |key: &str| map.get(key).cloned().unwrap_or(Value::Null);
+        let id = Ulid::generate();
+        let record = json!({
+            "tessellation": tess, "path": text("path"), "name": text("name"), "size": text("size"), "sha256": text("sha256"),
+            "content_type": text("content_type"), "content": text("content"), "uploaded_by": text("uploaded_by"), "uploaded_at": text("uploaded_at"),
+            "scan": report, "rescan": true, "document_id": doc.id.to_string(),
+        });
+        let Value::Object(record) = record else { unreachable!() };
+        self.ensure_system_tessellation(QUARANTINE_TESSELLATION)?;
+        let items = vec![
+            BatchItem { key: DocKey::new(QUARANTINE_TESSELLATION, id), op: WalOp::Put(document(QUARANTINE_TESSELLATION, id, record, None)), expected_seq: None },
+            BatchItem { key: DocKey::new(tess, doc.id), op: WalOp::Delete { tessellation: tess.to_string(), id: doc.id }, expected_seq: Some(seq) },
+        ];
+        if !self.commit(items).await? {
+            // Changed meanwhile: the next pass looks at it again.
+            return Ok(());
+        }
+        let name = format!("{}{}", text("path").as_str().unwrap_or_default(), text("name").as_str().unwrap_or_default());
+        let found: Vec<String> = report.detections.iter().map(|d| format!("{} ({})", d.name, d.engine)).collect();
+        warn!("🦠 A rescan quarantined '{}' in '{}': {}.", name, tess, found.join(", "));
+        self.audit("system", "file.quarantined", &name, json!({ "tessellation": tess, "id": id.to_string(), "document_id": doc.id.to_string(), "detections": report.detections, "rescan": true }))
+            .await;
+        Ok(())
+    }
+}
+
+/// How rescans of stored files are going (`/status` `storage.scan.rescan`). The
+/// fingerprint and finish time are kept in the data directory across restarts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RescanProgress {
+    /// What the last finished pass scanned with (see `Scanner::fingerprint`).
+    pub fingerprint: Option<String>,
+    pub finished_at: Option<String>,
+    #[serde(skip_deserializing)]
+    pub running: bool,
+    #[serde(skip_deserializing)]
+    pub started_at: Option<String>,
+    /// Files scanned and found in the current (or last) pass.
+    #[serde(skip_deserializing)]
+    pub scanned: u64,
+    #[serde(skip_deserializing)]
+    pub found: u64,
+    #[serde(skip_deserializing)]
+    pub error: Option<String>,
+    /// Where an interrupted pass resumes: (tessellation, last document ID).
+    #[serde(skip)]
+    pub position: Option<(String, String)>,
+    #[serde(skip)]
+    pub requested: bool,
+}
+
+const RESCAN_FILE: &str = "rescan.json";
+
+/// Rescan stored files on the Overseer when the signatures or rules have changed
+/// (at most every `files.scan.rescan_hours`), or when an administrator asks.
+pub fn spawn_rescan_task(engine: Arc<HexDBEngine>, shutdown_rx: tokio::sync::watch::Receiver<()>) {
+    let Some(scanner) = engine.scanner.clone() else { return };
+    let path = engine.config.storage_dir().join(RESCAN_FILE);
+    if let Ok(saved) = std::fs::read(&path).map_err(anyhow::Error::from).and_then(|b| Ok(serde_json::from_slice::<RescanProgress>(&b)?)) {
+        *engine.rescan.lock().unwrap() = saved;
+    }
+    crate::tasks::supervise("rescans", shutdown_rx.clone(), move || {
+        let (engine, scanner, path, mut shutdown_rx) = (engine.clone(), scanner.clone(), path.clone(), shutdown_rx.clone());
+        async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    _ = engine.rescan_now.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(600)) => {}
+                }
+                let hours = engine.config.files.scan.rescan_hours;
+                let (requested, last, finished_at, interrupted) = {
+                    let p = engine.rescan.lock().unwrap();
+                    (p.requested, p.fingerprint.clone(), p.finished_at.clone(), p.position.is_some())
+                };
+                if !engine.is_writable() || (!requested && hours == 0) {
+                    continue;
+                }
+                let Some(fingerprint) = scanner.fingerprint().await else { continue };
+                let age_ok = finished_at
+                    .as_deref()
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                    .is_none_or(|t| Utc::now().signed_duration_since(t) >= chrono::Duration::hours(hours as i64));
+                if !(requested || interrupted || (last.as_deref() != Some(fingerprint.as_str()) && age_ok)) {
+                    continue;
+                }
+                {
+                    let mut p = engine.rescan.lock().unwrap();
+                    p.requested = false;
+                    p.running = true;
+                    p.error = None;
+                    if !interrupted {
+                        p.started_at = Some(now_text());
+                        p.scanned = 0;
+                        p.found = 0;
+                    }
+                }
+                info!("🛡️ Rescanning stored files ({}).", fingerprint);
+                let result = engine.rescan_pass(&scanner, &fingerprint).await;
+                let snapshot = {
+                    let mut p = engine.rescan.lock().unwrap();
+                    p.running = false;
+                    if let Err(e) = &result {
+                        // The scanner went away, say: the pass resumes on the next round.
+                        p.error = Some(format!("{:#}", e));
+                    }
+                    p.clone()
+                };
+                match &result {
+                    Ok(()) => info!("🛡️ Rescan finished: {} file(s) scanned, {} quarantined.", snapshot.scanned, snapshot.found),
+                    Err(e) => warn!("⚠️ Rescan paused: {:#}", e),
+                }
+                if let Ok(bytes) = serde_json::to_vec(&snapshot) {
+                    let _ = std::fs::write(&path, bytes);
+                }
+            }
+        }
+    });
 }
 
 /// Keep a file document's system fields as stored, and check name and path.

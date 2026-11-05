@@ -86,6 +86,8 @@ export interface ScanStatus {
   /** Why scanning is weaker than it should be (no ClamAV), if it is. */
   warning: string | null
   quarantined: number
+  /** Rescans of stored files (when signatures change, or on request). */
+  rescan?: { running: boolean; started_at?: string | null; finished_at?: string | null; fingerprint?: string | null; scanned: number; found: number; error?: string | null }
 }
 
 export interface ShareLink {
@@ -1052,6 +1054,7 @@ export const api = {
   quarantine: () => request<{ files: QuarantinedFile[] }>("GET", "/quarantine"),
   releaseQuarantined: (id: string) => request<{ document: Record<string, unknown>; created: boolean }>("POST", `/quarantine/${encodeURIComponent(id)}/release`),
   deleteQuarantined: (id: string) => request<void>("DELETE", `/quarantine/${encodeURIComponent(id)}`),
+  rescan: () => request<{ rescan: string }>("POST", "/quarantine/rescan"),
   chat: (question: string, history: { role: "user" | "assistant"; content: string }[]) => request<ChatAnswer>("POST", "/ai/chat", { question, history }),
   login: (login: string, password: string, code?: string) =>
     request<{ user: Me; expires_at: number }>("POST", "/auth/login", code ? { login, password, code } : { login, password }),

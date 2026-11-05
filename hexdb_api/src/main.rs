@@ -359,6 +359,7 @@ async fn server() -> anyhow::Result<()> {
 
     // Apply `hexdb reset-password` requests left in the storage folder.
     hexdb_core::recovery::spawn_recovery_task(engine.clone(), shutdown_rx.clone());
+    hexdb_core::engine::spawn_rescan_task(engine.clone(), shutdown_rx.clone());
 
     // Look for newer HexDB releases (updates.check).
     hexdb_core::updates::spawn_update_check(engine.clone(), config.updates.clone(), shutdown_rx.clone());

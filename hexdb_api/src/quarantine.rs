@@ -28,6 +28,15 @@ pub async fn release(Path(id): Path<String>, State(engine): Engine, Auth(princip
     Ok(Json(json!({ "document": result.document.to_api_json(), "created": result.created })).into_response())
 }
 
+/// `POST /quarantine/rescan`: scan every stored file again now (202; see `/status`
+/// `storage.scan.rescan`), e.g. after adding YARA rules.
+pub async fn rescan(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    engine.request_rescan()?;
+    engine.audit(&principal.login, "file.rescan_requested", "files", json!({})).await;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "rescan": "started" }))).into_response())
+}
+
 /// `DELETE /quarantine/{id}`: delete a quarantined file for good. Audited.
 pub async fn delete(Path(id): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     principal.require_admin()?;

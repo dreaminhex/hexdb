@@ -75,6 +75,7 @@ pub fn app_router(
         .route("/ai/estimate", get(crate::config::ai_estimate))
         .route("/ai/chat", get(crate::agent::chat_status).post(crate::agent::chat))
         .route("/quarantine", get(crate::quarantine::list))
+        .route("/quarantine/rescan", post(crate::quarantine::rescan))
         .route("/quarantine/{id}", axum::routing::delete(crate::quarantine::delete))
         .route("/quarantine/{id}/release", post(crate::quarantine::release))
         .route("/shares", get(crate::shares::list).post(crate::shares::create))

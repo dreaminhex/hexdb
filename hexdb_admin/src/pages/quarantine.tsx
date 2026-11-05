@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { IconAlertTriangle, IconRestore, IconShieldCheck, IconTrash } from "@tabler/icons-react"
+import { IconAlertTriangle, IconLoader2, IconRefresh, IconRestore, IconShieldCheck, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -19,13 +19,41 @@ export function QuarantinePage() {
   const status = usePoll(() => api.status(), 30_000, [])
   const [action, setAction] = useState<Action | null>(null)
   const scan = status.data?.storage.scan
+  const rescan = scan?.rescan
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <p className="text-muted-foreground max-w-3xl text-sm">
-        Every upload is scanned before it's stored. A file that matches is kept here instead, on the Overseer only: it isn't in its tessellation,
-        can't be downloaded, and never reaches another hex. Release a false positive to store it as a normal file, or delete it.
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <p className="text-muted-foreground max-w-3xl text-sm">
+          Every upload is scanned before it's stored, and stored files are scanned again when the signatures change. A file that matches is kept here
+          instead, on the Overseer only: it isn't in its tessellation, can't be downloaded, and never reaches another hex. Release a false positive to
+          store it as a normal file, or delete it.
+        </p>
+        {scan && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={rescan?.running}
+            onClick={() =>
+              void api
+                .rescan()
+                .then(() => toast.success("Rescanning every stored file."))
+                .then(() => status.refresh())
+                .catch((e: Error) => toast.error(e.message))
+            }
+          >
+            {rescan?.running ? <IconLoader2 className="size-4 animate-spin" /> : <IconRefresh className="size-4" />} Rescan now
+          </Button>
+        )}
+      </div>
+      {rescan && (rescan.running || rescan.finished_at) && (
+        <p className="text-muted-foreground text-xs">
+          {rescan.running
+            ? `Rescanning: ${rescan.scanned} file(s) so far, ${rescan.found} quarantined.`
+            : `Last rescan ${new Date(rescan.finished_at as string).toLocaleString()}: ${rescan.scanned} file(s), ${rescan.found} quarantined.`}
+          {rescan.error && ` Paused: ${rescan.error}`}
+        </p>
+      )}
       {scan === null && (
         <p className="text-destructive flex items-center gap-2 text-sm">
           <IconAlertTriangle className="size-4" /> Malware scanning is off (files.scan.enabled = false): uploads aren't scanned.

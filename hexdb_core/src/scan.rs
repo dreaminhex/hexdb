@@ -245,6 +245,8 @@ async fn read_answer<R: AsyncRead + Unpin>(stream: &mut R, timeout: Duration) ->
 pub struct Yara {
     rules: yara_x::Rules,
     count: usize,
+    /// A hash of the rule sources, so a changed rule set rescans stored files.
+    fingerprint: String,
 }
 
 #[cfg(feature = "yara")]
@@ -264,15 +266,20 @@ impl Yara {
             }
         }
         let dir = dir.unwrap_or(std::path::Path::new(""));
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(BUILT_IN_RULES.as_bytes());
         for file in &files {
             let source = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+            hasher.update(file.to_string_lossy().as_bytes());
+            hasher.update(source.as_bytes());
             let namespace = file.strip_prefix(dir).unwrap_or(file).to_string_lossy().replace(['\\', '/', '.', '-', ' '], "_");
             compiler.new_namespace(&namespace);
             compiler.add_source(source.as_str()).map_err(|e| anyhow::anyhow!("{}: {}", file.display(), e))?;
         }
         let rules = compiler.build();
         let count = rules.iter().count();
-        Ok(Yara { rules, count })
+        let fingerprint = format!("{} rules, {}", count, &hasher.finalize().to_hex()[..16]);
+        Ok(Yara { rules, count, fingerprint })
     }
 
     /// Names (`namespace:rule`) of the rules that match.
@@ -383,6 +390,21 @@ impl Scanner {
         } else {
             "No malware scanner: this build has no YARA-X and ClamAV isn't configured, so uploads aren't scanned. Install ClamAV and set files.scan.clamd (see the manual's Malware scanning).".into()
         })
+    }
+
+    /// What the verdicts depend on: ClamAV's version and signature version, and the
+    /// YARA rules. When it changes, stored files are scanned again. None while a
+    /// configured ClamAV can't answer (no rescan against half the engines).
+    pub async fn fingerprint(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(clamd) = self.clamd().await {
+            parts.push(clamd.version().await.ok()?);
+        }
+        #[cfg(feature = "yara")]
+        if let Some(yara) = &self.yara {
+            parts.push(format!("YARA-X {}", yara.fingerprint));
+        }
+        Some(parts.join(" | "))
     }
 
     /// The engines and their versions, for `/status` (reaches clamd).

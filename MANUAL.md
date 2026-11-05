@@ -1308,8 +1308,11 @@ Every uploaded file is scanned before it's stored (`files.scan`, on by default),
 | `GET /quarantine` | Quarantined files, newest first: tessellation, path, name, size, uploader and `scan` with its `detections` |
 | `POST /quarantine/{id}/release` | A false positive: store it in its tessellation as a normal file (or a new version), recorded as `scan.released_by` |
 | `DELETE /quarantine/{id}` | Delete it for good; its content goes with the next garbage collection |
+| `POST /quarantine/rescan` | Scan every stored file again now (202), for example after adding YARA rules |
 
 Quarantining, releasing and deleting are audited (`file.quarantined`, `file.released`, `file.quarantine_deleted`). Asked on a replica, these requests are passed to the Overseer. Quarantine stays with the hex that scanned the file: after a failover, the files quarantined on the old Overseer are on that hex, not the new one.
+
+**Rescans.** A file that was clean when it was stored may match a signature published later. When ClamAV's signatures or the YARA rules change, the Overseer scans every stored file's current version again, at most once every `files.scan.rescan_hours` (24; 0: never), one file at a time in the background; files stored before scanning was on get scanned this way too. A file it flags moves to quarantine: its document leaves its tessellation (so every hex drops it) and the quarantine keeps it, marked `rescan`. Clean files aren't rewritten. `/status` shows the passes (`storage.scan.rescan`: `running`, `scanned`, `found`, `finished_at`, and what they scanned with); a pass the scanner interrupts resumes where it stopped. Earlier versions of a file aren't rescanned.
 
 **When the scanner can't answer.** If ClamAV is configured (or was found, below) but can't answer, an upload answers 503 `scanner_unavailable` with `Retry-After` and nothing is stored: no file enters the lattice unscanned. This is also the case for a minute or two after ClamAV starts, while it loads its signatures.
 
@@ -2527,6 +2530,7 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `files.scan.max_size_mb` | 2000 | Larger files are stored as not scanned; clamd's limits must be at least this |
 | `files.scan.yara_rules` | (none) | A directory of extra YARA rules, besides HexDB's own |
 | `files.scan.yara_max_mb` | 128 | Larger files skip YARA-X, which reads a file into memory |
+| `files.scan.rescan_hours` | 24 | Rescan stored files when signatures or rules change, at most this often (0: never) |
 | `files.text_kb` | 64 | Text kept per file for full-text search |
 | `files.thumbnails`, `thumbnail_px` | `true`, 320 | Image thumbnails and their size (32-2048) |
 | `memory.ram_mb` | 1024 | Memory budget for documents |

@@ -12,17 +12,24 @@ use reqwest::{Method, StatusCode};
 use serde_json::json;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Content the fake clamd reports as infected.
 const MARKER: &[u8] = b"HEXDB-TEST-MALWARE";
 
-/// A fake clamd on a free port (PING, VERSION, INSTREAM); returns its address.
+/// A fake clamd on a free port (PING, VERSION, INSTREAM) that flags MARKER; returns its address.
 fn fake_clamd() -> String {
+    fake_clamd_flagging(Arc::new(Mutex::new(vec![MARKER.to_vec()])))
+}
+
+/// A fake clamd that flags any of `markers` (which a test can change, like a signature update).
+fn fake_clamd_flagging(markers: Arc<Mutex<Vec<Vec<u8>>>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
         for socket in listener.incoming().flatten() {
+            let markers = markers.clone();
             std::thread::spawn(move || {
                 let mut socket = socket;
                 let mut command = Vec::new();
@@ -50,7 +57,7 @@ fn fake_clamd() -> String {
                             }
                             data.extend_from_slice(&piece);
                         }
-                        if data.windows(MARKER.len()).any(|w| w == MARKER) {
+                        if markers.lock().unwrap().iter().any(|m| data.windows(m.len()).any(|w| w == m.as_slice())) {
                             b"stream: Hexdb.Test.Marker FOUND\0"
                         } else {
                             b"stream: OK\0"
@@ -248,5 +255,39 @@ fn a_real_clamav_finds_the_eicar_test_file() -> Result<()> {
     // A larger file streams in many pieces.
     let big: Vec<u8> = (0..20_000_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
     assert_eq!(put(&server, "docs/big.bin", &big)?.body["scan"]["status"], "clean");
+    Ok(())
+}
+
+#[test]
+fn a_rescan_quarantines_files_new_signatures_find() -> Result<()> {
+    let markers = Arc::new(Mutex::new(vec![MARKER.to_vec()]));
+    let clamd = fake_clamd_flagging(markers.clone());
+    let server = files_server(TestOptions { extra_toml: scanning(&format!("tcp://{}", clamd)), ..Default::default() })?;
+    // Clean under today's signatures.
+    let later = b"a payload only tomorrow's signatures know".to_vec();
+    assert_eq!(put(&server, "docs/later.bin", &later)?.status, StatusCode::CREATED);
+    assert_eq!(put(&server, "docs/fine.txt", b"fine")?.status, StatusCode::CREATED);
+
+    // The signatures update; an administrator rescans (otherwise it runs on its own).
+    markers.lock().unwrap().push(b"tomorrow's signatures".to_vec());
+    let viewer = server.user_with_roles("viewer", json!([{ "name": "reader", "tessellations": ["*"] }]))?;
+    assert_eq!(server.request_as(Some(&viewer), Method::POST, "/quarantine/rescan", None, &[])?.status, StatusCode::FORBIDDEN);
+    assert_eq!(server.request(Method::POST, "/quarantine/rescan", None, &[])?.status, StatusCode::ACCEPTED);
+    wait_until(Duration::from_secs(30), "the rescan to finish", || {
+        let rescan = server.request(Method::GET, "/status", None, &[])?.body["storage"]["scan"]["rescan"].clone();
+        Ok(rescan["running"] == false && rescan["finished_at"].is_string())
+    })?;
+
+    // The newly detected file left its tessellation for quarantine; the other stayed.
+    assert_eq!(server.get_bytes("/media/_files/docs/later.bin", &[])?.0, StatusCode::NOT_FOUND);
+    assert_eq!(server.get_bytes("/media/_files/docs/fine.txt", &[])?.0, StatusCode::OK);
+    let files = server.request(Method::GET, "/quarantine", None, &[])?.body["files"].clone();
+    assert_eq!(files.as_array().map(Vec::len), Some(1), "{}", files);
+    assert_eq!(files[0]["name"], "later.bin");
+    assert_eq!(files[0]["rescan"], true);
+    let rescan = server.request(Method::GET, "/status", None, &[])?.body["storage"]["scan"]["rescan"].clone();
+    assert_eq!(rescan["scanned"], 2, "{}", rescan);
+    assert_eq!(rescan["found"], 1, "{}", rescan);
+    assert!(rescan["fingerprint"].as_str().unwrap_or("").contains("ClamAV"), "{}", rescan);
     Ok(())
 }

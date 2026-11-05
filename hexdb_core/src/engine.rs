@@ -43,7 +43,7 @@ use ulid::Ulid;
 
 pub(crate) mod backup;
 mod files;
-pub use files::{ai_files::AiTask, ExtractQueue, FileContent, FileSync, UploadOptions, UploadResult};
+pub use files::{ai_files::AiTask, spawn_rescan_task, ExtractQueue, FileContent, FileSync, UploadOptions, UploadResult};
 mod indexing;
 mod reads;
 mod history;
@@ -274,6 +274,9 @@ pub struct HexDBEngine {
     pub(crate) replica_position: std::sync::Mutex<Option<crate::replication::Continuation>>,
     /// Malware scanning of uploads (`files.scan`; None when it's off).
     pub(crate) scanner: Option<Arc<crate::scan::Scanner>>,
+    /// Rescans of stored files (see `files::spawn_rescan_task`).
+    pub(crate) rescan: std::sync::Mutex<files::RescanProgress>,
+    pub(crate) rescan_now: tokio::sync::Notify,
     /// A sliced replica's recent changes of every slice (see replication).
     pub recent_changes: std::sync::Mutex<crate::replication::RecentChanges>,
     /// Loaded plugins and their delivery state.
@@ -558,6 +561,8 @@ impl HexDBEngine {
             continuation: std::sync::RwLock::new(None),
             replica_position: std::sync::Mutex::new(None),
             scanner: scanner.clone(),
+            rescan: Default::default(),
+            rescan_now: tokio::sync::Notify::new(),
             recent_changes: std::sync::Mutex::new(crate::replication::RecentChanges::default()),
             plugins: crate::plugins::PluginRegistry::default(),
             login_throttle,

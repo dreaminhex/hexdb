@@ -358,6 +358,14 @@ pub struct ScanConfig {
     /// YARA-X reads a file into memory: files larger than this (MB) skip it.
     #[serde(default = "default_yara_max_mb")]
     pub yara_max_mb: u64,
+    /// Rescan stored files when the signatures or rules have changed, at most this
+    /// often (hours; 0: never). Files stored before scanning was on are scanned too.
+    #[serde(default = "default_rescan_hours")]
+    pub rescan_hours: u64,
+}
+
+fn default_rescan_hours() -> u64 {
+    24
 }
 
 fn default_clamd() -> String {
@@ -385,6 +393,7 @@ impl Default for ScanConfig {
             max_size_mb: default_scan_max_size_mb(),
             yara_rules: String::new(),
             yara_max_mb: default_yara_max_mb(),
+            rescan_hours: default_rescan_hours(),
         }
     }
 }
