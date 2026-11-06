@@ -2,7 +2,7 @@
   "name": "hexdb",
   "displayName": "HexDB for VS Code",
   "description": "Browse HexDB lattices, run SQL and GraphQL, and edit stored functions.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "dreaminhex",
   "license": "Apache-2.0",
   "icon": "media/icon.png",

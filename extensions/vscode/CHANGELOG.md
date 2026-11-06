@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
 - **Quarantine shows only when there's something in it.** An empty quarantine no longer adds a node under each connection. **HexDB: Rescan Stored Files** is still in the Command Palette.
 - A quarantined file's location no longer shows a doubled slash.
