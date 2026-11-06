@@ -316,7 +316,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 
 Every driver takes the same connection URI, such as `hexdbs://db.example.com?apiKey=hxk_...` (see [Connection URIs](MANUAL.md#connection-uris)). See [drivers/README.md](drivers/README.md). The REST API is described by `GET /openapi.json` ([hexdb_api/openapi.json](hexdb_api/openapi.json)).
 
-**HexDB for VS Code** ([extensions/vscode](extensions/vscode)) browses a lattice (hexes, regions, lag, tessellations), runs SQL and GraphQL, and edits documents and stored functions. Install it from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=dreaminhex.hexdb).
+**HexDB for VS Code** ([extensions/vscode](extensions/vscode)) browses a lattice (hexes, regions, lag, tessellations), runs SQL and GraphQL, and edits documents and stored functions. Install it from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=dreaminhex.hexdb) or [Open VSX](https://open-vsx.org/extension/dreaminhex/hexdb) (VSCodium, Cursor, Windsurf and other VS Code forks).
 
 ## Installing
 
