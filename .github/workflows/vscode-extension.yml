@@ -1,6 +1,6 @@
 # Publishes HexDB for VS Code (extensions/vscode) when a vscode-v<version> tag is pushed, e.g.
 # vscode-v0.1.1 for "version": "0.1.1" in extensions/vscode/package.json. The extension has its
-# own version, apart from HexDB's releases (release.yml runs on v* tags, not these).
+# own version, apart from HexDB's releases (release.yml runs on v<digit> tags, not these).
 #
 # Both stores use trusted publishing: each exchanges an OIDC token from this workflow for a
 # short-lived credential, so no token is stored anywhere. Both are registered with this file

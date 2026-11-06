@@ -26,7 +26,8 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # v and a digit: "v*" also matched the extension's vscode-v* tags and ran a whole release.
+    tags: ["v[0-9]*"]
 
 permissions:
   contents: write
