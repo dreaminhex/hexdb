@@ -2,13 +2,13 @@
 # vscode-v0.1.1 for "version": "0.1.1" in extensions/vscode/package.json. The extension has its
 # own version, apart from HexDB's releases (release.yml runs on v* tags, not these).
 #
-#   Open VSX              trusted publishing: an OIDC token from this workflow, no stored secret.
-#                         Registered at open-vsx.org for the namespace dreaminhex with this file
-#                         (vscode-extension.yml) and the environment open-vsx, which only
-#                         vscode-v* tags may deploy to (Open VSX doesn't check the ref itself).
-#   VS Code Marketplace   only if the secret VSCE_PAT is set (an Azure DevOps token with
-#                         Marketplace: Manage); otherwise publish the .vsix from the GitHub
-#                         release by hand.
+# Both stores use trusted publishing: each exchanges an OIDC token from this workflow for a
+# short-lived credential, so no token is stored anywhere. Both are registered with this file
+# (vscode-extension.yml) and the environment open-vsx, which only vscode-v* tags may deploy to
+# (neither store checks the ref itself):
+#   Open VSX              open-vsx.org, namespace dreaminhex
+#   VS Code Marketplace   the Trusted Publishing policy of the publisher DreamInHex, for the
+#                         repository dreaminhex/hexdb
 #
 # The .vsix is also attached to a GitHub release for the tag. Re-running publishes nothing twice.
 
@@ -26,12 +26,9 @@ jobs:
     name: Publish
     runs-on: ubuntu-latest
     environment: open-vsx
-    env:
-      # Whether the Marketplace token exists, not the token itself.
-      HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
     permissions:
       contents: write # the GitHub release
-      id-token: write # Open VSX trusted publishing
+      id-token: write # trusted publishing to both stores
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -68,11 +65,8 @@ jobs:
         run: npx --yes ovsx@1.3.0 publish -i "hexdb-$VERSION.vsix" --trusted-publishing --skip-duplicate
 
       - name: Publish to the VS Code Marketplace
-        if: env.HAS_VSCE_PAT == 'true'
         working-directory: extensions/vscode
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx vsce publish -i "hexdb-$VERSION.vsix" --skip-duplicate
+        run: npx vsce publish -i "hexdb-$VERSION.vsix" --oidc --skip-duplicate
 
       - name: GitHub release
         working-directory: extensions/vscode
