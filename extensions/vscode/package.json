@@ -2,7 +2,7 @@
   "name": "hexdb",
   "displayName": "HexDB for VS Code",
   "description": "Browse HexDB lattices, run SQL and GraphQL, and edit stored functions.",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "publisher": "dreaminhex",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -207,6 +207,29 @@
         "title": "Disconnect",
         "category": "HexDB",
         "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "hexdb.releaseQuarantined",
+        "title": "Release (It's Safe)",
+        "category": "HexDB",
+        "icon": "$(check)"
+      },
+      {
+        "command": "hexdb.deleteQuarantined",
+        "title": "Delete for Good",
+        "category": "HexDB",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "hexdb.rescanQuarantine",
+        "title": "Rescan Stored Files",
+        "category": "HexDB",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "hexdb.showQuarantined",
+        "title": "Show Details",
+        "category": "HexDB"
       }
     ],
     "menus": {
@@ -332,6 +355,41 @@
           "command": "hexdb.deleteFunction",
           "when": "view == hexdb.connections && viewItem == function-admin",
           "group": "2_edit@2"
+        },
+        {
+          "command": "hexdb.releaseQuarantined",
+          "when": "view == hexdb.connections && viewItem == quarantined-file",
+          "group": "inline@1"
+        },
+        {
+          "command": "hexdb.deleteQuarantined",
+          "when": "view == hexdb.connections && viewItem == quarantined-file",
+          "group": "inline@2"
+        },
+        {
+          "command": "hexdb.showQuarantined",
+          "when": "view == hexdb.connections && viewItem == quarantined-file",
+          "group": "1_view@1"
+        },
+        {
+          "command": "hexdb.releaseQuarantined",
+          "when": "view == hexdb.connections && viewItem == quarantined-file",
+          "group": "2_decide@1"
+        },
+        {
+          "command": "hexdb.deleteQuarantined",
+          "when": "view == hexdb.connections && viewItem == quarantined-file",
+          "group": "2_decide@2"
+        },
+        {
+          "command": "hexdb.rescanQuarantine",
+          "when": "view == hexdb.connections && viewItem == quarantine",
+          "group": "inline@1"
+        },
+        {
+          "command": "hexdb.rescanQuarantine",
+          "when": "view == hexdb.connections && viewItem == quarantine",
+          "group": "1_scan@1"
         }
       ],
       "editor/title": [
@@ -388,6 +446,18 @@
         },
         {
           "command": "hexdb.graphqlTessellation",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.releaseQuarantined",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.deleteQuarantined",
+          "when": "false"
+        },
+        {
+          "command": "hexdb.showQuarantined",
           "when": "false"
         }
       ]

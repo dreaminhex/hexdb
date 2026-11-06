@@ -1,4 +1,5 @@
-// HexDB for VS Code: connections, the lattice, tessellations, SQL and GraphQL, and stored functions.
+// HexDB for VS Code: connections, the lattice, tessellations, SQL and GraphQL, stored functions,
+// and the files the malware scan quarantined.
 
 import { parseConnectionUri } from "@dreaminhex/hexdb"
 import * as vscode from "vscode"
@@ -8,21 +9,24 @@ import { HexDBFileSystem, scheme } from "./fs"
 import { Functions } from "./functions"
 import { LatticePanels } from "./lattice"
 import { toConnectionUri, withoutCredentials } from "./lib"
+import { Quarantine } from "./quarantine"
 import { Queries } from "./queries"
 import { ResultsPanel } from "./results"
 import { ConnectionsTree, type Node } from "./tree"
 
 const playgroundInfo = "https://hexdb.app/api/playground"
 
-export function activate(context: vscode.ExtensionContext): { connections: Connections; queries: Queries; results: ResultsPanel; tree: ConnectionsTree } {
+export function activate(context: vscode.ExtensionContext): { connections: Connections; queries: Queries; results: ResultsPanel; tree: ConnectionsTree; quarantine: Quarantine } {
   const connections = new Connections(context)
-  const tree = new ConnectionsTree(connections)
+  const quarantine = new Quarantine(connections)
+  const tree = new ConnectionsTree(connections, quarantine)
   const results = new ResultsPanel(context)
   const fs = new HexDBFileSystem(connections)
   const queries = new Queries(context, connections, results)
   const lattices = new LatticePanels(context, connections)
   const functions = new Functions(connections, fs, results, () => tree.refresh())
   const view = vscode.window.createTreeView("hexdb.connections", { treeDataProvider: tree, showCollapseAll: true })
+  quarantine.attach(view)
 
   fs.onDidSave(() => tree.refresh())
 
@@ -41,6 +45,7 @@ export function activate(context: vscode.ExtensionContext): { connections: Conne
 
   context.subscriptions.push(
     connections,
+    quarantine,
     results,
     queries,
     lattices,
@@ -130,10 +135,25 @@ export function activate(context: vscode.ExtensionContext): { connections: Conne
     command("hexdb.deleteFunction", async (node?: Node) => {
       if (node?.kind === "function") await functions.delete(node.connection, node.fn)
     }),
+    command("hexdb.releaseQuarantined", async (node?: Node) => {
+      if (node?.kind === "quarantined") await quarantine.release(node.connection, node.file)
+    }),
+    command("hexdb.deleteQuarantined", async (node?: Node) => {
+      if (node?.kind === "quarantined") await quarantine.delete(node.connection, node.file)
+    }),
+    command("hexdb.rescanQuarantine", async (node?: Node) => {
+      const connection = await target(node)
+      if (connection) await quarantine.rescan(connection)
+    }),
+    command("hexdb.showQuarantined", async (node?: Node) => {
+      if (node?.kind !== "quarantined") return
+      const doc = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify(node.file, null, 2) })
+      await vscode.window.showTextDocument(doc, { preview: true })
+    }),
   )
 
   // Internals for the integration tests (test/integration); not a public API.
-  return { connections, queries, results, tree }
+  return { connections, queries, results, tree, quarantine }
 }
 
 export function deactivate(): void {

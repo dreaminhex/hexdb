@@ -53,7 +53,8 @@ check("the tree shows the lattice, tessellations and functions", async () => {
   const [root] = await api.tree.getChildren()
   const children = await api.tree.getChildren(root)
   const kinds = children.map((c) => c.kind)
-  assert.deepEqual(kinds.filter((k) => k !== "message"), ["lattice", "tessellations", "functions"])
+  // Administrators of HexDB 2.4+ also see the quarantine.
+  assert.deepEqual(kinds.filter((k) => k !== "message" && k !== "quarantine"), ["lattice", "tessellations", "functions"])
   const hexes = await api.tree.getChildren(children[0])
   assert.ok(hexes.length >= 1)
   assert.ok(hexes.every((h) => h.kind === "hex"))
@@ -120,6 +121,46 @@ check("runs a function", async () => {
   }
   const tab = await until("function results", () => api.results.latest?.title === fn.name && (api.results.latest.json !== undefined || api.results.latest.error) && api.results.latest)
   assert.equal(tab.error, undefined)
+})
+
+check("administrators see quarantined files, with a badge, and release or delete them", async () => {
+  const session = await api.connections.session(connection.id)
+  if (!session.isAdmin) return console.log("  (skipped: not an administrator)")
+  if (process.env.HEXDB_TEST_SEED !== "1") return console.log("  (skipped: only on a throwaway server)")
+  // The EICAR test file, which HexDB's built-in YARA rules flag (built from hex, as in hexdb_core).
+  const hex = "58354F2150254041505B345C505A58353428505E2937434329377D2445494341522D5354414E444152442D414E544956495255532D544553542D46494C452124482B482A"
+  const eicar = new Uint8Array(hex.match(/../g).map((b) => parseInt(b, 16)))
+  await session.request("POST", "/tessellations", { name: "uploads", kind: "files" })
+  for (const name of ["first.com", "second.com"]) {
+    await assert.rejects(session.db.requestRaw("PUT", `/uploads/_files/inbox/${name}`, new Blob([eicar])), (e) => e.status === 422 && e.code === "file_quarantined")
+  }
+
+  // The tree shows them under Quarantine, and the badge counts them.
+  const [root] = await api.tree.getChildren()
+  const children = await api.tree.getChildren(root)
+  const node = children.find((c) => c.kind === "quarantine")
+  assert.ok(node, "no Quarantine node for an administrator")
+  assert.equal(node.files.length, 2)
+  assert.match(String(api.tree.getTreeItem(node).description), /2 files/)
+  const files = await api.tree.getChildren(node)
+  assert.deepEqual(files.map((f) => f.kind), ["quarantined", "quarantined"])
+  assert.match(String(api.tree.getTreeItem(files[0]).description), /EICAR/)
+  assert.equal(api.quarantine.cached(connection.id).length, 2)
+
+  // Release one (a false positive) and delete the other; the confirmations are answered here.
+  const byName = (name) => files.find((f) => f.file.name === name).file
+  const original = vscode.window.showWarningMessage
+  vscode.window.showWarningMessage = async (_text, _options, choice) => choice
+  try {
+    await api.quarantine.release(connection, byName("first.com"))
+    await api.quarantine.delete(connection, byName("second.com"))
+  } finally {
+    vscode.window.showWarningMessage = original
+  }
+  assert.equal(api.quarantine.cached(connection.id).length, 0)
+  const released = await session.db.requestRaw("GET", "/uploads/_files/inbox/first.com")
+  assert.equal(released.status, 200)
+  await assert.rejects(session.db.requestRaw("GET", "/uploads/_files/inbox/second.com"), (e) => e.status === 404)
 })
 
 check("administrators edit, save, run and delete a script function", async () => {

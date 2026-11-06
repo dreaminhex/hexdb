@@ -1,8 +1,10 @@
-// The Connections view: each connection's lattice (hexes and regions), tessellations and functions.
+// The Connections view: each connection's lattice (hexes and regions), tessellations, functions
+// and, for administrators, the files the malware scan quarantined.
 
 import * as vscode from "vscode"
 
 import { errorMessage, type Connections, type SavedConnection, type Session } from "./connections"
+import { describeDetections, type Quarantine, type QuarantinedFile } from "./quarantine"
 import { describeRegion } from "./regions"
 import { formatLag } from "./shared/format"
 
@@ -57,6 +59,8 @@ export type Node =
   | { kind: "column"; label: string; description?: string }
   | { kind: "functions"; connection: SavedConnection; admin: boolean }
   | { kind: "function"; connection: SavedConnection; fn: FunctionInfo; admin: boolean }
+  | { kind: "quarantine"; connection: SavedConnection; files: QuarantinedFile[] }
+  | { kind: "quarantined"; connection: SavedConnection; file: QuarantinedFile }
   | { kind: "message"; label: string; error?: boolean }
 
 const roleIcon: Record<string, string> = { Overseer: "star-full", Harvester: "circle-filled", Replicant: "circle-outline" }
@@ -67,7 +71,15 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
   /** Connections whose icon was repainted after signing in. */
   private readonly painted = new Set<string>()
 
-  constructor(private readonly connections: Connections) {
+  constructor(
+    private readonly connections: Connections,
+    private readonly quarantine: Quarantine,
+  ) {
+    // A file quarantined, released or deleted redraws that connection.
+    quarantine.onDidChange((id) => {
+      const connection = connections.get(id)
+      this.refresh(connection ? { kind: "connection", connection } : undefined)
+    })
     connections.onDidChange(() => {
       // Signing out or editing makes the icon change again on the next connect.
       for (const id of this.painted) if (!connections.isOpen(id)) this.painted.delete(id)
@@ -175,6 +187,38 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
         item.command = { command: "hexdb.openFunction", title: "Open Function", arguments: [node] }
         return item
       }
+      case "quarantine": {
+        const n = node.files.length
+        const item = new vscode.TreeItem("Quarantine", n ? C.Expanded : C.Collapsed)
+        item.id = `${node.connection.id}/quarantine`
+        item.description = n ? `${n} ${n === 1 ? "file" : "files"}` : "nothing quarantined"
+        item.tooltip = "Uploads the malware scan flagged. They aren't in their tessellation, can't be downloaded and never reach another hex. Release a false positive, or delete it."
+        item.iconPath = new vscode.ThemeIcon(n ? "warning" : "shield", n ? new vscode.ThemeColor("list.warningForeground") : undefined)
+        item.contextValue = "quarantine"
+        return item
+      }
+      case "quarantined": {
+        const f = node.file
+        const item = new vscode.TreeItem(f.name, C.None)
+        item.id = `${node.connection.id}/q/${f.id}`
+        item.description = `${f.tessellation} · ${f.scan.detections.map((d) => d.name).join(", ")}`
+        item.tooltip = new vscode.MarkdownString(
+          [
+            `**${md(f.name)}** in ${md(f.tessellation)}/${md(f.path)}`,
+            `Matched: ${md(describeDetections(f))}`,
+            f.uploaded_by ? `Uploaded by ${md(f.uploaded_by)}${f.uploaded_at ? ` at ${md(new Date(f.uploaded_at).toLocaleString())}` : ""}` : "",
+            f.rescan ? "Found by a rescan after it was stored." : "",
+            `Size: ${md(formatBytes(f.size))}`,
+            f.scan.engines.length ? `Scanned by ${md(f.scan.engines.join(", "))}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        )
+        item.iconPath = new vscode.ThemeIcon("bug", new vscode.ThemeColor("errorForeground"))
+        item.contextValue = "quarantined-file"
+        item.command = { command: "hexdb.showQuarantined", title: "Show Details", arguments: [node] }
+        return item
+      }
       case "message": {
         const item = new vscode.TreeItem(node.label, C.None)
         item.iconPath = new vscode.ThemeIcon(node.error ? "error" : "info", node.error ? new vscode.ThemeColor("errorForeground") : undefined)
@@ -220,6 +264,12 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
           if (functions.length === 0) return [{ kind: "message", label: node.admin ? "No functions yet: use + to add one" : "No functions" }]
           return functions.sort((a, b) => a.name.localeCompare(b.name)).map((fn) => ({ kind: "function", connection: node.connection, fn, admin: node.admin }))
         }
+        case "quarantine":
+          if (node.files.length === 0) return [{ kind: "message", label: "Nothing is quarantined" }]
+          return node.files
+            .slice()
+            .sort((a, b) => (b.uploaded_at ?? "").localeCompare(a.uploaded_at ?? ""))
+            .map((file) => ({ kind: "quarantined", connection: node.connection, file }))
         default:
           return []
       }
@@ -248,6 +298,11 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
       nodes.push({ kind: "message", label: "Lattice hidden: needs the status permission" })
     }
     nodes.push({ kind: "tessellations", connection }, { kind: "functions", connection, admin: session.isAdmin })
+    // Administrators only (and HexDB 2.4+); a server that can't be asked just doesn't show it.
+    if (session.isAdmin) {
+      const files = await this.quarantine.list(connection).catch(() => null)
+      if (files) nodes.push({ kind: "quarantine", connection, files })
+    }
     return nodes
   }
 }
@@ -255,6 +310,18 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
 /** Server text as literal Markdown, so a hostile server can't add links or remote images to a tooltip. */
 function md(value: unknown): string {
   return String(value ?? "").replace(/[\\`*_{}[\]()#+\-.!|<>~:]/g, "\\$&")
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ["KB", "MB", "GB", "TB"]
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit++
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`
 }
 
 function rank(role: string): number {
