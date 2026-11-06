@@ -204,7 +204,7 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
         item.description = `${f.tessellation} · ${f.scan.detections.map((d) => d.name).join(", ")}`
         item.tooltip = new vscode.MarkdownString(
           [
-            `**${md(f.name)}** in ${md(f.tessellation)}/${md(f.path)}`,
+            `**${md(f.name)}** in ${md(f.tessellation)}${md(f.path.startsWith("/") ? f.path : `/${f.path}`)}`,
             `Matched: ${md(describeDetections(f))}`,
             f.uploaded_by ? `Uploaded by ${md(f.uploaded_by)}${f.uploaded_at ? ` at ${md(new Date(f.uploaded_at).toLocaleString())}` : ""}` : "",
             f.rescan ? "Found by a rescan after it was stored." : "",
