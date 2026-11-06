@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Quarantine shows only when there's something in it.** An empty quarantine no longer adds a node under each connection. **HexDB: Rescan Stored Files** is still in the Command Palette.
+- A quarantined file's location no longer shows a doubled slash.
+
 ## 0.2.1
 
 - **Quarantine.** Administrators of HexDB 2.4 or later see the uploads the malware scan flagged, under each connection: what matched, the engines, who uploaded it and when. Release a false positive (it is stored as a normal file), delete a file for good, or rescan every stored file.

@@ -298,10 +298,11 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
       nodes.push({ kind: "message", label: "Lattice hidden: needs the status permission" })
     }
     nodes.push({ kind: "tessellations", connection }, { kind: "functions", connection, admin: session.isAdmin })
-    // Administrators only (and HexDB 2.4+); a server that can't be asked just doesn't show it.
+    // Administrators only (and HexDB 2.4+), and only while something is quarantined: an empty quarantine
+    // is just clutter. The tree redraws when the quarantine changes, so it appears when a file lands.
     if (session.isAdmin) {
       const files = await this.quarantine.list(connection).catch(() => null)
-      if (files) nodes.push({ kind: "quarantine", connection, files })
+      if (files?.length) nodes.push({ kind: "quarantine", connection, files })
     }
     return nodes
   }

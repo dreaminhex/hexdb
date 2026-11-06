@@ -161,6 +161,10 @@ check("administrators see quarantined files, with a badge, and release or delete
   const released = await session.db.requestRaw("GET", "/uploads/_files/inbox/first.com")
   assert.equal(released.status, 200)
   await assert.rejects(session.db.requestRaw("GET", "/uploads/_files/inbox/second.com"), (e) => e.status === 404)
+
+  // With nothing left, the Quarantine node goes away.
+  const after = await api.tree.getChildren(root)
+  assert.equal(after.find((c) => c.kind === "quarantine"), undefined, "an empty Quarantine node is still shown")
 })
 
 check("administrators edit, save, run and delete a script function", async () => {
