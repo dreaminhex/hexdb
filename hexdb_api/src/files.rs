@@ -396,12 +396,27 @@ pub async fn restore_version(Path((tess, id, version)): Path<(String, String, u6
 pub async fn trash(Path(tess): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     principal.require(Permission::Read, &tess)?;
     user_tessellation(&engine, &tess)?;
+    if !is_files(&engine, &tess) {
+        let docs = engine.list_document_trash(&tess).await?;
+        return Ok(Json(json!({ "total": docs.len(), "documents": docs })).into_response());
+    }
     let docs = engine.list_trash(&tess).await?;
     Ok(Json(json!({ "documents": docs_json(&docs), "total": docs.len() })).into_response())
 }
 
+fn is_files(engine: &HexDBEngine, tess: &str) -> bool {
+    engine.tessellation_info(tess).is_some_and(|i| i.is_files())
+}
+
 /// Purge every file in the trash.
 pub async fn empty_trash(Path(tess): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    if !is_files(&engine, &tess) {
+        principal.require(Permission::Manage, &tess)?;
+        user_tessellation(&engine, &tess)?;
+        let purged = engine.empty_document_trash(&tess).await?;
+        engine.audit(&principal.login, "data.purge", &tess, json!({ "trash": "emptied", "purged": purged })).await;
+        return Ok(Json(json!({ "purged": purged })).into_response());
+    }
     principal.require(Permission::Delete, &tess)?;
     user_tessellation(&engine, &tess)?;
     let purged = engine.empty_trash(&tess).await?;
@@ -416,8 +431,15 @@ pub async fn restore(
     State(engine): Engine,
     Auth(principal): Auth,
 ) -> ApiResult {
-    principal.require(Permission::Restore, &tess)?;
     let Query(params) = params?;
+    if !is_files(&engine, &tess) {
+        principal.require(Permission::Write, &tess)?;
+        user_tessellation(&engine, &tess)?;
+        let doc = engine.restore_document(&tess, &id).await?;
+        engine.audit(&principal.login, "data.restore", &tess, json!({ "id": id })).await;
+        return Ok(respond(StatusCode::OK, doc.to_api_json(), false));
+    }
+    principal.require(Permission::Restore, &tess)?;
     user_tessellation(&engine, &tess)?;
     let doc = engine.restore_file(&tess, &id, params.name.as_deref(), params.path.as_deref()).await?;
     Ok(respond(StatusCode::OK, doc.to_api_json(), false))
@@ -425,6 +447,15 @@ pub async fn restore(
 
 /// Delete one file from the trash for good.
 pub async fn purge(Path((tess, id)): Path<(String, String)>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    if !is_files(&engine, &tess) {
+        principal.require(Permission::Write, &tess)?;
+        user_tessellation(&engine, &tess)?;
+        if !engine.purge_document(&tess, &id).await? {
+            return Err(ApiError::not_found(format!("Document {} is not in the trash of '{}'.", id, tess)));
+        }
+        engine.audit(&principal.login, "data.purge", &tess, json!({ "id": id })).await;
+        return Ok(no_content(false));
+    }
     principal.require(Permission::Delete, &tess)?;
     user_tessellation(&engine, &tess)?;
     if !engine.purge_file(&tess, &id).await? {

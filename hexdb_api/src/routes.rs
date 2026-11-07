@@ -64,6 +64,9 @@ pub fn app_router(
         .route("/status/history", get(status_history))
         .route("/logs", get(logs))
         .route("/audit", get(audit))
+        .route("/deletes", get(list_deletes))
+        .route("/deletes/{batch}", get(get_delete).delete(purge_delete))
+        .route("/deletes/{batch}/restore", post(restore_delete))
         .route("/settings", get(get_settings).put(put_settings))
         .route("/config", get(crate::config::get_config).put(crate::config::put_config))
         .route("/config/history", get(crate::config::config_history))
@@ -207,6 +210,8 @@ pub fn app_router(
             post(update_where).layer(DefaultBodyLimit::max(body_limit)),
         )
         .route("/{tessellation}/_delete", post(delete_where))
+        .route("/{tessellation}/_folders", axum::routing::delete(delete_root_folder))
+        .route("/{tessellation}/_folders/{*path}", axum::routing::delete(delete_folder))
         // Files tessellations (uploads stream, so they have no body limit here;
         // files.max_file_mb and storage.disk_mb apply)
         .route(

@@ -1336,6 +1336,7 @@ pub async fn delete_doc(
     }
     let mut response = no_content(outcome.replayed);
     if !outcome.replayed {
+        audit_batch(&engine, &principal, &batch, "data.delete.cascade", &tess).await;
         if let Ok(value) = HeaderValue::from_str(&batch.to_string()) {
             response.headers_mut().insert(DELETE_BATCH_HEADER, value);
         }
@@ -1346,6 +1347,152 @@ pub async fn delete_doc(
 // ---------------------------------------------------------------------------
 // Bulk
 // ---------------------------------------------------------------------------
+
+/// `DELETE /{tess}/_folders/{*path}?recursive=true&dry_run=true&expect=N&all=true`.
+#[derive(Deserialize, Default)]
+pub struct FolderDeleteParams {
+    #[serde(default)]
+    pub recursive: bool,
+    #[serde(default)]
+    pub all: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+    pub expect: Option<usize>,
+}
+
+impl FolderDeleteParams {
+    fn options(&self) -> hexdb_core::engine::deletes::DeleteOptions {
+        hexdb_core::engine::deletes::DeleteOptions { all: self.all, dry_run: self.dry_run, expect: self.expect }
+    }
+}
+
+/// `DELETE /{tess}/_folders`: the root folder (recursive needs all=true).
+pub async fn delete_root_folder(
+    Path(tess): Path<String>,
+    params: Result<Query<FolderDeleteParams>, QueryRejection>,
+    state: State<Arc<HexDBEngine>>,
+    auth: Auth,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> ApiResult {
+    delete_folder(Path((tess, String::new())), params, state, auth, method, uri, headers).await
+}
+
+/// Delete the files in a folder (with `recursive`, everything below it too)
+/// as one restorable delete batch.
+pub async fn delete_folder(
+    Path((tess, path)): Path<(String, String)>,
+    params: Result<Query<FolderDeleteParams>, QueryRejection>,
+    State(engine): Engine,
+    Auth(principal): Auth,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> ApiResult {
+    principal.require(Permission::Delete, &tess)?;
+    let Query(params) = params?;
+    existing_tessellation(&engine, &tess)?;
+    let idem = if params.dry_run { None } else { idempotency(&principal, &headers, &method, &uri, None)? };
+    let outcome = engine.delete_folder(&tess, &path, params.recursive, params.options(), idem).await?;
+    let summary = outcome.value;
+    if let (Some(batch), false) = (&summary.batch, outcome.replayed) {
+        let details = json!({ "batch": batch, "folder": format!("/{}", path.trim_start_matches('/')), "recursive": params.recursive, "total": summary.total, "deleted": summary.deleted });
+        engine.audit(&principal.login, "data.delete.folder", &tess, details).await;
+    }
+    Ok(respond(StatusCode::OK, serde_json::to_value(&summary).unwrap_or_default(), outcome.replayed))
+}
+
+/// Record a batch in the audit trail if it was more than one plain delete
+/// (several documents, a cascade, or detached links).
+async fn audit_batch(engine: &HexDBEngine, principal: &hexdb_core::auth::Principal, batch: &ulid::Ulid, action: &str, target: &str) {
+    let Ok(Some(record)) = engine.delete_batch(&batch.to_string()).await else { return };
+    let fields = record.data_json();
+    let total: u64 = fields["counts"].as_object().map(|c| c.values().filter_map(Value::as_u64).sum()).unwrap_or(0);
+    let detached = fields["detached"].as_array().is_some_and(|d| !d.is_empty());
+    if total > 1 || detached {
+        let details = json!({ "batch": batch.to_string(), "deleted": fields["counts"], "detached": fields["detached"].as_array().map_or(0, Vec::len) });
+        engine.audit(&principal.login, action, target, details).await;
+    }
+}
+
+/// Who may see a delete batch: the auditors, whoever deleted it, and anyone
+/// who can read every tessellation it deleted from.
+fn may_see_batch(principal: &hexdb_core::auth::Principal, record: &Value) -> bool {
+    principal.has(Action::Audit)
+        || record["by"].as_str() == Some(principal.login.as_str())
+        || record["counts"].as_object().is_some_and(|c| c.keys().all(|t| principal.can(Permission::Read, t)))
+}
+
+/// `GET /deletes`: delete batches, newest first. Auditors see every batch;
+/// others see their own.
+pub async fn list_deletes(params: Result<Query<hexdb_core::engine::deletes::DeletesQuery>, QueryRejection>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    let Query(mut query) = params?;
+    if !principal.has(Action::Audit) {
+        query.by = Some(principal.login.clone());
+    }
+    let (batches, total) = engine.delete_batches(&query).await?;
+    Ok(Json(json!({ "batches": batches, "total": total })).into_response())
+}
+
+/// `GET /deletes/{batch}`: the record, and what's still in the trash.
+pub async fn get_delete(Path(batch): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    let missing = || ApiError::not_found(format!("There's no delete batch {}.", batch));
+    let record = engine.delete_batch(&batch).await?.ok_or_else(missing)?;
+    let mut body = hexdb_core::engine::deletes::batch_json(&record);
+    if !may_see_batch(&principal, &body) {
+        return Err(missing());
+    }
+    let trashed: Vec<Value> = engine
+        .trashed_in_batch(&batch)
+        .await?
+        .iter()
+        .filter_map(HexDBEngine::trashed_document)
+        .map(|d| json!({ "tessellation": d.tessellation, "id": d.id.to_string() }))
+        .collect();
+    body["in_trash"] = json!(trashed);
+    Ok(Json(body).into_response())
+}
+
+/// The permissions a restore or purge of a batch needs: write on its
+/// document tessellations, `restore` or `delete` on its files tessellations.
+fn require_batch(engine: &HexDBEngine, principal: &hexdb_core::auth::Principal, record: &Value, files_permission: Permission) -> Result<(), ApiError> {
+    for tess in record["counts"].as_object().map(|c| c.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
+        let files = engine.tessellation_info(&tess).is_some_and(|i| i.is_files());
+        principal.require(if files { files_permission } else { Permission::Write }, &tess)?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, Default)]
+pub struct RestoreBatchParams {
+    #[serde(default)]
+    pub skip_existing: bool,
+}
+
+/// `POST /deletes/{batch}/restore`: put back everything the batch deleted, in one commit.
+pub async fn restore_delete(
+    Path(batch): Path<String>,
+    params: Result<Query<RestoreBatchParams>, QueryRejection>,
+    State(engine): Engine,
+    Auth(principal): Auth,
+) -> ApiResult {
+    let Query(params) = params?;
+    let record = engine.delete_batch(&batch).await?.ok_or_else(|| ApiError::not_found(format!("There's no delete batch {}.", batch)))?;
+    require_batch(&engine, &principal, &record.data_json(), Permission::Restore)?;
+    let summary = engine.restore_batch(&batch, params.skip_existing).await?;
+    engine.audit(&principal.login, "data.restore", &batch, json!({ "restored": summary.restored, "skipped": summary.skipped.len(), "relinked": summary.relinked })).await;
+    Ok(Json(json!(summary)).into_response())
+}
+
+/// `DELETE /deletes/{batch}`: delete what the batch still has in the trash, for good.
+pub async fn purge_delete(Path(batch): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    let record = engine.delete_batch(&batch).await?.ok_or_else(|| ApiError::not_found(format!("There's no delete batch {}.", batch)))?;
+    require_batch(&engine, &principal, &record.data_json(), Permission::Delete)?;
+    let purged = engine.purge_batch(&batch).await?;
+    engine.audit(&principal.login, "data.purge", &batch, json!({ "purged": purged })).await;
+    Ok(Json(json!({ "batch": batch, "purged": purged })).into_response())
+}
 
 /// The delete batch a `DELETE /{tess}/{id}` made, to restore it.
 pub const DELETE_BATCH_HEADER: &str = "x-hexdb-delete-batch";
@@ -2049,7 +2196,12 @@ pub async fn transaction(
         principal.require(needed, &op.tessellation)?;
     }
     let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?;
-    let outcome = engine.transaction(&ops, idem).await?;
+    let batch = ulid::Ulid::generate();
+    let context = hexdb_core::engine::deletes::DeleteContext { kind: "transaction".into(), batch: Some(batch), ..Default::default() };
+    let outcome = hexdb_core::engine::deletes::with_delete_context(context, engine.transaction(&ops, idem)).await?;
+    if !outcome.replayed {
+        audit_batch(&engine, &principal, &batch, "data.delete.transaction", "transaction").await;
+    }
     Ok(respond(StatusCode::OK, serde_json::to_value(&outcome.value).unwrap_or(Value::Null), outcome.replayed))
 }
 

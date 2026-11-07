@@ -118,3 +118,98 @@ fn deletes_by_filter_need_a_filter_preview_and_guard_their_count() -> Result<()>
     assert_eq!(count("items")?, 0);
     Ok(())
 }
+
+#[test]
+fn trash_history_restore_purge_folders_and_files() -> Result<()> {
+    let server = TestServer::start()?;
+    let res = server.request(Method::POST, "/tessellations", Some(&json!({ "name": "media", "kind": "files" })), &[])?;
+    assert_eq!(res.status, 201, "{}", res.body);
+    let upload = |path: &str, bytes: &[u8]| -> Result<Value> {
+        let res = server.send_bytes(Method::PUT, &format!("/media/_files/{}", path), bytes.to_vec(), &[])?;
+        assert!(res.status.is_success(), "upload {}: {}", path, res.body);
+        Ok(res.body)
+    };
+    let media_count = || -> Result<u64> { Ok(server.request(Method::GET, "/media?limit=100", None, &[])?.body["total"].as_u64().unwrap_or(0)) };
+    upload("a/one.txt", b"one")?;
+    upload("a/two.txt", b"two")?;
+    upload("a/b/three.txt", b"three")?;
+    upload("keep/four.txt", b"four")?;
+
+    // A folder: only its own files, unless recursive; the root needs all.
+    let res = server.request(Method::DELETE, "/media/_folders/a?recursive=true&dry_run=true", None, &[])?;
+    assert_eq!((res.status.as_u16(), res.body["total"].as_u64()), (200, Some(3)), "{}", res.body);
+    let res = server.request(Method::DELETE, "/media/_folders?recursive=true", None, &[])?;
+    assert_eq!(res.error_code(), Some("filter_required"), "{}", res.body);
+    let res = server.request(Method::DELETE, "/media/_folders/a", None, &[])?;
+    assert_eq!(res.body["total"], 2, "{}", res.body);
+    assert_eq!(media_count()?, 2);
+    let res = server.request(Method::DELETE, "/media/_folders/a?recursive=true", None, &[])?;
+    assert_eq!(res.body["total"], 1, "{}", res.body);
+    let folder_batch = res.body["batch"].as_str().unwrap().to_string();
+    assert_eq!(media_count()?, 1);
+
+    // The history lists them; restoring the first folder delete brings both files back, content and all.
+    let history = server.request(Method::GET, "/deletes?kind=folder", None, &[])?.body;
+    assert_eq!(history["total"], 2, "{}", history);
+    let first = history["batches"][1]["batch"].as_str().unwrap().to_string();
+    let res = server.request(Method::POST, &format!("/deletes/{}/restore", first), None, &[])?;
+    assert_eq!((res.status.as_u16(), res.body["restored"]["media"].as_u64()), (200, Some(2)), "{}", res.body);
+    let (status, _, bytes) = server.get_bytes("/media/_files/a/two.txt", &[])?;
+    assert_eq!((status.as_u16(), bytes.as_slice()), (200, b"two".as_slice()));
+    let res = server.request(Method::POST, &format!("/deletes/{}/restore", first), None, &[])?;
+    assert_eq!(res.status, 409, "already restored: {}", res.body);
+
+    // Purging a batch deletes it for good; it can't be restored after.
+    let res = server.request(Method::DELETE, &format!("/deletes/{}", folder_batch), None, &[])?;
+    assert_eq!((res.status.as_u16(), res.body["purged"].as_u64()), (200, Some(1)), "{}", res.body);
+    assert_eq!(server.request(Method::POST, &format!("/deletes/{}/restore", folder_batch), None, &[])?.status, 409);
+    assert!(server.request(Method::GET, "/media/_trash", None, &[])?.body["documents"].as_array().unwrap().is_empty());
+
+    // Files can belong to a document: they go to the files trash with it, and come back with it.
+    let order = server.insert("orders", &json!({ "n": 1 }))?;
+    let res = add_schema(&server, "media", &json!({ "fields": { "order_id": { "type": "string", "parent": { "tessellation": "orders", "on_delete": "cascade" } } } }))?;
+    assert_eq!(res.status, 201, "{}", res.body);
+    let file = upload("orders/receipt.txt", b"receipt")?;
+    let file_id = file["id"].as_str().unwrap();
+    assert_eq!(server.request(Method::PATCH, &format!("/media/{}", file_id), Some(&json!({ "order_id": order })), &[])?.status, 200);
+    let res = server.request(Method::DELETE, &format!("/orders/{}", order), None, &[])?;
+    assert_eq!(res.status, 204, "{}", res.body);
+    let batch = res.headers["x-hexdb-delete-batch"].to_str()?.to_string();
+    assert_eq!(server.request(Method::GET, &format!("/media/{}", file_id), None, &[])?.status, 404);
+    let detail = server.request(Method::GET, &format!("/deletes/{}", batch), None, &[])?.body;
+    assert_eq!(detail["counts"], json!({ "orders": 1, "media": 1 }), "{}", detail);
+    assert_eq!(server.request(Method::POST, &format!("/deletes/{}/restore", batch), None, &[])?.status, 200);
+    assert_eq!(server.get_doc("orders", &order)?.unwrap()["n"], 1);
+    assert_eq!(server.request(Method::GET, &format!("/media/{}", file_id), None, &[])?.body["order_id"], order.as_str());
+
+    // The document trash, one document at a time.
+    let note = server.insert("notes", &json!({ "text": "keep me" }))?;
+    server.request(Method::DELETE, &format!("/notes/{}", note), None, &[])?;
+    let trash = server.request(Method::GET, "/notes/_trash", None, &[])?.body;
+    assert_eq!((trash["documents"][0]["id"].as_str(), trash["documents"][0]["text"].as_str()), (Some(note.as_str()), Some("keep me")), "{}", trash);
+    assert!(trash["documents"][0]["_deleted"]["batch"].is_string());
+    assert_eq!(server.request(Method::POST, &format!("/notes/_trash/{}/restore", note), None, &[])?.status, 200);
+    assert!(server.get_doc("notes", &note)?.is_some());
+    server.request(Method::DELETE, &format!("/notes/{}", note), None, &[])?;
+    assert_eq!(server.request(Method::DELETE, &format!("/notes/_trash/{}", note), None, &[])?.status, 204);
+    assert_eq!(server.request(Method::POST, &format!("/notes/_trash/{}/restore", note), None, &[])?.status, 404);
+
+    // Writers see their own batches; auditors see all; a writer can't restore into a tessellation they can't write.
+    let writer = server.user_with_roles("writer-1", json!([{ "name": "writer", "tessellations": ["notes"] }]))?;
+    let mine = server.request_as(Some(&writer), Method::POST, "/notes", Some(&json!({ "text": "w" })), &[])?.body["id"].as_str().unwrap().to_string();
+    assert_eq!(server.request_as(Some(&writer), Method::DELETE, &format!("/notes/{}", mine), None, &[])?.status, 204);
+    let theirs = server.request_as(Some(&writer), Method::GET, "/deletes", None, &[])?.body;
+    assert_eq!(theirs["total"], 1, "{}", theirs);
+    assert_eq!(server.request_as(Some(&writer), Method::POST, &format!("/deletes/{}/restore", batch), None, &[])?.status, 403);
+    let auditor = server.user_with_roles("auditor-1", json!([{ "name": "auditor", "tessellations": ["*"] }]))?;
+    assert!(server.request_as(Some(&auditor), Method::GET, "/deletes", None, &[])?.body["total"].as_u64().unwrap() >= 5);
+
+    // The audit trail has the batches, not plain single deletes.
+    let audit = server.request(Method::GET, "/audit?action=data.&limit=100", None, &[])?.body;
+    let actions: Vec<&str> = audit["events"].as_array().unwrap().iter().filter_map(|e| e["action"].as_str()).collect();
+    for expected in ["data.delete.folder", "data.delete.cascade", "data.restore", "data.purge"] {
+        assert!(actions.contains(&expected), "{} missing from {:?}", expected, actions);
+    }
+    assert_eq!(actions.iter().filter(|a| **a == "data.delete.cascade").count(), 1, "{:?}", actions);
+    Ok(())
+}

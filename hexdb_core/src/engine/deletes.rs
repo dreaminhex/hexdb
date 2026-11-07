@@ -486,36 +486,72 @@ impl HexDBEngine {
         let parsed = &parsed;
         let run = self.run_write(idem, move || {
             let batch = batch.clone();
-            Box::pin(async move {
-                let (roots, matched) = self.delete_roots(tess, parsed).await?;
-                let keys: Vec<DocKey> = roots.iter().map(|(k, _)| k.clone()).collect();
-                let plan = self.plan_cascade(&keys, &HashSet::new()).await?;
-                if !plan.blocked.is_empty() {
-                    return Err(blocked_error(&plan).into());
-                }
-                if let Some(expect) = options.expect {
-                    check_expected(expect, plan.total())?;
-                }
-                let mut items: Vec<BatchItem> = roots
-                    .into_iter()
-                    .map(|(key, seq)| {
-                        let op = WalOp::Delete { tessellation: key.tessellation.clone(), id: key.id };
-                        BatchItem { key, op, expected_seq: Some(seq) }
-                    })
-                    .collect();
-                self.run_before_triggers(&mut items).await?;
-                let batch = if items.is_empty() { None } else { batch };
-                Ok((items, summary(batch, false, matched, plan, false)))
-            })
+            Box::pin(async move { self.plan_delete_where(tess, parsed, options, batch).await })
         });
         with_delete_context(context, run).await
+    }
+
+    /// Delete the files in a folder of a files tessellation (`recursive`: and
+    /// in every folder below it), as a delete by filter on their path. The
+    /// root folder needs `options.all`, as an empty filter would.
+    pub async fn delete_folder(&self, tess: &str, folder: &str, recursive: bool, options: DeleteOptions, idem: Option<super::writes::IdempotencyKey>) -> Result<super::writes::Outcome<DeleteSummary>> {
+        if !self.tessellation_info(tess).is_some_and(|t| t.is_files()) {
+            return Err(EngineError::Invalid(format!("'{}' isn't a files tessellation.", tess)).into());
+        }
+        let folder = crate::files::normalize_path(folder)?;
+        if folder == "/" && recursive && !options.all {
+            return Err(EngineError::FilterRequired(format!(
+                "Deleting the root folder recursively deletes every file in '{}'. Send all=true if that's what you mean.",
+                tess
+            ))
+            .into());
+        }
+        let filter = if recursive { json!({ "path": { "$startsWith": folder } }) } else { json!({ "path": folder }) };
+        let context = DeleteContext { kind: "folder".into(), filter: Some(json!({ "folder": folder, "recursive": recursive })), batch: Some(Ulid::generate()), expect: options.expect };
+        let summary_filter = Filter::parse(&filter)?;
+        if options.dry_run {
+            let (roots, matched) = self.delete_roots(tess, &summary_filter).await?;
+            let plan = self.plan_cascade(&roots.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(), &HashSet::new()).await?;
+            return Ok(super::writes::Outcome { value: summary(None, true, matched, plan, true), replayed: false });
+        }
+        let batch = context.batch.map(|b| b.to_string());
+        let parsed = &summary_filter;
+        let run = self.run_write(idem, move || {
+            let batch = batch.clone();
+            Box::pin(async move { self.plan_delete_where(tess, parsed, options, batch).await })
+        });
+        with_delete_context(context, run).await
+    }
+
+    /// Plan a delete by filter: the matches as deletes (the commit adds the cascade).
+    async fn plan_delete_where(&self, tess: &str, filter: &Filter, options: DeleteOptions, batch: Option<String>) -> Result<(Vec<BatchItem>, DeleteSummary)> {
+        let (roots, matched) = self.delete_roots(tess, filter).await?;
+        let keys: Vec<DocKey> = roots.iter().map(|(k, _)| k.clone()).collect();
+        let plan = self.plan_cascade(&keys, &HashSet::new()).await?;
+        if !plan.blocked.is_empty() {
+            return Err(blocked_error(&plan).into());
+        }
+        if let Some(expect) = options.expect {
+            check_expected(expect, plan.total())?;
+        }
+        let mut items: Vec<BatchItem> = roots
+            .into_iter()
+            .map(|(key, seq)| {
+                let op = WalOp::Delete { tessellation: key.tessellation.clone(), id: key.id };
+                BatchItem { key, op, expected_seq: Some(seq) }
+            })
+            .collect();
+        self.run_before_triggers(&mut items).await?;
+        let batch = if items.is_empty() { None } else { batch };
+        Ok((items, summary(batch, false, matched, plan, false)))
     }
 
     /// The documents of `tess` a delete by `filter` removes directly (those
     /// the caller can see and change), with their versions, and how many matched.
     async fn delete_roots(&self, tess: &str, filter: &Filter) -> Result<(Vec<(DocKey, u64)>, usize)> {
+        let files = self.tessellation_info(tess).is_some_and(|t| t.is_files());
         let read = self.caller_scope(tess, crate::auth::Action::Read);
-        let write = self.caller_scope(tess, crate::auth::Action::Write);
+        let write = self.caller_scope(tess, if files { crate::auth::Action::Delete } else { crate::auth::Action::Write });
         if !read.is_full() || !write.is_full() {
             self.check_scope_fields(tess, &read, filter, &[])?;
         }
@@ -557,6 +593,215 @@ fn summary(batch: Option<String>, dry_run: bool, matched: usize, plan: CascadePl
         detached: plan.detached,
         blocked: if preview { plan.blocked } else { BTreeMap::new() },
         sample: if preview { plan.sample } else { Vec::new() },
+    }
+}
+
+/// Filters for `GET /deletes`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeletesQuery {
+    /// Who deleted.
+    pub by: Option<String>,
+    /// Batches that deleted from this tessellation.
+    pub tessellation: Option<String>,
+    /// delete, filter, transaction, folder.
+    pub kind: Option<String>,
+    /// Epoch milliseconds, inclusive.
+    pub since: Option<i64>,
+    /// Epoch milliseconds, exclusive.
+    pub until: Option<i64>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// A history record as the API shows it: its fields plus `batch`.
+pub fn batch_json(record: &Document) -> Value {
+    let mut map = match record.data_json() {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    };
+    map.insert("batch".into(), json!(record.id.to_string()));
+    Value::Object(map)
+}
+
+impl HexDBEngine {
+    /// Delete batches, newest first, and how many match.
+    pub async fn delete_batches(&self, query: &DeletesQuery) -> Result<(Vec<Value>, usize)> {
+        if !self.tessellation_exists(DELETES_TESSELLATION) {
+            return Ok((Vec::new(), 0));
+        }
+        let mut conditions = Map::new();
+        if let Some(by) = query.by.as_deref().filter(|s| !s.is_empty()) {
+            conditions.insert("by".into(), json!(by));
+        }
+        if let Some(kind) = query.kind.as_deref().filter(|s| !s.is_empty()) {
+            conditions.insert("kind".into(), json!(kind));
+        }
+        if let Some(tess) = query.tessellation.as_deref().filter(|s| !s.is_empty()) {
+            conditions.insert(format!("counts.{}", tess), json!({ "$exists": true }));
+        }
+        let mut time = Map::new();
+        if let Some(since) = query.since {
+            time.insert("$gte".into(), json!(since));
+        }
+        if let Some(until) = query.until {
+            time.insert("$lt".into(), json!(until));
+        }
+        if !time.is_empty() {
+            conditions.insert("time".into(), Value::Object(time));
+        }
+        let page = self
+            .query_documents(
+                DELETES_TESSELLATION,
+                &super::DocumentQuery {
+                    filter: Filter::parse(&Value::Object(conditions))?,
+                    sort: vec![crate::filter::SortKey { field: "time".into(), descending: true }],
+                    offset: query.offset.unwrap_or(0),
+                    limit: query.limit.unwrap_or(100).clamp(1, 1000),
+                    after: None,
+                    with_total: true,
+                },
+            )
+            .await?;
+        Ok((page.documents.iter().map(batch_json).collect(), page.total.unwrap_or(0)))
+    }
+
+    /// Delete everything a batch still has in the trash, for good (its
+    /// documents, and its files in the files trash). Returns how many.
+    pub async fn purge_batch(&self, batch: &str) -> Result<usize> {
+        self.ensure_writable()?;
+        let not_found = || EngineError::NotFound(format!("There's no delete batch {}.", batch));
+        let id = Ulid::from_string(batch).map_err(|_| not_found())?;
+        for _ in 0..super::MAX_WRITE_RETRIES {
+            let (record, record_seq) = if self.tessellation_exists(DELETES_TESSELLATION) { self.read_latest(&DocKey::new(DELETES_TESSELLATION, id)).await? } else { (None, 0) };
+            let record = record.ok_or_else(not_found)?;
+            let fields = record.data_json();
+            let mut items = Vec::new();
+            for entry in self.trashed_in_batch(batch).await? {
+                let (_, seq) = self.read_latest(&DocKey::new(TRASH_TESSELLATION, entry.id)).await?;
+                if let Some(doc) = Self::trashed_document(&entry) {
+                    if !self.caller_scope(&doc.tessellation, crate::auth::Action::Write).allows(&doc) {
+                        return Err(EngineError::Forbidden(format!("Your role may not purge documents of '{}'.", doc.tessellation)).into());
+                    }
+                }
+                items.push(BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op: WalOp::Delete { tessellation: TRASH_TESSELLATION.into(), id: entry.id }, expected_seq: Some(seq) });
+            }
+            if self.tessellation_exists(crate::files::TRASH_TESSELLATION) {
+                for file in fields["files"].as_array().cloned().unwrap_or_default() {
+                    let Some(file_id) = file["id"].as_str().and_then(|id| Ulid::from_string(id).ok()) else { continue };
+                    let key = DocKey::new(crate::files::TRASH_TESSELLATION, file_id);
+                    let (Some(trashed), seq) = self.read_latest(&key).await? else { continue };
+                    if trashed.data_json().get("from") != file.get("tessellation") {
+                        continue;
+                    }
+                    items.push(BatchItem { key, op: WalOp::Delete { tessellation: crate::files::TRASH_TESSELLATION.into(), id: file_id }, expected_seq: Some(seq) });
+                }
+            }
+            let purged = items.len();
+            let mut map = match fields {
+                Value::Object(map) => map,
+                _ => Map::new(),
+            };
+            map.insert("purged_at".into(), json!(now_text()));
+            map.insert("purged_by".into(), json!(caller_login()));
+            map.insert("purged".into(), json!(purged));
+            let updated = Document { id, tessellation: DELETES_TESSELLATION.into(), data: infer_fields_from_json(&Value::Object(map)), ttl: record.ttl };
+            items.push(BatchItem { key: DocKey::new(DELETES_TESSELLATION, id), op: WalOp::Put(updated), expected_seq: Some(record_seq) });
+            if crate::files::as_internal(self.commit(items)).await? {
+                return Ok(purged);
+            }
+        }
+        Err(EngineError::Conflict("The trash is being changed concurrently; try again.".into()).into())
+    }
+
+    /// The trash entries of documents deleted from `tess`.
+    async fn trash_entries_of(&self, tess: &str, doc_id: Option<&str>) -> Result<Vec<Document>> {
+        if !self.tessellation_exists(TRASH_TESSELLATION) {
+            return Ok(Vec::new());
+        }
+        let mut filter = json!({ "from": tess });
+        if let Some(id) = doc_id {
+            filter["doc_id"] = json!(id);
+        }
+        self.matching_documents(TRASH_TESSELLATION, &Filter::parse(&filter)?).await
+    }
+
+    /// Documents deleted from `tess` that the caller can see, newest first:
+    /// each as it was, with `_deleted: {batch, at, by}`.
+    pub async fn list_document_trash(&self, tess: &str) -> Result<Vec<Value>> {
+        let read = self.caller_scope(tess, crate::auth::Action::Read);
+        let mut out = Vec::new();
+        for entry in self.trash_entries_of(tess, None).await?.into_iter().rev() {
+            let Some(doc) = Self::trashed_document(&entry) else { continue };
+            if !read.allows(&doc) {
+                continue;
+            }
+            let meta = entry.data_json();
+            let mut json = read.mask(doc).to_api_json();
+            json["_deleted"] = json!({ "batch": meta["batch"], "at": meta["deleted_at"], "by": meta["deleted_by"] });
+            out.push(json);
+        }
+        Ok(out)
+    }
+
+    /// The newest trash entry of document `id` of `tess` the caller may `action`.
+    async fn trashed_entry(&self, tess: &str, id: &str, action: crate::auth::Action) -> Result<(Document, Document, u64)> {
+        let missing = || EngineError::NotFound(format!("Document {} is not in the trash of '{}'.", id, tess));
+        let entry = self.trash_entries_of(tess, Some(id)).await?.pop().ok_or_else(missing)?;
+        let doc = Self::trashed_document(&entry).ok_or_else(missing)?;
+        if !self.caller_scope(tess, crate::auth::Action::Read).allows(&doc) {
+            return Err(missing().into());
+        }
+        if !self.caller_scope(tess, action).allows(&doc) {
+            return Err(EngineError::Forbidden(format!("Your role may not {} this document in '{}'.", action.name(), tess)).into());
+        }
+        let (_, seq) = self.read_latest(&DocKey::new(TRASH_TESSELLATION, entry.id)).await?;
+        Ok((entry, doc, seq))
+    }
+
+    /// Put one deleted document back (not the rest of its batch).
+    pub async fn restore_document(&self, tess: &str, id: &str) -> Result<Document> {
+        self.ensure_writable()?;
+        let (entry, doc, entry_seq) = self.trashed_entry(tess, id, crate::auth::Action::Write).await?;
+        let key = DocKey::new(tess, doc.id);
+        let (current, seq) = self.read_latest(&key).await?;
+        if current.is_some() {
+            return Err(EngineError::Conflict(format!("Document {} exists in '{}' again; delete it first to restore the deleted one.", id, tess)).into());
+        }
+        let items = vec![
+            BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op: WalOp::Delete { tessellation: TRASH_TESSELLATION.into(), id: entry.id }, expected_seq: Some(entry_seq) },
+            BatchItem { key, op: WalOp::Put(doc.clone()), expected_seq: Some(seq) },
+        ];
+        if !RESTORING.scope((), self.commit(items)).await? {
+            return Err(EngineError::Conflict("The document changed while being restored; try again.".into()).into());
+        }
+        Ok(self.caller_scope(tess, crate::auth::Action::Read).mask(doc))
+    }
+
+    /// Delete one document's trash entry for good. False if it isn't in the trash.
+    pub async fn purge_document(&self, tess: &str, id: &str) -> Result<bool> {
+        self.ensure_writable()?;
+        let (entry, _, seq) = match self.trashed_entry(tess, id, crate::auth::Action::Write).await {
+            Ok(found) => found,
+            Err(e) if matches!(e.downcast_ref::<EngineError>(), Some(EngineError::NotFound(_))) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let op = WalOp::Delete { tessellation: TRASH_TESSELLATION.into(), id: entry.id };
+        self.commit(vec![BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op, expected_seq: Some(seq) }]).await
+    }
+
+    /// Delete every document of `tess`'s trash for good. Returns how many.
+    pub async fn empty_document_trash(&self, tess: &str) -> Result<usize> {
+        self.ensure_writable()?;
+        let items: Vec<BatchItem> = self
+            .trash_entries_of(tess, None)
+            .await?
+            .into_iter()
+            .map(|e| BatchItem { key: DocKey::new(TRASH_TESSELLATION, e.id), op: WalOp::Delete { tessellation: TRASH_TESSELLATION.into(), id: e.id }, expected_seq: None })
+            .collect();
+        for chunk in items.chunks(1000) {
+            self.commit(chunk.to_vec()).await?;
+        }
+        Ok(items.len())
     }
 }
 
@@ -662,6 +907,7 @@ impl HexDBEngine {
         }
         let kind = if ctx.kind.is_empty() { "delete".to_string() } else { ctx.kind };
         let record = json!({
+            "time": now,
             "at": at,
             "by": by,
             "kind": kind,
@@ -691,6 +937,7 @@ impl HexDBEngine {
         for field in ["batch", "from"] {
             self.ensure_internal_index(TRASH_TESSELLATION, IndexDef { fields: vec![field.into()], ..Default::default() }).await?;
         }
+        self.ensure_internal_index(DELETES_TESSELLATION, IndexDef { fields: vec!["time".into()], ..Default::default() }).await?;
         Ok(())
     }
 
@@ -770,10 +1017,41 @@ impl HexDBEngine {
                 items.push(BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op: WalOp::Delete { tessellation: TRASH_TESSELLATION.into(), id: entry.id }, expected_seq: Some(entry_seq) });
                 items.push(BatchItem { key, op: WalOp::Put(doc), expected_seq: Some(seq) });
             }
+            for file in fields["files"].as_array().cloned().unwrap_or_default() {
+                let (Some(tess), Some(id)) = (file["tessellation"].as_str(), file["id"].as_str().and_then(|id| Ulid::from_string(id).ok())) else { continue };
+                if !self.tessellation_exists(crate::files::TRASH_TESSELLATION) {
+                    break;
+                }
+                let trash_key = DocKey::new(crate::files::TRASH_TESSELLATION, id);
+                let (Some(trashed), trash_seq) = self.read_latest(&trash_key).await? else { continue };
+                let mut map = match trashed.data_json() {
+                    Value::Object(map) => map,
+                    _ => continue,
+                };
+                if map.get("from").and_then(Value::as_str) != Some(tess) {
+                    continue;
+                }
+                for key in crate::files::TRASH_FIELDS {
+                    map.remove(*key);
+                }
+                let doc = Document { id, tessellation: tess.to_string(), data: infer_fields_from_json(&Value::Object(map)), ttl: None };
+                if !self.caller_scope(tess, crate::auth::Action::Restore).allows(&doc) {
+                    return Err(EngineError::Forbidden(format!("Your role may not restore files in '{}'.", tess)).into());
+                }
+                let key = DocKey::new(tess, id);
+                let (current, seq) = self.read_latest(&key).await?;
+                if current.is_some() {
+                    existing.push(json!({ "tessellation": tess, "id": id.to_string() }));
+                    continue;
+                }
+                *summary.restored.entry(tess.to_string()).or_default() += 1;
+                items.push(BatchItem { key: trash_key, op: WalOp::Delete { tessellation: crate::files::TRASH_TESSELLATION.into(), id }, expected_seq: Some(trash_seq) });
+                items.push(BatchItem { key, op: WalOp::Put(doc), expected_seq: Some(seq) });
+            }
             if !existing.is_empty() && !skip_existing {
                 let list: Vec<String> = existing.iter().take(10).map(|e| format!("{}/{}", e["tessellation"].as_str().unwrap_or(""), e["id"].as_str().unwrap_or(""))).collect();
                 return Err(EngineError::Conflict(format!(
-                    "{} document(s) of batch {} exist again ({}). Restore the rest with skip_existing=true, or delete those first.",
+                    "{} document(s) or file(s) of batch {} exist again ({}). Restore the rest with skip_existing=true, or delete those first.",
                     existing.len(),
                     batch,
                     list.join(", ")
@@ -808,8 +1086,15 @@ impl HexDBEngine {
             let record = Document { id: record.id, tessellation: DELETES_TESSELLATION.into(), data: infer_fields_from_json(&Value::Object(map)), ttl: record.ttl };
             items.push(BatchItem { key: DocKey::new(DELETES_TESSELLATION, record.id), op: WalOp::Put(record), expected_seq: Some(record_seq) });
 
-            if RESTORING.scope((), self.commit(items)).await? {
-                return Ok(summary);
+            // As the files subsystem: file documents go back as they were (no upload).
+            let committed = RESTORING.scope((), crate::files::as_internal(self.commit(items))).await;
+            match committed {
+                Ok(true) => return Ok(summary),
+                Ok(false) => continue,
+                Err(e) if matches!(e.downcast_ref::<EngineError>(), Some(EngineError::Conflict(_))) => {
+                    return Err(EngineError::Conflict(format!("A restored file's name is taken in its folder again; rename or move that file first. ({})", e)).into())
+                }
+                Err(e) => return Err(e),
             }
         }
         Err(EngineError::Conflict("The documents are being modified concurrently; try again.".into()).into())
