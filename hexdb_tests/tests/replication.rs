@@ -166,5 +166,23 @@ fn catalog_changes_and_sealed_fields_reach_the_replica() -> Result<()> {
     assert_eq!(masked.body["card"], "************1111", "{}", masked.body);
     let found = replica.request(Method::POST, "/payments/_query", Some(&json!({ "filter": { "card": "4111111111111111" } })), &[])?;
     assert_eq!(found.body["documents"].as_array().map(Vec::len), Some(1), "{}", found.body);
+
+    // Deletes replicate with their trash and history (a replica that takes
+    // over can restore them), the card stays sealed in the trash, and a
+    // restore sent to the replica is forwarded and puts everything back.
+    let res = overseer.request(Method::POST, "/payments/_delete", Some(&json!({ "filter": { "amount": 25 } })), &[])?;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    let batch = res.body["batch"].as_str().unwrap().to_string();
+    wait_until(Duration::from_secs(30), "the delete batch on the replica", || {
+        Ok(replica.request(Method::GET, &format!("/deletes/{}", batch), None, &[])?.body["in_trash"].as_array().is_some_and(|t| t.len() == 1))
+    })?;
+    assert!(replica.get_doc("payments", &id)?.is_none());
+    let trash = replica.request(Method::GET, "/payments/_trash", None, &[])?.body;
+    assert_eq!(trash["documents"][0]["card"], "4111111111111111", "{}", trash);
+    let restored = replica.request(Method::POST, &format!("/deletes/{}/restore", batch), None, &[])?;
+    assert_eq!(restored.status.as_u16(), 200, "{}", restored.body);
+    assert_eq!(restored.body["restored"]["payments"], 1);
+    wait_until(Duration::from_secs(30), "the restored payment on the replica", || Ok(replica.get_doc("payments", &id)?.is_some()))?;
+    assert_eq!(overseer.get_doc("payments", &id)?.unwrap()["card"], "4111111111111111");
     Ok(())
 }
