@@ -1,4 +1,4 @@
-﻿//! Parent links, cascading deletes, delete guardrails, the document trash and
+//! Parent links, cascading deletes, delete guardrails, the document trash and
 //! restoring delete batches.
 
 use anyhow::Result;
