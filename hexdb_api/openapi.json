@@ -836,6 +836,239 @@
         }
       }
     },
+    "/deletes": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "The delete history, newest first (auditors: every batch; others: their own)",
+        "operationId": "get_deletes",
+        "parameters": [
+          {
+            "name": "by",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tessellation",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{\"batches\": [...], \"total\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/deletes/{batch}": {
+      "get": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "A delete batch: what it removed, and what's still in the trash",
+        "operationId": "get_deletes_batch",
+        "parameters": [
+          {
+            "name": "batch",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Delete what a delete batch left in the trash, for good",
+        "operationId": "delete_deletes_batch",
+        "parameters": [
+          {
+            "name": "batch",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{\"batch\", \"purged\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/deletes/{batch}/restore": {
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Put back everything a delete batch removed, in one commit (409 if a document's ID exists again, unless skip_existing)",
+        "operationId": "post_deletes_batch_restore",
+        "parameters": [
+          {
+            "name": "batch",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "skip_existing",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{\"batch\", \"restored\", \"skipped\", \"relinked\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/audit": {
       "get": {
         "tags": [
@@ -4930,8 +5163,88 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Patch every document matching a filter",
+        "summary": "Patch every document matching a filter (a missing or empty filter needs all: true)",
         "operationId": "post_tessellation__update",
+        "parameters": [
+          {
+            "name": "tessellation",
+            "in": "path",
+            "required": true,
+            "description": "Tessellation name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Makes the write safe to retry: the same key returns the first result.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "update"
+                ],
+                "properties": {
+                  "filter": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "update": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "all": {
+                    "type": "boolean",
+                    "description": "Required with a missing or empty filter: every document"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/{tessellation}/_delete": {
+      "post": {
+        "tags": [
+          "Documents"
+        ],
+        "summary": "Delete every document matching a filter, and what cascades from them through parent links, as one restorable delete batch (a missing or empty filter needs all: true)",
+        "operationId": "post_tessellation__delete",
         "parameters": [
           {
             "name": "tessellation",
@@ -4964,15 +5277,208 @@
                     "type": "object",
                     "additionalProperties": true
                   },
-                  "update": {
-                    "type": "object",
-                    "additionalProperties": true
+                  "all": {
+                    "type": "boolean",
+                    "description": "Required with a missing or empty filter: every document"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Only say what would be deleted"
+                  },
+                  "expect": {
+                    "type": "integer",
+                    "description": "Refuse (409 count_changed) unless exactly this many documents and files would go"
                   }
                 }
               }
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "{\"batch\", \"dry_run\", \"matched\", \"total\", \"deleted\": {tessellation: n}, \"detached\", \"blocked\", \"sample\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/{tessellation}/_folders/{path}": {
+      "delete": {
+        "tags": [
+          "Files"
+        ],
+        "summary": "Delete the files in a folder (recursive: everything below it) as one restorable delete batch (delete permission)",
+        "operationId": "delete_tessellation__folders_path",
+        "parameters": [
+          {
+            "name": "tessellation",
+            "in": "path",
+            "required": true,
+            "description": "Tessellation name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "description": "The folder, e.g. photos/2024",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "expect",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "all",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Makes the write safe to retry: the same key returns the first result.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{\"batch\", \"total\", \"deleted\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/{tessellation}/_folders": {
+      "delete": {
+        "tags": [
+          "Files"
+        ],
+        "summary": "Delete the files in the root folder (recursive=true also needs all=true)",
+        "operationId": "delete_tessellation__folders",
+        "parameters": [
+          {
+            "name": "tessellation",
+            "in": "path",
+            "required": true,
+            "description": "Tessellation name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "expect",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "all",
+            "in": "query",
+            "required": false,
+            "description": "",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Makes the write safe to retry: the same key returns the first result.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",
@@ -5222,7 +5728,7 @@
         "tags": [
           "Documents"
         ],
-        "summary": "Delete a document",
+        "summary": "Delete a document (to the trash, with what cascades from it); X-HexDB-Delete-Batch names the batch",
         "operationId": "delete_tessellation_id",
         "parameters": [
           {
@@ -5692,9 +6198,9 @@
     "/{tessellation}/_trash": {
       "get": {
         "tags": [
-          "Files"
+          "Documents"
         ],
-        "summary": "Deleted files",
+        "summary": "Deleted documents or files (documents carry _deleted: {batch, at, by})",
         "operationId": "get_tessellation__trash",
         "parameters": [
           {
@@ -5733,9 +6239,9 @@
       },
       "delete": {
         "tags": [
-          "Files"
+          "Documents"
         ],
-        "summary": "Empty the trash",
+        "summary": "Empty the trash (documents: manage; files: delete)",
         "operationId": "delete_tessellation__trash",
         "parameters": [
           {
@@ -5776,9 +6282,9 @@
     "/{tessellation}/_trash/{id}/restore": {
       "post": {
         "tags": [
-          "Files"
+          "Documents"
         ],
-        "summary": "Restore a deleted file (?name=, ?path= when the original is taken)",
+        "summary": "Restore one deleted document or file (files: ?name=, ?path= when the original is taken)",
         "operationId": "post_tessellation__trash_id_restore",
         "parameters": [
           {
@@ -5846,9 +6352,9 @@
     "/{tessellation}/_trash/{id}": {
       "delete": {
         "tags": [
-          "Files"
+          "Documents"
         ],
-        "summary": "Delete a trashed file for good",
+        "summary": "Delete one trashed document or file for good",
         "operationId": "delete_tessellation__trash_id",
         "parameters": [
           {
@@ -6292,7 +6798,7 @@
         ],
         "requestBody": {
           "required": true,
-          "description": "{\"operations\": [{\"op\": \"insert|replace|patch|delete|get|check\", \"tessellation\", \"id\", \"data\", \"if_version\"}]}",
+          "description": "{\"operations\": [{\"op\": \"insert|replace|patch|delete|delete_where|get|check\", \"tessellation\", \"id\", \"data\", \"if_version\", \"filter\", \"all\"}]}",
           "content": {
             "application/json": {
               "schema": {
