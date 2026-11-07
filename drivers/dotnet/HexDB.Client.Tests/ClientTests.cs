@@ -54,6 +54,31 @@ public class ClientTests
     }
 
     [SkippableFact]
+    public async Task DeletesNeedAFilterPreviewAndRestore()
+    {
+        Skip.If(Url is null || Key is null, "set HEXDB_URL and HEXDB_API_KEY");
+        using var db = Client();
+        var name = $"{_prefix}_carts";
+        var carts = db.Tessellation(name);
+        await carts.InsertManyAsync(new object[] { new { open = true }, new { open = true }, new { open = false } });
+        var refused = await Assert.ThrowsAsync<HexDBException>(() => carts.DeleteWhereAsync(new { }));
+        Assert.Equal((400, "filter_required"), (refused.Status, refused.Code));
+        await Assert.ThrowsAsync<HexDBException>(() => carts.UpdateWhereAsync(new { }, new { seen = true }));
+        Assert.Equal(3, (await carts.UpdateWhereAsync(new { }, new { seen = true }, all: true))!["modified"]!.GetValue<int>());
+        var preview = await carts.DeleteWhereAsync(new { open = true }, dryRun: true);
+        Assert.Equal((2, (string?)null), (preview.Total, preview.Batch));
+        var changed = await Assert.ThrowsAsync<HexDBException>(() => carts.DeleteWhereAsync(new { open = true }, expect: 5));
+        Assert.Equal("count_changed", changed.Code);
+        var done = await carts.DeleteWhereAsync(new { open = true }, expect: preview.Total);
+        Assert.Equal(1, await carts.CountAsync());
+        var history = await db.DeletesAsync(tessellation: name);
+        Assert.Equal(done.Batch, history!["batches"]![0]!["batch"]!.GetValue<string>());
+        var restored = await db.RestoreDeletesAsync(done.Batch!);
+        Assert.Equal(2, restored!["restored"]![name]!.GetValue<int>());
+        Assert.Equal(3, await carts.CountAsync());
+    }
+
+    [SkippableFact]
     public async Task TransactionsGraphQLAndErrors()
     {
         Skip.If(Url is null || Key is null, "set HEXDB_URL and HEXDB_API_KEY");

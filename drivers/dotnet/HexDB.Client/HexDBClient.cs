@@ -66,6 +66,22 @@ public sealed class UpsertResult
     [JsonPropertyName("ids")] public List<string> Ids { get; set; } = new();
 }
 
+/// <summary>What <c>DeleteWhereAsync</c> did, or (dry run) would do.</summary>
+public sealed class DeleteSummary
+{
+    /// <summary>The delete batch, to restore it (null for a dry run).</summary>
+    [JsonPropertyName("batch")] public string? Batch { get; set; }
+    [JsonPropertyName("dry_run")] public bool DryRun { get; set; }
+    [JsonPropertyName("matched")] public int Matched { get; set; }
+    /// <summary>Documents and files that go: the matches and what cascades from them.</summary>
+    [JsonPropertyName("total")] public int Total { get; set; }
+    [JsonPropertyName("deleted")] public Dictionary<string, int> Deleted { get; set; } = new();
+    [JsonPropertyName("detached")] public Dictionary<string, int> Detached { get; set; } = new();
+    /// <summary>Dry runs: documents whose <c>on_delete: restrict</c> link would refuse the delete.</summary>
+    [JsonPropertyName("blocked")] public JsonObject? Blocked { get; set; }
+    [JsonPropertyName("sample")] public List<string>? Sample { get; set; }
+}
+
 /// <summary>A stream message.</summary>
 public sealed class StreamMessage
 {
@@ -327,6 +343,27 @@ public sealed class HexDBClient : IDisposable
     public Task<JsonNode?> TransactionAsync(IEnumerable<object> operations, string? idempotencyKey = null, CancellationToken cancel = default) =>
         RequestAsync(HttpMethod.Post, "/transactions", new { operations }, idempotencyKey, cancel);
 
+    /// <summary>
+    /// The delete history, newest first (your own deletes, or everyone's with the audit permission):
+    /// <c>{"batches": [...], "total"}</c>.
+    /// </summary>
+    public Task<JsonNode?> DeletesAsync(string? tessellation = null, string? by = null, string? kind = null, int limit = 100, CancellationToken cancel = default)
+    {
+        var query = new List<string> { $"limit={limit}" };
+        if (tessellation is not null) query.Add($"tessellation={Uri.EscapeDataString(tessellation)}");
+        if (by is not null) query.Add($"by={Uri.EscapeDataString(by)}");
+        if (kind is not null) query.Add($"kind={Uri.EscapeDataString(kind)}");
+        return RequestAsync(HttpMethod.Get, $"/deletes?{string.Join("&", query)}", null, null, cancel);
+    }
+
+    /// <summary>Put back everything a delete batch removed, in one step.</summary>
+    public Task<JsonNode?> RestoreDeletesAsync(string batch, bool skipExisting = false, CancellationToken cancel = default) =>
+        RequestAsync(HttpMethod.Post, $"/deletes/{Uri.EscapeDataString(batch)}/restore?skip_existing={(skipExisting ? "true" : "false")}", null, null, cancel);
+
+    /// <summary>Delete what a delete batch left in the trash, for good.</summary>
+    public Task<JsonNode?> PurgeDeletesAsync(string batch, CancellationToken cancel = default) =>
+        RequestAsync(HttpMethod.Delete, $"/deletes/{Uri.EscapeDataString(batch)}", null, null, cancel);
+
     /// <summary>Run a GraphQL query or mutation; throws on GraphQL errors.</summary>
     public async Task<JsonNode?> GraphQLAsync(string query, object? variables = null, CancellationToken cancel = default)
     {
@@ -444,8 +481,22 @@ public sealed class Tessellation
     public Task<UpsertResult> UpsertAsync(IReadOnlyList<string> key, IEnumerable<object> documents, string? idempotencyKey = null, CancellationToken cancel = default) =>
         _db.RequestAsync<UpsertResult>(HttpMethod.Post, $"{_path}/_upsert", new { key, documents }, idempotencyKey, cancel);
 
-    public Task<JsonNode?> UpdateWhereAsync(object filter, object update, CancellationToken cancel = default) =>
-        _db.RequestAsync(HttpMethod.Post, $"{_path}/_update", new { filter, update }, null, cancel);
+    /// <summary>
+    /// Merge <paramref name="update"/> into every document matching <paramref name="filter"/>.
+    /// An empty filter (every document) is refused unless <paramref name="all"/> is true.
+    /// </summary>
+    public Task<JsonNode?> UpdateWhereAsync(object filter, object update, bool all = false, CancellationToken cancel = default) =>
+        _db.RequestAsync(HttpMethod.Post, $"{_path}/_update", new { filter, update, all }, null, cancel);
+
+    /// <summary>
+    /// Delete every document matching <paramref name="filter"/>, and what belongs to them through
+    /// parent links, as one atomic delete batch that <c>RestoreDeletesAsync</c> puts back. An empty
+    /// filter is refused unless <paramref name="all"/> is true. <paramref name="dryRun"/> only reports
+    /// what would go; <paramref name="expect"/> refuses (409 count_changed) unless exactly that many
+    /// documents and files would go.
+    /// </summary>
+    public Task<DeleteSummary> DeleteWhereAsync(object filter, bool all = false, bool dryRun = false, int? expect = null, string? idempotencyKey = null, CancellationToken cancel = default) =>
+        _db.RequestAsync<DeleteSummary>(HttpMethod.Post, $"{_path}/_delete", new { filter, all, dry_run = dryRun, expect }, idempotencyKey, cancel);
 
     /// <summary>
     /// The values behind vault tokens of tokenized fields (up to 1,000; needs the

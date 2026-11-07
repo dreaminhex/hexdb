@@ -53,6 +53,28 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(result["ids"][0], ids[0])
         self.assertEqual(orders.update_where({"status": "void"}, {"refunded": True})["modified"], 1)
 
+    def test_deletes(self):
+        name = f"{self.prefix}_carts"
+        carts = self.db.tessellation(name)
+        carts.insert_many([{"open": True}, {"open": True}, {"open": False}])
+        with self.assertRaises(HexDBError) as caught:
+            carts.delete_where({})
+        self.assertEqual(caught.exception.code, "filter_required")
+        with self.assertRaises(HexDBError):
+            carts.update_where({}, {"seen": True})
+        self.assertEqual(carts.update_where({}, {"seen": True}, all=True)["modified"], 3)
+        preview = carts.delete_where({"open": True}, dry_run=True)
+        self.assertEqual(preview["total"], 2)
+        with self.assertRaises(HexDBError) as caught:
+            carts.delete_where({"open": True}, expect=5)
+        self.assertEqual(caught.exception.code, "count_changed")
+        done = carts.delete_where({"open": True}, expect=preview["total"])
+        self.assertEqual(carts.count(), 1)
+        self.assertEqual(self.db.deletes(tessellation=name)["batches"][0]["batch"], done["batch"])
+        self.assertEqual(self.db.restore_deletes(done["batch"])["restored"][name], 2)
+        self.assertEqual(carts.count(), 3)
+        self.assertEqual(self.db.purge_deletes(done["batch"])["purged"], 0)
+
     def test_transactions_and_errors(self):
         ledger = f"{self.prefix}_ledger"
         op = [{"op": "insert", "tessellation": ledger, "data": {"amount": 5}}]

@@ -206,6 +206,20 @@ class HexDB:
         """Operations across tessellations, all or nothing."""
         return self.request("POST", "/transactions", {"operations": operations}, _idem(idempotency_key))
 
+    def deletes(self, **query: Any) -> Dict[str, Any]:
+        """The delete history, newest first: ``by``, ``tessellation``, ``kind``, ``since``,
+        ``until``, ``limit``, ``offset`` (your own deletes, or everyone's with the audit permission)."""
+        params = "&".join(f"{k}={_quote(str(v))}" for k, v in query.items() if v is not None)
+        return self.request("GET", f"/deletes?{params}")
+
+    def restore_deletes(self, batch: str, *, skip_existing: bool = False) -> Dict[str, Any]:
+        """Put back everything a delete batch removed, in one step."""
+        return self.request("POST", f"/deletes/{_quote(batch)}/restore?skip_existing={'true' if skip_existing else 'false'}")
+
+    def purge_deletes(self, batch: str) -> Dict[str, Any]:
+        """Delete what a delete batch left in the trash, for good."""
+        return self.request("DELETE", f"/deletes/{_quote(batch)}")
+
     def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Run a GraphQL query or mutation; raises HexDBError on GraphQL errors."""
         result = self.request("POST", "/graphql", {"query": query, "variables": variables or {}})
@@ -331,8 +345,27 @@ class Tessellation:
         detokenize permission; audited). One-way and unknown tokens map to None."""
         return self.db.request("POST", f"/tessellations/{_quote(self.name)}/detokenize", {"tokens": list(tokens)})["values"]
 
-    def update_where(self, filter: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, int]:
-        return self.db.request("POST", f"{self.path}/_update", {"filter": filter, "update": update})
+    def update_where(self, filter: Dict[str, Any], update: Dict[str, Any], *, all: bool = False) -> Dict[str, int]:
+        """Merge ``update`` into every document matching ``filter``. An empty filter
+        (every document) is refused unless ``all=True``."""
+        return self.db.request("POST", f"{self.path}/_update", {"filter": filter, "update": update, "all": all})
+
+    def delete_where(
+        self,
+        filter: Dict[str, Any],
+        *,
+        all: bool = False,
+        dry_run: bool = False,
+        expect: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Delete every document matching ``filter``, and what belongs to them through
+        parent links, as one atomic delete batch that ``db.restore_deletes(batch)`` puts
+        back. An empty filter is refused unless ``all=True``. ``dry_run`` only reports
+        what would go; ``expect`` refuses (409 count_changed) unless exactly that many
+        documents and files would go."""
+        body = {"filter": filter, "all": all, "dry_run": dry_run, "expect": expect}
+        return self.db.request("POST", f"{self.path}/_delete", body, _idem(idempotency_key))
 
 
 class Stream:

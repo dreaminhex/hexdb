@@ -60,6 +60,26 @@ test("transactions, idempotency and errors", async () => {
   await assert.rejects(anonymous.tessellation("ledger").count(), (e) => e instanceof HexDBError && e.status === 401 && e.code === "unauthorized")
 })
 
+test("deletes: no filter, no delete; dry run, expect, restore", async () => {
+  const carts = db.tessellation("carts")
+  await carts.insertMany([{ open: true }, { open: true }, { open: false }])
+  await assert.rejects(carts.deleteWhere({}), (e) => e instanceof HexDBError && e.status === 400 && e.code === "filter_required")
+  await assert.rejects(carts.updateWhere({}, { seen: true }), (e) => e instanceof HexDBError && e.code === "filter_required")
+  assert.equal((await carts.updateWhere({}, { seen: true }, { all: true })).modified, 3)
+  const preview = await carts.deleteWhere({ open: true }, { dryRun: true })
+  assert.deepEqual([preview.total, preview.batch], [2, undefined])
+  await assert.rejects(carts.deleteWhere({ open: true }, { expect: 1 }), (e) => e instanceof HexDBError && e.code === "count_changed")
+  const done = await carts.deleteWhere({ open: true }, { expect: preview.total })
+  assert.equal(await carts.count(), 1)
+  const history = await db.deletes({ tessellation: "carts" })
+  assert.equal(history.batches[0].batch, done.batch)
+  const restored = await db.restoreDeletes(done.batch)
+  assert.equal(restored.restored.carts, 2)
+  assert.equal(await carts.count(), 3)
+  assert.equal((await carts.deleteWhere({}, { all: true })).total, 3)
+  assert.equal((await db.purgeDeletes((await db.deletes({ tessellation: "carts" })).batches[0].batch)).purged, 3)
+})
+
 test("sessions, GraphQL, functions", async () => {
   const session = new HexDB({ url: server.url })
   await session.login(server.adminLogin, server.adminPassword)

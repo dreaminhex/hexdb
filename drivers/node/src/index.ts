@@ -66,6 +66,36 @@ export interface Query {
   fields?: string[]
 }
 
+/** What `deleteWhere` did, or (dry run) would do. */
+export interface DeleteSummary {
+  /** The delete batch, to restore it (none for a dry run). */
+  batch?: string
+  dry_run: boolean
+  matched: number
+  /** Documents and files that go: the matches and what cascades from them. */
+  total: number
+  deleted: Record<string, number>
+  detached: Record<string, number>
+  /** Dry runs: documents whose `on_delete: restrict` link would refuse the delete. */
+  blocked?: Record<string, { count: number; ids: string[] }>
+  sample?: string[]
+}
+
+/** One delete in the history. */
+export interface DeleteBatch {
+  batch: string
+  time: number
+  at: string
+  by: string
+  kind: string
+  tessellation: string
+  counts: Record<string, number>
+  trashed: boolean
+  restored_at?: string
+  purged_at?: string
+  [field: string]: unknown
+}
+
 export interface QueryPage {
   documents: Document[]
   total: number
@@ -269,6 +299,23 @@ export class HexDB {
     return this.request("POST", "/transactions", { operations }, idempotency(options.idempotencyKey))
   }
 
+  /** The delete history, newest first (your own deletes, or everyone's with the audit permission). */
+  deletes(query: { by?: string; tessellation?: string; kind?: string; since?: number; until?: number; limit?: number; offset?: number } = {}): Promise<{ batches: DeleteBatch[]; total: number }> {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(query)) if (value !== undefined) params.set(key, String(value))
+    return this.request("GET", `/deletes?${params}`)
+  }
+
+  /** Put back everything a delete batch removed, in one step. */
+  restoreDeletes(batch: string, options: { skipExisting?: boolean } = {}): Promise<{ batch: string; restored: Record<string, number>; skipped: { tessellation: string; id: string }[]; relinked: number }> {
+    return this.request("POST", `/deletes/${encodeURIComponent(batch)}/restore?skip_existing=${options.skipExisting ?? false}`)
+  }
+
+  /** Delete what a delete batch left in the trash, for good. */
+  purgeDeletes(batch: string): Promise<{ batch: string; purged: number }> {
+    return this.request("DELETE", `/deletes/${encodeURIComponent(batch)}`)
+  }
+
   /** Run a GraphQL query or mutation. Throws on GraphQL errors. */
   async graphql<T = Record<string, unknown>>(query: string, variables?: Record<string, unknown>): Promise<T> {
     const result = await this.request<{ data?: T; errors?: { message: string; extensions?: { code?: string } }[] }>("POST", "/graphql", { query, variables })
@@ -405,9 +452,24 @@ export class Tessellation {
     return this.db.request("POST", `${this.path}/_upsert`, { key, documents: docs }, idempotency(options.idempotencyKey))
   }
 
-  /** Merge `update` into every document matching `filter`. */
-  updateWhere(filter: Record<string, unknown>, update: Record<string, unknown>): Promise<{ matched: number; modified: number }> {
-    return this.db.request("POST", `${this.path}/_update`, { filter, update })
+  /**
+   * Merge `update` into every document matching `filter`. An empty filter
+   * (every document) is refused unless `options.all` is true.
+   */
+  updateWhere(filter: Record<string, unknown>, update: Record<string, unknown>, options: { all?: boolean } = {}): Promise<{ matched: number; modified: number }> {
+    return this.db.request("POST", `${this.path}/_update`, { filter, update, all: options.all ?? false })
+  }
+
+  /**
+   * Delete every document matching `filter`, and what belongs to them through
+   * parent links, as one atomic delete batch that `db.restoreDeletes(batch)`
+   * puts back. An empty filter is refused unless `options.all` is true.
+   * `dryRun` only reports what would go; `expect` refuses (409 count_changed)
+   * unless exactly that many documents and files would go.
+   */
+  deleteWhere(filter: Record<string, unknown>, options: { all?: boolean; dryRun?: boolean; expect?: number; idempotencyKey?: string } = {}): Promise<DeleteSummary> {
+    const body = { filter, all: options.all ?? false, dry_run: options.dryRun ?? false, expect: options.expect }
+    return this.db.request("POST", `${this.path}/_delete`, body, idempotency(options.idempotencyKey))
   }
 
   /**
