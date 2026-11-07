@@ -414,6 +414,60 @@ export interface Tessellation {
   schema_version?: number | null
   /** A schema version is saved, waiting to be applied. */
   schema_pending?: boolean
+  /** GET /tessellations/{name}: its parent links (fields holding a parent's ID). */
+  links?: { field: string; tessellation: string; on_delete: OnDelete }[]
+  /** GET /tessellations/{name}: the links pointing at it. */
+  children?: { tessellation: string; field: string; on_delete: OnDelete }[]
+}
+
+/** What happens to a document when its parent is deleted. */
+export type OnDelete = "cascade" | "restrict" | "detach"
+
+/** What a delete by filter or folder did, or (dry run) would do. */
+export interface DeleteSummary {
+  /** The delete batch, to restore it (none for a dry run). */
+  batch?: string
+  dry_run: boolean
+  matched: number
+  /** Documents and files that go, matches and cascade. */
+  total: number
+  deleted: Record<string, number>
+  detached: Record<string, number>
+  /** Dry runs: restricting children that would refuse the delete. */
+  blocked?: Record<string, { count: number; ids: string[] }>
+  sample?: string[]
+}
+
+/** One delete in the history (GET /deletes). */
+export interface DeleteBatch {
+  batch: string
+  time: number
+  at: string
+  by: string
+  /** delete, filter, transaction or folder. */
+  kind: string
+  tessellation: string
+  filter?: unknown
+  counts: Record<string, number>
+  documents: number
+  files: { tessellation: string; id: string }[]
+  detached: { tessellation: string; id: string; field: string; value: unknown }[]
+  /** False when the trash was off: nothing to restore. */
+  trashed: boolean
+  restored_at?: string
+  restored_by?: string
+  purged_at?: string
+  purged_by?: string
+  /** GET /deletes/{batch}: documents still in the trash. */
+  in_trash?: { tessellation: string; id: string }[]
+}
+
+/** What restoring a batch did. */
+export interface RestoreSummary {
+  batch: string
+  restored: Record<string, number>
+  skipped: { tessellation: string; id: string }[]
+  relinked: number
 }
 
 export type IndexKind = "field" | "text" | "vector"
@@ -1108,6 +1162,31 @@ export const api = {
   replaceDocument: (tess: string, id: string, data: unknown, ttl?: number) =>
     request<ApiDocument>("PUT", `/${enc(tess)}/${enc(id)}${ttl ? `?ttl=${ttl}` : ""}`, data),
   deleteDocument: (tess: string, id: string) => request<void>("DELETE", `/${enc(tess)}/${enc(id)}`),
+  /** Delete one document; resolves to its delete batch (for undo). */
+  deleteDocumentBatch: async (tess: string, id: string): Promise<string | null> => {
+    const response = await fetch(`/${enc(tess)}/${enc(id)}`, { method: "DELETE", headers: { Accept: "application/json" } })
+    if (!response.ok) {
+      const body = (await response.json().catch(() => undefined)) as { error?: { code?: string; message?: string } } | undefined
+      throw new ApiError(response.status, body?.error?.code ?? "error", body?.error?.message ?? response.statusText)
+    }
+    return response.headers.get("x-hexdb-delete-batch")
+  },
+  deleteWhere: (tess: string, body: { filter?: unknown; all?: boolean; dry_run?: boolean; expect?: number }) =>
+    request<DeleteSummary>("POST", `/${enc(tess)}/_delete`, body),
+  deleteFolder: (tess: string, folder: string, options: { recursive?: boolean; all?: boolean; dry_run?: boolean; expect?: number }) => {
+    const path = folder.split("/").filter(Boolean).map(enc).join("/")
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(options)) if (value !== undefined && value !== false) query.set(key, String(value))
+    return request<DeleteSummary>("DELETE", `/${enc(tess)}/_folders${path ? `/${path}` : ""}?${query}`)
+  },
+  deletes: (params: { by?: string; tessellation?: string; kind?: string; limit?: number; offset?: number } = {}) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== "") query.set(key, String(value))
+    return request<{ batches: DeleteBatch[]; total: number }>("GET", `/deletes?${query}`)
+  },
+  deleteBatch: (batch: string) => request<DeleteBatch>("GET", `/deletes/${enc(batch)}`),
+  restoreBatch: (batch: string, skipExisting = false) => request<RestoreSummary>("POST", `/deletes/${enc(batch)}/restore?skip_existing=${skipExisting}`),
+  purgeBatch: (batch: string) => request<{ batch: string; purged: number }>("DELETE", `/deletes/${enc(batch)}`),
   aggregate: (tess: string, aggregation: unknown) =>
     request<{ rows: Record<string, unknown>[]; total_groups: number; matched: number }>("POST", `/${enc(tess)}/_aggregate`, aggregation),
 

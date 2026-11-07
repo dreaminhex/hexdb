@@ -38,13 +38,15 @@ function draftFromPending(pending: PendingSchema): string {
 /** What the schema editor offers while typing inside quotes. */
 const SCHEMA_KEYWORDS: Completion[] = [
   ...["fields", "additional_fields", "migration"].map((label) => ({ label, type: "property", detail: "schema" })),
-  ...["type", "required", "nullable", "default", "enum", "min", "max", "min_length", "max_length", "description", "tokenize"].map((label) => ({
+  ...["type", "required", "nullable", "default", "enum", "min", "max", "min_length", "max_length", "description", "tokenize", "parent"].map((label) => ({
     label,
     type: "property",
     detail: "field rule",
   })),
   ...["string", "number", "integer", "boolean", "object", "array", "any"].map((label) => ({ label, type: "enum", detail: "type" })),
   ...["one_way", "vault"].map((label) => ({ label, type: "enum", detail: "tokenize" })),
+  ...["tessellation", "on_delete"].map((label) => ({ label, type: "property", detail: "parent link" })),
+  ...["cascade", "restrict", "detach"].map((label) => ({ label, type: "enum", detail: "on_delete" })),
   ...["rename", "copy", "remove", "set_default", "convert", "function"].map((label) => ({ label, type: "keyword", detail: "migration step" })),
   ...["from", "to", "field", "value", "name", "undo"].map((label) => ({ label, type: "property", detail: "step option" })),
 ]
@@ -73,6 +75,7 @@ export function SchemasDialog({ tessellation, onOpenChange }: { tessellation: st
  */
 export function SchemaManager({ tessellation, roomy = false }: { tessellation: string; roomy?: boolean }) {
   const schemas = usePoll(() => api.schemas(tessellation), 3000, [tessellation])
+  const info = usePoll(() => api.tessellation(tessellation), 10_000, [tessellation])
   const [draft, setDraft] = useState<string>()
   const [check, setCheck] = useState<SchemaCheck>()
   const [busy, setBusy] = useState<Action>()
@@ -169,9 +172,26 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
   }
 
   const migration = schemas.data?.migration
+  const links = info.data?.links ?? []
+  const children = info.data?.children ?? []
   return (
     <div className="grid gap-4">
       {schemas.error && <p className="text-destructive text-sm">{schemas.error.message}</p>}
+      {(links.length > 0 || children.length > 0) && (
+        <div className="grid gap-1 rounded-md border px-3 py-2 text-xs">
+          {links.map((l) => (
+            <div key={`link:${l.field}`}>
+              <span className="font-mono">{l.field}</span> belongs to a document in <span className="font-medium">{l.tessellation}</span>: deleting that
+              document {l.on_delete === "cascade" ? "deletes this one too" : l.on_delete === "restrict" ? "is refused while this one exists" : "sets the field to null"}.
+            </div>
+          ))}
+          {children.map((c) => (
+            <div key={`child:${c.tessellation}.${c.field}`}>
+              Documents in <span className="font-medium">{c.tessellation}</span> belong to these (<span className="font-mono">{c.field}</span>, {c.on_delete}).
+            </div>
+          ))}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2 text-sm">
         {current ? (
           <>
@@ -296,7 +316,9 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
         <p className="text-muted-foreground text-xs">
           Field rules: type (string, number, integer, boolean, object, array, any), required, nullable, default, enum, min, max, min_length,
           max_length, description, and tokenize (one_way or vault, string fields only: the value is replaced by a token on write; vault tokens can be
-          read back with the detokenize permission). Migration steps: rename and copy ({"{from, to}"}), remove ("field"), set_default ({"{field, value}"}), convert (
+          read back with the detokenize permission), and parent ({"{tessellation, on_delete}"}, string fields: the field holds the ID of the document
+          that owns this one; when that document is deleted, cascade deletes this one too, restrict refuses the delete, detach sets the field to null).
+          Migration steps: rename and copy ({"{from, to}"}), remove ("field"), set_default ({"{field, value}"}), convert (
           {"{field, to}"}), and function ({"{name, undo}"}: a function that gets batches of documents and returns them migrated). A new version must stay
           compatible: no type change without a convert step, no new required field without a default. With a function step, use Check to run it on
           the existing documents first.

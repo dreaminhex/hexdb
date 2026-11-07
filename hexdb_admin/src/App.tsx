@@ -14,6 +14,7 @@ import { LoginPage } from "@/pages/login"
 const AccountPage = lazy(() => import("@/pages/account").then((m) => ({ default: m.AccountPage })))
 const AskPage = lazy(() => import("@/pages/ask").then((m) => ({ default: m.AskPage })))
 const SharesPage = lazy(() => import("@/pages/shares").then((m) => ({ default: m.SharesPage })))
+const DeletesPage = lazy(() => import("@/pages/deletes").then((m) => ({ default: m.DeletesPage })))
 const QuarantinePage = lazy(() => import("@/pages/quarantine").then((m) => ({ default: m.QuarantinePage })))
 const AuditPage = lazy(() => import("@/pages/audit").then((m) => ({ default: m.AuditPage })))
 const ConfigurationPage = lazy(() => import("@/pages/configuration").then((m) => ({ default: m.ConfigurationPage })))
@@ -47,6 +48,7 @@ const PAGES: Record<string, Page> = {
   "/schemas": { title: "Schemas", element: SchemasPage },
   "/documents": { title: "Documents", element: DocumentsPage },
   "/files": { title: "Files", element: FilesPage },
+  "/deletes": { title: "Deletes", element: DeletesPage },
   "/shares": { title: "Shared links", element: SharesPage, requires: "share" },
   "/streams": { title: "Streams", element: StreamsPage },
   "/queues": { title: "Queues", element: QueuesPage },

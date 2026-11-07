@@ -17,6 +17,7 @@ import { toast } from "sonner"
 
 import { CodeEditor } from "@/components/code-editor"
 import { ConfirmDialog } from "@/components/confirm-dialog"
+import { DeletePreviewDialog } from "@/components/delete-preview-dialog"
 import { DocumentTable } from "@/components/document-table"
 import { columnsFor } from "@/lib/doc-table"
 import { Button } from "@/components/ui/button"
@@ -30,6 +31,7 @@ import { can, useAuth } from "@/lib/auth"
 import { api, type ApiDocument, errorMessage } from "@/lib/api"
 import { formatNumber, formatTimestamp } from "@/lib/format"
 import { setQueryParam, useQueryParam } from "@/lib/router"
+import { toastDeleted } from "@/lib/deletes"
 import { tokensIn } from "@/lib/tokens"
 
 const PAGE_SIZES = ["25", "50", "100"]
@@ -246,11 +248,15 @@ function DocumentEditor({
           open={deleting}
           onOpenChange={setDeleting}
           title="Delete this document?"
-          description={<span className="font-mono text-xs">{doc.id}</span>}
+          description={
+            <span>
+              <span className="font-mono text-xs">{doc.id}</span> goes to the trash, with anything that belongs to it through parent links. You can undo it.
+            </span>
+          }
           confirmLabel="Delete document"
           onConfirm={async () => {
-            await api.deleteDocument(tessellation, doc.id)
-            toast.success("Document deleted.")
+            const batch = await api.deleteDocumentBatch(tessellation, doc.id)
+            toastDeleted({ total: 1, batch }, onSaved)
             onSaved()
             onOpenChange(false)
           }}
@@ -280,6 +286,7 @@ export function DocumentsPage() {
   const [pageSize, setPageSize] = useState("25")
   const [offset, setOffset] = useState(0)
   const [editing, setEditing] = useState<ApiDocument | null | undefined>(undefined)
+  const [deletingMatches, setDeletingMatches] = useState(false)
 
   // Reset the query when switching tessellations.
   useEffect(() => {
@@ -375,6 +382,17 @@ export function DocumentsPage() {
         >
           <IconPlus /> New document
         </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="text-destructive hover:text-destructive"
+          onClick={() => setDeletingMatches(true)}
+          disabled={!tessellation || !can(me, filesTessellations.has(tessellation) ? "delete" : "write", tessellation) || total === 0}
+          title={applied.filter ? "Delete every document matching the applied filter" : "No filter is applied: this deletes every document"}
+        >
+          <IconTrash /> {applied.filter ? "Delete matching" : "Delete all"}
+        </Button>
       </form>
 
       {(inputError || page.error) && (
@@ -437,6 +455,16 @@ export function DocumentsPage() {
           </div>
         </div>
       </Card>
+
+      {tessellation && (
+        <DeletePreviewDialog
+          open={deletingMatches}
+          onOpenChange={setDeletingMatches}
+          tessellation={tessellation}
+          target={{ kind: "filter", filter: applied.filter }}
+          onDeleted={() => void page.refresh()}
+        />
+      )}
 
       {tessellation && (
         <DocumentEditor

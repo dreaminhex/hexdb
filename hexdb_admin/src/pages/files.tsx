@@ -29,6 +29,7 @@ import {
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
+import { DeletePreviewDialog } from "@/components/delete-preview-dialog"
 import { ShareDialog } from "@/components/share-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -990,6 +991,7 @@ export function FilesPage() {
   const [dragging, setDragging] = useState(false)
   const [newFolder, setNewFolder] = useState("")
   const [sharingFolder, setSharingFolder] = useState(false)
+  const [deletingFolder, setDeletingFolder] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   const rights: FileRights = {
     write: !!tess && can(me, "write", tess),
@@ -1282,6 +1284,11 @@ export function FilesPage() {
                     <IconLink className="size-3.5" /> Share folder
                   </Button>
                 )}
+                {rights.delete && folder !== "/" && (
+                  <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive h-7 text-xs" onClick={() => setDeletingFolder(true)}>
+                    <IconTrash className="size-3.5" /> Delete folder
+                  </Button>
+                )}
                 {rights.upload && (
                   <form
                     className="ml-3 flex items-center gap-1"
@@ -1409,7 +1416,19 @@ export function FilesPage() {
       )}
 
       {tess && (
-        <ShareDialog open={sharingFolder} onOpenChange={setSharingFolder} tess={tess} folder={folder} name={folder === "/" ? `all of ${tess}` : folder} />
+        <>
+          <DeletePreviewDialog
+            open={deletingFolder}
+            onOpenChange={setDeletingFolder}
+            tessellation={tess}
+            target={{ kind: "folder", folder, recursive: true }}
+            onDeleted={() => {
+              go(folderOf(crumbs.slice(0, -1)))
+              void listing.refresh()
+            }}
+          />
+          <ShareDialog open={sharingFolder} onOpenChange={setSharingFolder} tess={tess} folder={folder} name={folder === "/" ? `all of ${tess}` : folder} />
+        </>
       )}
       <FileDetails tess={tess} id={selected} open={!!selected} onOpenChange={(open) => !open && setSelected(null)} onChanged={() => void listing.refresh()} rights={rights} />
       <UploadPanel items={uploads} onClear={() => setUploads([])} />
