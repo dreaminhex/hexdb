@@ -42,7 +42,7 @@ What it provides:
 
 | Area | Features |
 | --- | --- |
-| Data | Documents with generated, time-sortable IDs; replace, merge-patch, delete; bulk writes; upserts; update-by-filter; per-document TTLs; idempotency keys; optional versioned schemas, inferred from existing documents and saved to apply now or later |
+| Data | Documents with generated, time-sortable IDs; replace, merge-patch, delete; bulk writes; upserts; update- and delete-by-filter that refuse to run without a filter; per-document TTLs; idempotency keys; optional versioned schemas, inferred from existing documents and saved to apply now or later; parent links with cascading deletes; a trash and a delete history for every delete, restorable in one step |
 | Files | Any binary file, deduplicated, compressed when that helps, encrypted and split across the six vertices; metadata (EXIF, IPTC, XMP, ID3, Vorbis, QuickTime, Matroska, Broadcast WAV, PDF, Office, ...) extracted and searchable; thumbnails; versions with rollback; a trash; resumable uploads; ranged downloads |
 | AI | Your own provider and key (Claude, OpenAI, GitHub Models, Azure OpenAI, local OpenAI-compatible servers): AI tags and descriptions for files, AI-chosen video thumbnails, a second opinion from the index advisor; token estimates, usage per feature and a monthly budget |
 | Configuration | Lattice-wide settings in the admin UI and `hexdb config`: encrypted, versioned, audited, checked on every hex, with rollback and write-only secrets |
@@ -122,7 +122,12 @@ hexdb health
 HEXDB_TOKEN=hxk_... hexdb status
 HEXDB_TOKEN=hxk_... hexdb backup        # a consistent backup while running; --list shows them
 HEXDB_TOKEN=hxk_... hexdb sql "SELECT COUNT(*) FROM orders"   # see section 10; -p fills ? parameters, --json prints the raw answer
+HEXDB_TOKEN=hxk_... hexdb rm orders --filter '{"status": "cancelled"}'   # shows what would go, then asks; see below
+HEXDB_TOKEN=hxk_... hexdb deletes list                     # the delete history; show, restore and purge <batch>
+HEXDB_TOKEN=hxk_... hexdb trash orders                     # what's in a tessellation's trash
 ```
+
+`hexdb rm <tessellation>` deletes documents by ID (`hexdb rm orders 01J... 01J...`), by `--filter`, a folder of a files tessellation (`/path`, with `-r` for everything below it), or with `--all` everything. It always asks the server first what would go (the matches and what cascades from them), shows it, and asks: you type the tessellation's name for `--all`, the root folder or more than 100 documents, and answer y otherwise. A plain delete by ID with nothing cascading doesn't ask. Without a terminal it needs `--yes`. The delete carries the previewed count as `expect`, so it fails instead of deleting more if the data changed in between, and prints the batch with the command that undoes it (`hexdb deletes restore <batch>`).
 
 `hexdb start` runs the `hexdb_api` binary found next to the CLI (or on `PATH`, or `--server-bin`). The server writes `hexdb.pid` to its data directory: its PID, endpoint, executable, start time and a one-time shutdown token. The file is readable by its owner only. `hexdb stop` posts the token to `POST /shutdown`. `--force` kills the process only if its executable and start time match the file, so a stale file can't kill an unrelated process that reused the PID.
 
@@ -310,7 +315,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - A banner when a newer release is out or the hexes run different versions, naming the hexes behind and linking the release notes; on HexDB Enterprise it has the button for a rolling update, and shows its progress hex by hex (see [Operations](#23-operations)).
 - A per-tessellation table. On a replica, a banner names the Overseer. For users with the `maintenance` permission, "Flush to disk" writes unflushed data to SSTables and "Back up" writes a backup (see [Operations](#23-operations)).
 
-**Files.** Browse a files tessellation by folder, as a grid with thumbnails or as a list, or pick a type (audio, images, video, documents, archives) to list those files from every folder below. Upload by dropping files or with the Upload button (large files resume after a dropped connection), and search names, tags and metadata. Audio files have a play button in the grid and the list; they play in a bar at the bottom of the page (one at a time, streamed with Range requests, so long WAV masters start at once and can be seeked). When a search finds nothing, the page looks for close matches instead, so a typo such as "tatoo" still finds "tattooed". Videos without a server thumbnail show a frame the browser decodes itself. Open a file to preview it (images, audio, video), read its metadata, edit its name, folder, tags and description, download or restore earlier versions, or move it to the trash. The Trash view restores or deletes trashed files.
+**Files.** Browse a files tessellation by folder, as a grid with thumbnails or as a list, or pick a type (audio, images, video, documents, archives) to list those files from every folder below. Upload by dropping files or with the Upload button (large files resume after a dropped connection), and search names, tags and metadata. Audio files have a play button in the grid and the list; they play in a bar at the bottom of the page (one at a time, streamed with Range requests, so long WAV masters start at once and can be seeked). When a search finds nothing, the page looks for close matches instead, so a typo such as "tatoo" still finds "tattooed". Videos without a server thumbnail show a frame the browser decodes itself. Open a file to preview it (images, audio, video), read its metadata, edit its name, folder, tags and description, download or restore earlier versions, or move it to the trash. Delete folder deletes a folder and everything below it, after showing what would go. The Trash view restores or deletes trashed files.
 
 **Queries.** A console for GraphQL and SQL, switched at the top left. GraphQL has schema-aware completion and validation, and variables; SQL has table and column completion, `?` or `$1` parameters (a JSON array), and runs read-only `SELECT`s (see [SQL](#10-sql)). Both have examples written against the tessellations the hex has, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
 
@@ -319,9 +324,11 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 - The key button opens the indexes dialog. It lists indexes, creates field or text indexes (choosing an analyzer for text), and has a Suggestions section. "From recent queries" runs the rule-based advisor; "Ask Claude" adds the configured AI provider's suggestions. Each suggestion has a button to apply it.
 - The document button opens the schema dialog. It shows the version history and any migration in progress, and edits the next version. Check reports compatibility and how many existing documents wouldn't fit (running migration functions on them); Save registers the version. "Roll back to" restores an earlier version's fields.
 
-**Schemas.** Every tessellation with its schema version, and a mark on those with a version waiting to be applied. Pick one to see its version history, migration progress and rollback, and to edit the next version in a JSON editor that marks errors as you type and completes schema keywords. The editor starts from the current version, or on a tessellation without a schema, from one read from its documents (see [Schemas](#13-schemas)). Check reports compatibility and how many existing documents would fit; saving checks first, refuses an incompatible version, and asks before saving one some documents wouldn't fit. **Save, apply later** keeps the version without applying it (writes follow the current version until then); **Save and apply now** registers it and migrates existing documents in the background. A saved version can be applied, edited or discarded. The same editor is in the schema dialog on the Tessellations page.
+**Schemas.** Every tessellation with its schema version, and a mark on those with a version waiting to be applied. Pick one to see its version history, migration progress and rollback, and to edit the next version in a JSON editor that marks errors as you type and completes schema keywords. A tessellation's parent links, and the tessellations that link to it, are listed above the versions. The editor starts from the current version, or on a tessellation without a schema, from one read from its documents (see [Schemas](#13-schemas)). Check reports compatibility and how many existing documents would fit; saving checks first, refuses an incompatible version, and asks before saving one some documents wouldn't fit. **Save, apply later** keeps the version without applying it (writes follow the current version until then); **Save and apply now** registers it and migrates existing documents in the background. A saved version can be applied, edited or discarded. The same editor is in the schema dialog on the Tessellations page.
 
-**Documents.** Pick a tessellation, filter with JSON, sort and page. Files tessellations are listed too: each file is a document whose `meta` holds its extracted metadata, so `{"meta.artist": "Ashes Gone"}` filters files (files are added on the Files page, not here). A side panel creates, edits (with an optional TTL) and deletes documents. The footer shows which index answered the query.
+**Documents.** Pick a tessellation, filter with JSON, sort and page. Files tessellations are listed too: each file is a document whose `meta` holds its extracted metadata, so `{"meta.artist": "Ashes Gone"}` filters files (files are added on the Files page, not here). A side panel creates, edits (with an optional TTL) and deletes documents. Delete matching (Delete all, without a filter) shows what the applied filter would delete, the cascade included, and asks for the tessellation's name to delete everything or more than 100 documents. After a delete, Undo restores it. The footer shows which index answered the query.
+
+**Deletes.** The delete history: each delete with its kind, who made it, what it removed and whether it's in the trash, restored or purged, with details, Restore and Purge (see [The trash and the delete history](#the-trash-and-the-delete-history)). Users with `audit` see everyone's deletes.
 
 **Streams**
 - Lists the streams you can read. Administrators and stream managers create and edit them: retention, sources and destinations as JSON.
@@ -368,15 +375,19 @@ Errors have one shape:
 | Status | Code | Meaning |
 | --- | --- | --- |
 | 400 | `invalid_request` | Malformed JSON, bad parameters or invalid values |
+| 400 | `filter_required` | A delete or update by filter without a filter and without `"all": true` |
 | 401 | `unauthorized` | Missing, expired, revoked or invalid credentials |
 | 401 | `mfa_required` | Sign-in needs an MFA code (or the code was wrong) |
 | 403 | `forbidden` | Your roles don't allow it, or a system tessellation via document routes |
 | 403 | `cross_origin` | A cookie-authenticated change from another site (CSRF protection) |
 | 404 | `not_found` | Unknown document, tessellation, user, role, stream or function |
 | 409 | `conflict` | Already exists, a failed precondition or unique index, or an idempotent request in progress |
+| 409 | `count_changed` | A delete would remove a different number of documents than its `expect` |
+| 409 | `has_children` | Documents link to what's being deleted with `on_delete: restrict` |
 | 410 | `history_expired` | A change feed position older than the kept history |
 | 413 | `document_too_large` | A document over `limits.max_document_kb` |
 | 413 | `too_large` | A request body over its limit |
+| 413 | `too_many` | A delete would remove more than 100,000 documents and files |
 | 421 | `read_only_replica` | A write sent to a replica with forwarding off |
 | 422 | `idempotency_key_reused` | An `Idempotency-Key` reused with a different request |
 | 422 | `schema_violation` | A document that doesn't fit the tessellation's schema |
@@ -400,10 +411,10 @@ curl -X POST http://localhost:7700/articles -H "Content-Type: application/json" 
 curl http://localhost:7700/articles/01JTY87RVJ9B5863KMB2YD896B             # the ETag header holds its version
 curl -X PUT   http://localhost:7700/articles/01JTY... -H "Content-Type: application/json" -d '{ "title": "New" }'
 curl -X PATCH http://localhost:7700/articles/01JTY... -H "Content-Type: application/json" -d '{ "views": 446, "tags": null }'
-curl -X DELETE http://localhost:7700/articles/01JTY...                      # 204
+curl -X DELETE http://localhost:7700/articles/01JTY...                      # 204; the delete batch in X-HexDB-Delete-Batch
 ```
 
-PUT replaces the whole document. PATCH is a JSON merge patch at the top level: fields are set, and a `null` field is removed. PUT and PATCH also accept `?ttl=`.
+PUT replaces the whole document. PATCH is a JSON merge patch at the top level: fields are set, and a `null` field is removed. PUT and PATCH also accept `?ttl=`. A deleted document goes to the trash; see [Deleting](#deleting).
 
 ### Bulk writes, updates and upserts
 
@@ -417,7 +428,7 @@ curl -X POST http://localhost:7700/articles/_bulk -H "Content-Type: application/
 curl -X PATCH http://localhost:7700/articles/_bulk -H "Content-Type: application/json" \
   -d '[{ "id": "01J...", "published": true }, { "id": "01J...", "published": true }]'
 
-# Patch every document matching a filter ({} matches all)
+# Patch every document matching a filter. Without a filter (or with {}) it needs "all": true.
 curl -X POST http://localhost:7700/articles/_update -H "Content-Type: application/json" \
   -d '{ "filter": { "status": "draft" }, "update": { "status": "published" } }'
 # => { "matched": 10, "modified": 10 }
@@ -444,6 +455,95 @@ Implementation: the record lives in the `_idempotency` system tessellation, keye
 ### TTLs
 
 `?ttl=<seconds>` on POST, PUT or PATCH sets `_expires_at`. Expired documents read as not found immediately. A sweep (`memory.ttl_scan_frequency`) evicts them from memory, and compaction drops them from disk.
+
+### Deleting
+
+Deleting is built to be hard to get wrong:
+- **No filter, no delete.** A delete or update by filter without a filter (or with `{}`) is refused with 400 `filter_required` unless the request says `"all": true`.
+- **One atomic batch.** Everything one request deletes (the documents it names or matches, what cascades from them through [parent links](#parent-links-and-cascading-deletes), and the files among them) is deleted in one commit, or not at all.
+- **Nothing is gone at once.** Every delete moves the documents to the trash for `storage.trash_days` (30). Each request's delete is a *delete batch* that can be restored in one step or purged for good.
+- **A record of it.** The delete history keeps who deleted what, when and how (`storage.delete_history_days`, 90). Deletes of more than one document go to the [audit trail](#the-audit-trail) too.
+
+**Single documents.** `DELETE /{tessellation}/{id}` answers 204 with the batch in `X-HexDB-Delete-Batch`. If other documents link to it, they cascade, detach or block the delete as their links say.
+
+**By filter.** `POST /{tessellation}/_delete` takes `filter`, `all`, `dry_run` and `expect`:
+
+```bash
+# Preview: what would go, the cascade included. Nothing is deleted.
+curl -X POST http://localhost:7700/orders/_delete -H "Content-Type: application/json" \
+  -d '{ "filter": { "status": "cancelled" }, "dry_run": true }'
+# => { "dry_run": true, "matched": 12, "total": 40, "deleted": { "orders": 12, "order_items": 28 },
+#      "detached": {}, "sample": ["orders/01J...", ...] }
+
+# Delete exactly what the preview showed
+curl -X POST http://localhost:7700/orders/_delete -H "Content-Type: application/json" \
+  -d '{ "filter": { "status": "cancelled" }, "expect": 40 }'
+# => { "batch": "01J...", "dry_run": false, "matched": 12, "total": 40, "deleted": { ... }, "detached": {} }
+
+# Every document: say so
+curl -X POST http://localhost:7700/scratch/_delete -H "Content-Type: application/json" -d '{ "all": true }'
+```
+
+- `expect` refuses with 409 `count_changed`, deleting nothing, unless exactly that many documents and files would go. It's checked again inside the commit, so a document added between the preview and the delete can't slip in. Clients that preview first should always send it; `hexdb rm` and the admin UI do.
+- A dry run also lists `blocked`: children whose `restrict` link would refuse the delete.
+- A role's row filter narrows the filter, as for `_update`: only documents the caller can see and change are matched.
+- Deleting files by filter needs `delete` on the files tessellation; deleting documents needs `write`.
+- GraphQL: `deleteDocuments(tessellation, filter, all, dryRun, expect, idempotencyKey)`. Transactions: a `delete_where` operation (see [Transactions](#11-transactions)).
+
+**Limits.** One request deletes at most 100,000 documents and files, the cascade included; more is refused with 413 `too_many`, deleting nothing.
+
+### Parent links and cascading deletes
+
+A schema field can say which document owns this one:
+
+```json
+{ "fields": {
+    "order_id": { "type": "string", "required": true, "parent": { "tessellation": "orders", "on_delete": "cascade" } }
+} }
+```
+
+The field holds the parent's ID. When the parent is deleted, `on_delete` decides what happens to this document:
+
+| `on_delete` | The child |
+| --- | --- |
+| `cascade` | Is deleted too, with its own children by their links |
+| `restrict` | Refuses the parent's delete (409 `has_children`, naming the children) while it exists, unless the same request deletes it too |
+| `detach` | Stays, with the link set to null; the field must be nullable or not required |
+
+- `on_delete` has no default: what a delete does is always written down.
+- A link marks ownership, nothing more. HexDB stays a document store: there are no joins over links, and writes don't check that the parent exists.
+- The parent can be any user or files tessellation, including the child's own (trees); a cycle ends when every document in it has been reached.
+- Files tessellations can have parent links on a file's own fields (anything but the fields HexDB writes), so a file can belong to a document and go to the files trash with it.
+- When a version with links is registered, HexDB checks the parent tessellation exists and gives each link field an index (unless an index already starts with that field), so finding the children is an index lookup. The index stays if the link is removed later; drop it yourself if you don't need it.
+- A tessellation others link to can't be dropped (409, naming the links); remove the links first.
+- `GET /tessellations/{name}` lists its `links` and the `children` that link to it.
+- A cascade needs the right to change every document it reaches (`write`, or `delete` for files, within the role's row filters). If one is out of reach, the whole delete is refused with 403: never part of it.
+- Cascaded deletes run before triggers, and appear in the change feed, like any other delete.
+- A child inserted at the moment its parent is deleted can be left behind, since inserts don't check parents.
+
+### The trash and the delete history
+
+Each delete batch has a record in the delete history and its documents in the trash, in the same commit as the delete. Both replicate to every hex, so a replica that takes over can restore them.
+
+| Request | Does |
+| --- | --- |
+| `GET /deletes` | The history, newest first: `{"batches", "total"}`. Filters: `by`, `tessellation`, `kind` (`delete`, `filter`, `transaction`, `folder`), `since` and `until` (epoch milliseconds), `limit`, `offset` |
+| `GET /deletes/{batch}` | The record (`counts` per tessellation, `files`, `detached` links, the redacted `filter`, `restored_at`, `purged_at`) and `in_trash`: what's still there |
+| `POST /deletes/{batch}/restore` | Puts back everything the batch removed, in one commit: documents, files and detached links. 409 if a document's ID exists again; `?skip_existing=true` restores the rest |
+| `DELETE /deletes/{batch}` | Deletes the batch's trash for good |
+| `GET /{tessellation}/_trash` | Deleted documents of a tessellation, each with `_deleted: {batch, at, by}` |
+| `POST /{tessellation}/_trash/{id}/restore` | Puts one document back (not the rest of its batch) |
+| `DELETE /{tessellation}/_trash/{id}` | Deletes one document's trash entry for good |
+| `DELETE /{tessellation}/_trash` | Empties the tessellation's trash (needs `manage`) |
+
+- Auditors see every batch; other users see their own, and the batches whose tessellations they can all read.
+- Restoring needs `write` on the batch's document tessellations and `restore` on its files tessellations; purging needs `write` and `delete`.
+- A document comes back exactly as it was stored: its ID, fields, expiry and `_schema` stamp. It isn't validated against a newer schema version; the next background migration upgrades it.
+- In the trash, masked fields stay sealed and tokenized fields stay tokens. The history keeps a delete's filter with the values tested against such fields replaced by `[redacted]`.
+- With `storage.trash_days = 0`, deleted documents aren't kept: the history still records each delete, but it can't be restored. Files always go to the files trash (`files.trash_days`).
+- Not deletes, so not in the trash or the history: TTL expiry, dropping a tessellation, and system tessellations.
+
+Audit events (area `data`): `data.delete.filter`, `data.delete.folder`, `data.delete.cascade` (a single delete that took other documents with it), `data.delete.transaction` (a transaction that deleted more than one document), `data.restore` and `data.purge`. A plain delete of one document is in the history and the trash, not the audit trail.
 
 ## 6. Querying
 
@@ -576,7 +676,7 @@ query Recent($filter: JSON) {
 | --- | --- |
 | `tessellations`, `tessellation(name)` with `documentCount`, `indexes` and `documents` | `insertDocument`, `insertDocuments` (atomic) |
 | `document(tessellation, id)` | `replaceDocument`, `patchDocument`, `deleteDocument` |
-| `documents(tessellation, filter, sort, limit, offset, after)` | `updateDocuments(tessellation, filter, update)` (atomic) |
+| `documents(tessellation, filter, sort, limit, offset, after)` | `updateDocuments(tessellation, filter, update, all)`, `deleteDocuments(tessellation, filter, all, dryRun, expect)` (atomic; see [Deleting](#deleting)) |
 | `count(tessellation, filter)` | `createTessellation`, `deleteTessellation` |
 | `aggregate(tessellation, filter, groupBy, aggregates, sort, limit, offset)` | `transaction(operations, idempotencyKey)` |
 | `changes(after, tessellation, limit)` | `createIndex`, `dropIndex` |
@@ -793,7 +893,9 @@ curl -X POST http://localhost:7700/transactions -H "Content-Type: application/js
 # => { "results": [{ "op": "patch", "id": "...", "version": 812, "document": {...} }, ...], "writes": 3 }
 ```
 
-**Operations.** `get`, `check` (a precondition only), `insert`, `replace`, `patch` and `delete`. Later operations see the effects of earlier ones.
+**Operations.** `get`, `check` (a precondition only), `insert`, `replace`, `patch`, `delete` and `delete_where`. Later operations see the effects of earlier ones.
+
+`delete_where` takes a `filter` (or `"all": true`) instead of an `id`, and deletes every matching document, including ones earlier operations wrote; its result's `document` is `{"deleted": <count>, "ids": [...]}`. Deletes in a transaction cascade along [parent links](#parent-links-and-cascading-deletes) and are one delete batch, restorable in one step.
 
 **Preconditions,** on any operation with an `id`:
 - `if_version`: the document's version must equal this. `0` means it must not exist. Versions come back in every result and in the `ETag` header of `GET /{tess}/{id}`.
@@ -920,6 +1022,7 @@ curl -X POST http://localhost:7700/tessellations/orders/schemas -H "Content-Type
 - `min` and `max` (numbers), `min_length` and `max_length` (strings and arrays).
 - `description`.
 - `tokenize`: `one_way` or `vault` (string fields only, without `enum`): the value is replaced by a token on write. See [Tokenization](#tokenization).
+- `parent`: `{tessellation, on_delete}` (string fields only, not tokenized): the field holds the ID of the document that owns this one, and `on_delete` (`cascade`, `restrict` or `detach`) says what happens to this one when that document is deleted. See [Parent links and cascading deletes](#parent-links-and-cascading-deletes).
 
 Field names are top-level names or dotted paths. With `"additional_fields": false`, documents can't have other fields.
 
@@ -1291,6 +1394,10 @@ Deleting a file's document (`DELETE /media/{id}`, or a delete in a transaction o
 
 Dropping a files tessellation drops its trashed files too.
 
+**Folders.** `DELETE /media/_folders/{folder}` moves the files directly in a folder to the trash, and with `?recursive=true` everything below it too, as one [delete batch](#the-trash-and-the-delete-history) that restores in one step. `?dry_run=true` previews it and `?expect=N` guards it, as for `_delete`; the root folder (`DELETE /media/_folders?recursive=true`) also needs `all=true`. It needs `delete`.
+
+A file can belong to a document through a [parent link](#parent-links-and-cascading-deletes) on one of its own fields, and is then trashed and restored with that document.
+
 ### Malware scanning
 
 Every uploaded file is scanned before it's stored (`files.scan`, on by default), on the Overseer, which takes every upload. The scan runs after the file's chunks are on disk and before its document commits, so a file that doesn't pass never becomes a document in its tessellation and never reaches another hex.
@@ -1406,6 +1513,7 @@ hexdb put media ./Pictures -r --to /photos                     # a folder, keepi
 hexdb ls media /2024                                           # subfolders and files
 hexdb ls media --search "glacier lagoon"
 hexdb get media 2024/Iceland/IMG_0042.jpg -o ~/Downloads       # by path or ID; --version N for an earlier one
+hexdb rm media /2024/Iceland -r                                # a folder and everything below it; shows what would go and asks
 ```
 
 ## 17. Functions, schedules and triggers
@@ -1943,6 +2051,7 @@ HexDB records security-relevant events as documents in the `_audit` system tesse
 | --- | --- |
 | Accounts | `auth.*` (sign-in, failures, sign-out, password, MFA, API keys), `user.*`, `role.*` |
 | Data structure | `tessellation.*`, `index.*`, `schema.*` (including `schema.rollback`) |
+| Deletes | `data.delete.*` (by filter, folders, cascades, transactions), `data.restore`, `data.purge`; see [Deleting](#the-trash-and-the-delete-history) |
 | Features | `stream.*`, `function.*`, `schedule.*`, `trigger.*` |
 | Operations | `maintenance.*` (flush, compact, backup), `settings.update`, `server.shutdown`, `lattice.join_info` |
 | Refusals | `access.denied` |
@@ -2329,6 +2438,8 @@ The ciphertext is `nonce (12) | AES-256-GCM(chunk, maybe compressed)` with the c
 | Other request bodies | 2 MB | fixed |
 | Documents per bulk request | 10,000 | fixed |
 | Operations per transaction | 1,000 | fixed |
+| Documents and files one delete removes, its cascade included | 100,000 | fixed |
+| Documents one update by filter modifies | 100,000 | fixed |
 | Page size | 1,000 (default 100) | fixed |
 | File size | No limit beyond the disk budget | `files.max_file_mb` |
 | Upload and download time | No limit (exempt from the request time) | fixed |
@@ -2528,6 +2639,8 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `storage.compaction_frequency` | 1800 | Seconds between compactions |
 | `storage.change_history_hours`, `change_history_mb` | 24, 512 | Change history kept on disk |
 | `storage.backup_path` | `backups` next to the data directory | Where backups are written; must be outside the data directory |
+| `storage.trash_days` | 30 | Days a deleted document stays in the trash (0: not kept; deletes are still in the history) |
+| `storage.delete_history_days` | 90 | Days the delete history keeps each delete |
 | `files.uploads` | true | Accept uploads (false: refuse them with 403; stored files stay readable) |
 | `files.max_file_mb` | 0 (no limit) | Largest file accepted |
 | `files.trash_days` | 30 | Days a deleted file stays in the trash |
@@ -2637,6 +2750,7 @@ A hex that didn't shut down cleanly leaves its runtime file behind, and the next
 
 The Node.js, Python and .NET drivers each cover:
 - documents, queries, counts, aggregations and upserts;
+- deletes by filter (`deleteWhere`, with `all`, a dry run and `expect`), the delete history, restoring and purging;
 - transactions and idempotency keys;
 - the change feed;
 - streams with consumer groups;
@@ -2754,7 +2868,7 @@ A query HexDB can't answer throws `InvalidOperationException` instead of loading
 - `GroupBy` and `Join`;
 - `Where` after `Skip`, `Take` or `Select`.
 
-**Relationships.** One-to-many and one-to-one relationships between entity types work as in EF Core: navigations, foreign key properties (stored as fields), fixup when you add a graph, and cascade deletes of the dependents you've loaded. HexDB itself doesn't enforce foreign keys or cascade on the server.
+**Relationships.** One-to-many and one-to-one relationships between entity types work as in EF Core: navigations, foreign key properties (stored as fields), fixup when you add a graph, and cascade deletes of the dependents you've loaded. HexDB doesn't enforce foreign keys. Declare the foreign key field as a [parent link](#parent-links-and-cascading-deletes) in the dependent tessellation's schema to have the server cascade (or restrict, or detach) too, including dependents that weren't loaded.
 - `Include`, `ThenInclude`, string includes (`Include("Books.Reviews")`) and `AutoInclude` load related entities. Each included navigation is one more query on the related tessellation per page of results, with the page's keys in an `$in` filter, so index the foreign key fields you include by.
 - Tracked queries connect entities through EF Core's change tracker; `AsNoTracking` queries connect them directly, in both directions.
 - Filter and sort on foreign key properties (`Where(b => b.AuthorId == id)`), not through navigations: `Where(b => b.Author.Name == "...")` would need a join and throws.
