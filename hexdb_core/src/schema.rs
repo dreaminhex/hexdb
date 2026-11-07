@@ -29,6 +29,14 @@
 // string field can be tokenized (`"tokenize": "one_way"` or `"vault"`): its
 // value is replaced by a token on write (see `crate::tokens`).
 
+// A string field can also be a parent link (`"parent": {"tessellation":
+// "orders", "on_delete": "cascade"}`): it holds the ID of the document (or
+// file) that owns this one, and says what happens to this document when its
+// parent is deleted: `cascade` deletes it too, `restrict` refuses the parent's
+// delete while it exists, `detach` sets the link to null. A link marks
+// ownership only: it isn't a join, and writes don't check that the parent
+// exists (see engine::deletes).
+
 // Migration steps: rename {from, to}, copy {from, to}, remove "field",
 // set_default {field, value}, convert {field, to: string | number | integer |
 // boolean}. Fields are top-level names or dotted paths.
@@ -90,6 +98,37 @@ pub enum Tokenize {
     Vault,
 }
 
+/// What happens to a document when its parent is deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnDelete {
+    /// Delete the child too (and its own children, by their rules).
+    Cascade,
+    /// Refuse to delete the parent while the child exists.
+    Restrict,
+    /// Keep the child and set its link to null.
+    Detach,
+}
+
+impl OnDelete {
+    pub fn name(self) -> &'static str {
+        match self {
+            OnDelete::Cascade => "cascade",
+            OnDelete::Restrict => "restrict",
+            OnDelete::Detach => "detach",
+        }
+    }
+}
+
+/// A field holding the ID of the document that owns this one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParentLink {
+    /// The parent's tessellation (this one, for trees).
+    pub tessellation: String,
+    pub on_delete: OnDelete,
+}
+
 /// What one field must look like.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +160,9 @@ pub struct FieldRule {
     /// Replace the value with a token on write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenize: Option<Tokenize>,
+    /// The field holds the ID of this document's parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentLink>,
 }
 
 /// One migration step.
@@ -393,6 +435,11 @@ impl SchemaVersion {
         }
     }
 
+    /// The parent links: (field, link), in field order.
+    pub fn links(&self) -> impl Iterator<Item = (&String, &ParentLink)> {
+        self.fields.iter().filter_map(|(field, rule)| rule.parent.as_ref().map(|link| (field, link)))
+    }
+
     /// True if this version's migration calls a function (it can then only
     /// run in the engine, which runs functions).
     pub fn has_function_steps(&self) -> bool {
@@ -497,6 +544,9 @@ pub fn new_version(current: &[SchemaVersion], input: SchemaInput) -> Result<Sche
                 bail!("{}: a tokenized field can't have enum values", field);
             }
         }
+        if let Some(link) = &rule.parent {
+            check_link(field, rule, link)?;
+        }
     }
     for step in &input.migration {
         step.check()?;
@@ -522,6 +572,28 @@ pub fn new_version(current: &[SchemaVersion], input: SchemaInput) -> Result<Sche
         created_by_login: String::new(),
         restores: None,
     })
+}
+
+/// The rules a parent link's field must follow (the engine checks that the
+/// parent tessellation exists).
+fn check_link(field: &str, rule: &FieldRule, link: &ParentLink) -> Result<()> {
+    if crate::catalog::validate_tessellation_name(&link.tessellation).is_err() {
+        bail!("{}: '{}' can't be a parent tessellation", field, link.tessellation);
+    }
+    if !matches!(rule.kind, FieldType::String | FieldType::Any) {
+        bail!("{}: a parent link holds a document ID, so it's a string field", field);
+    }
+    // The stored value would be a token, which matches no parent's ID.
+    if rule.tokenize.is_some() {
+        bail!("{}: a parent link can't be tokenized", field);
+    }
+    if rule.allowed.is_some() {
+        bail!("{}: a parent link can't have enum values", field);
+    }
+    if link.on_delete == OnDelete::Detach && rule.required && !rule.nullable {
+        bail!("{}: detach sets the link to null when the parent is deleted, so the field must be nullable or not required", field);
+    }
+    Ok(())
 }
 
 /// The input for a rollback to version `to`: that version's fields, and a

@@ -42,6 +42,7 @@ use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
 pub(crate) mod backup;
+pub mod deletes;
 mod files;
 pub use files::{ai_files::AiTask, spawn_rescan_task, ExtractQueue, FileContent, FileSync, UploadOptions, UploadResult};
 mod indexing;
@@ -940,6 +941,7 @@ impl HexDBEngine {
     /// Delete a tessellation and all of its documents. Returns false if it doesn't exist.
     pub async fn delete_tessellation(&self, name: &str) -> Result<bool> {
         self.ensure_writable()?;
+        self.check_not_parent(name)?;
         let files = self.tessellation_info(name).is_some_and(|i| i.is_files());
         let deleted = self.delete_tessellation_unchecked(name).await?;
         if deleted && files {

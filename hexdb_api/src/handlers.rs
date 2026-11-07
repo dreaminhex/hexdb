@@ -1091,6 +1091,12 @@ pub async fn get_tessellation(Path(name): Path<String>, State(engine): Engine, A
         .tessellation_info(&name)
         .ok_or_else(|| ApiError::not_found(format!("Tessellation '{}' not found.", name)))?;
     let mut body = tessellation_json(&name, &info);
+    body["links"] = json!(engine
+        .parent_links(&name)
+        .into_iter()
+        .map(|(field, link)| json!({ "field": field, "tessellation": link.tessellation, "on_delete": link.on_delete }))
+        .collect::<Vec<_>>());
+    body["children"] = json!(engine.child_links(&name));
     // Counted as the caller sees it (a role's row filter narrows it).
     body["document_count"] = json!(engine.count_matching(&name, &hexdb_core::filter::Filter::all()).await?);
     Ok(Json(body).into_response())

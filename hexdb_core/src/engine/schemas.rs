@@ -113,6 +113,7 @@ impl HexDBEngine {
     pub async fn save_pending_schema(&self, tess: &str, input: SchemaInput, by: &crate::auth::Principal) -> Result<(PendingSchema, u32)> {
         self.ensure_writable()?;
         self.check_migration_functions(&input).await?;
+        self.check_links(tess, &input)?;
         let mut catalog = self.catalog.lock().unwrap();
         let info = catalog.tessellations.get_mut(tess).ok_or_else(|| EngineError::NotFound(format!("Tessellation '{}' not found.", tess)))?;
         if !info.is_user_data() {
@@ -161,18 +162,23 @@ impl HexDBEngine {
     async fn register_schema(&self, tess: &str, input: SchemaInput, by: &crate::auth::Principal, restores: Option<u32>) -> Result<SchemaVersion> {
         self.ensure_writable()?;
         self.check_migration_functions(&input).await?;
-        let mut catalog = self.catalog.lock().unwrap();
-        let info = catalog.tessellations.get_mut(tess).ok_or_else(|| EngineError::NotFound(format!("Tessellation '{}' not found.", tess)))?;
-        if !info.is_user_data() {
-            return Err(EngineError::Invalid(format!("'{}' is a system tessellation; it can't have a schema.", tess)).into());
-        }
-        let mut version = schema::new_version(&info.schemas, input).map_err(|e| EngineError::Conflict(format!("{:#}", e)))?;
-        version.created_by = by.user_id.clone();
-        version.created_by_login = by.login.clone();
-        version.restores = restores;
-        info.schemas.push(version.clone());
-        catalog.save(&self.storage_dir, &self.keys)?;
+        self.check_links(tess, &input)?;
+        let version = {
+            let mut catalog = self.catalog.lock().unwrap();
+            let info = catalog.tessellations.get_mut(tess).ok_or_else(|| EngineError::NotFound(format!("Tessellation '{}' not found.", tess)))?;
+            if !info.is_user_data() {
+                return Err(EngineError::Invalid(format!("'{}' is a system tessellation; it can't have a schema.", tess)).into());
+            }
+            let mut version = schema::new_version(&info.schemas, input).map_err(|e| EngineError::Conflict(format!("{:#}", e)))?;
+            version.created_by = by.user_id.clone();
+            version.created_by_login = by.login.clone();
+            version.restores = restores;
+            info.schemas.push(version.clone());
+            catalog.save(&self.storage_dir, &self.keys)?;
+            version
+        };
         info!("📐 Schema version {} registered for '{}'.", version.version, tess);
+        self.ensure_link_indexes(tess).await;
         Ok(version)
     }
 
