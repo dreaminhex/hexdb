@@ -110,6 +110,15 @@ pub enum EngineError {
     ScannerUnavailable(String),
     /// The upload was infected and is quarantined (422).
     Quarantined(String),
+    /// A delete or update by filter without a filter, and without `"all": true` (400).
+    FilterRequired(String),
+    /// A delete would remove a different number of documents than the
+    /// request's `expect` (409): the data changed since it was previewed.
+    CountChanged(String),
+    /// Documents link to what's being deleted with `on_delete: restrict` (409).
+    HasChildren(String),
+    /// A delete would remove more documents than one request may (413).
+    TooMany(String),
 }
 
 impl fmt::Display for EngineError {
@@ -133,6 +142,10 @@ impl fmt::Display for EngineError {
             | EngineError::QuotaExceeded(m)
             | EngineError::ScannerUnavailable(m)
             | EngineError::Quarantined(m)
+            | EngineError::FilterRequired(m)
+            | EngineError::CountChanged(m)
+            | EngineError::HasChildren(m)
+            | EngineError::TooMany(m)
             | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }

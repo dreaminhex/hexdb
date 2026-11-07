@@ -96,7 +96,7 @@ fn row_filters_and_field_masks_apply_to_every_path() -> Result<()> {
     let stored = server.get_doc("orders", &eu_doc)?.unwrap();
     assert_eq!((stored["total"].clone(), stored["cost"].clone()), (json!(999), json!(0)), "{}", stored);
     // Update by filter touches only what the caller can see.
-    let res = as_eu(Method::POST, "/orders/_update", Some(&json!({ "filter": {}, "update": { "status": "seen" } })))?;
+    let res = as_eu(Method::POST, "/orders/_update", Some(&json!({ "filter": {}, "all": true, "update": { "status": "seen" } })))?;
     assert_eq!(res.body["matched"], 4, "{}", res.body);
     assert!(server.get_doc("orders", &us_doc)?.unwrap().get("status").is_none());
     // Upsert can't take over a document outside the filter.

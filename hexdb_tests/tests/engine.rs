@@ -278,7 +278,7 @@ async fn counts_stay_exact_through_every_kind_of_write() -> Result<()> {
         engine.replace_document("items", id, json!({ "replaced": true }), None, None).await?;
     }
     check("replaces").await?;
-    engine.update_where("items", &json!({ "kind": "odd" }), &json!({ "seen": true }), None, None).await?;
+    engine.update_where("items", &json!({ "kind": "odd" }), &json!({ "seen": true }), None, false, None).await?;
     check("update by filter").await?;
     let ops = hexdb_core::parse_transaction(&json!([
         { "op": "insert", "tessellation": "items", "data": { "from": "tx" } },

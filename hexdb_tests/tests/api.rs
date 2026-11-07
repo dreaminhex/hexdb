@@ -261,8 +261,13 @@ fn update_by_filter() -> Result<()> {
     let res = server.request(Method::POST, "/posts/_update", Some(&update), &[])?;
     assert_eq!(res.body, json!({ "matched": 0, "modified": 0 }));
 
-    // An empty filter matches everything; unchanged documents aren't rewritten.
+    // An empty filter would match everything, so it needs "all": true.
     let res = server.request(Method::POST, "/posts/_update", Some(&json!({ "filter": {}, "update": { "reviewed": true } })), &[])?;
+    assert_eq!((res.status, res.error_code()), (StatusCode::BAD_REQUEST, Some("filter_required")), "{}", res.body);
+    let res = server.request(Method::POST, "/posts/_update", Some(&json!({ "update": { "reviewed": true } })), &[])?;
+    assert_eq!(res.error_code(), Some("filter_required"));
+    // With it, unchanged documents aren't rewritten.
+    let res = server.request(Method::POST, "/posts/_update", Some(&json!({ "filter": {}, "all": true, "update": { "reviewed": true } })), &[])?;
     assert_eq!(res.body, json!({ "matched": 15, "modified": 5 }));
     Ok(())
 }

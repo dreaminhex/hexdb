@@ -132,6 +132,10 @@ impl From<anyhow::Error> for ApiError {
             Some(EngineError::ScannerUnavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "scanner_unavailable", m.clone()).with_retry_after(10),
             Some(EngineError::Quarantined(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "file_quarantined", m.clone()),
             Some(EngineError::TooLarge(m)) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "document_too_large", m.clone()),
+            Some(EngineError::FilterRequired(m)) => ApiError::new(StatusCode::BAD_REQUEST, "filter_required", m.clone()),
+            Some(EngineError::CountChanged(m)) => ApiError::new(StatusCode::CONFLICT, "count_changed", m.clone()),
+            Some(EngineError::HasChildren(m)) => ApiError::new(StatusCode::CONFLICT, "has_children", m.clone()),
+            Some(EngineError::TooMany(m)) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_many", m.clone()),
             Some(EngineError::SchemaViolation(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "schema_violation", m.clone()),
             Some(EngineError::TriggerRejected(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "trigger_rejected", m.clone()),
             Some(EngineError::DiskFull(m)) => ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "disk_full", m.clone()),
@@ -1324,16 +1328,27 @@ pub async fn delete_doc(
     principal.require(if files { Permission::Delete } else { Permission::Write }, &tess)?;
     user_tessellation(&engine, &tess)?;
     let idem = idempotency(&principal, &headers, &method, &uri, None)?;
-    let outcome = engine.delete_document(&tess, &id, idem).await?;
+    let batch = ulid::Ulid::generate();
+    let context = hexdb_core::engine::deletes::DeleteContext { batch: Some(batch), ..Default::default() };
+    let outcome = hexdb_core::engine::deletes::with_delete_context(context, engine.delete_document(&tess, &id, idem)).await?;
     if !outcome.value {
         return Err(ApiError::not_found(format!("Document {} not found in '{}'.", id, tess)));
     }
-    Ok(no_content(outcome.replayed))
+    let mut response = no_content(outcome.replayed);
+    if !outcome.replayed {
+        if let Ok(value) = HeaderValue::from_str(&batch.to_string()) {
+            response.headers_mut().insert(DELETE_BATCH_HEADER, value);
+        }
+    }
+    Ok(response)
 }
 
 // ---------------------------------------------------------------------------
 // Bulk
 // ---------------------------------------------------------------------------
+
+/// The delete batch a `DELETE /{tess}/{id}` made, to restore it.
+pub const DELETE_BATCH_HEADER: &str = "x-hexdb-delete-batch";
 
 /// Insert many documents atomically. Body: an array, or `{"documents": [...]}`.
 pub async fn bulk_insert(
@@ -1400,8 +1415,50 @@ pub async fn bulk_patch(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateRequest {
+    #[serde(default)]
     pub filter: Value,
     pub update: Value,
+    /// Required with a missing or empty filter: yes, every document.
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// `POST /{tess}/_delete`: `{"filter", "all", "dry_run", "expect"}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteRequest {
+    #[serde(default)]
+    pub filter: Value,
+    #[serde(flatten)]
+    pub options: hexdb_core::engine::deletes::DeleteOptions,
+}
+
+/// Delete every document matching a filter, and what cascades from them, as
+/// one atomic delete batch that can be restored. A missing or empty filter
+/// needs `"all": true`; `dry_run` previews; `expect` guards against deleting
+/// more than a preview showed.
+pub async fn delete_where(
+    Path(tess): Path<String>,
+    State(engine): Engine,
+    Auth(principal): Auth,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> ApiResult {
+    let files = engine.tessellation_info(&tess).is_some_and(|i| i.is_files());
+    principal.require(if files { Permission::Delete } else { Permission::Write }, &tess)?;
+    let Json(body) = body?;
+    existing_tessellation(&engine, &tess)?;
+    let request: DeleteRequest = serde_json::from_value(body.clone()).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let idem = if request.options.dry_run { None } else { idempotency(&principal, &headers, &method, &uri, Some(&body))? };
+    let outcome = engine.delete_where(&tess, &request.filter, request.options, idem).await?;
+    let summary = outcome.value;
+    if let (Some(batch), false) = (&summary.batch, outcome.replayed) {
+        let details = json!({ "batch": batch, "total": summary.total, "deleted": summary.deleted, "detached": summary.detached, "all": request.options.all });
+        engine.audit(&principal.login, "data.delete.filter", &tess, details).await;
+    }
+    Ok(respond(StatusCode::OK, serde_json::to_value(&summary).unwrap_or_default(), outcome.replayed))
 }
 
 /// Merge-patch every document matching a filter, atomically:
@@ -1422,7 +1479,7 @@ pub async fn update_where(
     let idem = idempotency(&principal, &headers, &method, &uri, Some(&body))?;
     let request: UpdateRequest = serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
     let outcome = engine
-        .update_where(&tess, &request.filter, &request.update, params.expiry(), idem)
+        .update_where(&tess, &request.filter, &request.update, params.expiry(), request.all, idem)
         .await?;
     Ok(respond(StatusCode::OK, serde_json::to_value(&outcome.value).unwrap_or_default(), outcome.replayed))
 }

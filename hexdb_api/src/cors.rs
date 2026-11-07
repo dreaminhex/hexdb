@@ -26,7 +26,7 @@ use std::sync::Arc;
 const ALLOW_METHODS: &str = "GET, HEAD, POST, PUT, PATCH, DELETE";
 /// Response headers a page may read besides the CORS-safelisted ones.
 const EXPOSE_HEADERS: &str =
-    "etag, location, retry-after, content-disposition, content-range, accept-ranges, last-modified, idempotent-replayed, upload-offset, x-hexdb-version, x-hexdb-unchanged, x-hexdb-forwarded-to";
+    "etag, location, retry-after, content-disposition, content-range, accept-ranges, last-modified, idempotent-replayed, upload-offset, x-hexdb-version, x-hexdb-unchanged, x-hexdb-forwarded-to, x-hexdb-delete-batch";
 /// How long a browser may reuse a preflight's answer.
 const MAX_AGE_SECONDS: &str = "600";
 

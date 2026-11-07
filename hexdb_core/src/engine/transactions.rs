@@ -63,6 +63,9 @@ pub enum TxOpKind {
     Replace,
     Patch,
     Delete,
+    /// Delete every document matching a filter (and what cascades from them).
+    #[serde(rename = "delete_where")]
+    DeleteWhere,
 }
 
 /// One operation in a transaction.
@@ -79,6 +82,8 @@ pub struct TxOperation {
     pub ttl: Option<i64>,
     pub if_version: Option<u64>,
     pub if_match: Option<Filter>,
+    /// delete_where: the filter (a missing or empty one needs `all`).
+    pub filter: Option<Filter>,
 }
 
 /// The outcome of one operation.
@@ -117,7 +122,7 @@ impl TxOperation {
         let at = |m: &str| invalid(format!("operations[{}]: {}", index, m));
         let Value::Object(map) = value else { return Err(at("expected an object.")) };
         for key in map.keys() {
-            if !["op", "tessellation", "id", "data", "ttl", "if_version", "if_match"].contains(&key.as_str()) {
+            if !["op", "tessellation", "id", "data", "ttl", "if_version", "if_match", "filter", "all"].contains(&key.as_str()) {
                 return Err(at(&format!("unknown key '{}'.", key)));
             }
         }
@@ -125,7 +130,7 @@ impl TxOperation {
             .get("op")
             .cloned()
             .and_then(|v| serde_json::from_value(v).ok())
-            .ok_or_else(|| at("op must be one of get, check, insert, replace, patch, delete."))?;
+            .ok_or_else(|| at("op must be one of get, check, insert, replace, patch, delete, delete_where."))?;
         let tessellation = map
             .get("tessellation")
             .and_then(Value::as_str)
@@ -140,7 +145,21 @@ impl TxOperation {
             Some(Value::String(s)) => Some(Ulid::from_string(s).map_err(|_| at(&format!("'{}' is not a valid document ID.", s)))?),
             Some(_) => return Err(at("id must be a string.")),
         };
-        if id.is_none() && kind != TxOpKind::Insert {
+        let filter = if kind == TxOpKind::DeleteWhere {
+            if id.is_some() || ["data", "ttl", "if_version", "if_match"].iter().any(|k| map.contains_key(*k)) {
+                return Err(at("delete_where takes a filter (and all), not an id, data, ttl or preconditions."));
+            }
+            let raw = map.get("filter").cloned().unwrap_or(Value::Null);
+            let all = map.get("all").and_then(Value::as_bool).unwrap_or(false);
+            super::deletes::require_filter(&raw, all, "delete_where", &tessellation).map_err(|e| at(&e.to_string()))?;
+            Some(Filter::parse(&raw).map_err(|e| at(&e.to_string()))?)
+        } else {
+            if map.contains_key("filter") || map.contains_key("all") {
+                return Err(at("filter and all only apply to delete_where."));
+            }
+            None
+        };
+        if id.is_none() && !matches!(kind, TxOpKind::Insert | TxOpKind::DeleteWhere) {
             return Err(at("id is required."));
         }
         let data = map.get("data").filter(|v| !v.is_null()).cloned();
@@ -160,7 +179,7 @@ impl TxOperation {
                 Some(chrono::Utc::now().timestamp_millis().saturating_add(millis))
             }
         };
-        if ttl.is_some() && matches!(kind, TxOpKind::Get | TxOpKind::Check | TxOpKind::Delete) {
+        if ttl.is_some() && matches!(kind, TxOpKind::Get | TxOpKind::Check | TxOpKind::Delete | TxOpKind::DeleteWhere) {
             return Err(at("ttl only applies to insert, replace, and patch."));
         }
         let if_version = match map.get("if_version") {
@@ -174,7 +193,7 @@ impl TxOperation {
         if kind == TxOpKind::Insert && (if_match.is_some() || if_version.is_some_and(|v| v != 0)) {
             return Err(at("insert creates a new document; only if_version: 0 applies."));
         }
-        Ok(TxOperation { kind, tessellation, id, data, ttl, if_version, if_match })
+        Ok(TxOperation { kind, tessellation, id, data, ttl, if_version, if_match, filter })
     }
 }
 
@@ -249,6 +268,14 @@ impl HexDBEngine {
         for op in ops.iter().filter(|op| op.kind == TxOpKind::Insert) {
             self.ensure_tessellation(&op.tessellation)?;
         }
+        let mut context = super::deletes::current_context();
+        if context.kind.is_empty() {
+            context.kind = "transaction".into();
+        }
+        super::deletes::with_delete_context(context, self.run_transaction(ops, idem)).await
+    }
+
+    async fn run_transaction(&self, ops: &[TxOperation], idem: Option<IdempotencyKey>) -> Result<Outcome<TransactionResult>> {
         let _guard = match &idem {
             Some(k) => {
                 self.ensure_system_tessellation(super::writes::IDEMPOTENCY_TESSELLATION)?;
@@ -256,7 +283,6 @@ impl HexDBEngine {
             }
             None => None,
         };
-
         for _ in 0..MAX_WRITE_RETRIES {
             let mut idem_seq = 0;
             if let Some(k) = &idem {
@@ -307,6 +333,47 @@ impl HexDBEngine {
 
         for (i, op) in ops.iter().enumerate() {
             let at = |m: String| format!("operations[{}]: {}", i, m);
+            if op.kind == TxOpKind::DeleteWhere {
+                let (read, write) = scopes
+                    .entry(op.tessellation.clone())
+                    .or_insert_with(|| (self.caller_scope(&op.tessellation, Action::Read), self.caller_scope(&op.tessellation, Action::Write)))
+                    .clone();
+                let filter = op.filter.clone().unwrap_or_else(Filter::all);
+                if !read.is_full() || !write.is_full() {
+                    self.check_scope_fields(&op.tessellation, &read, &filter, &[])?;
+                }
+                let narrowed = read.narrow(&write.narrow(&filter));
+                // Stored matches, and documents earlier operations wrote, as they are now.
+                let mut candidates: Vec<DocKey> = self.matching_documents(&op.tessellation, &narrowed).await?.into_iter().map(|d| DocKey::new(&op.tessellation, d.id)).collect();
+                candidates.extend(order.iter().filter(|k| k.tessellation == op.tessellation).cloned());
+                let mut ids = Vec::new();
+                for key in candidates {
+                    if !slots.contains_key(&key) {
+                        let (current, base_seq) = self.read_latest(&key).await?;
+                        let hidden = current.as_ref().is_some_and(|d| !read.allows(d));
+                        slots.insert(key.clone(), Slot { base_seq, current: if hidden { None } else { current }, written: false, hidden });
+                        order.push(key.clone());
+                    }
+                    let slot = slots.get_mut(&key).unwrap();
+                    if slot.current.as_ref().is_some_and(|d| narrowed.matches(d)) {
+                        slot.current = None;
+                        slot.written = true;
+                        ids.push(key.id.to_string());
+                        if ids.len() > super::deletes::MAX_DELETE {
+                            return Err(EngineError::TooMany(at(format!("the filter matches more than {} documents; narrow it.", super::deletes::MAX_DELETE))).into());
+                        }
+                    }
+                }
+                results.push(TxResult {
+                    op: op.kind,
+                    tessellation: op.tessellation.clone(),
+                    id: String::new(),
+                    version: None,
+                    document: Some(serde_json::json!({ "deleted": ids.len(), "ids": ids })),
+                });
+                result_keys.push(None);
+                continue;
+            }
             let id = op.id.unwrap_or_else(Ulid::generate);
             let key = DocKey::new(&op.tessellation, id);
 
@@ -407,6 +474,8 @@ impl HexDBEngine {
                     slot.written = true;
                     Some(doc.to_api_json())
                 }
+                // Planned above, before an ID is needed.
+                TxOpKind::DeleteWhere => None,
                 TxOpKind::Delete => {
                     slot.current.as_ref().ok_or_else(missing)?;
                     slot.current = None;
@@ -421,7 +490,7 @@ impl HexDBEngine {
                 json
             });
             results.push(TxResult { op: op.kind, tessellation: op.tessellation.clone(), id: id.to_string(), version: None, document });
-            result_keys.push(key);
+            result_keys.push(Some(key));
         }
 
         // Every document written must stay within what the caller may write.
@@ -460,11 +529,11 @@ impl HexDBEngine {
             items.push(BatchItem { key, op, expected_seq: Some(slot.base_seq) });
         }
 
-        let write_index = result_keys.iter().map(|k| index_of.get(k).copied()).collect();
+        let write_index = result_keys.iter().map(|k| k.as_ref().and_then(|k| index_of.get(k).copied())).collect();
         let read_version = result_keys
             .iter()
             .map(|k| {
-                let slot = &slots[k];
+                let slot = &slots[k.as_ref()?];
                 (!slot.written && slot.current.is_some()).then_some(slot.base_seq)
             })
             .collect();

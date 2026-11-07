@@ -70,6 +70,10 @@ pub struct DeleteContext {
     pub kind: String,
     /// The filter of a delete by filter (already redacted).
     pub filter: Option<Value>,
+    /// The batch ID to use (the caller reports it); none: a new one.
+    pub batch: Option<Ulid>,
+    /// Refuse the commit unless exactly this many documents and files go.
+    pub expect: Option<usize>,
 }
 
 tokio::task_local! {
@@ -84,6 +88,11 @@ pub async fn with_delete_context<F: Future>(context: DeleteContext, f: F) -> F::
 
 fn context() -> DeleteContext {
     CONTEXT.try_with(Clone::clone).unwrap_or_default()
+}
+
+/// The delete context the current task runs with (empty if none).
+pub(crate) fn current_context() -> DeleteContext {
+    context()
 }
 
 /// True while a restore commits (documents go back as they were stored).
@@ -280,7 +289,7 @@ impl HexDBEngine {
                                 plan.sample.push(format!("{}/{}", link.tessellation, child.id));
                             }
                             if plan.total() > MAX_DELETE {
-                                return Err(EngineError::TooLarge(format!(
+                                return Err(EngineError::TooMany(format!(
                                     "The delete would remove more than {} documents and files (with what cascades from them); narrow it.",
                                     MAX_DELETE
                                 ))
@@ -377,17 +386,196 @@ impl HexDBEngine {
     }
 }
 
+/// How a delete by filter runs.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct DeleteOptions {
+    /// Required with a missing or empty filter: yes, every document.
+    #[serde(default)]
+    pub all: bool,
+    /// Only say what would go.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Refuse unless exactly this many documents and files would go (the
+    /// cascade included), so a preview-then-delete can't remove more than it showed.
+    #[serde(default)]
+    pub expect: Option<usize>,
+}
+
+/// What a delete by filter did, or would do.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteSummary {
+    /// The delete batch, to restore it (none for a dry run or when nothing matched).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<String>,
+    pub dry_run: bool,
+    /// Documents the filter matched.
+    pub matched: usize,
+    /// Documents and files that go, per tessellation (matches and cascade).
+    pub deleted: BTreeMap<String, usize>,
+    /// Documents and files that go, in total.
+    pub total: usize,
+    pub detached: BTreeMap<String, usize>,
+    /// Dry runs: restricting children that would refuse the delete.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub blocked: BTreeMap<String, Value>,
+    /// Dry runs: a few of the documents that would go.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sample: Vec<String>,
+}
+
+/// The guardrail for writes by filter: no filter means nothing, unless the
+/// caller says `all`.
+pub fn require_filter(filter: &Value, all: bool, what: &str, tess: &str) -> Result<()> {
+    let empty = match filter {
+        Value::Null => true,
+        Value::Object(map) => map.is_empty(),
+        _ => false,
+    };
+    if empty && !all {
+        return Err(EngineError::FilterRequired(format!(
+            "This {} has no filter, so it would apply to every document in '{}'. Add a filter, or send \"all\": true if that's what you mean.",
+            what, tess
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// A filter as the delete history keeps it: values tested against sealed or
+/// tokenized fields are replaced, so the history doesn't hold them.
+fn redact_filter(filter: &Value, hidden: &[String]) -> Value {
+    match filter {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    // Operators ($and, $or, ...; also written _and) hold more conditions.
+                    let operator = k.starts_with('$') || (k.starts_with('_') && !hidden.contains(k));
+                    let value = if operator {
+                        redact_filter(v, hidden)
+                    } else if hidden.iter().any(|h| h == k || h.starts_with(&format!("{}.", k)) || k.starts_with(&format!("{}.", h))) {
+                        json!("[redacted]")
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), value)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(|v| redact_filter(v, hidden)).collect()),
+        other => other.clone(),
+    }
+}
+
+impl HexDBEngine {
+    /// Delete every document of `tess` matching `filter`, and what cascades
+    /// from them, as one atomic commit and one delete batch (see the module
+    /// comment). Needs a filter, or `options.all`.
+    pub async fn delete_where(&self, tess: &str, filter: &Value, options: DeleteOptions, idem: Option<super::writes::IdempotencyKey>) -> Result<super::writes::Outcome<DeleteSummary>> {
+        crate::catalog::validate_tessellation_name(tess).map_err(|e| EngineError::Invalid(e.to_string()))?;
+        require_filter(filter, options.all, "delete", tess)?;
+        let parsed = Filter::parse(if filter.is_null() { &Value::Null } else { filter })?;
+        let mut hidden = self.sealed_paths(tess);
+        hidden.extend(self.tokenized_fields(tess).into_iter().map(|(path, _)| path));
+        let context = DeleteContext { kind: "filter".into(), filter: Some(redact_filter(filter, &hidden)), batch: Some(Ulid::generate()), expect: options.expect };
+        if options.dry_run {
+            let (roots, matched) = self.delete_roots(tess, &parsed).await?;
+            let plan = self.plan_cascade(&roots.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(), &HashSet::new()).await?;
+            return Ok(super::writes::Outcome { value: summary(None, true, matched, plan, true), replayed: false });
+        }
+        let batch = context.batch.map(|b| b.to_string());
+        let parsed = &parsed;
+        let run = self.run_write(idem, move || {
+            let batch = batch.clone();
+            Box::pin(async move {
+                let (roots, matched) = self.delete_roots(tess, parsed).await?;
+                let keys: Vec<DocKey> = roots.iter().map(|(k, _)| k.clone()).collect();
+                let plan = self.plan_cascade(&keys, &HashSet::new()).await?;
+                if !plan.blocked.is_empty() {
+                    return Err(blocked_error(&plan).into());
+                }
+                if let Some(expect) = options.expect {
+                    check_expected(expect, plan.total())?;
+                }
+                let mut items: Vec<BatchItem> = roots
+                    .into_iter()
+                    .map(|(key, seq)| {
+                        let op = WalOp::Delete { tessellation: key.tessellation.clone(), id: key.id };
+                        BatchItem { key, op, expected_seq: Some(seq) }
+                    })
+                    .collect();
+                self.run_before_triggers(&mut items).await?;
+                let batch = if items.is_empty() { None } else { batch };
+                Ok((items, summary(batch, false, matched, plan, false)))
+            })
+        });
+        with_delete_context(context, run).await
+    }
+
+    /// The documents of `tess` a delete by `filter` removes directly (those
+    /// the caller can see and change), with their versions, and how many matched.
+    async fn delete_roots(&self, tess: &str, filter: &Filter) -> Result<(Vec<(DocKey, u64)>, usize)> {
+        let read = self.caller_scope(tess, crate::auth::Action::Read);
+        let write = self.caller_scope(tess, crate::auth::Action::Write);
+        if !read.is_full() || !write.is_full() {
+            self.check_scope_fields(tess, &read, filter, &[])?;
+        }
+        // Only documents the caller can see and change.
+        let narrowed = read.narrow(&write.narrow(filter));
+        let mut roots = Vec::new();
+        for doc in self.matching_documents(tess, &narrowed).await? {
+            let key = DocKey::new(tess, doc.id);
+            let (_, seq) = self.read_latest(&key).await?;
+            roots.push((key, seq));
+            if roots.len() > MAX_DELETE {
+                return Err(EngineError::TooMany(format!("The filter matches more than {} documents; narrow it.", MAX_DELETE)).into());
+            }
+        }
+        let matched = roots.len();
+        Ok((roots, matched))
+    }
+}
+
+fn check_expected(expect: usize, total: usize) -> Result<()> {
+    if expect != total {
+        return Err(EngineError::CountChanged(format!(
+            "The delete would remove {} documents and files, not the {} expected (the data changed since it was previewed); nothing was deleted. Preview it again.",
+            total, expect
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn summary(batch: Option<String>, dry_run: bool, matched: usize, plan: CascadePlan, preview: bool) -> DeleteSummary {
+    let total = plan.total();
+    DeleteSummary {
+        batch,
+        dry_run,
+        matched,
+        total,
+        deleted: plan.deleted,
+        detached: plan.detached,
+        blocked: if preview { plan.blocked } else { BTreeMap::new() },
+        sample: if preview { plan.sample } else { Vec::new() },
+    }
+}
+
 /// The 409 for a delete that restricting children refuse.
 pub fn blocked_error(plan: &CascadePlan) -> EngineError {
+    let list = blocked_list(plan);
+    EngineError::HasChildren(format!(
+        "Documents link to what you're deleting with on_delete restrict: {}. Delete or move them first; nothing was deleted.",
+        list
+    ))
+}
+
+fn blocked_list(plan: &CascadePlan) -> String {
     let list: Vec<String> = plan
         .blocked
         .iter()
         .map(|(tess, b)| format!("{} in '{}' ({})", b["count"], tess, b["ids"].as_array().map(|ids| ids.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default()))
-        .collect();
-    EngineError::Conflict(format!(
-        "Documents link to what you're deleting with on_delete restrict: {}. Delete or move them first; nothing was deleted.",
-        list.join("; ")
-    ))
+        .collect::<Vec<_>>();
+    list.join("; ")
 }
 
 /// Set a (possibly dotted) field to null.
@@ -433,7 +621,8 @@ impl HexDBEngine {
         if deletes.is_empty() {
             return Ok(None);
         }
-        let batch = Ulid::generate();
+        let ctx = context();
+        let batch = ctx.batch.unwrap_or_else(Ulid::generate);
         let now = Utc::now().timestamp_millis();
         let (at, by) = (now_text(), caller_login());
         let trash_days = self.config.storage.trash_days as i64;
@@ -467,7 +656,10 @@ impl HexDBEngine {
         if counts.is_empty() {
             return Ok(None);
         }
-        let ctx = context();
+        // Checked again here, at commit, so nothing that changed since the plan slips through.
+        if let Some(expect) = ctx.expect {
+            check_expected(expect, counts.values().sum())?;
+        }
         let kind = if ctx.kind.is_empty() { "delete".to_string() } else { ctx.kind };
         let record = json!({
             "at": at,
@@ -811,7 +1003,7 @@ mod tests {
         // A restricting child refuses the delete, and nothing goes.
         let invoice = engine.insert_json("invoices", json!({ "order_id": o }), None).await.unwrap().id;
         let refused = engine.delete_document("orders", &o, None).await.unwrap_err();
-        assert!(matches!(kind(&refused), Some(EngineError::Conflict(_))) && refused.to_string().contains("invoices"), "{:#}", refused);
+        assert!(matches!(kind(&refused), Some(EngineError::HasChildren(_))) && refused.to_string().contains("invoices"), "{:#}", refused);
         assert!(exists(&engine, "orders", &order).await && exists(&engine, "items", &item1).await);
         // Unless it goes in the same request.
         let ops = crate::engine::parse_transaction(&json!({ "operations": [

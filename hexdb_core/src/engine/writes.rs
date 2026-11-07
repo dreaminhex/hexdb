@@ -717,16 +717,19 @@ impl HexDBEngine {
     }
 
     /// Merge-patch every document matching `filter` (see [`crate::filter`]).
-    /// An empty filter matches every document. Atomic.
+    /// A missing or empty filter, which matches every document, needs `all`. Atomic.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_where(
         &self,
         tess: &str,
         filter: &Value,
         update: &Value,
         ttl: Option<i64>,
+        all: bool,
         idem: Option<IdempotencyKey>,
     ) -> Result<Outcome<UpdateSummary>> {
         validate_tess(tess)?;
+        super::deletes::require_filter(filter, all, "update", tess)?;
         let filter = Filter::parse(filter)?;
         let changes = patch_changes(update, "update")?;
         if changes.is_empty() && ttl.is_none() {
@@ -931,7 +934,7 @@ impl HexDBEngine {
 
     /// Plan and commit a write, retrying on concurrent modification, with
     /// optional idempotency.
-    async fn run_write<'a, T>(
+    pub(crate) async fn run_write<'a, T>(
         &'a self,
         idem: Option<IdempotencyKey>,
         plan: impl Fn() -> BoxFuture<'a, Result<(Vec<BatchItem>, T)>>,

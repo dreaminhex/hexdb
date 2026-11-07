@@ -206,6 +206,7 @@ pub fn app_router(
             "/{tessellation}/_update",
             post(update_where).layer(DefaultBodyLimit::max(body_limit)),
         )
+        .route("/{tessellation}/_delete", post(delete_where))
         // Files tessellations (uploads stream, so they have no body limit here;
         // files.max_file_mb and storage.disk_mb apply)
         .route(

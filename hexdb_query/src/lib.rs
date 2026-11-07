@@ -66,6 +66,10 @@ fn to_gql(e: anyhow::Error) -> async_graphql::Error {
         Some(EngineError::ScannerUnavailable(m)) => gql_error("SCANNER_UNAVAILABLE", m.clone()),
         Some(EngineError::Quarantined(m)) => gql_error("FILE_QUARANTINED", m.clone()),
         Some(EngineError::TooLarge(m)) => gql_error("DOCUMENT_TOO_LARGE", m.clone()),
+        Some(EngineError::FilterRequired(m)) => gql_error("FILTER_REQUIRED", m.clone()),
+        Some(EngineError::CountChanged(m)) => gql_error("COUNT_CHANGED", m.clone()),
+        Some(EngineError::HasChildren(m)) => gql_error("HAS_CHILDREN", m.clone()),
+        Some(EngineError::TooMany(m)) => gql_error("TOO_MANY", m.clone()),
         Some(EngineError::SchemaViolation(m)) => gql_error("SCHEMA_VIOLATION", m.clone()),
         Some(EngineError::TriggerRejected(m)) => gql_error("TRIGGER_REJECTED", m.clone()),
         Some(EngineError::DiskFull(m)) => gql_error("DISK_FULL", m.clone()),
@@ -401,6 +405,26 @@ pub struct ChangePage {
 pub struct UpdateResult {
     pub matched: usize,
     pub modified: usize,
+}
+
+/// Result of `deleteDocuments`.
+#[derive(SimpleObject)]
+pub struct DeleteResult {
+    /// The delete batch, to restore it (none for a dry run, or when nothing matched).
+    pub batch: Option<String>,
+    pub dry_run: bool,
+    /// Documents the filter matched.
+    pub matched: usize,
+    /// Documents and files that go, in total (matches and cascade).
+    pub total: usize,
+    /// Documents and files that go, per tessellation.
+    pub deleted: Json<Value>,
+    /// Documents whose parent link is set to null, per tessellation.
+    pub detached: Json<Value>,
+    /// Dry runs: restricting children that would refuse the delete.
+    pub blocked: Json<Value>,
+    /// Dry runs: a few of the documents that would go.
+    pub sample: Vec<String>,
 }
 
 /// A role granted to a user, on these tessellations ("*" for all).
@@ -863,7 +887,7 @@ impl MutationRoot {
                 .results
                 .into_iter()
                 .map(|r| TxResultObject {
-                    op: format!("{:?}", r.op).to_lowercase(),
+                    op: serde_json::to_value(r.op).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
                     tessellation: r.tessellation,
                     id: ID(r.id),
                     version: r.version,
@@ -881,6 +905,7 @@ impl MutationRoot {
         filter: Json<Value>,
         update: Json<Value>,
         ttl: Option<u64>,
+        #[graphql(default, desc = "Required with an empty filter: yes, every document.")] all: bool,
         #[graphql(desc = "Retrying with the same key and arguments returns the original result instead of writing again (kept 24 hours). Reusing a key with different arguments fails with UNPROCESSABLE.")]
         idempotency_key: Option<String>,
     ) -> GqlResult<UpdateResult> {
@@ -891,14 +916,58 @@ impl MutationRoot {
             ctx,
             "updateDocuments",
             idempotency_key,
-            json!({ "tessellation": tessellation, "filter": filter.0, "update": update.0, "ttl": ttl }),
+            json!({ "tessellation": tessellation, "filter": filter.0, "update": update.0, "ttl": ttl, "all": all }),
         )?;
         let outcome = engine
-            .update_where(&tessellation, &filter.0, &update.0, expiry(ttl), idem)
+            .update_where(&tessellation, &filter.0, &update.0, expiry(ttl), all, idem)
             .await
             .map_err(to_gql)?;
         note_replay(ctx, outcome.replayed);
         Ok(UpdateResult { matched: outcome.value.matched, modified: outcome.value.modified })
+    }
+
+    /// Delete every document matching a filter, and what cascades from them
+    /// through parent links, as one atomic delete batch that can be restored.
+    #[allow(clippy::too_many_arguments)]
+    async fn delete_documents(
+        &self,
+        ctx: &Context<'_>,
+        tessellation: String,
+        filter: Option<Json<Value>>,
+        #[graphql(default, desc = "Required with an empty filter: yes, every document.")] all: bool,
+        #[graphql(default, desc = "Only say what would be deleted.")] dry_run: bool,
+        #[graphql(desc = "Refuse unless exactly this many documents and files would go (the count a dry run gave).")] expect: Option<usize>,
+        #[graphql(desc = "Retrying with the same key and arguments returns the original result instead of writing again (kept 24 hours).")]
+        idempotency_key: Option<String>,
+    ) -> GqlResult<DeleteResult> {
+        let engine = engine(ctx);
+        let files = engine.tessellation_info(&tessellation).is_some_and(|i| i.is_files());
+        require(ctx, if files { Permission::Delete } else { Permission::Write }, &tessellation)?;
+        existing_tessellation(engine, &tessellation)?;
+        let filter = filter.map(|f| f.0).unwrap_or(Value::Null);
+        let idem = if dry_run {
+            None
+        } else {
+            idempotency(ctx, "deleteDocuments", idempotency_key, json!({ "tessellation": tessellation, "filter": filter, "all": all, "expect": expect }))?
+        };
+        let options = hexdb_core::engine::deletes::DeleteOptions { all, dry_run, expect };
+        let outcome = engine.delete_where(&tessellation, &filter, options, idem).await.map_err(to_gql)?;
+        note_replay(ctx, outcome.replayed);
+        let s = outcome.value;
+        if let (Some(batch), false) = (&s.batch, outcome.replayed) {
+            let details = json!({ "batch": batch, "total": s.total, "deleted": s.deleted, "detached": s.detached, "all": all });
+            engine.audit(&principal(ctx)?.login, "data.delete.filter", &tessellation, details).await;
+        }
+        Ok(DeleteResult {
+            batch: s.batch,
+            dry_run: s.dry_run,
+            matched: s.matched,
+            total: s.total,
+            deleted: Json(json!(s.deleted)),
+            detached: Json(json!(s.detached)),
+            blocked: Json(json!(s.blocked)),
+            sample: s.sample,
+        })
     }
 
     /// Create a user tessellation.
