@@ -78,7 +78,8 @@ async fn compaction_drops_deleted_and_expired_documents() -> Result<()> {
     let stats = engine.compact().await?;
     assert_eq!(stats.files_merged, 2);
     assert_eq!(stats.entries_kept, 1, "only the live document should remain on disk");
-    assert_eq!(engine.stats().await.sst_files, 1);
+    // One SSTable for "t", plus the delete's trash entry and history record.
+    assert_eq!(engine.stats().await.sst_files, 3);
     assert_eq!(engine.count_documents("t").await?, 1);
 
     engine.shutdown().await?;

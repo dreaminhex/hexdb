@@ -8,15 +8,103 @@
 //
 // Each link field gets a field index (unless one already starts with it), so
 // finding a document's children is an index lookup, not a scan.
+//
+// The trash: every delete of a user document goes through `trash_deletes`
+// inside the commit, which adds, in the same atomic batch, a copy of the
+// document to `_trash` (kept `storage.trash_days`) and one record of the
+// whole delete to `_deletes` (the delete history, kept
+// `storage.delete_history_days`). Everything one commit deleted is one delete
+// batch, and `restore_batch` puts all of it back in one commit. Deleted files
+// go to the files trash as before (see engine::files); the batch lists them.
+//
+// A trash entry is `{from, doc_id, batch, deleted_at, deleted_by, expires_at,
+// document: {...the stored fields...}}` with a fresh ID. The document's sealed
+// fields stay sealed there (under `document.`, see engine::sealing) and its
+// tokens stay tokens, and a restore writes it back as it was stored: with its
+// `_schema` stamp, without validating it against a newer version.
+//
+// Not deletes, so not trashed: TTL expiry, writes HexDB makes itself (files
+// internals, replication), dropping a tessellation, and system tessellations.
 
-use super::{EngineError, HexDBEngine};
+use super::{writes::BatchItem, EngineError, HexDBEngine};
 use crate::{
+    document::{infer_fields_from_json, CompactFields, Document, FieldValue},
+    filter::Filter,
+    hex::DocKey,
     index::{IndexDef, IndexKind},
     schema::{OnDelete, ParentLink, SchemaInput},
+    wal::WalOp,
 };
 use anyhow::Result;
-use serde::Serialize;
+use chrono::{SecondsFormat, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
+use std::future::Future;
 use tracing::warn;
+use ulid::Ulid;
+
+/// Deleted documents, until they're restored, purged or expire.
+pub const TRASH_TESSELLATION: &str = "_trash";
+/// One record per delete batch: who deleted what, when, and how.
+pub const DELETES_TESSELLATION: &str = "_deletes";
+/// The field of a trash entry holding the deleted document's fields.
+pub const TRASHED_DOCUMENT: &str = "document";
+
+const DAY_MILLIS: i64 = 86_400_000;
+
+/// What a delete was, for its history record (set by the code that deletes).
+#[derive(Debug, Clone, Default)]
+pub struct DeleteContext {
+    /// delete (by ID), filter, transaction, folder; empty: delete.
+    pub kind: String,
+    /// The filter of a delete by filter (already redacted).
+    pub filter: Option<Value>,
+}
+
+tokio::task_local! {
+    static CONTEXT: DeleteContext;
+    static RESTORING: ();
+}
+
+/// Run `f` with `context` describing the deletes it commits.
+pub async fn with_delete_context<F: Future>(context: DeleteContext, f: F) -> F::Output {
+    CONTEXT.scope(context, f).await
+}
+
+fn context() -> DeleteContext {
+    CONTEXT.try_with(Clone::clone).unwrap_or_default()
+}
+
+/// True while a restore commits (documents go back as they were stored).
+pub(crate) fn is_restoring() -> bool {
+    RESTORING.try_with(|_| ()).is_ok()
+}
+
+fn now_text() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn caller_login() -> String {
+    crate::access::caller().map(|p| p.login.clone()).unwrap_or_else(|| "system".into())
+}
+
+fn string_field(doc: &Document, field: &str) -> Option<String> {
+    match doc.data.get(field) {
+        Some(FieldValue::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// What restoring a batch did.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RestoreSummary {
+    pub batch: String,
+    /// Documents put back, per tessellation.
+    pub restored: BTreeMap<String, usize>,
+    /// Documents left out because a document with the same ID exists again.
+    pub skipped: Vec<Value>,
+}
 
 /// A link from a child tessellation's field to a parent tessellation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -104,6 +192,195 @@ impl HexDBEngine {
     }
 }
 
+impl HexDBEngine {
+    /// Inside a commit: trash the user documents `items` delete and record
+    /// the batch. Returns the batch ID, if the commit deletes any.
+    pub(crate) async fn trash_deletes(&self, items: &mut Vec<BatchItem>) -> Result<Option<Ulid>> {
+        if is_restoring() || crate::files::is_internal() {
+            return Ok(None);
+        }
+        let deletes: Vec<DocKey> = items
+            .iter()
+            .filter(|i| matches!(i.op, WalOp::Delete { .. }) && self.tessellation_info(&i.key.tessellation).is_some_and(|t| t.is_user_data()))
+            .map(|i| i.key.clone())
+            .collect();
+        if deletes.is_empty() {
+            return Ok(None);
+        }
+        let batch = Ulid::generate();
+        let now = Utc::now().timestamp_millis();
+        let (at, by) = (now_text(), caller_login());
+        let trash_days = self.config.storage.trash_days as i64;
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut files = Vec::new();
+        let mut added = Vec::new();
+        for key in &deletes {
+            let (Some(previous), _) = self.read_latest(key).await? else { continue };
+            *counts.entry(key.tessellation.clone()).or_default() += 1;
+            if self.tessellation_info(&key.tessellation).is_some_and(|t| t.is_files()) {
+                // The files trash keeps it (engine::files); the batch remembers where.
+                files.push(json!({ "tessellation": key.tessellation, "id": key.id.to_string() }));
+                continue;
+            }
+            if trash_days == 0 {
+                continue;
+            }
+            let mut data: CompactFields = BTreeMap::new();
+            data.insert("from".into(), FieldValue::String(key.tessellation.clone()));
+            data.insert("doc_id".into(), FieldValue::String(key.id.to_string()));
+            data.insert("batch".into(), FieldValue::String(batch.to_string()));
+            data.insert("deleted_at".into(), FieldValue::String(at.clone()));
+            data.insert("deleted_by".into(), FieldValue::String(by.clone()));
+            if let Some(expires) = previous.ttl {
+                data.insert("expires_at".into(), FieldValue::Integer(expires));
+            }
+            data.insert(TRASHED_DOCUMENT.into(), FieldValue::Object(previous.data));
+            let entry = Document { id: Ulid::generate(), tessellation: TRASH_TESSELLATION.into(), data, ttl: Some(now + trash_days * DAY_MILLIS) };
+            added.push(BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op: WalOp::Put(entry), expected_seq: None });
+        }
+        if counts.is_empty() {
+            return Ok(None);
+        }
+        let ctx = context();
+        let kind = if ctx.kind.is_empty() { "delete".to_string() } else { ctx.kind };
+        let record = json!({
+            "at": at,
+            "by": by,
+            "kind": kind,
+            "tessellation": deletes[0].tessellation,
+            "filter": ctx.filter,
+            "counts": counts,
+            "documents": counts.values().sum::<usize>() - files.len(),
+            "files": files,
+            "trashed": trash_days > 0,
+        });
+        let history_days = self.config.storage.delete_history_days.max(1) as i64;
+        let record = Document { id: batch, tessellation: DELETES_TESSELLATION.into(), data: infer_fields_from_json(&record), ttl: Some(now + history_days * DAY_MILLIS) };
+        added.push(BatchItem { key: DocKey::new(DELETES_TESSELLATION, batch), op: WalOp::Put(record), expected_seq: Some(0) });
+        self.ensure_trash().await?;
+        items.extend(added);
+        Ok(Some(batch))
+    }
+
+    /// Create the trash and the delete history, with their indexes.
+    async fn ensure_trash(&self) -> Result<()> {
+        if self.tessellation_exists(TRASH_TESSELLATION) && self.tessellation_exists(DELETES_TESSELLATION) {
+            return Ok(());
+        }
+        self.ensure_system_tessellation(TRASH_TESSELLATION)?;
+        self.ensure_system_tessellation(DELETES_TESSELLATION)?;
+        for field in ["batch", "from"] {
+            self.ensure_internal_index(TRASH_TESSELLATION, IndexDef { fields: vec![field.into()], ..Default::default() }).await?;
+        }
+        Ok(())
+    }
+
+    /// A delete batch's history record.
+    pub async fn delete_batch(&self, batch: &str) -> Result<Option<Document>> {
+        let Ok(id) = Ulid::from_string(batch) else { return Ok(None) };
+        if !self.tessellation_exists(DELETES_TESSELLATION) {
+            return Ok(None);
+        }
+        Ok(self.read_latest(&DocKey::new(DELETES_TESSELLATION, id)).await?.0)
+    }
+
+    /// The trash entries of a batch.
+    pub async fn trashed_in_batch(&self, batch: &str) -> Result<Vec<Document>> {
+        if !self.tessellation_exists(TRASH_TESSELLATION) {
+            return Ok(Vec::new());
+        }
+        self.matching_documents(TRASH_TESSELLATION, &Filter::parse(&json!({ "batch": batch }))?).await
+    }
+
+    /// The document a trash entry holds, as it was stored.
+    pub fn trashed_document(entry: &Document) -> Option<Document> {
+        let tessellation = string_field(entry, "from")?;
+        let id = Ulid::from_string(&string_field(entry, "doc_id")?).ok()?;
+        let data = match entry.data.get(TRASHED_DOCUMENT) {
+            Some(FieldValue::Object(fields)) => fields.clone(),
+            _ => BTreeMap::new(),
+        };
+        let ttl = match entry.data.get("expires_at") {
+            Some(FieldValue::Integer(at)) => Some(*at),
+            _ => None,
+        };
+        Some(Document { id, tessellation, data, ttl })
+    }
+
+    /// Put back everything a delete batch removed, in one commit. Documents
+    /// whose IDs exist again are a conflict, or left out with `skip_existing`.
+    /// The caller needs write access to every document it puts back.
+    pub async fn restore_batch(&self, batch: &str, skip_existing: bool) -> Result<RestoreSummary> {
+        self.ensure_writable()?;
+        for _ in 0..super::MAX_WRITE_RETRIES {
+            let (record, record_seq) = match Ulid::from_string(batch) {
+                Ok(id) if self.tessellation_exists(DELETES_TESSELLATION) => self.read_latest(&DocKey::new(DELETES_TESSELLATION, id)).await?,
+                _ => (None, 0),
+            };
+            let record = record.ok_or_else(|| EngineError::NotFound(format!("There's no delete batch {}.", batch)))?;
+            let fields = record.data_json();
+            if let Some(at) = fields.get("restored_at").and_then(Value::as_str) {
+                return Err(EngineError::Conflict(format!("Delete batch {} was already restored ({}).", batch, at)).into());
+            }
+            if fields.get("purged_at").and_then(Value::as_str).is_some() || fields["trashed"] == false {
+                return Err(EngineError::Conflict(format!("Delete batch {} can't be restored: its documents weren't kept or were purged.", batch)).into());
+            }
+
+            let mut summary = RestoreSummary { batch: batch.to_string(), ..Default::default() };
+            let mut items = Vec::new();
+            let mut existing = Vec::new();
+            for entry in self.trashed_in_batch(batch).await? {
+                let (entry_now, entry_seq) = self.read_latest(&DocKey::new(TRASH_TESSELLATION, entry.id)).await?;
+                if entry_now.is_none() {
+                    continue;
+                }
+                let Some(doc) = Self::trashed_document(&entry) else { continue };
+                if !self.tessellation_info(&doc.tessellation).is_some_and(|t| t.is_user_data()) {
+                    return Err(EngineError::Conflict(format!("The tessellation '{}' no longer exists; create it to restore batch {}.", doc.tessellation, batch)).into());
+                }
+                if !self.caller_scope(&doc.tessellation, crate::auth::Action::Write).allows(&doc) {
+                    return Err(EngineError::Forbidden(format!("Your role may not restore documents in '{}'.", doc.tessellation)).into());
+                }
+                let key = DocKey::new(&doc.tessellation, doc.id);
+                let (current, seq) = self.read_latest(&key).await?;
+                if current.is_some() {
+                    existing.push(json!({ "tessellation": doc.tessellation, "id": doc.id.to_string() }));
+                    continue;
+                }
+                *summary.restored.entry(doc.tessellation.clone()).or_default() += 1;
+                items.push(BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op: WalOp::Delete { tessellation: TRASH_TESSELLATION.into(), id: entry.id }, expected_seq: Some(entry_seq) });
+                items.push(BatchItem { key, op: WalOp::Put(doc), expected_seq: Some(seq) });
+            }
+            if !existing.is_empty() && !skip_existing {
+                let list: Vec<String> = existing.iter().take(10).map(|e| format!("{}/{}", e["tessellation"].as_str().unwrap_or(""), e["id"].as_str().unwrap_or(""))).collect();
+                return Err(EngineError::Conflict(format!(
+                    "{} document(s) of batch {} exist again ({}). Restore the rest with skip_existing=true, or delete those first.",
+                    existing.len(),
+                    batch,
+                    list.join(", ")
+                ))
+                .into());
+            }
+            summary.skipped = existing;
+
+            let mut map = match fields {
+                Value::Object(map) => map,
+                _ => Map::new(),
+            };
+            map.insert("restored_at".into(), json!(now_text()));
+            map.insert("restored_by".into(), json!(caller_login()));
+            map.insert("restored".into(), json!(summary.restored));
+            let record = Document { id: record.id, tessellation: DELETES_TESSELLATION.into(), data: infer_fields_from_json(&Value::Object(map)), ttl: record.ttl };
+            items.push(BatchItem { key: DocKey::new(DELETES_TESSELLATION, record.id), op: WalOp::Put(record), expected_seq: Some(record_seq) });
+
+            if RESTORING.scope((), self.commit(items)).await? {
+                return Ok(summary);
+            }
+        }
+        Err(EngineError::Conflict("The documents are being modified concurrently; try again.".into()).into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::schema::{new_version, OnDelete, SchemaInput};
@@ -129,5 +406,106 @@ mod tests {
         assert!(serde_json::from_value::<SchemaInput>(json!({ "fields": { "p": { "parent": { "tessellation": "orders" } } } })).is_err());
         // Detach on a nullable required field is fine.
         new_version(&[], input(json!({ "fields": { "p": { "type": "string", "required": true, "nullable": true, "parent": { "tessellation": "orders", "on_delete": "detach" } } } }))).unwrap();
+    }
+
+    use super::{DELETES_TESSELLATION, TRASH_TESSELLATION};
+    use crate::{engine::writes::BatchItem, hex::DocKey, users, wal::WalOp, Document, EngineError};
+
+    fn batch_of(engine: &super::HexDBEngine) -> String {
+        let ids = engine.state.try_lock().map(|s| s.hex.keys()).unwrap_or_default();
+        let mut batches: Vec<String> = ids.into_iter().filter(|k| k.tessellation == DELETES_TESSELLATION).map(|k| k.id.to_string()).collect();
+        batches.sort();
+        batches.pop().expect("a delete batch")
+    }
+
+    fn kind(e: &anyhow::Error) -> Option<&EngineError> {
+        e.downcast_ref::<EngineError>()
+    }
+
+    #[tokio::test]
+    async fn deletes_go_to_the_trash_and_restore_as_they_were() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        let doc = engine.insert_json("orders", json!({ "customer": "ada", "total": 12.5, "lines": [{ "sku": "A" }] }), Some(4_102_444_800_000)).await.unwrap();
+        let id = doc.id.to_string();
+        assert!(engine.delete_document("orders", &id, None).await.unwrap().value);
+        assert!(engine.get_document("orders", &id).await.unwrap().is_none());
+
+        // One trash entry and one history record.
+        let batch = batch_of(&engine);
+        let record = engine.delete_batch(&batch).await.unwrap().unwrap().data_json();
+        assert_eq!((record["kind"].as_str(), record["documents"].as_u64(), record["counts"]["orders"].as_u64()), (Some("delete"), Some(1), Some(1)), "{}", record);
+        assert_eq!(record["by"], "system");
+        let trashed = engine.trashed_in_batch(&batch).await.unwrap();
+        assert_eq!(trashed.len(), 1);
+        let entry = trashed[0].data_json();
+        assert_eq!((entry["from"].as_str(), entry["doc_id"].as_str(), entry["document"]["customer"].as_str()), (Some("orders"), Some(id.as_str()), Some("ada")));
+        assert!(trashed[0].ttl.is_some(), "trash entries expire");
+
+        // Restore puts back the same document (ID, fields, expiry) and empties the batch.
+        let summary = engine.restore_batch(&batch, false).await.unwrap();
+        assert_eq!(summary.restored.get("orders"), Some(&1));
+        let back = engine.get_document("orders", &id).await.unwrap().unwrap();
+        assert_eq!(back.data_json(), doc.data_json());
+        assert_eq!(back.ttl, Some(4_102_444_800_000));
+        assert!(engine.trashed_in_batch(&batch).await.unwrap().is_empty());
+        let record = engine.delete_batch(&batch).await.unwrap().unwrap().data_json();
+        assert!(record["restored_at"].is_string(), "{}", record);
+        let again = engine.restore_batch(&batch, false).await.unwrap_err();
+        assert!(matches!(kind(&again), Some(EngineError::Conflict(_))), "{:#}", again);
+        assert!(matches!(kind(&engine.restore_batch("01J00000000000000000000000", false).await.unwrap_err()), Some(EngineError::NotFound(_))));
+
+        // A document whose ID exists again blocks the restore, unless skipped.
+        assert!(engine.delete_document("orders", &id, None).await.unwrap().value);
+        let batch = batch_of(&engine);
+        let twin = Document { id: doc.id, tessellation: "orders".into(), data: doc.data.clone(), ttl: None };
+        assert!(engine.commit(vec![BatchItem { key: DocKey::new("orders", doc.id), op: WalOp::Put(twin), expected_seq: None }]).await.unwrap());
+        let blocked = engine.restore_batch(&batch, false).await.unwrap_err();
+        assert!(blocked.to_string().contains("exist again"), "{:#}", blocked);
+        let summary = engine.restore_batch(&batch, true).await.unwrap();
+        assert_eq!((summary.restored.len(), summary.skipped.len()), (0, 1));
+
+        // Deleting from a system tessellation isn't trashed.
+        let entries = engine.count_documents(TRASH_TESSELLATION).await.unwrap();
+        let record_id = DocKey::new(DELETES_TESSELLATION, ulid::Ulid::from_string(&batch).unwrap());
+        let op = WalOp::Delete { tessellation: DELETES_TESSELLATION.into(), id: record_id.id };
+        assert!(engine.commit(vec![BatchItem { key: record_id, op, expected_seq: None }]).await.unwrap());
+        assert_eq!(engine.count_documents(TRASH_TESSELLATION).await.unwrap(), entries);
+        engine.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn masked_fields_stay_sealed_in_the_trash() {
+        const CARD: &str = "4111111111111111";
+        let (engine, dir) = crate::engine::test_engine().await;
+        engine.create_tessellation(users::ROLES_TESSELLATION, "system").unwrap();
+        users::create_role(
+            &engine,
+            users::RoleInput {
+                name: Some("clerk".into()),
+                description: None,
+                permissions: Some(vec!["read".into()]),
+                restrictions: Some(serde_json::from_value(json!({ "orders": { "mask": { "card": { "show_last": 4 } } } })).unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+        let id = engine.insert_json("orders", json!({ "card": CARD, "name": "Ada" }), None).await.unwrap().id;
+        engine.delete_document("orders", &id.to_string(), None).await.unwrap();
+        let batch = batch_of(&engine);
+        let entry = engine.trashed_in_batch(&batch).await.unwrap().remove(0);
+
+        // In memory the trash entry holds the card sealed; reading it opens it.
+        let held = match engine.state.lock().await.hex.read(&DocKey::new(TRASH_TESSELLATION, entry.id)) {
+            Some(crate::hex::Lookup::Live { bytes, .. }) => String::from_utf8_lossy(&bytes).into_owned(),
+            _ => String::new(),
+        };
+        assert!(!held.contains(CARD) && held.contains(crate::sealed::MARK), "{}", held);
+        assert_eq!(entry.data_json()["document"]["card"], CARD);
+
+        engine.restore_batch(&batch, false).await.unwrap();
+        assert_eq!(engine.get_document("orders", &id.to_string()).await.unwrap().unwrap().data_json()["card"], CARD);
+        engine.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

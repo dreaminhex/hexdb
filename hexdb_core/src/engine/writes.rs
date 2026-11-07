@@ -1117,8 +1117,11 @@ impl HexDBEngine {
 
         let mut items = items;
         if !replicated {
+            self.trash_deletes(&mut items).await?;
             self.guard_file_writes(&mut items).await?;
-            self.apply_schemas(&mut items).await?;
+            if !super::deletes::is_restoring() {
+                self.apply_schemas(&mut items).await?;
+            }
         }
         if !replicated {
             self.tokenize_items(&mut items).await?;

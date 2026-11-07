@@ -137,6 +137,17 @@ pub struct StorageConfig {
     /// SSTables are hard-linked instead of copied.
     #[serde(default)]
     pub backup_path: String,
+    /// Days a deleted document stays in the trash, restorable (0: deleted
+    /// documents aren't kept; their deletes are still in the history).
+    #[serde(default = "default_trash_days")]
+    pub trash_days: u64,
+    /// Days the delete history (`GET /deletes`) keeps each delete.
+    #[serde(default = "default_delete_history_days")]
+    pub delete_history_days: u64,
+}
+
+fn default_delete_history_days() -> u64 {
+    90
 }
 
 fn default_change_history_hours() -> u64 {
@@ -722,6 +733,8 @@ impl Default for HexConfig {
                 change_history_hours: default_change_history_hours(),
                 change_history_mb: default_change_history_mb(),
                 backup_path: String::new(),
+                trash_days: default_trash_days(),
+                delete_history_days: default_delete_history_days(),
             },
             compression: CompressionConfig {
                 compression_level: 0,

@@ -5,7 +5,11 @@
 // read from disk are sealed again before the hex caches them; and when roles
 // change which fields are masked, everything the hex holds is resealed.
 
-use super::{writes::BatchItem, HexDBEngine};
+use super::{
+    deletes::{TRASHED_DOCUMENT, TRASH_TESSELLATION},
+    writes::BatchItem,
+    HexDBEngine,
+};
 use crate::{
     hex::{DocKey, Lookup},
     sealed::SealPolicy,
@@ -26,6 +30,12 @@ impl HexDBEngine {
         self.seal_policy.read().unwrap().paths(tess)
     }
 
+    /// The sealed fields of one document: its tessellation's, or for a trash
+    /// entry, those of the tessellation it was deleted from, under `document.`.
+    pub(crate) fn doc_sealed_paths(&self, doc: &crate::Document) -> Vec<String> {
+        trash_paths(doc, |tess| self.sealed_paths(tess)).unwrap_or_else(|| self.sealed_paths(&doc.tessellation))
+    }
+
     /// Seal the documents a commit writes.
     pub(crate) fn seal_items(&self, items: &mut [BatchItem]) {
         if self.seal_policy.read().unwrap().is_empty() {
@@ -33,7 +43,7 @@ impl HexDBEngine {
         }
         for item in items {
             if let WalOp::Put(doc) = &mut item.op {
-                let paths = self.sealed_paths(&doc.tessellation);
+                let paths = self.doc_sealed_paths(doc);
                 if !paths.is_empty() {
                     *doc = self.sealer.seal_document(doc, &paths);
                 }
@@ -68,7 +78,7 @@ impl HexDBEngine {
     /// Stored bytes as the hex keeps them: with this tessellation's sealed
     /// fields sealed (documents in SSTables may predate the mask).
     pub(crate) fn sealed_bytes(&self, doc: &crate::Document, bytes: Vec<u8>) -> Vec<u8> {
-        let paths = self.sealed_paths(&doc.tessellation);
+        let paths = self.doc_sealed_paths(doc);
         if paths.is_empty() {
             return bytes;
         }
@@ -102,15 +112,19 @@ impl HexDBEngine {
         let mut affected: BTreeSet<String> = self.state.lock().await.hex.keys().into_iter().map(|k| k.tessellation).collect();
         affected.extend(self.indexes.read().unwrap().by_tessellation.keys().cloned());
         affected.retain(|t| !self.is_system_tessellation(t) && (policy.differs_for(&old, t) || (first && !policy.paths(t).is_empty())));
-        if affected.is_empty() {
+        // Trash entries are sealed by the tessellation they came from: reseal them all.
+        let trash = *old != policy || first;
+        if affected.is_empty() && !trash {
             return;
         }
+        let paths_of = |doc: &crate::Document| trash_paths(doc, |t| policy.paths(t)).unwrap_or_else(|| policy.paths(&doc.tessellation));
 
         let mut resealed = 0usize;
         {
             let mut state = self.state.lock().await;
             for key in state.hex.keys() {
-                if !affected.contains(&key.tessellation) {
+                let in_trash = trash && key.tessellation == TRASH_TESSELLATION;
+                if !affected.contains(&key.tessellation) && !in_trash {
                     continue;
                 }
                 let Some(meta) = state.hex.meta(&key).cloned() else { continue };
@@ -120,7 +134,7 @@ impl HexDBEngine {
                 if let Some(Lookup::Live { bytes, seq, ttl }) = state.hex.read(&key) {
                     // Reading opens what was sealed; seal again under the new policy.
                     let Ok(doc) = parse_document(&bytes) else { continue };
-                    let bytes = match serde_json::to_vec(&self.sealer.seal_document(&doc, &policy.paths(&key.tessellation))) {
+                    let bytes = match serde_json::to_vec(&self.sealer.seal_document(&doc, &paths_of(&doc))) {
                         Ok(bytes) => bytes,
                         Err(_) => continue,
                     };
@@ -133,8 +147,13 @@ impl HexDBEngine {
             self.doc_cache.drop_tessellation(tess);
         }
         self.changes.reseal(|doc| {
-            let paths = if affected.contains(&doc.tessellation) { policy.paths(&doc.tessellation) } else { return None };
-            Some(self.sealer.seal_document(&crate::sealed::unsealed(doc), &paths))
+            let in_trash = trash && doc.tessellation == TRASH_TESSELLATION;
+            if !affected.contains(&doc.tessellation) && !in_trash {
+                return None;
+            }
+            let doc = crate::sealed::unsealed(doc);
+            let paths = paths_of(&doc);
+            Some(self.sealer.seal_document(&doc, &paths))
         });
         for tess in &affected {
             self.rebuild_tessellation_indexes(tess).await;
@@ -146,8 +165,24 @@ impl HexDBEngine {
     /// True if a document read from this tessellation may be kept in the
     /// parsed-document cache (not when it has sealed fields: parsed, they're open).
     pub(crate) fn cacheable(&self, key: &DocKey) -> bool {
+        if key.tessellation == TRASH_TESSELLATION {
+            return self.seal_policy.read().unwrap().is_empty();
+        }
         self.sealed_paths(&key.tessellation).is_empty()
     }
+}
+
+/// A trash entry's sealed paths (`paths` of the tessellation it came from,
+/// under `document.`); `None` for any other document.
+fn trash_paths(doc: &crate::Document, paths: impl Fn(&str) -> Vec<String>) -> Option<Vec<String>> {
+    if doc.tessellation != TRASH_TESSELLATION {
+        return None;
+    }
+    let from = match doc.data.get("from") {
+        Some(crate::document::FieldValue::String(from)) => from.clone(),
+        _ => return Some(Vec::new()),
+    };
+    Some(paths(&from).into_iter().map(|p| format!("{}.{}", TRASHED_DOCUMENT, p)).collect())
 }
 
 #[cfg(test)]

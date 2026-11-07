@@ -863,7 +863,7 @@ impl Follower {
                     // Kept in memory: with its sealed fields sealed (see crate::sealed).
                     let mut kept = change.clone();
                     if let Some(doc) = &kept.document {
-                        kept.document = Some(engine.sealer.seal_document(doc, &engine.sealed_paths(&doc.tessellation)));
+                        kept.document = Some(engine.sealer.seal_document(doc, &engine.doc_sealed_paths(doc)));
                     }
                     recent.push(&session.source_id, &kept, limit);
                 }
