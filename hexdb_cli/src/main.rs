@@ -13,6 +13,7 @@ use std::{
 };
 
 mod config;
+mod deletes;
 mod files;
 mod lattice;
 mod service;
@@ -181,6 +182,48 @@ enum Commands {
         #[arg(short, long, global = true)]
         url: Option<String>,
     },
+    /// Delete documents (by ID or --filter) or a folder of files, showing what
+    /// would go first and asking (needs a token with write access)
+    Rm {
+        tessellation: String,
+        /// Document IDs, or a folder of a files tessellation (starting with /)
+        targets: Vec<String>,
+        /// Delete the documents matching this filter, e.g. '{"status": "draft"}'
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// Delete every document in the tessellation (or the whole root folder)
+        #[arg(long)]
+        all: bool,
+        /// With a folder: everything below it too
+        #[arg(short, long)]
+        recursive: bool,
+        /// Don't ask (for scripts); the delete still fails if more would go than the preview counted
+        #[arg(short, long)]
+        yes: bool,
+        /// Print the server's JSON answer
+        #[arg(long)]
+        json: bool,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// The delete history: list deletes, show one, restore it, or purge it for good
+    Deletes {
+        #[command(subcommand)]
+        sub: DeletesCommand,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long, global = true)]
+        url: Option<String>,
+    },
+    /// List what's in a tessellation's trash
+    Trash {
+        tessellation: String,
+        #[arg(long)]
+        json: bool,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long)]
+        url: Option<String>,
+    },
     /// List a folder of a files tessellation, or search its names and metadata
     Ls {
         tessellation: String,
@@ -193,6 +236,41 @@ enum Commands {
         /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
         #[arg(short, long)]
         url: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeletesCommand {
+    /// Recent deletes, newest first (yours, or everyone's with the audit permission)
+    List {
+        /// Who deleted
+        #[arg(long)]
+        by: Option<String>,
+        /// Deletes from this tessellation
+        #[arg(long)]
+        tessellation: Option<String>,
+        /// delete, filter, transaction or folder
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// One delete: what it removed and what's still in the trash
+    Show { batch: String },
+    /// Put back everything a delete removed, in one step
+    Restore {
+        batch: String,
+        /// Leave out documents whose IDs exist again instead of refusing
+        #[arg(long)]
+        skip_existing: bool,
+    },
+    /// Delete what a delete left in the trash, for good
+    Purge {
+        batch: String,
+        #[arg(short, long)]
+        yes: bool,
     },
 }
 
@@ -459,6 +537,36 @@ async fn main() -> Result<()> {
                 ConfigCommand::AiUsage { json } => config::ai_usage(&target, json).await,
                 ConfigCommand::Rollback { version, message } => config::rollback(&target, version, message.as_deref()).await,
             }
+        }
+        Commands::Rm { tessellation, targets, filter, all, recursive, yes, json, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb rm` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key with write access.");
+            }
+            let target = deletes::Target { config: &config, base: &base, token };
+            let args = deletes::RmArgs { tessellation: &tessellation, targets: &targets, filter: filter.as_deref(), all, recursive, yes, json };
+            deletes::rm(&target, args).await
+        }
+        Commands::Deletes { sub, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb deletes` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key.");
+            }
+            let target = deletes::Target { config: &config, base: &base, token };
+            match sub {
+                DeletesCommand::List { by, tessellation, kind, limit, json } => {
+                    let query = [("by", by), ("tessellation", tessellation), ("kind", kind), ("limit", Some(limit.to_string()))];
+                    deletes::list(&target, &query, json).await
+                }
+                DeletesCommand::Show { batch } => deletes::show(&target, &batch).await,
+                DeletesCommand::Restore { batch, skip_existing } => deletes::restore(&target, &batch, skip_existing).await,
+                DeletesCommand::Purge { batch, yes } => deletes::purge(&target, &batch, yes).await,
+            }
+        }
+        Commands::Trash { tessellation, json, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            let target = deletes::Target { config: &config, base: &base, token };
+            deletes::trash(&target, &tessellation, json).await
         }
         Commands::Ls { tessellation, folder, search, url } => {
             let (base, config) = base_url(config_path, url)?;

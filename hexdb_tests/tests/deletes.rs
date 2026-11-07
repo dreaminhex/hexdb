@@ -213,3 +213,45 @@ fn trash_history_restore_purge_folders_and_files() -> Result<()> {
     assert_eq!(actions.iter().filter(|a| **a == "data.delete.cascade").count(), 1, "{:?}", actions);
     Ok(())
 }
+
+#[test]
+fn the_cli_previews_confirms_and_restores() -> Result<()> {
+    let server = TestServer::start()?;
+    for status in ["old", "old", "new"] {
+        server.insert("orders", &json!({ "status": status }))?;
+    }
+    let cli = |args: &[&str]| -> Result<(bool, String)> {
+        let out = std::process::Command::new(hexdb_tests::cli_bin()?)
+            .arg("--config")
+            .arg(server.dir().join("hexdb.toml"))
+            .args(args)
+            .env("HEXDB_TOKEN", server.token())
+            .current_dir(server.dir())
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        Ok((out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))))
+    };
+
+    // Nothing to delete without a target; a script must say --yes.
+    let (ok, text) = cli(&["rm", "orders"])?;
+    assert!(!ok && text.contains("--all"), "{}", text);
+    let (ok, text) = cli(&["rm", "orders", "--filter", r#"{"status": "old"}"#])?;
+    assert!(!ok && text.contains("would delete 2") && text.contains("--yes"), "{}", text);
+    assert_eq!(server.count("orders")?, 3);
+
+    let (ok, text) = cli(&["rm", "orders", "--filter", r#"{"status": "old"}"#, "--yes"])?;
+    assert!(ok, "{}", text);
+    assert_eq!(server.count("orders")?, 1);
+    let batch = text.split("hexdb deletes restore ").nth(1).map(|s| s.trim().to_string()).expect("a restore hint");
+
+    let (ok, text) = cli(&["deletes", "list"])?;
+    assert!(ok && text.contains(&batch) && text.contains("filter"), "{}", text);
+    let (ok, text) = cli(&["trash", "orders"])?;
+    assert!(ok && text.contains("2 in the trash"), "{}", text);
+    let (ok, text) = cli(&["deletes", "restore", &batch])?;
+    assert!(ok && text.contains("2 in orders"), "{}", text);
+    assert_eq!(server.count("orders")?, 3);
+    let (ok, text) = cli(&["deletes", "purge", &batch])?;
+    assert!(!ok && text.contains("--yes"), "{}", text);
+    Ok(())
+}
