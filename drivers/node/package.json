@@ -1,6 +1,6 @@
 {
   "name": "@dreaminhex/hexdb",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "description": "Client for HexDB, the hexagonal document database.",
   "license": "Apache-2.0",
   "author": "Dream In Hex",
