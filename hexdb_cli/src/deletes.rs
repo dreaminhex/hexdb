@@ -9,20 +9,13 @@
 // fails instead of deleting more if the data changed in between. Deleting by
 // ID previews too when something would cascade.
 
+use crate::api::{encode, Target};
 use anyhow::{bail, Context, Result};
-use hexdb_core::HexConfig;
 use serde_json::{json, Value};
 use std::io::{BufRead, IsTerminal, Write};
-use std::time::Duration;
 
 /// Above this many documents, confirming means typing the tessellation's name.
 const TYPE_TO_CONFIRM: u64 = 100;
-
-pub struct Target<'a> {
-    pub config: &'a HexConfig,
-    pub base: &'a str,
-    pub token: Option<&'a str>,
-}
 
 /// What to delete.
 pub struct RmArgs<'a> {
@@ -34,51 +27,8 @@ pub struct RmArgs<'a> {
     pub recursive: bool,
     pub yes: bool,
     pub json: bool,
-}
-
-fn encode(segment: &str) -> String {
-    let mut out = String::new();
-    for byte in segment.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{:02X}", byte));
-        }
-    }
-    out
-}
-
-impl Target<'_> {
-    /// Send a request; the parsed answer, or the server's error message.
-    async fn send(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value> {
-        let mut builder = hexdb_core::crypt::http_client().timeout(Duration::from_secs(300));
-        if !self.config.tls.ca_file.is_empty() {
-            let pem = std::fs::read(&self.config.tls.ca_file).with_context(|| format!("Failed to read tls.ca_file {}", self.config.tls.ca_file))?;
-            for cert in reqwest::Certificate::from_pem_bundle(&pem)? {
-                builder = builder.add_root_certificate(cert);
-            }
-        }
-        let mut request = builder.build()?.request(method, format!("{}{}", self.base, path));
-        if let Some(token) = self.token {
-            request = request.bearer_auth(token);
-        }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = request.send().await.map_err(|e| if e.is_connect() { anyhow::anyhow!("HexDB is not reachable at {}.", self.base) } else { e.into() })?;
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        if !status.is_success() {
-            let message = value.pointer("/error/message").and_then(Value::as_str).map(String::from).unwrap_or(text);
-            match status {
-                reqwest::StatusCode::UNAUTHORIZED => bail!("This needs valid credentials: set HEXDB_TOKEN (or --token) to an API key."),
-                reqwest::StatusCode::FORBIDDEN => bail!("Not allowed with this API key: {}", message),
-                _ => bail!("{}", message),
-            }
-        }
-        Ok(value)
-    }
+    /// The delete's idempotency key (default: a new one).
+    pub key: Option<&'a str>,
 }
 
 /// The request that deletes (or previews): a path and a body or query.
@@ -112,15 +62,17 @@ fn delete_request(args: &RmArgs<'_>) -> Result<(String, Option<Value>)> {
     Ok((format!("/{}/_delete", tess), Some(json!({ "filter": filter, "all": args.all }))))
 }
 
-async fn run_delete(target: &Target<'_>, path: &str, body: &Option<Value>, dry_run: bool, expect: Option<u64>) -> Result<Value> {
-    match body {
+/// The preview (`key` None: a dry run) or the delete itself (with its idempotency key).
+async fn run_delete(target: &Target<'_>, path: &str, body: &Option<Value>, key: Option<&str>, expect: Option<u64>) -> Result<Value> {
+    let dry_run = key.is_none();
+    let (method, path, body) = match body {
         Some(body) => {
             let mut body = body.clone();
             body["dry_run"] = json!(dry_run);
             if let Some(expect) = expect {
                 body["expect"] = json!(expect);
             }
-            target.send(reqwest::Method::POST, path, Some(&body)).await
+            (reqwest::Method::POST, path.to_string(), Some(body))
         }
         None => {
             let mut path = path.to_string();
@@ -130,8 +82,12 @@ async fn run_delete(target: &Target<'_>, path: &str, body: &Option<Value>, dry_r
             if let Some(expect) = expect {
                 path.push_str(&format!("&expect={}", expect));
             }
-            target.send(reqwest::Method::DELETE, &path, None).await
+            (reqwest::Method::DELETE, path, None)
         }
+    };
+    match key {
+        Some(key) => Ok(target.write(method, &path, body.as_ref(), key).await?.0),
+        None => target.send(method, &path, body.as_ref()).await,
     }
 }
 
@@ -154,7 +110,7 @@ fn print_preview(preview: &Value) {
 }
 
 /// Ask on the terminal. `name`: the text that must be typed (else y/N).
-fn confirm(question: &str, name: Option<&str>) -> Result<bool> {
+pub(crate) fn confirm(question: &str, name: Option<&str>) -> Result<bool> {
     let stdin = std::io::stdin();
     match name {
         Some(name) => print!("{} Type '{}' to confirm: ", question, name),
@@ -173,7 +129,7 @@ fn confirm(question: &str, name: Option<&str>) -> Result<bool> {
 /// `hexdb rm`.
 pub async fn rm(target: &Target<'_>, args: RmArgs<'_>) -> Result<()> {
     let (path, body) = delete_request(&args)?;
-    let preview = run_delete(target, &path, &body, true, None).await?;
+    let preview = run_delete(target, &path, &body, None, None).await?;
     let total = preview["total"].as_u64().unwrap_or(0);
     if total == 0 {
         if args.json {
@@ -203,7 +159,8 @@ pub async fn rm(target: &Target<'_>, args: RmArgs<'_>) -> Result<()> {
             return Ok(());
         }
     }
-    let done = run_delete(target, &path, &body, false, Some(total)).await?;
+    let key = args.key.map(String::from).unwrap_or_else(crate::api::new_key);
+    let done = run_delete(target, &path, &body, Some(&key), Some(total)).await?;
     if args.json {
         println!("{}", done);
     } else {
@@ -256,7 +213,7 @@ pub async fn list(target: &Target<'_>, query: &[(&str, Option<String>)], json: b
 
 /// `hexdb deletes show`.
 pub async fn show(target: &Target<'_>, batch: &str) -> Result<()> {
-    let body = target.send(reqwest::Method::GET, &format!("/deletes/{}", encode(batch)), None).await?;
+    let body: Value = target.send(reqwest::Method::GET, &format!("/deletes/{}", encode(batch)), None).await?;
     println!("{}", serde_json::to_string_pretty(&body)?);
     Ok(())
 }
@@ -264,7 +221,7 @@ pub async fn show(target: &Target<'_>, batch: &str) -> Result<()> {
 /// `hexdb deletes restore`.
 pub async fn restore(target: &Target<'_>, batch: &str, skip_existing: bool) -> Result<()> {
     let path = format!("/deletes/{}/restore?skip_existing={}", encode(batch), skip_existing);
-    let body = target.send(reqwest::Method::POST, &path, None).await?;
+    let body = target.write(reqwest::Method::POST, &path, None, &crate::api::new_key()).await?.0;
     println!("Restored: {}.", counts(&body["restored"]));
     if let Some(skipped) = body["skipped"].as_array().filter(|s| !s.is_empty()) {
         println!("Left out, because they exist again: {}.", skipped.len());
@@ -286,7 +243,7 @@ pub async fn purge(target: &Target<'_>, batch: &str, yes: bool) -> Result<()> {
             return Ok(());
         }
     }
-    let body = target.send(reqwest::Method::DELETE, &format!("/deletes/{}", encode(batch)), None).await?;
+    let body = target.write(reqwest::Method::DELETE, &format!("/deletes/{}", encode(batch)), None, &crate::api::new_key()).await?.0;
     println!("Purged {} item(s) of batch {} for good.", body["purged"], batch);
     Ok(())
 }

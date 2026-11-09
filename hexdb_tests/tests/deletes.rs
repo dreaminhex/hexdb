@@ -265,5 +265,49 @@ fn the_cli_previews_confirms_and_restores() -> Result<()> {
     assert_eq!(server.count("orders")?, 3);
     let (ok, text) = cli(&["deletes", "purge", &batch])?;
     assert!(!ok && text.contains("--yes"), "{}", text);
+
+    // Documents: an insert sent twice with the same key is written once.
+    let (ok, text) = cli(&["doc", "insert", "notes", r#"{"text": "once"}"#, "--idempotency-key", "note-1", "--json"])?;
+    assert!(ok, "{}", text);
+    let id = serde_json::from_str::<Value>(&text)?["id"].as_str().unwrap().to_string();
+    let (ok, text) = cli(&["doc", "insert", "notes", r#"{"text": "once"}"#, "--idempotency-key", "note-1"])?;
+    assert!(ok && text.contains("already done") && text.contains(&id), "{}", text);
+    assert_eq!(server.count("notes")?, 1);
+    let (ok, text) = cli(&["doc", "insert", "notes", r#"[{"text": "a"}, {"text": "b"}]"#])?;
+    assert!(ok && text.contains("Inserted 2 documents"), "{}", text);
+
+    // Patch and replace, with a version precondition read from `doc get`.
+    let (ok, text) = cli(&["doc", "get", "notes", &id])?;
+    assert!(ok, "{}", text);
+    let version = serde_json::from_str::<Value>(&text)?["_version"].as_u64().expect("a version");
+    let (ok, text) = cli(&["doc", "patch", "notes", &id, r#"{"text": "stale"}"#, "--if-version", &(version + 1).to_string()])?;
+    assert!(!ok && text.contains("version"), "{}", text);
+    let (ok, text) = cli(&["doc", "patch", "notes", &id, r#"{"text": "patched"}"#, "--if-version", &version.to_string()])?;
+    assert!(ok, "{}", text);
+    let (ok, text) = cli(&["doc", "replace", "notes", &id, r#"{"body": "replaced"}"#])?;
+    assert!(ok, "{}", text);
+    assert_eq!(server.get_doc("notes", &id)?.unwrap()["body"], "replaced");
+
+    // Update by filter needs a filter (or --all) and, in a script, --yes.
+    let (ok, text) = cli(&["doc", "update", "notes", "--set", r#"{"seen": true}"#])?;
+    assert!(!ok && text.contains("--all"), "{}", text);
+    let (ok, text) = cli(&["doc", "update", "notes", "--all", "--set", r#"{"seen": true}"#])?;
+    assert!(!ok && text.contains("--yes") && text.contains("3 document"), "{}", text);
+    let (ok, text) = cli(&["doc", "update", "notes", "--all", "--set", r#"{"seen": true}"#, "--yes"])?;
+    assert!(ok && text.contains("Updated 3"), "{}", text);
+
+    // A schema with an enforced parent link, then a transaction and a refused orphan.
+    let schema = r#"{"fields": {"order_id": {"type": "string", "parent": {"tessellation": "orders", "on_delete": "cascade", "enforce": true}}}}"#;
+    server.insert("lines", &json!({ "order_id": null }))?;
+    let (ok, text) = cli(&["schema", "set", "lines", schema])?;
+    assert!(ok && text.contains("version 1"), "{}", text);
+    let (ok, text) = cli(&["schema", "show", "lines"])?;
+    assert!(ok && text.contains("\"enforce\": true"), "{}", text);
+    let order = server.insert("orders", &json!({ "status": "tx" }))?;
+    let tx = format!(r#"[{{"op": "insert", "tessellation": "lines", "data": {{"order_id": "{}"}}}}]"#, order);
+    let (ok, text) = cli(&["tx", &tx])?;
+    assert!(ok && text.contains("Committed 1"), "{}", text);
+    let (ok, text) = cli(&["doc", "insert", "lines", r#"{"order_id": "01J00000000000000000000000"}"#])?;
+    assert!(!ok && text.contains("doesn't exist"), "{}", text);
     Ok(())
 }

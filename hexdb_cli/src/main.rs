@@ -12,8 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod api;
 mod config;
 mod deletes;
+mod docs;
 mod files;
 mod lattice;
 mod service;
@@ -203,8 +205,40 @@ enum Commands {
         /// Print the server's JSON answer
         #[arg(long)]
         json: bool,
+        /// Idempotency key for the delete (default: a new one; a lost answer is retried with it)
+        #[arg(long)]
+        idempotency_key: Option<String>,
         /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
         #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// Read and write documents: get, insert, replace, patch, upsert, update by filter (needs a token with write access)
+    Doc {
+        #[command(subcommand)]
+        sub: DocCommand,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long, global = true)]
+        url: Option<String>,
+    },
+    /// Run a transaction: operations across tessellations, all or nothing
+    Tx {
+        /// {"operations": [...]} or the array of operations: JSON, @file.json, or - for standard input
+        data: String,
+        /// Idempotency key (default: a new one; a lost answer is retried with it)
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// Show, check or set a tessellation's schema, including parent links (needs manage to set)
+    Schema {
+        #[command(subcommand)]
+        sub: SchemaCommand,
+        /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
+        #[arg(short, long, global = true)]
         url: Option<String>,
     },
     /// The delete history: list deletes, show one, restore it, or purge it for good
@@ -237,6 +271,93 @@ enum Commands {
         #[arg(short, long)]
         url: Option<String>,
     },
+}
+
+/// Options shared by document writes.
+#[derive(clap::Args)]
+struct WriteArgs {
+    /// Idempotency key: the same write sent again with it returns the first result instead of writing twice (default: a new one per command; a lost answer is retried with it)
+    #[arg(long)]
+    idempotency_key: Option<String>,
+    /// Expire the document this many seconds after the write
+    #[arg(long)]
+    ttl: Option<u64>,
+    /// Print the server's JSON answer
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum DocCommand {
+    /// Print a document
+    Get { tessellation: String, id: String },
+    /// Insert a document, or an array of them in one atomic write (JSON, @file.json, or - for standard input)
+    Insert {
+        tessellation: String,
+        data: String,
+        #[command(flatten)]
+        write: WriteArgs,
+    },
+    /// Replace a document's fields with these (PUT)
+    Replace {
+        tessellation: String,
+        id: String,
+        data: String,
+        /// Only if the document is at this version (`hexdb doc get` shows it as _version); 409 otherwise
+        #[arg(long)]
+        if_version: Option<u64>,
+        #[command(flatten)]
+        write: WriteArgs,
+    },
+    /// Merge these fields into a document (PATCH; null removes a field)
+    Patch {
+        tessellation: String,
+        id: String,
+        data: String,
+        /// Only if the document is at this version; 409 otherwise
+        #[arg(long)]
+        if_version: Option<u64>,
+        #[command(flatten)]
+        write: WriteArgs,
+    },
+    /// Insert, or replace the document whose key fields match (e.g. an ID from another system)
+    Upsert {
+        tessellation: String,
+        /// Key fields, comma-separated
+        #[arg(long, value_delimiter = ',', required = true)]
+        on: Vec<String>,
+        data: String,
+        #[command(flatten)]
+        write: WriteArgs,
+    },
+    /// Merge fields into every document matching a filter; says how many first and asks
+    Update {
+        tessellation: String,
+        /// Which documents, e.g. '{"status": "draft"}'
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// Every document in the tessellation (instead of a filter)
+        #[arg(long)]
+        all: bool,
+        /// The fields to merge in, e.g. '{"status": "published"}'
+        #[arg(long)]
+        set: String,
+        /// Don't ask (for scripts)
+        #[arg(short, long)]
+        yes: bool,
+        #[command(flatten)]
+        write: WriteArgs,
+    },
+}
+
+#[derive(Subcommand)]
+enum SchemaCommand {
+    /// The schema versions, migration progress, parent links and the links pointing here
+    Show { tessellation: String },
+    /// Check a version without registering it: compatibility, and how many documents would fit
+    Check { tessellation: String, data: String },
+    /// Register a new version (JSON, @file.json, or -); existing documents migrate in the background
+    Set { tessellation: String, data: String },
 }
 
 #[derive(Subcommand)]
@@ -426,8 +547,18 @@ struct PluginEntry {
 
 const REGISTRY_PATH: &str = "plugins.json";
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // The command dispatch below is one large future; Windows gives the main
+    // thread 1 MB of stack, so it runs on a thread with room to spare.
+    std::thread::Builder::new()
+        .name("hexdb".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run()))?
+        .join()
+        .map_err(|_| anyhow!("The command panicked."))?
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let config_path = cli.config.as_deref();
     let token = cli.token.as_deref();
@@ -538,21 +669,59 @@ async fn main() -> Result<()> {
                 ConfigCommand::Rollback { version, message } => config::rollback(&target, version, message.as_deref()).await,
             }
         }
-        Commands::Rm { tessellation, targets, filter, all, recursive, yes, json, url } => {
+        Commands::Rm { tessellation, targets, filter, all, recursive, yes, json, idempotency_key, url } => {
             let (base, config) = base_url(config_path, url)?;
             if token.is_none() {
                 bail!("`hexdb rm` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key with write access.");
             }
-            let target = deletes::Target { config: &config, base: &base, token };
-            let args = deletes::RmArgs { tessellation: &tessellation, targets: &targets, filter: filter.as_deref(), all, recursive, yes, json };
+            let target = api::Target { config: &config, base: &base, token };
+            let args = deletes::RmArgs { tessellation: &tessellation, targets: &targets, filter: filter.as_deref(), all, recursive, yes, json, key: idempotency_key.as_deref() };
             deletes::rm(&target, args).await
+        }
+        Commands::Doc { sub, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb doc` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key.");
+            }
+            let target = api::Target { config: &config, base: &base, token };
+            fn options(w: &WriteArgs) -> docs::WriteOptions<'_> {
+                docs::WriteOptions { key: w.idempotency_key.as_deref(), ttl: w.ttl, json: w.json }
+            }
+            match &sub {
+                DocCommand::Get { tessellation, id } => docs::get(&target, tessellation, id).await,
+                DocCommand::Insert { tessellation, data, write } => docs::insert(&target, tessellation, data, &options(write)).await,
+                DocCommand::Replace { tessellation, id, data, if_version, write } => docs::modify(&target, "replace", tessellation, id, data, *if_version, &options(write)).await,
+                DocCommand::Patch { tessellation, id, data, if_version, write } => docs::modify(&target, "patch", tessellation, id, data, *if_version, &options(write)).await,
+                DocCommand::Upsert { tessellation, on, data, write } => docs::upsert(&target, tessellation, on, data, &options(write)).await,
+                DocCommand::Update { tessellation, filter, all, set, yes, write } => docs::update(&target, tessellation, filter.as_deref(), *all, set, *yes, &options(write)).await,
+            }
+        }
+        Commands::Tx { data, idempotency_key, json, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb tx` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key.");
+            }
+            let target = api::Target { config: &config, base: &base, token };
+            docs::transaction(&target, &data, &docs::WriteOptions { key: idempotency_key.as_deref(), ttl: None, json }).await
+        }
+        Commands::Schema { sub, url } => {
+            let (base, config) = base_url(config_path, url)?;
+            if token.is_none() {
+                bail!("`hexdb schema` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key.");
+            }
+            let target = api::Target { config: &config, base: &base, token };
+            match sub {
+                SchemaCommand::Show { tessellation } => docs::schema_show(&target, &tessellation).await,
+                SchemaCommand::Check { tessellation, data } => docs::schema_check(&target, &tessellation, &data).await,
+                SchemaCommand::Set { tessellation, data } => docs::schema_set(&target, &tessellation, &data).await,
+            }
         }
         Commands::Deletes { sub, url } => {
             let (base, config) = base_url(config_path, url)?;
             if token.is_none() {
                 bail!("`hexdb deletes` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key.");
             }
-            let target = deletes::Target { config: &config, base: &base, token };
+            let target = api::Target { config: &config, base: &base, token };
             match sub {
                 DeletesCommand::List { by, tessellation, kind, limit, json } => {
                     let query = [("by", by), ("tessellation", tessellation), ("kind", kind), ("limit", Some(limit.to_string()))];
@@ -565,7 +734,7 @@ async fn main() -> Result<()> {
         }
         Commands::Trash { tessellation, json, url } => {
             let (base, config) = base_url(config_path, url)?;
-            let target = deletes::Target { config: &config, base: &base, token };
+            let target = api::Target { config: &config, base: &base, token };
             deletes::trash(&target, &tessellation, json).await
         }
         Commands::Ls { tessellation, folder, search, url } => {
