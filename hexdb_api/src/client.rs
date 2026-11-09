@@ -129,6 +129,7 @@ pub async fn resolve_client(
         if engine.lattice_keys.verify_request(&signature, &method, &signed_target(&target, &client), b"", &engine.lattice_nonces) {
             address = client;
             request.extensions_mut().insert(Forwarded);
+            request.extensions_mut().insert(crate::forward::ForwardSignature(signature));
         } else {
             tracing::warn!("🚫 Ignoring a forwarded-request header without a valid lattice signature.");
         }

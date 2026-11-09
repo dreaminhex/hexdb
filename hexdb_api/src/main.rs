@@ -190,6 +190,7 @@ async fn server() -> anyhow::Result<()> {
         config_sha256: String::new(),
         config_state: String::new(),
         signs_responses: true,
+        signs_forwarded: true,
         slicing: config.replication.slicing,
         slice_copies: config.replication.slice_copies.max(1),
         slices_held: hexdb_core::slicing::ALL_SLICES,

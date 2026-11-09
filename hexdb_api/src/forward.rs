@@ -70,6 +70,58 @@ pub const FORWARDED_TO_HEADER: &str = "x-hexdb-forwarded-to";
 #[derive(Clone, Copy)]
 pub struct Forwarded;
 
+/// The verified signature of a forwarded request, so its JSON answer can be
+/// signed for it (see `crate::lattice::sign_responses`).
+#[derive(Clone)]
+pub struct ForwardSignature(pub String);
+
+/// Answers larger than this aren't buffered to be signed or checked.
+pub const MAX_SIGNED_ANSWER: u64 = 64 * 1024 * 1024;
+
+/// True for an answer the Overseer signs and a replica checks: JSON within the size limit.
+pub fn signed_answer(headers: &HeaderMap) -> bool {
+    let json = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("application/json"));
+    let small = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).is_none_or(|n| n <= MAX_SIGNED_ANSWER);
+    json && small
+}
+
+/// Read the Overseer's answer and check its signature, when the Overseer signs
+/// forwarded answers and this one is JSON. Err: a ready 502 to return.
+enum Answer {
+    /// Read whole, and its signature checked.
+    Checked(axum::body::Bytes),
+    /// Passed through as it comes (not JSON, or the Overseer doesn't sign).
+    Unchecked(reqwest::Response),
+}
+
+async fn checked_answer(engine: &HexDBEngine, overseer: &hexdb_core::network::discovery::PeerHex, signature: &str, response: reqwest::Response, incoming: Option<&str>) -> Result<(StatusCode, HeaderMap, Answer), crate::handlers::ApiError> {
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut out_headers = HeaderMap::new();
+    copy_headers(response.headers(), &mut out_headers);
+    let json = signed_answer(response.headers());
+    if !json || (!overseer.signs_forwarded && incoming.is_none()) {
+        return Ok((status, out_headers, Answer::Unchecked(response)));
+    }
+    let tag = response.headers().get(hexdb_core::replication::LATTICE_RESPONSE_HEADER).and_then(|v| v.to_str().ok()).map(String::from);
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(e) => return Err(crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", format!("The Overseer's response was cut off: {}", e))),
+    };
+    if overseer.signs_forwarded && !tag.is_some_and(|tag| engine.lattice_keys.verify_response(signature, status.as_u16(), &body, &tag)) {
+        warn!("🚫 The Overseer '{}' sent an answer to a forwarded request without a valid signature; not passing it on.", overseer.name);
+        return Err(crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", "The Overseer's answer didn't verify (it may have been changed in transit); the request may have been carried out."));
+    }
+    out_headers.remove(hexdb_core::replication::LATTICE_RESPONSE_HEADER);
+    // This hex was passing on a request forwarded to it (an Overseer handing its
+    // role over): sign the answer for the hex that sent it here.
+    if let Some(incoming) = incoming {
+        if let Ok(tag) = HeaderValue::from_str(&engine.lattice_keys.sign_response(incoming, status.as_u16(), &body)) {
+            out_headers.insert(HeaderName::from_static(hexdb_core::replication::LATTICE_RESPONSE_HEADER), tag);
+        }
+    }
+    Ok((status, out_headers, Answer::Checked(body)))
+}
+
 /// What the forwarding signature covers.
 pub fn signed_target(path_and_query: &str, client: &str) -> String {
     format!("{}#forwarded-for={}", path_and_query, client)
@@ -175,6 +227,7 @@ fn forward_client(engine: &HexDBEngine) -> Option<reqwest::Client> {
 async fn forward_upload(engine: &Arc<HexDBEngine>, overseer: hexdb_core::network::discovery::PeerHex, request: Request) -> Response {
     let Some(http) = forward_client(engine) else { return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", "This hex can't reach the Overseer.").into_response() };
     let (parts, body) = request.into_parts();
+    let incoming = parts.extensions.get::<ForwardSignature>().map(|s| s.0.clone());
     let client = crate::auth::client_address(&parts.extensions);
     let path_and_query = parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| parts.uri.path().to_string());
     let url = format!("{}{}", hexdb_core::replication::peer_base_url(&overseer), path_and_query);
@@ -195,12 +248,16 @@ async fn forward_upload(engine: &Arc<HexDBEngine>, overseer: hexdb_core::network
             return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", format!("The upload couldn't be passed on to the Overseer '{}': {}", overseer.name, e)).into_response();
         }
     };
-    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let mut out_headers = HeaderMap::new();
-    copy_headers(response.headers(), &mut out_headers);
-    let body = match response.bytes().await {
-        Ok(body) => body,
-        Err(e) => return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", format!("The Overseer's response was cut off: {}", e)).into_response(),
+    let (status, out_headers, answer) = match checked_answer(engine, &overseer, &signature, response, incoming.as_deref()).await {
+        Ok(answer) => answer,
+        Err(refused) => return refused.into_response(),
+    };
+    let body = match answer {
+        Answer::Checked(body) => body,
+        Answer::Unchecked(response) => match response.bytes().await {
+            Ok(body) => body,
+            Err(e) => return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", format!("The Overseer's response was cut off: {}", e)).into_response(),
+        },
     };
     let mut out = Response::new(Body::from(body));
     *out.status_mut() = status;
@@ -258,6 +315,7 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     }
 
     let (parts, body) = request.into_parts();
+    let incoming = parts.extensions.get::<ForwardSignature>().map(|s| s.0.clone());
     let bytes: Bytes = match axum::body::to_bytes(body, crate::routes::bulk_body_limit(&engine)).await {
         Ok(bytes) => bytes,
         Err(_) => return crate::handlers::ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "The request body is too large.").into_response(),
@@ -318,11 +376,16 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
             }
         }
     };
-    let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let mut out_headers = HeaderMap::new();
-    copy_headers(response.headers(), &mut out_headers);
-    // Streamed through, so a forwarded download isn't held in memory.
-    let mut out = Response::new(Body::from_stream(response.bytes_stream()));
+    let (status, out_headers, answer) = match checked_answer(&engine, &overseer, &signature, response, incoming.as_deref()).await {
+        Ok(answer) => answer,
+        Err(refused) => return refused.into_response(),
+    };
+    // Other answers stream through, so a forwarded download isn't held in memory.
+    let body = match answer {
+        Answer::Checked(body) => Body::from(body),
+        Answer::Unchecked(response) => Body::from_stream(response.bytes_stream()),
+    };
+    let mut out = Response::new(body);
     *out.status_mut() = status;
     *out.headers_mut() = out_headers;
     if let Ok(name) = HeaderValue::from_str(&overseer.name) {

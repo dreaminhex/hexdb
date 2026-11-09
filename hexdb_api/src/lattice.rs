@@ -39,13 +39,18 @@ pub async fn sign_responses(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let signature = if request.uri().path().starts_with("/lattice/") {
+    let lattice = request.uri().path().starts_with("/lattice/");
+    let signature = if lattice {
         request.headers().get(LATTICE_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).map(String::from)
     } else {
-        None
+        // A request a replica forwarded: its JSON answer is signed for it too.
+        request.extensions().get::<crate::forward::ForwardSignature>().map(|s| s.0.clone())
     };
     let response = next.run(request).await;
     let Some(signature) = signature else { return response };
+    if !lattice && !crate::forward::signed_answer(response.headers()) {
+        return response;
+    }
     let (mut parts, body) = response.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_SIGNED_RESPONSE).await else {
         return ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "too_large", "The lattice response is too large to sign.").into_response();

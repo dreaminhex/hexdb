@@ -105,6 +105,10 @@ pub struct PeerHex {
     /// then refuse unsigned answers from it.
     #[serde(default)]
     pub signs_responses: bool,
+    /// Signs its JSON answers to writes and reads other hexes forward to it
+    /// (2.4.4 and later): a replica then refuses an unsigned or altered one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signs_forwarded: bool,
     /// `replication.slicing` and `replication.slice_copies` (the Overseer's apply).
     /// The aliases read 2.1.0 hexes, which called slices shards, during an upgrade.
     #[serde(default, alias = "sharding")]
@@ -224,6 +228,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         config_sha256: lattice_config.sha256.clone(),
         config_state: lattice_config.state().to_string(),
         signs_responses: true,
+        signs_forwarded: true,
         slicing: config.replication.slicing,
         slice_copies: config.replication.slice_copies.max(1),
         slices_held,
@@ -871,6 +876,7 @@ mod tests {
             config_sha256: String::new(),
             config_state: String::new(),
             signs_responses: false,
+            signs_forwarded: false,
             slicing: false,
             slice_copies: 1,
             slices_held: crate::slicing::ALL_SLICES,
