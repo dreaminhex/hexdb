@@ -596,7 +596,7 @@ pub struct UiConfig {
 }
 
 fn default_discovery_interval() -> u64 {
-    10
+    5
 }
 
 /// Who this hex is: its name and which lattice role it may take.
@@ -700,7 +700,7 @@ impl Default for HexConfig {
                 lattice_name: String::new(),
                 peers: Vec::new(),
                 scan_local_ports: true,
-                discovery_interval_seconds: 10,
+                discovery_interval_seconds: default_discovery_interval(),
                 lattice_secret: String::new(),
                 previous_lattice_secrets: Vec::new(),
                 trusted_proxies: Vec::new(),

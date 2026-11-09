@@ -230,7 +230,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         replication_source,
         machine_id: crate::updates::machine_id(),
         region: config.identity.effective_region(),
-        knows: engine.peers.lock().await.iter().filter(|m| m.status == "active").map(|m| m.hex.ip.clone()).collect(),
+        knows: sees(&engine.peers.lock().await),
         lag_ms: replication.2,
     }
 }
@@ -731,7 +731,11 @@ pub async fn elect_now(engine: &HexDBEngine) {
 
 /// One discovery round: probe, update members, and re-elect. A peer is lost
 /// after `LOST_AFTER_ROUNDS` consecutive rounds it didn't answer; rounds that
-/// weren't `on_time` (this hex was starved) count no misses.
+/// weren't `on_time` (this hex was starved) count no misses. And a peer that
+/// another hex answering this round still sees isn't lost yet: one hex cut off
+/// from the Overseer (a starved CPU, a broken link) can't elect itself alone
+/// and split the lattice. When the Overseer is really gone, the others stop
+/// seeing it within a round, so failover waits at most one more round.
 pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: bool) {
     let started = std::time::Instant::now();
     // Addresses learned from probers, until they stop probing for as long as a lost peer is kept.
@@ -749,6 +753,8 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: 
     let live: Vec<PeerHex> = {
         let mut members = engine.peers.lock().await;
         let answered: Vec<String> = found.iter().map(|p| p.id.clone()).collect();
+        // Who the hexes that answered still see.
+        let seen_by_others: std::collections::HashSet<String> = found.iter().flat_map(|p| p.knows.iter().cloned()).collect();
         for peer in &found {
             for addr in &peer.knows {
                 learn(engine, addr, None);
@@ -771,15 +777,7 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: 
                 }
             }
         }
-        for member in members.iter_mut().filter(|m| !answered.contains(&m.hex.id)) {
-            if on_time {
-                member.missed += 1;
-            }
-            if member.status == "active" && member.missed >= LOST_AFTER_ROUNDS {
-                warn!("⚠️ Lost contact with hex '{}' ({} rounds without an answer).", member.hex.name, member.missed);
-                member.status = "lost".into();
-            }
-        }
+        count_misses(&mut members, &answered, &seen_by_others, on_time);
         members.retain(|m| now - m.last_seen <= forget_after);
         members.iter().filter(|m| m.status == "active").map(|m| m.hex.clone()).collect()
     };
@@ -793,9 +791,65 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: 
     }
 }
 
+/// The discovery addresses of the members this hex has heard from within the
+/// last `LOST_AFTER_ROUNDS` rounds. A member kept active only because others
+/// still saw it isn't listed, so two hexes that have both lost the Overseer
+/// don't keep vouching for it to each other.
+fn sees(members: &[LatticeMember]) -> Vec<String> {
+    members.iter().filter(|m| m.status == "active" && m.missed < LOST_AFTER_ROUNDS).map(|m| m.hex.ip.clone()).collect()
+}
+
+/// Count a missed round against every member that didn't answer (unless
+/// this hex was starved), and mark lost those past `LOST_AFTER_ROUNDS` that
+/// no hex that answered still sees.
+fn count_misses(members: &mut [LatticeMember], answered: &[String], seen_by_others: &std::collections::HashSet<String>, on_time: bool) {
+    for member in members.iter_mut().filter(|m| !answered.contains(&m.hex.id)) {
+        if on_time {
+            member.missed += 1;
+        }
+        if member.status == "active" && member.missed >= LOST_AFTER_ROUNDS {
+            if seen_by_others.contains(&member.hex.ip) {
+                if member.missed == LOST_AFTER_ROUNDS {
+                    warn!("⚠️ Hex '{}' hasn't answered for {} rounds, but other hexes still see it: not counting it lost yet.", member.hex.name, member.missed);
+                }
+                continue;
+            }
+            warn!("⚠️ Lost contact with hex '{}' ({} rounds without an answer).", member.hex.name, member.missed);
+            member.status = "lost".into();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peer_others_still_see_is_not_lost_yet() {
+        let mut overseer = hex("o", ROLE_OVERSEER, "auto", 1024);
+        overseer.ip = "10.0.0.1:7702".into();
+        let mut members = vec![LatticeMember { hex: overseer, last_seen: Utc::now(), status: "active".into(), missed: 0 }];
+        let seen: std::collections::HashSet<String> = ["10.0.0.1:7702".to_string()].into();
+        for _ in 0..5 {
+            count_misses(&mut members, &[], &seen, true);
+        }
+        assert_eq!((members[0].status.as_str(), members[0].missed), ("active", 5), "another hex still sees it");
+        // A member kept only on others' word isn't vouched for in turn.
+        assert!(sees(&members).is_empty());
+        // Once nobody else sees it either, it's lost at once.
+        count_misses(&mut members, &[], &Default::default(), true);
+        assert_eq!(members[0].status, "lost");
+        // Alone (no other hex to ask), three missed rounds are enough; starved rounds count none.
+        let mut alone = vec![LatticeMember { hex: hex("p", ROLE_HARVESTER, "auto", 1024), last_seen: Utc::now(), status: "active".into(), missed: 0 }];
+        for _ in 0..4 {
+            count_misses(&mut alone, &[], &Default::default(), false);
+        }
+        assert_eq!(alone[0].status, "active");
+        for _ in 0..3 {
+            count_misses(&mut alone, &[], &Default::default(), true);
+        }
+        assert_eq!(alone[0].status, "lost");
+    }
 
     fn hex(id: &str, role: &str, preference: &str, ram_mb: u64) -> PeerHex {
         PeerHex {

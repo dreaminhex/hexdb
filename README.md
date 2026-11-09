@@ -75,7 +75,7 @@ Some results don't depend on the machine:
 - **Memory:** 1.5 times the JSON size, as four data and two parity fragments per document.
 - **Disk:** structured JSON compresses to 16% of its size (a 10 MB document takes 1.6 MB). Small documents average 81%, after encryption and per-document overhead.
 - **Vertex failure:** documents stay readable with two of the six vertices lost.
-- **Failover timing:** a hex is declared lost after three missed discovery rounds, so failover takes about three times `network.discovery_interval_seconds`.
+- **Failover timing:** a hex is declared lost after three missed discovery rounds, once no other hex still sees it, so failover takes three to four times `network.discovery_interval_seconds` (5 s): about 15 to 20 seconds.
 
 Documents over 1 MB need `limits.max_document_kb` raised (up to 64 MB).
 

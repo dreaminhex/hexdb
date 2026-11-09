@@ -2231,7 +2231,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 ### Discovery and election
 
-Every hex runs a TCP discovery listener (`network.discovery_endpoint`, default port 7702). A hex that can't open it (another program has the port) stops at startup with `Failed to bind the discovery endpoint`, as it does for the API port, since an unreachable hex can't replicate, vote or fail over. Every `discovery_interval_seconds` (10), it probes:
+Every hex runs a TCP discovery listener (`network.discovery_endpoint`, default port 7702). A hex that can't open it (another program has the port) stops at startup with `Failed to bind the discovery endpoint`, as it does for the API port, since an unreachable hex can't replicate, vote or fail over. Every `discovery_interval_seconds` (5), it probes:
 - the seed addresses in `network.peers` (other hexes' discovery endpoints);
 - the local ports 7702-7709, unless `scan_local_ports = false`;
 - hexes it learned of (2.3.3 and later): any hex that probes it, and the hexes each peer sees.
@@ -2240,7 +2240,7 @@ A hex that probes another tells it its own discovery address, and each hex's ans
 
 A peer given by name is probed at every address the name resolves to, so one name can stand for a group of hexes: Fly.io's `<app>.internal`, a Kubernetes headless service, or round-robin DNS.
 
-Probes run concurrently with a 3-second timeout. A peer that doesn't answer three consecutive rounds is "lost", and it's forgotten after 30. A round that starts well after it was due (this hex was short of CPU) counts against no one, since the peers may simply not have been asked in time; the log says so.
+Probes run concurrently with a 3-second timeout. A peer that doesn't answer three consecutive rounds is "lost", and it's forgotten after 30. But while another hex that answered this round still sees it, it isn't lost yet: a hex cut off from the Overseer on its own (a starved CPU, a broken link) can't elect itself and split the lattice. When the Overseer really is gone, the other hexes stop seeing it within a round, so a replica takes over in about 15 to 20 seconds with the default interval. A round that starts well after it was due (this hex was short of CPU) counts against no one, since the peers may simply not have been asked in time; the log says so.
 
 Discovery is answered from a thread of its own, with the hex's identity as of its last round, so a hex busy enough to be slow (a throttled cloud CPU, a burst of catch-up work) keeps answering its lattice instead of being voted out. It stops answering only if the rest of the hex hasn't run for a minute, which means it's stuck, not busy.
 
@@ -2688,7 +2688,7 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `network.lattice_name` | generated | Hexes with the same name form a lattice |
 | `network.peers` | `[]` | Other hexes' discovery endpoints |
 | `network.scan_local_ports` | `true` | Also probe local ports 7702-7709 |
-| `network.discovery_interval_seconds` | 10 | Seconds between discovery rounds |
+| `network.discovery_interval_seconds` | 5 | Seconds between discovery rounds; failover takes three to four of them |
 | `network.advertise_host` | none | The host other hexes should use, when binding 0.0.0.0 |
 | `network.lattice_secret` | derived | The shared key that authenticates hexes |
 | `network.previous_lattice_secrets` | `[]` | Old secrets still accepted, for rotation |
