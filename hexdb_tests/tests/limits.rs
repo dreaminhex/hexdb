@@ -129,6 +129,24 @@ fn forwarded_addresses_are_trusted_only_from_configured_proxies() -> Result<()> 
     assert_eq!(fail_logins(&server, "ghost-b", "198.51.100.2", 1)?, vec![401], "another client isn't blocked");
     assert_eq!(fail_logins(&server, "ghost-c", "198.51.100.1", 1)?, vec![429], "the throttled client stays blocked");
 
+    // The IP blocklist: a blocked range is refused before authentication, except /health.
+    let from = |ip: &str, method: Method, path: &str| server.request(method, path, None, &[("X-Forwarded-For", ip)]);
+    let res = server.request(Method::POST, "/blocklist", Some(&json!({ "address": "127.0.0.0/8" })), &[])?;
+    assert_eq!(res.status.as_u16(), 400, "an entry can't cover the caller: {}", res.body);
+    let res = server.request(Method::POST, "/blocklist", Some(&json!({ "address": "203.0.113.0/24", "note": "scanner", "expires_in_hours": 1 })), &[])?;
+    assert_eq!(res.status.as_u16(), 201, "{}", res.body);
+    let id = res.body["id"].as_str().unwrap().to_string();
+    let blocked = from("203.0.113.9", Method::GET, "/tessellations")?;
+    assert_eq!((blocked.status.as_u16(), blocked.error_code()), (403, Some("blocked")), "{}", blocked.body);
+    assert_eq!(from("203.0.113.9", Method::GET, "/health")?.status.as_u16(), 200);
+    assert_eq!(from("203.0.114.9", Method::GET, "/tessellations")?.status.as_u16(), 200);
+    let listed = server.request(Method::GET, "/blocklist", None, &[])?.body;
+    assert_eq!(listed["entries"][0]["note"], "scanner", "{}", listed);
+    let audit = server.request(Method::GET, "/audit?action=security.", None, &[])?.body;
+    assert!(audit["events"].as_array().unwrap().iter().any(|e| e["action"] == "security.block"), "{}", audit);
+    assert_eq!(server.request(Method::DELETE, &format!("/blocklist/{}", id), None, &[])?.status.as_u16(), 204);
+    assert_eq!(from("203.0.113.9", Method::GET, "/tessellations")?.status.as_u16(), 200);
+
     // Not trusted: the header is ignored, so every attempt is the same client.
     let server = TestServer::start()?;
     assert_eq!(fail_logins(&server, "ghost-a", "198.51.100.1", 6)?.last(), Some(&429));

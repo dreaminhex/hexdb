@@ -7,6 +7,7 @@ pub mod lattice;
 pub mod init;
 pub mod server;
 pub mod client;
+pub mod blocklist;
 pub mod forward;
 pub mod streams;
 pub mod functions;

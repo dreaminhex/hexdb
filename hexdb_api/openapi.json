@@ -836,6 +836,128 @@
         }
       }
     },
+    "/blocklist": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "The IP blocklist: addresses and ranges refused before authentication (admins)",
+        "operationId": "get_blocklist",
+        "responses": {
+          "200": {
+            "description": "{\"entries\": [{\"id\", \"address\", \"note\", \"created_by\", \"created_at\", \"expires_at\"}]}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Block an address or CIDR range on every hex (admins; audited; can't cover your own address)",
+        "operationId": "post_blocklist",
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "address"
+                ],
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  },
+                  "expires_in_hours": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/blocklist/{id}": {
+      "delete": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Remove a blocklist entry (admins; audited)",
+        "operationId": "delete_blocklist_id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Done"
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/deletes": {
       "get": {
         "tags": [

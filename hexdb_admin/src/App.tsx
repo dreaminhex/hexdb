@@ -15,6 +15,7 @@ const AccountPage = lazy(() => import("@/pages/account").then((m) => ({ default:
 const AskPage = lazy(() => import("@/pages/ask").then((m) => ({ default: m.AskPage })))
 const SharesPage = lazy(() => import("@/pages/shares").then((m) => ({ default: m.SharesPage })))
 const DeletesPage = lazy(() => import("@/pages/deletes").then((m) => ({ default: m.DeletesPage })))
+const BlocklistPage = lazy(() => import("@/pages/blocklist").then((m) => ({ default: m.BlocklistPage })))
 const QuarantinePage = lazy(() => import("@/pages/quarantine").then((m) => ({ default: m.QuarantinePage })))
 const AuditPage = lazy(() => import("@/pages/audit").then((m) => ({ default: m.AuditPage })))
 const ConfigurationPage = lazy(() => import("@/pages/configuration").then((m) => ({ default: m.ConfigurationPage })))
@@ -57,6 +58,7 @@ const PAGES: Record<string, Page> = {
   "/roles": { title: "Roles", element: RolesPage, requires: "admin" },
   "/audit": { title: "Audit Trail", element: AuditPage, requires: "audit" },
   "/quarantine": { title: "Quarantine", element: QuarantinePage, requires: "admin" },
+  "/blocklist": { title: "IP Blocklist", element: BlocklistPage, requires: "admin" },
   "/logs": { title: "Logs", element: LogsPage, requires: "logs" },
   "/plugins": { title: "Plugins", element: PluginsPage, requires: "plugins" },
   "/configuration": { title: "Configuration", element: ConfigurationPage, requires: "view_config" },

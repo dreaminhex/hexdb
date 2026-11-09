@@ -8,6 +8,7 @@ import {
   IconHexagon3d,
   IconListCheck,
   IconVirus,
+  IconBan,
   IconTrashX,
   IconMathFunction,
   IconMessageChatbot,
@@ -83,6 +84,7 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
       { title: "Roles", route: "/roles", icon: IconUserCheck, requires: "admin" },
       { title: "Audit Trail", route: "/audit", icon: IconListCheck, requires: "audit" },
       { title: "Quarantine", route: "/quarantine", icon: IconVirus, requires: "admin" },
+      { title: "Blocklist", route: "/blocklist", icon: IconBan, requires: "admin" },
     ],
   },
   {

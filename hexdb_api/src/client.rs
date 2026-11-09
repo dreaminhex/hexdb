@@ -19,6 +19,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use hexdb_core::blocklist::Cidr;
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -43,45 +44,6 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
 
 fn peer(extensions: &axum::http::Extensions) -> Option<IpAddr> {
     extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip())
-}
-
-/// One address range.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Cidr {
-    network: IpAddr,
-    prefix: u8,
-}
-
-impl Cidr {
-    fn parse(text: &str) -> Option<Cidr> {
-        let text = text.trim();
-        let (addr, prefix) = match text.split_once('/') {
-            Some((a, p)) => (a.parse::<IpAddr>().ok()?, Some(p.parse::<u8>().ok()?)),
-            None => (text.parse::<IpAddr>().ok()?, None),
-        };
-        let max = if addr.is_ipv4() { 32 } else { 128 };
-        let prefix = prefix.unwrap_or(max);
-        (prefix <= max).then_some(Cidr { network: addr, prefix })
-    }
-
-    fn contains(&self, ip: IpAddr) -> bool {
-        // An IPv4 address may arrive mapped into IPv6.
-        let ip = match ip {
-            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
-            v4 => v4,
-        };
-        match (self.network, ip) {
-            (IpAddr::V4(net), IpAddr::V4(ip)) => {
-                let mask = if self.prefix == 0 { 0 } else { u32::MAX << (32 - self.prefix) };
-                u32::from(net) & mask == u32::from(ip) & mask
-            }
-            (IpAddr::V6(net), IpAddr::V6(ip)) => {
-                let mask = if self.prefix == 0 { 0 } else { u128::MAX << (128 - self.prefix) };
-                u128::from(net) & mask == u128::from(ip) & mask
-            }
-            _ => false,
-        }
-    }
 }
 
 /// The configured trusted proxies.

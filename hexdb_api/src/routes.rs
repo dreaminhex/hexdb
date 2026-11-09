@@ -64,6 +64,8 @@ pub fn app_router(
         .route("/status/history", get(status_history))
         .route("/logs", get(logs))
         .route("/audit", get(audit))
+        .route("/blocklist", get(crate::blocklist::list).post(crate::blocklist::add))
+        .route("/blocklist/{id}", axum::routing::delete(crate::blocklist::remove))
         .route("/deletes", get(list_deletes))
         .route("/deletes/{batch}", get(get_delete).delete(purge_delete))
         .route("/deletes/{batch}/restore", post(restore_delete))
@@ -252,22 +254,25 @@ pub fn app_router(
     }
 
     // Layers run outside-in from the last one added: security headers, then
-    // the client address, then request logging, then CORS (preflights end
+    // the client address, then request logging, then the IP blocklist, then CORS (preflights end
     // there), then the request timeout, then authentication, then forwarding
     // writes to the Overseer (on replicas), then the route.
     // Validated at startup (see main).
     let proxies = Arc::new(crate::client::TrustedProxies::parse(&engine.config.network.trusted_proxies).unwrap_or_default());
     let timeout = std::time::Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1));
+    let blocklist = crate::blocklist::Blocklist::start(engine.clone());
     let rest = router
         .layer(middleware::from_fn_with_state(engine.clone(), crate::lattice::sign_responses))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::forward::forward_writes))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::authenticate))
         .layer(middleware::from_fn_with_state(timeout, crate::server::request_timeout))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::cors::cors))
+        .layer(middleware::from_fn_with_state(blocklist.clone(), crate::blocklist::check))
         .layer(middleware::from_fn_with_state(engine.clone(), log_request))
         .layer(middleware::from_fn_with_state((proxies, engine.clone()), crate::client::resolve_client))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::security_headers))
         .layer(Extension(shutdown_handle))
+        .layer(Extension(blocklist))
         .layer(Extension(schema))
         .with_state(engine);
     // gRPC calls (content-type application/grpc) run as REST requests through all of the above.

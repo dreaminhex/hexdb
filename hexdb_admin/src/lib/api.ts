@@ -420,6 +420,17 @@ export interface Tessellation {
   children?: { tessellation: string; field: string; on_delete: OnDelete }[]
 }
 
+/** An IP blocklist entry (GET /blocklist). */
+export interface BlockEntry {
+  id: string
+  address: string
+  note?: string
+  created_by: string
+  created_at: number
+  /** Epoch milliseconds when it stops applying; none: until removed. */
+  expires_at?: number
+}
+
 /** What happens to a document when its parent is deleted. */
 export type OnDelete = "cascade" | "restrict" | "detach"
 
@@ -1108,6 +1119,9 @@ export const api = {
     request<ShareLink>("POST", "/shares", body),
   deleteShare: (code: string) => request<void>("DELETE", `/shares/${encodeURIComponent(code)}`),
   quarantine: () => request<{ files: QuarantinedFile[] }>("GET", "/quarantine"),
+  blocklist: () => request<{ entries: BlockEntry[] }>("GET", "/blocklist").then((r) => r.entries),
+  addBlock: (input: { address: string; note?: string; expires_in_hours?: number }) => request<BlockEntry>("POST", "/blocklist", input),
+  removeBlock: (id: string) => request<void>("DELETE", `/blocklist/${encodeURIComponent(id)}`),
   releaseQuarantined: (id: string) => request<{ document: Record<string, unknown>; created: boolean }>("POST", `/quarantine/${encodeURIComponent(id)}/release`),
   deleteQuarantined: (id: string) => request<void>("DELETE", `/quarantine/${encodeURIComponent(id)}`),
   rescan: () => request<{ rescan: string }>("POST", "/quarantine/rescan"),

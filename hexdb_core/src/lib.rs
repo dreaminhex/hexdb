@@ -33,6 +33,7 @@ pub mod settings;
 pub mod lattice_config;
 pub mod ai;
 pub mod shares;
+pub mod blocklist;
 pub mod queues;
 pub mod scan;
 pub mod process;

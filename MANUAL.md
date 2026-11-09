@@ -399,6 +399,7 @@ Errors have one shape:
 | 401 | `mfa_required` | Sign-in needs an MFA code (or the code was wrong) |
 | 403 | `forbidden` | Your roles don't allow it, or a system tessellation via document routes |
 | 403 | `cross_origin` | A cookie-authenticated change from another site (CSRF protection) |
+| 403 | `blocked` | The client's address is on the [IP blocklist](#ip-blocklist) |
 | 404 | `not_found` | Unknown document, tessellation, user, role, stream or function |
 | 409 | `conflict` | Already exists, a failed precondition or unique index, or an idempotent request in progress |
 | 409 | `count_changed` | A delete would remove a different number of documents than its `expect` |
@@ -2120,7 +2121,7 @@ HexDB records security-relevant events as documents in the `_audit` system tesse
 | Deletes | `data.delete.*` (by filter, folders, cascades, transactions), `data.restore`, `data.purge`; see [Deleting](#the-trash-and-the-delete-history) |
 | Features | `stream.*`, `function.*`, `schedule.*`, `trigger.*` |
 | Operations | `maintenance.*` (flush, compact, backup), `settings.update`, `server.shutdown`, `lattice.join_info` |
-| Refusals | `access.denied` |
+| Refusals | `access.denied`; the IP blocklist: `security.block`, `security.unblock` |
 
 Each event holds the actor, the action, the target, the outcome, the client address and details. Passwords, tokens and keys are never recorded. Events expire after `security.audit_retention_days` (90; 0 keeps them forever).
 
@@ -2136,6 +2137,22 @@ Filters: `actor`, `action` (a value ending in `.` matches that area), `target`, 
 - Only the Overseer writes events. A replica forwards its events to the Overseer, signed, with a 2-second timeout, and keeps nothing itself. An event is lost if the Overseer is unreachable at that moment, though it's still in the replica's log.
 - Every event is also logged at info under `hexdb::audit`.
 - A stream plugin with `audit = true` can ship events elsewhere.
+
+### IP blocklist
+
+Administrators can refuse every request from an address or range, on every hex, before it's authenticated:
+
+```bash
+curl -X POST http://localhost:7700/blocklist -H "Content-Type: application/json"   -d '{ "address": "203.0.113.0/24", "note": "credential stuffing", "expires_in_hours": 24 }'
+curl http://localhost:7700/blocklist                  # {"entries": [{"id", "address", "note", "created_by", "created_at", "expires_at"}]}
+curl -X DELETE http://localhost:7700/blocklist/01J...
+```
+
+- An entry is an IPv4 or IPv6 address or a CIDR range. `expires_in_hours` is optional; without it the entry applies until it's removed. At most 10,000 entries.
+- A blocked client gets 403 `blocked` with nothing else to learn. The address is the one [trusted proxies](#transport) resolve, so behind a proxy it's the real client's.
+- `/health`, `/ready` and the hex-to-hex routes are never blocked, so a mistaken entry can't take a hex out of its load balancer or its lattice. An entry that covers your own address is refused, so you can't lock yourself out.
+- Entries are documents in the `_blocklist` system tessellation: they replicate to every hex and apply there within a second; an expiring entry is a document with a TTL. Adding and removing are audited (`security.block`, `security.unblock`).
+- The admin UI's Blocklist page (under Security) lists, adds and removes entries.
 
 ### Browsers
 
