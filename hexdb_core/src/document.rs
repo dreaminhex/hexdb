@@ -158,6 +158,95 @@ impl<'de> Deserialize<'de> for Document {
     }
 }
 
+/// A field value decoded straight from JSON text with the same inference as
+/// `FieldValue::from_json`, without building a `serde_json::Value` first
+/// (about half the work for large documents).
+struct Inferred(FieldValue);
+
+impl<'de> Deserialize<'de> for Inferred {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Inferred;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_unit<E>(self) -> Result<Inferred, E> {
+                Ok(Inferred(FieldValue::Null))
+            }
+            fn visit_none<E>(self) -> Result<Inferred, E> {
+                Ok(Inferred(FieldValue::Null))
+            }
+            fn visit_bool<E>(self, b: bool) -> Result<Inferred, E> {
+                Ok(Inferred(FieldValue::Boolean(b)))
+            }
+            fn visit_i64<E>(self, i: i64) -> Result<Inferred, E> {
+                Ok(Inferred(FieldValue::Integer(i)))
+            }
+            fn visit_u64<E>(self, u: u64) -> Result<Inferred, E> {
+                Ok(Inferred(match i64::try_from(u) {
+                    Ok(i) => FieldValue::Integer(i),
+                    Err(_) => FieldValue::Long(u as i128),
+                }))
+            }
+            fn visit_f64<E>(self, f: f64) -> Result<Inferred, E> {
+                Ok(Inferred(FieldValue::Float(f)))
+            }
+            fn visit_str<E>(self, s: &str) -> Result<Inferred, E> {
+                Ok(Inferred(if DateTime::parse_from_rfc3339(s).is_ok() { FieldValue::DateTime(s.to_string()) } else { FieldValue::String(s.to_string()) }))
+            }
+            fn visit_string<E>(self, s: String) -> Result<Inferred, E> {
+                Ok(Inferred(if DateTime::parse_from_rfc3339(&s).is_ok() { FieldValue::DateTime(s) } else { FieldValue::String(s) }))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Inferred, A::Error> {
+                let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(Inferred(v)) = seq.next_element()? {
+                    items.push(v);
+                }
+                Ok(Inferred(FieldValue::Array(items)))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Inferred, A::Error> {
+                let mut fields = BTreeMap::new();
+                while let Some((k, Inferred(v))) = map.next_entry::<String, Inferred>()? {
+                    fields.insert(k, v);
+                }
+                Ok(Inferred(FieldValue::Object(fields)))
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
+/// Read a stored document straight into typed fields, when it holds no
+/// sealed values (those need the field paths to open; `Document`'s
+/// deserializer handles them). `None`: use the general path.
+pub fn parse_stored_fast(bytes: &[u8]) -> Option<serde_json::Result<Document>> {
+    let mark = crate::sealed::MARK.as_bytes();
+    if bytes.windows(mark.len()).any(|w| w == mark) {
+        return None;
+    }
+    #[derive(Deserialize)]
+    struct Stored {
+        id: Ulid,
+        tessellation: String,
+        #[serde(default)]
+        json: Option<Inferred>,
+        #[serde(default)]
+        data: Option<CompactFields>,
+        #[serde(default)]
+        ttl: Option<i64>,
+    }
+    Some(serde_json::from_slice::<Stored>(bytes).map(|stored| {
+        let data = match (stored.json, stored.data) {
+            (Some(Inferred(FieldValue::Object(fields))), _) => fields,
+            (Some(_), _) => CompactFields::new(),
+            (None, Some(data)) => data,
+            (None, None) => CompactFields::new(),
+        };
+        Document { id: stored.id, tessellation: stored.tessellation, data, ttl: stored.ttl }
+    }))
+}
+
 /// Keep only the given dotted field paths of a document's API JSON (plus
 /// `id` and `_expires_at`). Missing paths are left out; nested paths keep the
 /// enclosing objects.
@@ -307,6 +396,28 @@ pub fn infer_fields_from_json(value: &Value) -> CompactFields {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fast_reader_infers_exactly_like_the_general_one() {
+        let doc = Document {
+            id: Ulid::generate(),
+            tessellation: "t".into(),
+            data: infer_fields_from_json(&serde_json::json!({
+                "i": -5, "big": 18446744073709551615u64, "f": 1.5, "whole_float": 2.0, "s": "text", "when": "2026-11-09T10:00:00Z",
+                "not_a_date": "2026-11-09", "b": true, "n": null, "arr": [1, "x", [2.5], { "k": "2026-01-01T00:00:00+02:00" }],
+                "obj": { "nested": { "deep": [null, false] } }, "accented": "caf\u{e9}", "escaped": "a\"b\\c\nd"
+            })),
+            ttl: Some(1_800_000_000_000),
+        };
+        let bytes = serde_json::to_vec(&doc).unwrap();
+        let general: Document = serde_json::from_slice(&bytes).unwrap();
+        let fast = parse_stored_fast(&bytes).expect("no sealed values").unwrap();
+        assert_eq!(fast.data, general.data);
+        assert_eq!((fast.id, fast.ttl, fast.tessellation.as_str()), (general.id, general.ttl, "t"));
+        // A document with a sealed value takes the general path.
+        let sealed = br#"{"id":"01J00000000000000000000000","tessellation":"t","json":{"card":{"$hexdb_sealed":"v1.x.y"}}}"#;
+        assert!(parse_stored_fast(sealed).is_none());
+    }
 
     /// Document IDs are ULIDs stored as text and as 128-bit numbers: a new
     /// version of the ulid crate must read and write them exactly as before.

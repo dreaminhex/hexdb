@@ -1037,7 +1037,8 @@ impl SstStore {
 
 /// Parse a document from SSTable or memtable bytes.
 pub fn parse_document(bytes: &[u8]) -> Result<Document> {
-    serde_json::from_slice(bytes).map_err(|e| anyhow!("Stored document is unreadable: {}", e))
+    let parsed = crate::document::parse_stored_fast(bytes).unwrap_or_else(|| serde_json::from_slice(bytes));
+    parsed.map_err(|e| anyhow!("Stored document is unreadable: {}", e))
 }
 
 #[cfg(test)]
