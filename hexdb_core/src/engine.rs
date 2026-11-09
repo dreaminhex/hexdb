@@ -119,6 +119,8 @@ pub enum EngineError {
     HasChildren(String),
     /// A delete would remove more documents than one request may (413).
     TooMany(String),
+    /// A document names a parent that doesn't exist, through an enforced parent link (422).
+    ParentMissing(String),
 }
 
 impl fmt::Display for EngineError {
@@ -146,6 +148,7 @@ impl fmt::Display for EngineError {
             | EngineError::CountChanged(m)
             | EngineError::HasChildren(m)
             | EngineError::TooMany(m)
+            | EngineError::ParentMissing(m)
             | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }

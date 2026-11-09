@@ -227,6 +227,9 @@ pub struct CascadePlan {
     pub sample: Vec<String>,
     #[serde(skip)]
     deletes: Vec<(DocKey, u64)>,
+    /// Every child the links' indexes listed when the cascade was planned.
+    #[serde(skip)]
+    seen: HashSet<DocKey>,
     #[serde(skip)]
     detaches: Vec<(Document, u64, String)>,
 }
@@ -265,6 +268,9 @@ impl HexDBEngine {
             let children = links.entry(parent.tessellation.clone()).or_insert_with(|| self.child_links(&parent.tessellation)).clone();
             for link in children {
                 let filter = Filter::parse(&json!({ link.field.as_str(): parent.id.to_string() }))?;
+                if let (_, Some(listed)) = self.prepare_filter(&link.tessellation, &filter) {
+                    plan.seen.extend(listed.candidates.iter().map(|id| DocKey::new(&link.tessellation, *id)));
+                }
                 for child in self.matching_documents(&link.tessellation, &filter).await? {
                     let key = DocKey::new(&link.tessellation, child.id);
                     if going.contains(&key) {
@@ -346,20 +352,21 @@ impl HexDBEngine {
 
     /// Inside a commit: add what cascades from the deletes in `items`, or
     /// refuse the commit if a restricting child would be left behind.
-    async fn cascade_deletes(&self, items: &mut Vec<BatchItem>) -> Result<Vec<Value>> {
+    async fn cascade_deletes(&self, items: &mut Vec<BatchItem>) -> Result<(Vec<Value>, HashSet<DocKey>)> {
         let roots: Vec<DocKey> = items
             .iter()
             .filter(|i| matches!(i.op, WalOp::Delete { .. }) && self.tessellation_info(&i.key.tessellation).is_some_and(|t| t.is_user_data()))
             .map(|i| i.key.clone())
             .collect();
         if roots.is_empty() || !roots.iter().any(|k| !self.child_links(&k.tessellation).is_empty()) {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), HashSet::new()));
         }
         let written: HashSet<DocKey> = items.iter().filter(|i| matches!(i.op, WalOp::Put(_))).map(|i| i.key.clone()).collect();
-        let plan = self.plan_cascade(&roots, &written).await?;
+        let mut plan = self.plan_cascade(&roots, &written).await?;
         if !plan.blocked.is_empty() {
             return Err(blocked_error(&plan).into());
         }
+        let seen = std::mem::take(&mut plan.seen);
         let mut added = Vec::new();
         for (key, seq) in plan.deletes {
             let op = WalOp::Delete { tessellation: key.tessellation.clone(), id: key.id };
@@ -382,7 +389,7 @@ impl HexDBEngine {
         }
         self.run_before_triggers(&mut added).await?;
         items.extend(added);
-        Ok(detached)
+        Ok((detached, seen))
     }
 }
 
@@ -805,6 +812,96 @@ impl HexDBEngine {
     }
 }
 
+impl HexDBEngine {
+    /// Inside a commit, before the lock: the parents that enforced links in
+    /// `items` name, with the versions to check again under the lock. A write
+    /// naming a parent that doesn't exist (or that this commit deletes) is
+    /// refused. Only new documents and changed links are checked, so a child
+    /// written before its link was enforced can still be edited.
+    pub(crate) async fn parent_checks(&self, items: &[BatchItem]) -> Result<Vec<(DocKey, u64)>> {
+        let mut links: HashMap<String, Vec<(String, ParentLink)>> = HashMap::new();
+        let mut checks = Vec::new();
+        for item in items {
+            let WalOp::Put(doc) = &item.op else { continue };
+            let enforced = links
+                .entry(doc.tessellation.clone())
+                .or_insert_with(|| self.parent_links(&doc.tessellation).into_iter().filter(|(_, l)| l.enforce).collect());
+            if enforced.is_empty() {
+                continue;
+            }
+            let json = doc.data_json();
+            let mut previous: Option<Option<Value>> = None;
+            for (field, link) in enforced.iter() {
+                let value = match get_path(&json, field) {
+                    None | Some(Value::Null) => continue,
+                    Some(value) => value,
+                };
+                // Unchanged links were checked when they were written.
+                if previous.is_none() {
+                    previous = Some(self.read_latest(&item.key).await?.0.map(|d| d.data_json()));
+                }
+                if previous.as_ref().and_then(|p| p.as_ref()).and_then(|p| get_path(p, field)) == Some(value) {
+                    continue;
+                }
+                let missing = |why: &str| -> anyhow::Error {
+                    EngineError::ParentMissing(format!(
+                        "'{}' of this document in '{}' {} (the link to '{}' is enforced).",
+                        field, doc.tessellation, why, link.tessellation
+                    ))
+                    .into()
+                };
+                let Some(id) = value.as_str().and_then(|s| Ulid::from_string(s).ok()) else {
+                    return Err(missing(&format!("is {}, not a document ID", value)));
+                };
+                let parent = DocKey::new(&link.tessellation, id);
+                match items.iter().find(|i| i.key == parent).map(|i| &i.op) {
+                    Some(WalOp::Put(_)) => continue,
+                    Some(WalOp::Delete { .. }) => return Err(missing(&format!("names {}, which this request deletes", id))),
+                    _ => {}
+                }
+                if !self.tessellation_exists(&link.tessellation) {
+                    return Err(missing(&format!("names {}, but '{}' doesn't exist", id, link.tessellation)));
+                }
+                let (found, seq) = self.read_latest(&parent).await?;
+                if found.is_none() {
+                    return Err(missing(&format!("names {}, which doesn't exist", id)));
+                }
+                checks.push((parent, seq));
+            }
+        }
+        Ok(checks)
+    }
+
+    /// Under the commit lock: true if a parent this commit deletes has a child
+    /// (found through its link's index) that the commit neither deletes nor
+    /// detaches: one written after the cascade was planned. The commit is then
+    /// planned again, so its cascade includes it. Indexes change under the
+    /// same lock, so every committed child is seen.
+    pub(crate) fn children_appeared(&self, items: &[BatchItem], seen: &HashSet<DocKey>) -> bool {
+        if is_restoring() || crate::files::is_internal() {
+            return false;
+        }
+        let written: HashSet<&DocKey> = items.iter().map(|i| &i.key).collect();
+        let mut links: HashMap<String, Vec<ChildLink>> = HashMap::new();
+        for item in items {
+            if !matches!(item.op, WalOp::Delete { .. }) || !self.tessellation_info(&item.key.tessellation).is_some_and(|t| t.is_user_data()) {
+                continue;
+            }
+            let children = links.entry(item.key.tessellation.clone()).or_insert_with(|| self.child_links(&item.key.tessellation));
+            for link in children.iter() {
+                let Ok(filter) = Filter::parse(&json!({ link.field.as_str(): item.key.id.to_string() })) else { continue };
+                // Without a usable index (e.g. the link field is masked), the
+                // cascade's own lookup is all there is.
+                let (_, Some(plan)) = self.prepare_filter(&link.tessellation, &filter) else { continue };
+                if plan.candidates.iter().map(|id| DocKey::new(&link.tessellation, *id)).any(|child| !written.contains(&child) && !seen.contains(&child)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
 /// The 409 for a delete that restricting children refuse.
 pub fn blocked_error(plan: &CascadePlan) -> EngineError {
     let list = blocked_list(plan);
@@ -853,18 +950,18 @@ fn set_path(json: &mut Value, field: &str, value: Value) {
 impl HexDBEngine {
     /// Inside a commit: trash the user documents `items` delete and record
     /// the batch. Returns the batch ID, if the commit deletes any.
-    pub(crate) async fn trash_deletes(&self, items: &mut Vec<BatchItem>) -> Result<Option<Ulid>> {
+    pub(crate) async fn trash_deletes(&self, items: &mut Vec<BatchItem>) -> Result<HashSet<DocKey>> {
         if is_restoring() || crate::files::is_internal() {
-            return Ok(None);
+            return Ok(HashSet::new());
         }
-        let detached = self.cascade_deletes(items).await?;
+        let (detached, seen) = self.cascade_deletes(items).await?;
         let deletes: Vec<DocKey> = items
             .iter()
             .filter(|i| matches!(i.op, WalOp::Delete { .. }) && self.tessellation_info(&i.key.tessellation).is_some_and(|t| t.is_user_data()))
             .map(|i| i.key.clone())
             .collect();
         if deletes.is_empty() {
-            return Ok(None);
+            return Ok(seen);
         }
         let ctx = context();
         let batch = ctx.batch.unwrap_or_else(Ulid::generate);
@@ -899,7 +996,7 @@ impl HexDBEngine {
             added.push(BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op: WalOp::Put(entry), expected_seq: None });
         }
         if counts.is_empty() {
-            return Ok(None);
+            return Ok(seen);
         }
         // Checked again here, at commit, so nothing that changed since the plan slips through.
         if let Some(expect) = ctx.expect {
@@ -924,7 +1021,7 @@ impl HexDBEngine {
         added.push(BatchItem { key: DocKey::new(DELETES_TESSELLATION, batch), op: WalOp::Put(record), expected_seq: Some(0) });
         self.ensure_trash().await?;
         items.extend(added);
-        Ok(Some(batch))
+        Ok(seen)
     }
 
     /// Create the trash and the delete history, with their indexes.
@@ -1301,6 +1398,82 @@ mod tests {
 
         // The parent's tessellation can't be dropped while others link to it.
         assert!(engine.delete_tessellation("orders").await.is_err());
+        engine.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn enforced_links_need_a_parent() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        engine.create_tessellation("customers", "user").unwrap();
+        link(&engine, "messages", json!({ "customer_id": { "type": "string", "nullable": true, "parent": { "tessellation": "customers", "on_delete": "cascade", "enforce": true } } })).await;
+        let ada = engine.insert_json("customers", json!({ "name": "Ada" }), None).await.unwrap().id.to_string();
+        let msg = engine.insert_json("messages", json!({ "customer_id": ada, "text": "hi" }), None).await.unwrap().id.to_string();
+        // No parent, a wrong one, or not an ID: refused.
+        for bad in [json!("01J00000000000000000000000"), json!("not-an-id")] {
+            let refused = engine.insert_json("messages", json!({ "customer_id": bad }), None).await.unwrap_err();
+            assert!(matches!(kind(&refused), Some(EngineError::ParentMissing(_))), "{:#}", refused);
+        }
+        let refused = engine.patch_documents("messages", vec![(msg.clone(), json!({ "customer_id": "01J00000000000000000000000" }))], None, None).await.unwrap_err();
+        assert!(matches!(kind(&refused), Some(EngineError::ParentMissing(_))), "{:#}", refused);
+        // No link at all is fine (the field is nullable), and so is editing other fields.
+        engine.insert_json("messages", json!({ "text": "no customer" }), None).await.unwrap();
+        engine.patch_documents("messages", vec![(msg.clone(), json!({ "text": "edited" }))], None, None).await.unwrap();
+        // A parent created in the same transaction counts; one deleted in it doesn't.
+        let new_id = ulid::Ulid::generate().to_string();
+        let ops = crate::engine::parse_transaction(&json!({ "operations": [
+            { "op": "insert", "tessellation": "customers", "id": new_id, "data": { "name": "Bo" } },
+            { "op": "insert", "tessellation": "messages", "data": { "customer_id": new_id } },
+        ] })).unwrap();
+        engine.transaction(&ops, None).await.unwrap();
+        let ops = crate::engine::parse_transaction(&json!({ "operations": [
+            { "op": "delete", "tessellation": "customers", "id": ada },
+            { "op": "insert", "tessellation": "messages", "data": { "customer_id": ada } },
+        ] })).unwrap();
+        let refused = engine.transaction(&ops, None).await.unwrap_err();
+        assert!(matches!(kind(&refused), Some(EngineError::ParentMissing(_)) | Some(EngineError::Invalid(_))), "{:#}", refused);
+        assert!(exists(&engine, "customers", &ulid::Ulid::from_string(&ada).unwrap()).await);
+        engine.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Children written while their parents are deleted: with an enforced
+    /// link, no child is ever left without its parent, whatever the timing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn no_orphans_when_inserts_race_deletes() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        let engine = std::sync::Arc::new(engine);
+        engine.create_tessellation("customers", "user").unwrap();
+        link(&engine, "messages", json!({ "customer_id": { "type": "string", "parent": { "tessellation": "customers", "on_delete": "cascade", "enforce": true } } })).await;
+        let mut parents = Vec::new();
+        for i in 0..40 {
+            parents.push(engine.insert_json("customers", json!({ "n": i }), None).await.unwrap().id.to_string());
+        }
+        let mut tasks = Vec::new();
+        for (i, parent) in parents.iter().enumerate() {
+            for _ in 0..5 {
+                let (engine, parent) = (engine.clone(), parent.clone());
+                tasks.push(tokio::spawn(async move {
+                    // Refusals (the parent is gone) and conflicts are expected outcomes.
+                    let _ = engine.insert_json("messages", json!({ "customer_id": parent }), None).await;
+                }));
+            }
+            if i % 2 == 0 {
+                let (engine, parent) = (engine.clone(), parent.clone());
+                tasks.push(tokio::spawn(async move {
+                    engine.delete_document("customers", &parent, None).await.unwrap();
+                }));
+            }
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let messages = engine.matching_documents("messages", &crate::filter::Filter::all()).await.unwrap();
+        assert!(!messages.is_empty());
+        for message in messages {
+            let parent = message.data_json()["customer_id"].as_str().unwrap().to_string();
+            assert!(engine.get_document("customers", &parent).await.unwrap().is_some(), "message {} was left without customer {}", message.id, parent);
+        }
         engine.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }

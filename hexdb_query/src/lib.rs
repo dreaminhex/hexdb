@@ -70,6 +70,7 @@ fn to_gql(e: anyhow::Error) -> async_graphql::Error {
         Some(EngineError::CountChanged(m)) => gql_error("COUNT_CHANGED", m.clone()),
         Some(EngineError::HasChildren(m)) => gql_error("HAS_CHILDREN", m.clone()),
         Some(EngineError::TooMany(m)) => gql_error("TOO_MANY", m.clone()),
+        Some(EngineError::ParentMissing(m)) => gql_error("PARENT_MISSING", m.clone()),
         Some(EngineError::SchemaViolation(m)) => gql_error("SCHEMA_VIOLATION", m.clone()),
         Some(EngineError::TriggerRejected(m)) => gql_error("TRIGGER_REJECTED", m.clone()),
         Some(EngineError::DiskFull(m)) => gql_error("DISK_FULL", m.clone()),

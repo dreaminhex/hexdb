@@ -136,6 +136,7 @@ impl From<anyhow::Error> for ApiError {
             Some(EngineError::CountChanged(m)) => ApiError::new(StatusCode::CONFLICT, "count_changed", m.clone()),
             Some(EngineError::HasChildren(m)) => ApiError::new(StatusCode::CONFLICT, "has_children", m.clone()),
             Some(EngineError::TooMany(m)) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_many", m.clone()),
+            Some(EngineError::ParentMissing(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "parent_missing", m.clone()),
             Some(EngineError::SchemaViolation(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "schema_violation", m.clone()),
             Some(EngineError::TriggerRejected(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "trigger_rejected", m.clone()),
             Some(EngineError::DiskFull(m)) => ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "disk_full", m.clone()),
@@ -1098,7 +1099,7 @@ pub async fn get_tessellation(Path(name): Path<String>, State(engine): Engine, A
     body["links"] = json!(engine
         .parent_links(&name)
         .into_iter()
-        .map(|(field, link)| json!({ "field": field, "tessellation": link.tessellation, "on_delete": link.on_delete }))
+        .map(|(field, link)| json!({ "field": field, "tessellation": link.tessellation, "on_delete": link.on_delete, "enforce": link.enforce }))
         .collect::<Vec<_>>());
     body["children"] = json!(engine.child_links(&name));
     // Counted as the caller sees it (a role's row filter narrows it).

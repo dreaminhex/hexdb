@@ -33,11 +33,23 @@ fn parent_links_are_checked_indexed_and_shown() -> Result<()> {
     let items = server.request(Method::GET, "/tessellations/order_items", None, &[])?.body;
     let indexes: Vec<&str> = items["indexes"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
     assert!(indexes.contains(&"order_id") && indexes.contains(&"parent_id"), "{}", items);
-    assert_eq!(items["links"][0], json!({ "field": "order_id", "tessellation": "orders", "on_delete": "cascade" }));
+    assert_eq!(items["links"][0], json!({ "field": "order_id", "tessellation": "orders", "on_delete": "cascade", "enforce": false }));
 
     // The parent lists its children.
     let orders = server.request(Method::GET, "/tessellations/orders", None, &[])?.body;
     assert_eq!(orders["children"], json!([{ "tessellation": "order_items", "field": "order_id", "on_delete": "cascade" }]), "{}", orders);
+
+    // An enforced link refuses a parent that doesn't exist (422 parent_missing).
+    let enforced = json!({ "fields": { "order_id": { "type": "string", "parent": { "tessellation": "orders", "on_delete": "cascade", "enforce": true } } } });
+    server.insert("receipts", &json!({ "n": 0 }))?;
+    assert_eq!(add_schema(&server, "receipts", &enforced)?.status, 201);
+    let res = server.request(Method::POST, "/receipts", Some(&json!({ "order_id": "01J00000000000000000000000" })), &[])?;
+    assert_eq!((res.status.as_u16(), res.error_code()), (422, Some("parent_missing")), "{}", res.body);
+    let order = server.insert("orders", &json!({ "customer": "bo" }))?;
+    assert_eq!(server.request(Method::POST, "/receipts", Some(&json!({ "order_id": order })), &[])?.status, 201);
+    let links = server.request(Method::GET, "/tessellations/receipts", None, &[])?.body;
+    assert_eq!(links["links"][0]["enforce"], true, "{}", links);
+    assert_eq!(server.request(Method::DELETE, "/tessellations/receipts", None, &[])?.status, 204);
 
     // A parent can't be dropped while others link to it; a self-link doesn't block.
     let res = server.request(Method::DELETE, "/tessellations/orders", None, &[])?;

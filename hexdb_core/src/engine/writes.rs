@@ -1119,8 +1119,9 @@ impl HexDBEngine {
         }
 
         let mut items = items;
+        let mut seen_children = HashSet::new();
         if !replicated {
-            self.trash_deletes(&mut items).await?;
+            seen_children = self.trash_deletes(&mut items).await?;
             self.guard_file_writes(&mut items).await?;
             if !super::deletes::is_restoring() {
                 self.apply_schemas(&mut items).await?;
@@ -1129,6 +1130,8 @@ impl HexDBEngine {
         if !replicated {
             self.tokenize_items(&mut items).await?;
         }
+        // Enforced parent links: the parents named, checked again under the lock.
+        let parent_checks = if replicated { Vec::new() } else { self.parent_checks(&items).await? };
         // From here on, masked fields are sealed: in the WAL, the hex and the change feed.
         self.seal_items(&mut items);
         let roles_changed = items.iter().any(|i| i.key.tessellation == crate::users::ROLES_TESSELLATION);
@@ -1168,10 +1171,14 @@ impl HexDBEngine {
                     }
                 }
             }
-            for (key, expected) in checks {
+            for (key, expected) in checks.iter().chain(&parent_checks) {
                 if self.current_seq(&state, key).await != *expected {
                     return Ok(None);
                 }
+            }
+            // A child written since this delete's cascade was planned: plan it again.
+            if !replicated && self.children_appeared(&items, &seen_children) {
+                return Ok(None);
             }
 
             let first = state.next_seq;

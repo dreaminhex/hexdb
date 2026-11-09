@@ -127,6 +127,11 @@ pub struct ParentLink {
     /// The parent's tessellation (this one, for trees).
     pub tessellation: String,
     pub on_delete: OnDelete,
+    /// Enforce the link like a foreign key: a document can only name a parent
+    /// that exists, and a parent can't be deleted out from under a child being
+    /// written at the same moment (see engine::deletes).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub enforce: bool,
 }
 
 /// What one field must look like.
