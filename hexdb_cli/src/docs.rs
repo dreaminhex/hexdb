@@ -203,7 +203,8 @@ pub async fn schema_check(target: &Target<'_>, tess: &str, data: &str) -> Result
 
 /// `hexdb schema set`: register a new version (its migration runs in the background).
 pub async fn schema_set(target: &Target<'_>, tess: &str, data: &str) -> Result<()> {
-    let version = target.write(reqwest::Method::POST, &format!("/tessellations/{}/schemas", encode(tess)), Some(&read_json(data)?), &new_key()).await?.0;
+    // Sent once: registering isn't keyed, so a retry could register the version twice.
+    let version = target.send(reqwest::Method::POST, &format!("/tessellations/{}/schemas", encode(tess)), Some(&read_json(data)?)).await?;
     println!("Schema version {} of '{}' is current; existing documents are migrated in the background.", version["version"], tess);
     Ok(())
 }

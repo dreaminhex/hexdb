@@ -45,7 +45,7 @@ const SCHEMA_KEYWORDS: Completion[] = [
   })),
   ...["string", "number", "integer", "boolean", "object", "array", "any"].map((label) => ({ label, type: "enum", detail: "type" })),
   ...["one_way", "vault"].map((label) => ({ label, type: "enum", detail: "tokenize" })),
-  ...["tessellation", "on_delete"].map((label) => ({ label, type: "property", detail: "parent link" })),
+  ...["tessellation", "on_delete", "enforce"].map((label) => ({ label, type: "property", detail: "parent link" })),
   ...["cascade", "restrict", "detach"].map((label) => ({ label, type: "enum", detail: "on_delete" })),
   ...["rename", "copy", "remove", "set_default", "convert", "function"].map((label) => ({ label, type: "keyword", detail: "migration step" })),
   ...["from", "to", "field", "value", "name", "undo"].map((label) => ({ label, type: "property", detail: "step option" })),
@@ -317,7 +317,7 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
           Field rules: type (string, number, integer, boolean, object, array, any), required, nullable, default, enum, min, max, min_length,
           max_length, description, and tokenize (one_way or vault, string fields only: the value is replaced by a token on write; vault tokens can be
           read back with the detokenize permission), and parent ({"{tessellation, on_delete}"}, string fields: the field holds the ID of the document
-          that owns this one; when that document is deleted, cascade deletes this one too, restrict refuses the delete, detach sets the field to null).
+          that owns this one; when that document is deleted, cascade deletes this one too, restrict refuses the delete, detach sets the field to null; enforce: true refuses a parent that doesn't exist).
           Migration steps: rename and copy ({"{from, to}"}), remove ("field"), set_default ({"{field, value}"}), convert (
           {"{field, to}"}), and function ({"{name, undo}"}: a function that gets batches of documents and returns them migrated). A new version must stay
           compatible: no type change without a convert step, no new required field without a default. With a function step, use Check to run it on

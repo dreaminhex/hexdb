@@ -122,6 +122,7 @@ hexdb health
 HEXDB_TOKEN=hxk_... hexdb status
 HEXDB_TOKEN=hxk_... hexdb backup        # a consistent backup while running; --list shows them
 HEXDB_TOKEN=hxk_... hexdb sql "SELECT COUNT(*) FROM orders"   # see section 10; -p fills ? parameters, --json prints the raw answer
+HEXDB_TOKEN=hxk_... hexdb doc insert orders '{"total": 42}'   # documents, transactions, schemas: see section 5's Command line
 HEXDB_TOKEN=hxk_... hexdb rm orders --filter '{"status": "cancelled"}'   # shows what would go, then asks; see below
 HEXDB_TOKEN=hxk_... hexdb deletes list                     # the delete history; show, restore and purge <batch>
 HEXDB_TOKEN=hxk_... hexdb trash orders                     # what's in a tessellation's trash
@@ -364,6 +365,24 @@ The header's sun/moon button switches between light, dark and system themes.
 
 Documents are JSON objects. Responses add `id`, `_expires_at` when a TTL is set, and `_schema` when the tessellation has a schema. All three are ignored if sent in a body. A write to a tessellation that doesn't exist creates it.
 
+### Writing safely: the short version
+
+Every write in HexDB is atomic and durable before it's acknowledged. On top of that:
+
+| Write | All or nothing | Safe to retry | Guards |
+| --- | --- | --- | --- |
+| Insert (`POST /{t}`, `/_bulk`) | Yes, a bulk insert too | `Idempotency-Key` | Schema; [enforced parent links](#enforced-links) refuse a parent that doesn't exist |
+| Replace, patch (`PUT`, `PATCH /{t}/{id}`, `/_bulk`) | Yes | `Idempotency-Key` | In a [transaction](#11-transactions): `if_version` (optimistic locking) or `if_match` (a filter the document must match) |
+| Upsert by key fields (`/_upsert`) | Yes | `Idempotency-Key` | One upsert at a time per hex, so two can't both insert the same key; a unique index makes it hold for every write |
+| Update by filter (`/_update`) | Yes | `Idempotency-Key` | Refused without a filter unless `"all": true`; at most 100,000 documents |
+| Delete (`DELETE /{t}/{id}`, `/_delete`, folders) | Yes, cascade included | `Idempotency-Key` | Refused without a filter unless `"all": true`; `dry_run` previews and `expect` caps the count; `restrict` links refuse; everything goes to the trash, restorable as one batch |
+| Transaction (`/transactions`) | Yes, up to 1,000 operations | `Idempotency-Key` | Serializable for the documents it touches; `if_version`, `if_match`, `check` |
+
+- **Idempotency.** A write sent with an `Idempotency-Key` stores its result with the write itself, in one atomic log record. Sending it again with the same key (after a timeout, a dropped connection or a crash) returns that first result with `Idempotent-Replayed: true` and writes nothing. See [Idempotency keys](#idempotency-keys). The drivers retry a write that carries a key (on 429 and 503), and every write `hexdb doc`, `hexdb tx` and `hexdb rm` send carries one.
+- **Concurrency.** Writes that read first (replace, patch, update, delete, transactions) check at commit that nothing they read has changed since; if it has, they're planned again. A replica forwards writes to the Overseer, which runs them all.
+- **Ownership.** A [parent link](#parent-links-and-cascading-deletes) in a schema says which document owns another. Deleting the owner cascades, is refused, or unlinks, as the link says. With `"enforce": true` the link works like a foreign key: no document can name a parent that doesn't exist, whatever the timing.
+- **Undo.** Every delete goes to the trash, and the delete history can put back everything one request deleted in one step. See [The trash and the delete history](#the-trash-and-the-delete-history).
+
 ### Errors
 
 Errors have one shape:
@@ -391,6 +410,7 @@ Errors have one shape:
 | 421 | `read_only_replica` | A write sent to a replica with forwarding off |
 | 422 | `idempotency_key_reused` | An `Idempotency-Key` reused with a different request |
 | 422 | `schema_violation` | A document that doesn't fit the tessellation's schema |
+| 422 | `parent_missing` | A document names a parent that doesn't exist, through an [enforced parent link](#enforced-links) |
 | 422 | `trigger_rejected` | A before trigger refused the write, or failed |
 | 429 | `rate_limited` | Too many failed sign-ins (see `Retry-After`), this month's AI token budget is used up, or the AI provider is rate limiting |
 | 502 | `overseer_unreachable` | A replica couldn't forward a write to the Overseer |
@@ -456,6 +476,39 @@ Implementation: the record lives in the `_idempotency` system tessellation, keye
 
 `?ttl=<seconds>` on POST, PUT or PATCH sets `_expires_at`. Expired documents read as not found immediately. A sweep (`memory.ttl_scan_frequency`) evicts them from memory, and compaction drops them from disk.
 
+### Command line
+
+`hexdb doc`, `hexdb tx`, `hexdb schema`, `hexdb rm`, `hexdb deletes` and `hexdb trash` do all of the above from a terminal or a script. They need `HEXDB_TOKEN` (or `--token`) and take `--url`. Data is JSON text, `@file.json`, or `-` for standard input.
+
+```bash
+export HEXDB_TOKEN=hxk_...
+
+hexdb doc insert orders '{"customer": "ada", "total": 42}'
+hexdb doc insert orders @orders.json                    # an array: one atomic write
+hexdb doc get orders 01J...                             # the document, with its version as _version
+hexdb doc patch orders 01J... '{"status": "paid"}' --if-version 812
+hexdb doc replace orders 01J... @order.json
+hexdb doc upsert customers --on source_id '{"source_id": 17, "name": "Ada"}'
+hexdb doc update orders --filter '{"status": "draft"}' --set '{"status": "open"}'
+hexdb tx @transfer.json                                 # {"operations": [...]}
+
+hexdb schema show order_items                           # versions, parent links, children
+hexdb schema check order_items @schema.json             # compatible? would the documents fit?
+hexdb schema set order_items @schema.json
+
+hexdb rm orders --filter '{"status": "cancelled"}'      # shows what would go, then asks
+hexdb rm orders 01J... 01J...
+hexdb rm media /2024/old -r
+hexdb deletes list
+hexdb deletes restore 01J...                            # undo a delete, cascade and all
+hexdb trash orders
+```
+
+- **Every write is idempotent.** Each one carries an `Idempotency-Key`: `--idempotency-key <key>`, or a new one per command. If the connection drops, times out, or the hex answers 503 (an Overseer restarting or handing over), the CLI sends the write again with the same key, up to three times, so it's never applied twice. Running a command again with the same `--idempotency-key` prints the first result ("already done") and writes nothing.
+- **Optimistic locking.** `--if-version` on `replace` and `patch` sends the write as a transaction with `if_version`: it fails with 409 if the document changed since you read it.
+- **No accidental mass changes.** `hexdb doc update` and `hexdb rm` need a filter, IDs or a folder, or `--all`. Both say how many documents they'd change and ask: for everything, or more than 100 documents, you type the tessellation's name. Without a terminal they need `--yes`. `hexdb rm` sends the previewed count as `expect`, so it fails rather than delete more than it showed.
+- `--json` prints the server's answer; `--ttl <seconds>` sets an expiry on `insert`, `replace`, `patch` and `update`.
+
 ### Deleting
 
 Deleting is built to be hard to get wrong:
@@ -511,7 +564,7 @@ The field holds the parent's ID. When the parent is deleted, `on_delete` decides
 | `detach` | Stays, with the link set to null; the field must be nullable or not required |
 
 - `on_delete` has no default: what a delete does is always written down.
-- A link marks ownership, nothing more. HexDB stays a document store: there are no joins over links, and writes don't check that the parent exists.
+- A link marks ownership. HexDB stays a document store: there are no joins over links. Writes don't check that the parent exists unless the link is [enforced](#enforced-links).
 - The parent can be any user or files tessellation, including the child's own (trees); a cycle ends when every document in it has been reached.
 - Files tessellations can have parent links on a file's own fields (anything but the fields HexDB writes), so a file can belong to a document and go to the files trash with it.
 - When a version with links is registered, HexDB checks the parent tessellation exists and gives each link field an index (unless an index already starts with that field), so finding the children is an index lookup. The index stays if the link is removed later; drop it yourself if you don't need it.
@@ -519,7 +572,20 @@ The field holds the parent's ID. When the parent is deleted, `on_delete` decides
 - `GET /tessellations/{name}` lists its `links` and the `children` that link to it.
 - A cascade needs the right to change every document it reaches (`write`, or `delete` for files, within the role's row filters). If one is out of reach, the whole delete is refused with 403: never part of it.
 - Cascaded deletes run before triggers, and appear in the change feed, like any other delete.
-- A child inserted at the moment its parent is deleted can be left behind, since inserts don't check parents.
+- A delete never leaves behind a child written while it ran: under the commit lock it looks the parent's children up again in the link's index, and if one appeared since its cascade was planned, it plans again and takes that child too. (This needs the link's index; a link field that a role masks has no usable index, so a child written in that moment can be missed.)
+
+#### Enforced links
+
+A link with `"enforce": true` also works like a foreign key in the other direction: a document can only name a parent that exists.
+
+```json
+"customer_id": { "type": "string", "parent": { "tessellation": "customers", "on_delete": "cascade", "enforce": true } }
+```
+
+- A write that sets the link, or changes it, is refused with 422 `parent_missing` if the parent doesn't exist, or if the same request deletes it. A parent created in the same transaction counts.
+- The check is part of the commit: the parent's version is read when the write is planned and checked again under the commit lock, so a parent deleted in between makes the write plan again and fail. A background job that checks a customer, then writes a message for it while the customer is being deleted, gets 422 instead of leaving a message behind; and a delete that starts after the message is in takes the message with it.
+- A null or missing link isn't checked (make the field required to forbid it). Documents written before the link was enforced aren't checked until their link changes.
+- Enforcing costs one read of the parent per write that sets or changes a link.
 
 ### The trash and the delete history
 
@@ -1022,7 +1088,7 @@ curl -X POST http://localhost:7700/tessellations/orders/schemas -H "Content-Type
 - `min` and `max` (numbers), `min_length` and `max_length` (strings and arrays).
 - `description`.
 - `tokenize`: `one_way` or `vault` (string fields only, without `enum`): the value is replaced by a token on write. See [Tokenization](#tokenization).
-- `parent`: `{tessellation, on_delete}` (string fields only, not tokenized): the field holds the ID of the document that owns this one, and `on_delete` (`cascade`, `restrict` or `detach`) says what happens to this one when that document is deleted. See [Parent links and cascading deletes](#parent-links-and-cascading-deletes).
+- `parent`: `{tessellation, on_delete, enforce}` (string fields only, not tokenized): the field holds the ID of the document that owns this one, `on_delete` (`cascade`, `restrict` or `detach`) says what happens to this one when that document is deleted, and `enforce: true` refuses writes that name a parent that doesn't exist. See [Parent links and cascading deletes](#parent-links-and-cascading-deletes).
 
 Field names are top-level names or dotted paths. With `"additional_fields": false`, documents can't have other fields.
 
