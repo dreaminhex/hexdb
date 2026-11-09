@@ -720,6 +720,22 @@ impl HexDBEngine {
         Err(EngineError::Conflict("The trash is being changed concurrently; try again.".into()).into())
     }
 
+    /// The newest deleted version of document `id` of `tess`, from the trash
+    /// (for judging a delete against a reader's row filter). None if it isn't there.
+    pub async fn deleted_version(&self, tess: &str, id: &str) -> Option<Document> {
+        if !self.tessellation_exists(TRASH_TESSELLATION) {
+            return None;
+        }
+        // Lattices whose trash predates this lookup get its index now.
+        let index = IndexDef { fields: vec!["doc_id".into()], ..Default::default() };
+        if let Err(e) = self.ensure_internal_index(TRASH_TESSELLATION, index).await {
+            warn!("⚠️ Couldn't index the trash by document: {:#}", e);
+        }
+        let filter = Filter::parse(&json!({ "doc_id": id, "from": tess })).ok()?;
+        let entries = self.matching_documents(TRASH_TESSELLATION, &filter).await.ok()?;
+        entries.last().and_then(Self::trashed_document)
+    }
+
     /// The trash entries of documents deleted from `tess`.
     async fn trash_entries_of(&self, tess: &str, doc_id: Option<&str>) -> Result<Vec<Document>> {
         if !self.tessellation_exists(TRASH_TESSELLATION) {
@@ -1031,7 +1047,7 @@ impl HexDBEngine {
         }
         self.ensure_system_tessellation(TRASH_TESSELLATION)?;
         self.ensure_system_tessellation(DELETES_TESSELLATION)?;
-        for field in ["batch", "from"] {
+        for field in ["batch", "from", "doc_id"] {
             self.ensure_internal_index(TRASH_TESSELLATION, IndexDef { fields: vec![field.into()], ..Default::default() }).await?;
         }
         self.ensure_internal_index(DELETES_TESSELLATION, IndexDef { fields: vec!["time".into()], ..Default::default() }).await?;

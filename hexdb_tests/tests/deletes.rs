@@ -124,6 +124,22 @@ fn deletes_by_filter_need_a_filter_preview_and_guard_their_count() -> Result<()>
     let res = gql(r#"mutation { deleteDocuments(tessellation: "items", all: true, dryRun: true) { total dryRun deleted } }"#)?;
     assert_eq!(res.body["data"]["deleteDocuments"]["total"], 1, "{}", res.body);
 
+    // The change feed shows a reader with a row filter only the deletes of documents it could see.
+    let role = json!({ "name": "eu-only", "permissions": ["read"], "restrictions": { "regions": { "filter": { "region": "EU" } } } });
+    assert_eq!(server.request(Method::POST, "/roles", Some(&role), &[])?.status.as_u16(), 201);
+    let reader = server.user_with_roles("eu-reader", json!([{ "name": "eu-only", "tessellations": ["regions"] }]))?;
+    let eu = server.insert("regions", &json!({ "region": "EU" }))?;
+    let us = server.insert("regions", &json!({ "region": "US" }))?;
+    let start = server.request(Method::GET, "/changes?limit=1", None, &[])?.body["last_seq"].as_u64().unwrap();
+    for id in [&eu, &us] {
+        assert_eq!(server.request(Method::DELETE, &format!("/regions/{}", id), None, &[])?.status, 204);
+    }
+    let feed = server.request_as(Some(&reader), Method::GET, &format!("/changes?tessellation=regions&after={}", start), None, &[])?.body;
+    let deleted: Vec<&str> = feed["changes"].as_array().unwrap().iter().filter(|c| c["op"] == "delete").filter_map(|c| c["id"].as_str()).collect();
+    assert_eq!(deleted, vec![eu.as_str()], "{}", feed);
+    let all = server.request(Method::GET, &format!("/changes?tessellation=regions&after={}", start), None, &[])?.body;
+    assert_eq!(all["changes"].as_array().unwrap().iter().filter(|c| c["op"] == "delete").count(), 2, "{}", all);
+
     // "all": true deletes everything.
     let res = server.request(Method::POST, "/items/_delete", Some(&json!({ "all": true })), &[])?;
     assert_eq!((res.status.as_u16(), res.body["total"].as_u64()), (200, Some(1)), "{}", res.body);

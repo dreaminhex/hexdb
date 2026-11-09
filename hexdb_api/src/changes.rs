@@ -82,12 +82,25 @@ fn visible(engine: &HexDBEngine, principal: &Principal, change: &Change, tessell
 
 /// The change as this principal may see it: `None` if it's not visible at
 /// all, or the document is outside their role's row filter; hidden fields
-/// removed. Deletes carry no document, so they're shown by ID.
-fn render(engine: &HexDBEngine, principal: &Principal, change: &Change, tessellation: Option<&str>) -> Option<Value> {
+/// removed. A delete carries no document: a reader whose role has a row
+/// filter sees it only if the deleted version (kept in the trash, written in
+/// the delete's own commit) was within the filter, so deletes don't reveal
+/// documents the reader couldn't see. Without that version (the trash is off,
+/// or the entry was purged or restored), such a reader doesn't see it.
+async fn render(engine: &HexDBEngine, principal: &Principal, change: &Change, tessellation: Option<&str>) -> Option<Value> {
     if !visible(engine, principal, change, tessellation) {
         return None;
     }
     let mut json = change.to_api_json();
+    if change.kind == ChangeKind::Delete {
+        let scope = principal.scope(&change.tessellation, hexdb_core::Action::Read);
+        if !scope.is_full() {
+            let deleted = match change.id { Some(id) => engine.deleted_version(&change.tessellation, &id.to_string()).await, None => None };
+            if !deleted.is_some_and(|doc| scope.allows(&doc)) {
+                return None;
+            }
+        }
+    }
     if let Some(doc) = change.document_open() {
         let scope = principal.scope(&change.tessellation, hexdb_core::Action::Read);
         if !scope.allows(&doc) {
@@ -137,7 +150,7 @@ pub async fn changes(
                     break;
                 }
                 cursor = change.seq;
-                if let Some(json) = render(&engine, &principal, change, tessellation) {
+                if let Some(json) = render(&engine, &principal, change, tessellation).await {
                     out.push(json);
                 }
             }
@@ -156,7 +169,7 @@ pub async fn changes(
                 break;
             }
             cursor = change.seq;
-            if let Some(json) = render(&engine, &principal, change, tessellation) {
+            if let Some(json) = render(&engine, &principal, change, tessellation).await {
                 out.push(json);
             }
         }
@@ -229,15 +242,13 @@ async fn change_events(
 
     let event = |change: &Change, json: Value| crate::live::LiveEvent::new("change", Some(change.seq.to_string()), json);
 
-    let filter_engine = engine.clone();
-    let filter_tess = tessellation.clone();
-    let filter_principal = principal.clone();
-    let backlog = stream::iter(
-        backlog
-            .into_iter()
-            .filter_map(move |c| render(&filter_engine, &filter_principal, &c, filter_tess.as_deref()).map(|json| event(&c, json)))
-            .collect::<Vec<_>>(),
-    );
+    let mut rendered = Vec::new();
+    for c in backlog {
+        if let Some(json) = render(&engine, &principal, &c, tessellation.as_deref()).await {
+            rendered.push(event(&c, json));
+        }
+    }
+    let backlog = stream::iter(rendered);
 
     struct Live {
         engine: Arc<HexDBEngine>,
@@ -276,7 +287,7 @@ async fn change_events(
             };
             match next {
                 Ok(change) => {
-                    if let Some(json) = render(&s.engine, &s.principal, &change, s.tessellation.as_deref()) {
+                    if let Some(json) = render(&s.engine, &s.principal, &change, s.tessellation.as_deref()).await {
                         return Some((event(&change, json), s));
                     }
                 }

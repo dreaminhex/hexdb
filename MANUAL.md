@@ -2054,7 +2054,7 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 - Hidden fields are removed from every document returned, and masked fields are masked: in REST, GraphQL, SQL (where a masked column is a string), the change feed, functions and MCP.
 - Filtering, sorting, grouping or aggregating on a hidden or masked field is refused with 403, so values can't be probed. So is `$text` unless the text index covers no such field.
 - The query plan's `scanned` count reports only visible documents.
-- Delete events in the change feed carry no document, so they're shown by ID.
+- Delete events in the change feed carry only the deleted document's ID, and a reader with a row filter sees a delete only if the deleted version was within the filter (HexDB checks the copy the delete put in the [trash](#the-trash-and-the-delete-history)). So deletes don't reveal that hidden documents existed. If that copy is gone (`storage.trash_days = 0`, or the entry was purged or restored), such a reader doesn't see the delete; readers without a row filter see every delete.
 
 **Writes:**
 - A document must match the filter before (replace, patch, delete) and after (every write) the change. Writes that would move a document out of reach are refused with 403.
