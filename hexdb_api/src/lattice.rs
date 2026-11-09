@@ -355,6 +355,17 @@ pub async fn ai_usage(method: Method, uri: Uri, headers: HeaderMap, axum::extrac
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// Re-hash an API key with the current lattice key, asked by a replica that
+/// verified it with a previous one (see hexdb_core::auth::authenticate).
+pub async fn rehash_key(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let body: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let field = |k: &str| body[k].as_str().ok_or_else(|| ApiError::invalid(format!("{} is required.", k)));
+    let id = ulid::Ulid::from_string(field("id")?).map_err(|_| ApiError::invalid("id isn't an API key ID."))?;
+    hexdb_core::auth::store_rehashed_key(&engine, id, field("old_hash")?, field("new_hash")?, field("key")?).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 /// Count a sharing link download made on a replica.
 pub async fn share_download(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, &body)?;

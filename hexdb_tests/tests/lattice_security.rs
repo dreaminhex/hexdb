@@ -103,6 +103,8 @@ fn the_lattice_secret_rotates_one_hex_at_a_time() -> Result<()> {
     let first = overseer.insert("notes", &json!({ "step": 1 }))?;
     replicated(&replica, "notes", &first)?;
     let key = overseer.user_with_roles("svc", json!([{ "name": "reader", "tessellations": ["*"] }]))?;
+    // A key that will only ever be used on the replica.
+    let replica_key = overseer.user_with_roles("svc-replica", json!([{ "name": "reader", "tessellations": ["*"] }]))?;
 
     // Step 1: the replica moves to the new secret, keeping the old one. It
     // still follows the Overseer, which knows only the old secret.
@@ -122,6 +124,9 @@ fn the_lattice_secret_rotates_one_hex_at_a_time() -> Result<()> {
     // use it there (the role moves as hexes restart: a stopping Overseer hands it over).
     let leader = if overseer.request(Method::GET, "/status", None, &[])?.body["hex_type"] == "Overseer" { &overseer } else { &replica };
     assert_eq!(leader.request_as(Some(&key), Method::GET, "/notes", None, &[])?.status, 200, "the key, on the Overseer");
+    // The replica-only key is checked on the follower, which asks the Overseer to re-hash it.
+    let follower = if std::ptr::eq(leader, &overseer) { &replica } else { &overseer };
+    assert_eq!(follower.request_as(Some(&replica_key), Method::GET, "/notes", None, &[])?.status, 200, "the replica-only key after rotation");
     let third = overseer.insert("notes", &json!({ "step": 3 }))?;
     replicated(&replica, "notes", &third)?;
 
@@ -132,6 +137,7 @@ fn the_lattice_secret_rotates_one_hex_at_a_time() -> Result<()> {
         server.launch()?;
     }
     assert_eq!(overseer.request_as(Some(&key), Method::GET, "/notes", None, &[])?.status, 200, "the key was re-hashed with the new secret");
+    assert_eq!(replica.request_as(Some(&replica_key), Method::GET, "/notes", None, &[])?.status, 200, "the replica-only key was re-hashed too");
     let fourth = overseer.insert("notes", &json!({ "step": 4 }))?;
     replicated(&replica, "notes", &fourth)?;
 

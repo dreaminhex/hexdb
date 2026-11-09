@@ -144,6 +144,7 @@ pub fn app_router(
         .route("/lattice/revoke", post(crate::lattice::revoke))
         .route("/lattice/audit", post(crate::lattice::audit))
         .route("/lattice/ai-usage", post(crate::lattice::ai_usage))
+        .route("/lattice/rehash-key", post(crate::lattice::rehash_key))
         .route("/lattice/share-download", post(crate::lattice::share_download))
         .route("/lattice/throttle", post(crate::lattice::throttle))
         .route("/lattice/elect", post(crate::lattice::elect))

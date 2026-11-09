@@ -2227,7 +2227,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 1. On each hex in turn, set the new `lattice_secret` and add the old one to `network.previous_lattice_secrets`. Use the word `derived` for the key derived from the storage key, when moving from no secret to an explicit one. Restart that hex.
 2. Hexes sign with the current key and accept any listed key. A hex whose request isn't accepted retries with its previous keys, so mixed hexes keep talking.
-3. Once every hex has the new secret, remove `previous_lattice_secrets`. An API key is re-hashed with the new key when the Overseer checks it: on any request to the Overseer, and on any write, which every hex passes on to the Overseer. A key used only for reads on replicas while the old secret was accepted stops working when it's removed; use it once for a write, or against the Overseer, before step 3. Sessions signed with an old key end when it's removed.
+3. Once every hex has the new secret, remove `previous_lattice_secrets`. An API key is re-hashed with the new key the first time it's used after step 2, on any hex: the Overseer stores the new hash itself, and a replica asks the Overseer to (which it does only once it has the new secret too). A key not used at all between steps 2 and 3 stops working when the old secret is removed. Sessions signed with an old key end when it's removed.
 
 ### Local files
 

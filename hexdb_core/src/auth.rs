@@ -484,6 +484,28 @@ fn api_key_hash_with(lattice_key: &[u8; 32], secret: &str) -> String {
     mac(&key, secret.as_bytes()).to_hex().to_string()
 }
 
+/// A short public fingerprint of a lattice key, to tell which key a hash was made with.
+fn key_fingerprint(lattice_key: &[u8; 32]) -> String {
+    hex::encode(&blake3::keyed_hash(lattice_key, b"hexdb-lattice-key-fingerprint").as_bytes()[..8])
+}
+
+/// Store an API key's hash under the current lattice key (the Overseer), if
+/// it's still `old_hash` and `key` is this hex's current lattice key. Hashes
+/// are only ever replaced, never revealed; a stale request changes nothing.
+pub async fn store_rehashed_key(engine: &HexDBEngine, id: Ulid, old_hash: &str, new_hash: &str, key: &str) -> Result<bool> {
+    if key != key_fingerprint(&engine.config.lattice_key()?) {
+        return Ok(false);
+    }
+    let Some(doc) = engine.get_system_document(API_KEYS_TESSELLATION, id).await? else { return Ok(false) };
+    let Ok(mut stored) = serde_json::from_value::<StoredApiKey>(doc.data_json()) else { return Ok(false) };
+    if !crate::crypt::constant_time_eq(stored.secret_hash.as_bytes(), old_hash.as_bytes()) {
+        return Ok(false);
+    }
+    stored.secret_hash = new_hash.to_string();
+    engine.put_system_document(API_KEYS_TESSELLATION, id, serde_json::to_value(&stored)?, None).await?;
+    Ok(true)
+}
+
 fn api_key_hash(engine: &HexDBEngine, secret: &str) -> Result<String> {
     Ok(api_key_hash_with(&engine.config.lattice_key()?, secret))
 }
@@ -613,11 +635,34 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
         else {
             return Ok(None);
         };
-        if matched > 0 && engine.is_writable() {
-            stored.secret_hash = api_key_hash_with(&lattice_keys[0], secret);
-            if let Ok(json) = serde_json::to_value(&stored) {
-                if let Err(e) = engine.put_system_document(API_KEYS_TESSELLATION, id, json, None).await {
+        if matched > 0 {
+            let new_hash = api_key_hash_with(&lattice_keys[0], secret);
+            if engine.is_writable() {
+                let old_hash = std::mem::replace(&mut stored.secret_hash, new_hash.clone());
+                if let Err(e) = store_rehashed_key(engine, id, &old_hash, &new_hash, &key_fingerprint(&lattice_keys[0])).await {
                     warn!("⚠️ Couldn't re-hash API key '{}' with the current lattice key: {:#}", stored.name, e);
+                }
+            } else {
+                // A replica can't write: it asks the Overseer, which stores the
+                // new hash only if it also uses this lattice key (every hex
+                // has the new secret), so a key used only for reads on
+                // replicas survives the old secret's removal.
+                static ASKED: std::sync::Mutex<Vec<(Ulid, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+                let due = {
+                    let mut asked = ASKED.lock().unwrap();
+                    asked.retain(|(_, at)| at.elapsed() < std::time::Duration::from_secs(300));
+                    let due = !asked.iter().any(|(k, _)| *k == id);
+                    if due {
+                        asked.push((id, std::time::Instant::now()));
+                    }
+                    due
+                };
+                if due {
+                    let body = serde_json::json!({ "id": id.to_string(), "old_hash": stored.secret_hash, "new_hash": new_hash, "key": key_fingerprint(&lattice_keys[0]) });
+                    let ask = crate::replication::post_to_overseer(engine, "/lattice/rehash-key", &body);
+                    if let Ok(Err(e)) = tokio::time::timeout(std::time::Duration::from_secs(2), ask).await {
+                        tracing::debug!("Couldn't ask the Overseer to re-hash an API key: {:#}", e);
+                    }
                 }
             }
         }
