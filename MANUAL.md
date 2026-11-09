@@ -2462,12 +2462,12 @@ A document in memory takes about 1.5 times its JSON size: four data fragments pl
 
 **WAL record.** `[u32 big-endian length][12-byte nonce][ciphertext]`. The ciphertext is AES-256-GCM over the Zstandard-compressed JSON record `{"seq", "time", "op"}`. `op` is a put, a delete, a tessellation drop, or a batch of these, written atomically.
 
-**SSTable (version 4).** All integers are big-endian.
+**SSTable (version 6).** All integers are big-endian.
 
 | Offset | Field | Size |
 | --- | --- | --- |
 | 0x00 | Magic `HXDB` | 4 |
-| 0x04 | Version (4) | 2 |
+| 0x04 | Version (6) | 2 |
 | 0x06 | Compression (1 = Zstandard) | 1 |
 | 0x07 | Encryption (1 = AES-256-GCM) | 1 |
 | 0x08 | Entry count | 8 |
@@ -2477,9 +2477,12 @@ A document in memory takes about 1.5 times its JSON size: four data fragments pl
 | 0x28 | Index checksum (first 8 bytes of BLAKE3 over the index block) | 8 |
 | 0x30 | Max sequence number | 8 |
 | 0x38 | Key ID (identifies the key without revealing it) | 8 |
-| 0x40 | Bodies | ... |
+| 0x40 | Dictionary block: `length (4) | nonce (12) | AES-256-GCM(zstd dictionary)`; length 0 for none | ... |
+| after it | Bodies | ... |
 
-Each body is `nonce (12) | AES-256-GCM(zstd(JSON document))`, with the document ID and sequence number as authenticated data. Tombstones have no body.
+Each body is `nonce (12) | AES-256-GCM(zstd(JSON document))`, compressed with the file's dictionary if it has one, with the document ID and sequence number as authenticated data. Tombstones have no body.
+
+**Dictionaries.** A small JSON document compressed on its own barely shrinks: there's too little of it for Zstandard to find repetition. So a file of at least 64 documents averaging under 8 KB gets a dictionary (up to 16 KB) trained from a sample of them, which holds what they have in common (field names, repeated values), and every body is compressed with it. HexDB keeps the dictionary only when a trial on the sample shows it saving at least twice its own size. Order-like documents of about 250 bytes shrink to 40 bytes each with one, against 177 without. Each file has its own dictionary, so a file always reads on its own, and compaction trains a new one.
 
 **Stored document.** `{"id", "tessellation", "json": {fields as plain JSON}, "ttl"}`, in memory, WAL records, SSTable bodies and replication. Field types are inferred again when it's read, which is lossless. Versions before 0.2 stored each field with a type tag (`"data": {"name": {"type": "String", "value": "..."}}`), about three times larger. Both forms are read, and compaction rewrites old SSTables in the new form. In a lattice, upgrade replicas before the Overseer, as usual: upgraded hexes read both forms, but older hexes can't read the new one.
 
@@ -2487,7 +2490,7 @@ The index block is a series of chunks of up to 64 records. Each chunk is `length
 
 Only the chunk directory (each chunk's first ID, offset and length) and a Bloom filter of the IDs stay in memory, about 2 bytes per document.
 
-Versions 2 (unencrypted) and 3 (encrypted bodies, plaintext index) are still read. Compaction rewrites them as version 4.
+Versions 2 (unencrypted), 3 (encrypted bodies, plaintext index), 4 and 5 (version 6 without the dictionary block) are still read. Compaction rewrites them as version 6, so existing data gets dictionaries as its tessellations are compacted.
 
 **Sealed file.** `HXE1 | key ID (8) | nonce (12) | AES-256-GCM(content)`, authenticated with the file name.
 

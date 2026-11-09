@@ -47,6 +47,31 @@ pub fn decompress(data: &[u8]) -> io::Result<Vec<u8>> {
     })
 }
 
+thread_local! {
+    static DICT_DECOMPRESSOR: RefCell<Option<zstd::zstd_safe::DCtx<'static>>> = const { RefCell::new(None) };
+}
+
+/// Train a dictionary of at most `size` bytes from sample documents (none if
+/// zstd can't learn one from them, e.g. too few or too unlike).
+pub fn train_dictionary(samples: &[&[u8]], size: usize) -> Option<Vec<u8>> {
+    zstd::dict::from_samples(samples, size).ok().filter(|d| !d.is_empty())
+}
+
+/// Decompress one frame written with `dict` (prepared once per file).
+pub fn decompress_with(data: &[u8], dict: &zstd::dict::DecoderDictionary<'static>) -> io::Result<Vec<u8>> {
+    let size = match zstd::zstd_safe::get_frame_content_size(data) {
+        Ok(Some(size)) if size <= MAX_FRAME_CONTENT => size as usize,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "a dictionary frame without a content size")),
+    };
+    DICT_DECOMPRESSOR.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let dctx = slot.get_or_insert_with(zstd::zstd_safe::DCtx::create);
+        let mut out = Vec::with_capacity(size);
+        dctx.decompress_using_ddict(&mut out, data, dict.as_ddict()).map_err(|code| io::Error::other(zstd::zstd_safe::get_error_name(code)))?;
+        Ok(out)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +87,22 @@ mod tests {
             // And streaming readers read the new frames.
             assert_eq!(zstd::stream::decode_all(&packed[..]).unwrap(), data);
         }
+    }
+
+    #[test]
+    fn dictionaries_shrink_small_similar_documents() {
+        let docs: Vec<Vec<u8>> = (0..500).map(|i| format!(r#"{{"order_no":"ORD-{:06}","status":"{}","currency":"USD","total":{}}}"#, i, ["new", "paid", "void"][i % 3], i * 3).into_bytes()).collect();
+        let samples: Vec<&[u8]> = docs.iter().map(|d| &d[..]).collect();
+        let dict = train_dictionary(&samples, 4096).expect("a dictionary");
+        let mut c = zstd::bulk::Compressor::with_dictionary(0, &dict).unwrap();
+        let prepared = zstd::dict::DecoderDictionary::copy(&dict);
+        let (mut plain, mut with) = (0, 0);
+        for doc in &docs {
+            let packed = c.compress(doc).unwrap();
+            assert_eq!(&decompress_with(&packed, &prepared).unwrap(), doc);
+            with += packed.len();
+            plain += compress(doc, 0).unwrap().len();
+        }
+        assert!(with * 2 < plain, "{} vs {}", with, plain);
     }
 }
