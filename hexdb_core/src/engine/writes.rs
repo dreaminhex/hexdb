@@ -506,17 +506,11 @@ impl HexDBEngine {
         let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
         let ids = self.candidate_ids(tess, plan, None).await;
         let scanned = ids.len();
-        let mut documents = Vec::new();
-        for id in ids {
-            if let Some(doc) = self.read_latest(&DocKey::new(tess, id)).await?.0 {
-                if filter.matches(&doc) {
-                    documents.push(doc);
-                }
-            }
-        }
+        let keys: Vec<DocKey> = ids.into_iter().map(|id| DocKey::new(tess, id)).collect();
+        let documents: Vec<std::sync::Arc<Document>> = self.read_latest_many(&keys).await?.into_iter().flatten().filter(|doc| filter.matches(doc)).collect();
         let shape = crate::advisor::Shape::of(&aggregation.filter, &[]);
         self.query_stats.record(tess, shape, scanned, documents.len(), started.elapsed().as_secs_f64() * 1000.0, &indexes);
-        aggregation.run(&documents)
+        aggregation.run(documents.iter().map(|d| d.as_ref()))
     }
 
     /// Number of documents matching a filter.

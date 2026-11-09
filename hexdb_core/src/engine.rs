@@ -1196,6 +1196,76 @@ impl HexDBEngine {
         bail!("Document {} in '{}' could not be read.", key.id, key.tessellation)
     }
 
+    /// The newest visible versions of many documents of one scan, in order: one
+    /// lock per batch for what memory holds (parsed outside the lock), the
+    /// usual path (`read_latest`) for the rest. For aggregations and other
+    /// reads of many documents, where a lock per document costs more than the read.
+    pub(crate) async fn read_latest_many(&self, keys: &[DocKey]) -> Result<Vec<Option<Arc<Document>>>> {
+        const BATCH: usize = 1024;
+        let mut out = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(BATCH) {
+            let now = Utc::now().timestamp_millis();
+            // Per key: a cached document, bytes to parse, or "ask read_latest".
+            enum Found {
+                Doc(Option<Arc<Document>>),
+                Bytes(Vec<u8>, u64),
+                Slow,
+            }
+            let found: Vec<Found> = {
+                let mut state = self.state.lock().await;
+                chunk
+                    .iter()
+                    .map(|key| {
+                        let Some(meta) = state.hex.meta(key) else { return Found::Slow };
+                        if meta.tombstone || meta.is_expired(now) {
+                            return Found::Doc(None);
+                        }
+                        if let Some(doc) = self.doc_cache.get_shared(key, meta.seq) {
+                            return Found::Doc(Some(doc));
+                        }
+                        match state.hex.read(key) {
+                            Some(Lookup::Live { bytes, seq, ttl }) if ttl.is_none_or(|t| t > now) => Found::Bytes(bytes, seq),
+                            Some(Lookup::Live { .. }) | Some(Lookup::Tombstone { .. }) => Found::Doc(None),
+                            _ => Found::Slow,
+                        }
+                    })
+                    .collect()
+            };
+            // Parse what memory held on every core (documents are independent).
+            let mut found = found;
+            let raw: Vec<(usize, Vec<u8>, u64)> = found.iter_mut().enumerate().filter_map(|(i, f)| if let Found::Bytes(b, s) = f { Some((i, std::mem::take(b), *s)) } else { None }).collect();
+            let parsed: Vec<(usize, Result<Document>, usize, u64)> = if raw.len() < 64 {
+                raw.into_iter().map(|(i, b, s)| (i, parse_document(&b), b.len(), s)).collect()
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).min(8);
+                    let per = raw.len().div_ceil(threads);
+                    std::thread::scope(|scope| {
+                        let parts: Vec<_> = raw.chunks(per).map(|part| scope.spawn(move || part.iter().map(|(i, b, s)| (*i, parse_document(b), b.len(), *s)).collect::<Vec<_>>())).collect();
+                        parts.into_iter().flat_map(|p| p.join().unwrap_or_default()).collect()
+                    })
+                })
+                .await?
+            };
+            let mut parsed: std::collections::HashMap<usize, (Result<Document>, usize, u64)> = parsed.into_iter().map(|(i, d, n, s)| (i, (d, n, s))).collect();
+            for (i, (key, found)) in chunk.iter().zip(found).enumerate() {
+                out.push(match found {
+                    Found::Doc(doc) => doc,
+                    Found::Bytes(..) => {
+                        let (doc, size, seq) = parsed.remove(&i).ok_or_else(|| anyhow!("a parsed document went missing"))?;
+                        let doc = doc?;
+                        if self.cacheable(key) {
+                            self.doc_cache.put(key, seq, &doc, size);
+                        }
+                        Some(Arc::new(doc))
+                    }
+                    Found::Slow => self.read_latest(key).await?.0.map(Arc::new),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Cache a document read from disk, unless a newer version appeared meanwhile.
     async fn cache(&self, key: &DocKey, seq: u64, ttl: Option<i64>, bytes: &[u8]) {
         let mut state = self.state.lock().await;

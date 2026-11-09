@@ -219,9 +219,17 @@ impl Aggregation {
         // Group key (serialized) -> (key values, accumulators).
         let mut groups: BTreeMap<String, (Vec<Value>, Vec<Accumulator>)> = BTreeMap::new();
         let mut matched = 0;
+        // Only the top-level fields the aggregation reads are turned into JSON,
+        // not whole documents (the full API form for `id` and system fields).
+        let roots: std::collections::BTreeSet<&str> = group_paths.iter().chain(agg_paths.iter().flatten()).filter_map(|p| p.first().map(String::as_str)).collect();
+        let whole = roots.iter().any(|r| *r == "id" || r.starts_with('_'));
         for doc in documents {
             matched += 1;
-            let json = doc.to_api_json();
+            let json = if whole {
+                doc.to_api_json()
+            } else {
+                Value::Object(roots.iter().filter_map(|r| doc.data.get(*r).map(|v| (r.to_string(), v.to_json()))).collect())
+            };
             let key: Vec<Value> = group_paths
                 .iter()
                 .map(|p| resolve(&json, p).first().map(|v| (*v).clone()).unwrap_or(Value::Null))

@@ -32,7 +32,8 @@ pub(crate) struct DocCache {
 }
 
 struct DocCacheInner {
-    map: HashMap<DocKey, (u64, Document, usize, u64)>,
+    /// Shared, so a scan can use a cached document without copying it.
+    map: HashMap<DocKey, (u64, std::sync::Arc<Document>, usize, u64)>,
     bytes: usize,
     budget: usize,
     tick: u64,
@@ -44,6 +45,11 @@ impl DocCache {
     }
 
     pub(crate) fn get(&self, key: &DocKey, seq: u64) -> Option<Document> {
+        self.get_shared(key, seq).map(|doc| (*doc).clone())
+    }
+
+    /// The cached version `seq` of a document, shared rather than copied.
+    pub(crate) fn get_shared(&self, key: &DocKey, seq: u64) -> Option<std::sync::Arc<Document>> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.tick += 1;
         let tick = inner.tick;
@@ -62,7 +68,7 @@ impl DocCache {
         }
         inner.tick += 1;
         let tick = inner.tick;
-        if let Some((_, _, old, _)) = inner.map.insert(key.clone(), (seq, doc.clone(), size, tick)) {
+        if let Some((_, _, old, _)) = inner.map.insert(key.clone(), (seq, std::sync::Arc::new(doc.clone()), size, tick)) {
             inner.bytes -= old;
         }
         inner.bytes += size;
