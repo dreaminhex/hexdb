@@ -2187,7 +2187,7 @@ Without TLS, HexDB warns when it listens on a non-loopback address.
 
 Outgoing HTTPS (other hexes, AI providers, storage and import plugins, webhooks) trusts the operating system's certificate store, plus `tls.ca_file`. On Linux that's the `ca-certificates` package, which the Debian package depends on and the Docker image includes.
 
-Behind a reverse proxy, list the proxy in `network.trusted_proxies` (IPs or CIDR ranges). The client address is then taken from `X-Forwarded-For`: the right-most address that isn't a trusted proxy. Otherwise the TCP peer is the client. The client address is what sign-in throttling, connection limits and the audit trail use. When a trusted proxy terminates TLS and sends `X-Forwarded-Proto: https`, HexDB marks the session cookie `Secure` and sends HSTS, as it does with its own TLS.
+Behind a reverse proxy, list the proxy in `network.trusted_proxies` (IPs or CIDR ranges). The client address is then taken from `X-Forwarded-For`: the right-most address that isn't a trusted proxy. Otherwise the TCP peer is the client. The client address is what sign-in throttling, connection limits and the audit trail use. When a trusted proxy terminates TLS and sends `X-Forwarded-Proto: https`, HexDB marks the session cookie `Secure` and sends HSTS, as it does with its own TLS. A trusted proxy that serves HexDB under another host name sends `X-Forwarded-Host`, and the same-origin checks (the cookie CSRF protection, CORS, live streams) accept a browser's `Origin` matching it; from anyone else the header is ignored.
 
 ### Encryption at rest
 

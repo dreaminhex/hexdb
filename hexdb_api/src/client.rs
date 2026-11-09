@@ -60,7 +60,7 @@ impl TrustedProxies {
             .map(TrustedProxies)
     }
 
-    fn trusts(&self, ip: IpAddr) -> bool {
+    pub fn trusts(&self, ip: IpAddr) -> bool {
         self.0.iter().any(|c| c.contains(ip))
     }
 
@@ -116,6 +116,11 @@ pub async fn resolve_client(
         None => "unknown".into(),
     };
     let https = peer(request.extensions()).is_some_and(|peer| proxies.says_https(peer, request.headers()));
+    // The public host a trusted proxy reports (`same_origin` checks Origin against it);
+    // from anyone else the header is dropped, so it can't be spoofed.
+    if !peer(request.extensions()).is_some_and(|peer| proxies.trusts(peer)) {
+        request.headers_mut().remove("x-forwarded-host");
+    }
     let forwarded_for = request.headers().get(FORWARDED_FOR_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
     let signature = request.headers().get(FORWARD_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
     if let (Some(client), Some(signature)) = (forwarded_for, signature) {

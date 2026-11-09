@@ -133,9 +133,12 @@ pub fn request_credential(headers: &HeaderMap) -> Option<String> {
 /// True if a browser request came from this server's own pages.
 pub(crate) fn same_origin(headers: &HeaderMap) -> bool {
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    // Behind a trusted proxy, the public host it reports (untrusted senders' copies
+    // are dropped in `crate::client::resolve_client`); a list keeps the first hop's.
+    let forwarded = headers.get("x-forwarded-host").and_then(|v| v.to_str().ok()).and_then(|v| v.split(',').next()).map(str::trim);
     if let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
         let origin_host = origin.split_once("://").map(|(_, rest)| rest).unwrap_or(origin);
-        return host.is_some_and(|h| h.eq_ignore_ascii_case(origin_host));
+        return host.is_some_and(|h| h.eq_ignore_ascii_case(origin_host)) || forwarded.is_some_and(|h| h.eq_ignore_ascii_case(origin_host));
     }
     // No Origin: modern browsers still send Sec-Fetch-Site.
     matches!(
@@ -592,6 +595,22 @@ pub async fn revoke_key(State(engine): Engine, Auth(principal): Auth, Path(id): 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_origin_accepts_the_host_a_trusted_proxy_reports() {
+        let headers = |pairs: &[(&'static str, &str)]| {
+            let mut h = HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(*k, HeaderValue::from_str(v).unwrap());
+            }
+            h
+        };
+        assert!(same_origin(&headers(&[("host", "hexdb.app"), ("origin", "https://hexdb.app")])));
+        assert!(!same_origin(&headers(&[("host", "hxl-1.internal:7700"), ("origin", "https://acme.hexdb.app")])));
+        // Behind a trusted proxy (untrusted senders' X-Forwarded-Host never gets this far).
+        assert!(same_origin(&headers(&[("host", "hxl-1.internal:7700"), ("x-forwarded-host", "acme.hexdb.app"), ("origin", "https://acme.hexdb.app")])));
+        assert!(!same_origin(&headers(&[("host", "hxl-1.internal:7700"), ("x-forwarded-host", "acme.hexdb.app"), ("origin", "https://evil.example")])));
+    }
 
     #[test]
     fn only_the_listed_routes_are_public() {
