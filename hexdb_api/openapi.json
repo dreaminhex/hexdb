@@ -3760,6 +3760,71 @@
         }
       }
     },
+    "/tessellations/{name}/quota": {
+      "put": {
+        "tags": [
+          "Tessellations"
+        ],
+        "summary": "Set a files tessellation's limits, {mb, files} (null removes them; manage)",
+        "operationId": "put_tessellations_name_quota",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Name",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "mb": {
+                    "type": "integer"
+                  },
+                  "files": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{\"quota\", \"used_bytes\", \"used_files\"}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/tessellations/{name}/indexes": {
       "get": {
         "tags": [

@@ -786,6 +786,7 @@ impl Follower {
         for (name, info) in &meta.tessellations {
             engine.reconcile_indexes(name, &info.indexes).await?;
             engine.set_schemas_unchecked(name, &info.schemas, info.pending_schema.as_ref())?;
+            engine.set_quota_unchecked(name, info.quota.clone())?;
         }
 
         let cursor = ReplicaCursor { source_id: meta.source_id.clone(), applied_seq: meta.seq, held_slices: slices };
@@ -1221,6 +1222,7 @@ impl Follower {
             self.engine.set_replicated_kind(name, &info.kind)?;
             self.engine.reconcile_indexes(name, &info.indexes).await?;
             self.engine.set_schemas_unchecked(name, &info.schemas, info.pending_schema.as_ref())?;
+            self.engine.set_quota_unchecked(name, info.quota.clone())?;
         }
         if let Some(s) = self.session.as_mut() {
             s.last_catalog = std::time::Instant::now();

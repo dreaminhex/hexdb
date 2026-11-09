@@ -456,7 +456,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
                 );
                 catalog_changed = true;
             }
@@ -502,7 +502,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
                 );
                 catalog_changed = true;
             }
@@ -902,7 +902,7 @@ impl HexDBEngine {
         if !catalog.tessellations.contains_key(name) {
             catalog.tessellations.insert(
                 name.to_string(),
-                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None },
+                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
             );
             catalog.save(&self.storage_dir, &self.keys)?;
         }
@@ -940,7 +940,7 @@ impl HexDBEngine {
         }
         catalog.tessellations.insert(
             name.to_string(),
-            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None },
+            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
         );
         catalog.save(&self.storage_dir, &self.keys)?;
         info!("🧩 Created tessellation '{}' ({}).", name, kind);

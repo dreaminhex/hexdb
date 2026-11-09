@@ -68,5 +68,26 @@ fn uploads_stop_at_the_quota_and_deleting_frees_room() -> Result<()> {
     // Clearing a user's own quota (null) puts them back on the default.
     let res = server.request(Method::PATCH, "/users/una", Some(&json!({ "quota_mb": null, "quota_files": null })), &[])?;
     assert!(res.body["quota_mb"].is_null(), "{}", res.body);
+
+    // A files tessellation can have a quota of its own, whoever uploads.
+    assert!(server.request(Method::POST, "/tessellations", Some(&json!({ "name": "inbox", "kind": "files" })), &[])?.status.is_success());
+    let res = server.request(Method::PUT, "/tessellations/inbox/quota", Some(&json!({ "files": 2 })), &[])?;
+    assert_eq!((res.status, res.body["quota"]["files"].as_u64()), (StatusCode::OK, Some(2)), "{}", res.body);
+    for i in 0..2 {
+        assert!(server.send_bytes(Method::PUT, &format!("/inbox/_files/{}.txt", i), b"x".to_vec(), &[])?.status.is_success());
+    }
+    let res = server.send_bytes(Method::PUT, "/inbox/_files/third.txt", b"x".to_vec(), &[])?;
+    assert_eq!((res.status, res.error_code()), (StatusCode::INSUFFICIENT_STORAGE, Some("quota_exceeded")), "even an administrator: {}", res.body);
+    assert!(res.body["error"]["message"].as_str().unwrap().contains("'inbox'"), "{}", res.body);
+    let info = server.request(Method::GET, "/tessellations/inbox", None, &[])?.body;
+    assert_eq!((info["quota"]["files"].as_u64(), info["quota_used"]["files"].as_u64()), (Some(2), Some(2)), "{}", info);
+    assert_eq!(server.request(Method::PUT, "/tessellations/inbox/quota", Some(&json!(null)), &[])?.status, StatusCode::OK);
+    assert!(server.send_bytes(Method::PUT, "/inbox/_files/third.txt", b"x".to_vec(), &[])?.status.is_success());
+    // Only files tessellations have quotas.
+    server.insert("notes", &json!({ "n": 1 }))?;
+    assert_eq!(server.request(Method::PUT, "/tessellations/notes/quota", Some(&json!({ "mb": 1 })), &[])?.status, StatusCode::BAD_REQUEST);
+    // Counting quotas gave the files tessellations an index on uploaded_by.
+    let indexes = server.request(Method::GET, "/tessellations/media", None, &[])?.body;
+    assert!(indexes["indexes"].as_array().unwrap().iter().any(|i| i == "uploaded_by"), "{}", indexes);
     Ok(())
 }

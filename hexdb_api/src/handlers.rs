@@ -646,6 +646,7 @@ fn tessellation_json(name: &str, info: &TessellationInfo) -> Value {
         "indexes": info.indexes.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
         "schema_version": info.schemas.last().map(|s| s.version),
         "schema_pending": info.pending_schema.is_some(),
+        "quota": info.quota,
     })
 }
 
@@ -1102,9 +1103,25 @@ pub async fn get_tessellation(Path(name): Path<String>, State(engine): Engine, A
         .map(|(field, link)| json!({ "field": field, "tessellation": link.tessellation, "on_delete": link.on_delete, "enforce": link.enforce }))
         .collect::<Vec<_>>());
     body["children"] = json!(engine.child_links(&name));
+    if info.quota.is_some() {
+        let usage = engine.tessellation_usage(&name).await?;
+        body["quota_used"] = json!({ "bytes": usage.bytes, "files": usage.files });
+    }
     // Counted as the caller sees it (a role's row filter narrows it).
     body["document_count"] = json!(engine.count_matching(&name, &hexdb_core::filter::Filter::all()).await?);
     Ok(Json(body).into_response())
+}
+
+/// `PUT /tessellations/{name}/quota`: `{"mb", "files"}` (either may be left
+/// out or 0), or `null` to remove the limits. Files tessellations; needs manage.
+pub async fn set_quota(Path(name): Path<String>, State(engine): Engine, Auth(principal): Auth, body: Result<Json<Value>, JsonRejection>) -> ApiResult {
+    principal.require(Permission::Manage, &name)?;
+    let Json(body) = body?;
+    let quota: Option<hexdb_core::catalog::TessQuota> = serde_json::from_value(body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    engine.set_tessellation_quota(&name, quota.clone())?;
+    engine.audit(&principal.login, "tessellation.quota", &name, json!({ "quota": quota })).await;
+    let usage = engine.tessellation_usage(&name).await?;
+    Ok(Json(json!({ "quota": engine.tessellation_quota(&name), "used_bytes": usage.bytes, "used_files": usage.files })).into_response())
 }
 
 /// Delete a tessellation and all of its documents.

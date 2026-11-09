@@ -44,6 +44,19 @@ pub struct TessellationInfo {
     /// A next version saved to apply later, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_schema: Option<crate::schema::PendingSchema>,
+    /// Files tessellations: the most it may hold (see engine::files::quotas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<TessQuota>,
+}
+
+/// A files tessellation's limits: megabytes and files, current versions,
+/// earlier versions and the trash included (none or 0: no limit).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TessQuota {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
 }
 
 impl TessellationInfo {
@@ -185,7 +198,7 @@ mod tests {
         assert!(Catalog::load(&dir, &keys).unwrap().is_none());
 
         let mut catalog = Catalog::default();
-        catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1, indexes: Vec::new(), schemas: Vec::new(), pending_schema: None });
+        catalog.tessellations.insert("Articles".into(), TessellationInfo { kind: "user".into(), created: 1, indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None });
         catalog.dropped.insert("old".into(), 42);
         catalog.save(&dir, &keys).unwrap();
         assert!(!fs::read(Catalog::path(&dir)).unwrap().windows(8).any(|w| w == b"Articles"), "encrypted");
