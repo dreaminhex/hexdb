@@ -9,8 +9,10 @@
 //   cached for an hour, and again (at most once a minute) for a key ID it
 //   doesn't have. RS256/384/512, PS256/384/512, ES256/384 and EdDSA; never
 //   `none` or a shared-secret HMAC.
-// - `iss` is the provider's issuer, `aud` names `oauth.audience`, and the
-//   token is within `nbf`..`exp` (a minute's leeway for clocks).
+// - `iss` is the provider's issuer, `aud` names `oauth.audience` or, with
+//   `oauth.resource` set (the lattice's public URL), that URL or its `/mcp`
+//   endpoint, as MCP clients ask for with RFC 8707 resource indicators; and
+//   the token is within `nbf`..`exp` (a minute's leeway for clocks).
 //
 // The request then runs as the existing HexDB user whose login, or else
 // email address, equals the token's `oauth.user_claim` (default `email`),
@@ -47,19 +49,30 @@ const VERIFIED_CAPACITY: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub issuer: String,
+    /// The API identifier registered at the provider (may be empty with `resource`).
     pub audience: String,
+    /// The lattice's public URL (`oauth.resource`, no trailing slash; may be empty).
+    pub resource: String,
     pub user_claim: String,
 }
 
 impl Settings {
-    /// The configured provider, or None while `oauth.issuer` or `oauth.audience` is empty.
+    /// The configured provider, or None while `oauth.issuer` is empty or
+    /// neither `oauth.audience` nor `oauth.resource` is set.
     pub fn from_engine(engine: &HexDBEngine) -> Option<Settings> {
         let text = |key: &str| engine.config_value(key).as_str().map(str::trim).unwrap_or_default().to_string();
         let (issuer, audience, user_claim) = (text("oauth.issuer"), text("oauth.audience"), text("oauth.user_claim"));
-        if issuer.is_empty() || audience.is_empty() {
+        let resource = text("oauth.resource").trim_end_matches('/').to_string();
+        if issuer.is_empty() || (audience.is_empty() && resource.is_empty()) {
             return None;
         }
-        Some(Settings { issuer, audience, user_claim: if user_claim.is_empty() { "email".into() } else { user_claim } })
+        Some(Settings { issuer, audience, resource, user_claim: if user_claim.is_empty() { "email".into() } else { user_claim } })
+    }
+
+    /// True if a token for audience `aud` is meant for this lattice.
+    pub fn accepts_audience(&self, aud: &str) -> bool {
+        (!self.audience.is_empty() && aud == self.audience)
+            || (!self.resource.is_empty() && [self.resource.clone(), format!("{}/", self.resource), format!("{}/mcp", self.resource)].iter().any(|r| r == aud))
     }
 
     /// The provider's discovery document.
@@ -173,12 +186,12 @@ impl OAuth {
             bail!("iss is {}, not {}", claims["iss"], issuer);
         }
         let audience_ok = match &claims["aud"] {
-            Value::String(aud) => *aud == settings.audience,
-            Value::Array(list) => list.iter().any(|a| a.as_str() == Some(settings.audience.as_str())),
+            Value::String(aud) => settings.accepts_audience(aud),
+            Value::Array(list) => list.iter().filter_map(Value::as_str).any(|a| settings.accepts_audience(a)),
             _ => false,
         };
         if !audience_ok {
-            bail!("aud {} doesn't name {}", claims["aud"], settings.audience);
+            bail!("aud {} doesn't name {}", claims["aud"], if settings.audience.is_empty() { &settings.resource } else { &settings.audience });
         }
         let exp = claims["exp"].as_i64().ok_or_else(|| anyhow!("no exp"))?;
         if exp + LEEWAY <= now {

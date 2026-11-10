@@ -73,7 +73,7 @@ fn is_public(method: &Method, path: &str) -> bool {
         // A2A discovery; it says nothing unless a2a.enabled, and /a2a itself needs credentials.
         || ((path == "/.well-known/agent-card.json" || path == crate::a2a::JWKS_PATH) && method == Method::GET)
         // OAuth discovery (RFC 9728); 404 unless oauth.issuer is set.
-        || (path == PROTECTED_RESOURCE_PATH && method == Method::GET)
+        || ((path == PROTECTED_RESOURCE_PATH || path == MCP_RESOURCE_PATH) && method == Method::GET)
         || (path == "/auth/login" && method == Method::POST)
         || (path == "/shutdown" && method == Method::POST)
         || is_lattice_route(method, path)
@@ -223,8 +223,12 @@ pub async fn authenticate(State(engine): State<Arc<HexDBEngine>>, mut request: R
     } else if !is_public(&method, &path) {
         let mut response = ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "Sign in, or send an API key.").into_response();
         // With OAuth on, clients such as MCP's find the provider through the resource metadata.
+        // The MCP endpoint has metadata of its own (RFC 9728 section 3.1: the resource's path after the well-known prefix).
         let challenge = match hexdb_core::oauth::Settings::from_engine(&engine) {
-            Some(_) => format!("Bearer realm=\"HexDB\", resource_metadata=\"{}{}\"", base_url(&engine, &request), PROTECTED_RESOURCE_PATH),
+            Some(settings) => {
+                let metadata = if path == "/mcp" { MCP_RESOURCE_PATH } else { PROTECTED_RESOURCE_PATH };
+                format!("Bearer realm=\"HexDB\", resource_metadata=\"{}{}\"", public_url(&settings, &engine, &request), metadata)
+            }
             None => "Bearer realm=\"HexDB\"".to_string(),
         };
         if let Ok(value) = HeaderValue::from_str(&challenge) {
@@ -237,6 +241,17 @@ pub async fn authenticate(State(engine): State<Arc<HexDBEngine>>, mut request: R
 
 /// Where the OAuth protected resource metadata is served.
 const PROTECTED_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource";
+/// The MCP endpoint's own metadata.
+const MCP_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource/mcp";
+
+/// The lattice's public URL: `oauth.resource`, or the address the request came in on.
+fn public_url(settings: &hexdb_core::oauth::Settings, engine: &HexDBEngine, request: &Request) -> String {
+    if settings.resource.is_empty() {
+        base_url(engine, request)
+    } else {
+        settings.resource.clone()
+    }
+}
 
 /// This hex's address as the client reached it: `http(s)://host[:port]`.
 pub fn base_url(engine: &HexDBEngine, request: &Request) -> String {
@@ -251,8 +266,10 @@ pub async fn protected_resource(State(engine): Engine, request: Request) -> ApiR
     let Some(settings) = hexdb_core::oauth::Settings::from_engine(&engine) else {
         return Err(ApiError::new(StatusCode::NOT_FOUND, "not_found", "OAuth is off on this lattice."));
     };
+    // `/.well-known/oauth-protected-resource/mcp` describes the MCP endpoint itself.
+    let suffix = if request.uri().path() == MCP_RESOURCE_PATH { "/mcp" } else { "" };
     Ok(Json(json!({
-        "resource": base_url(&engine, &request),
+        "resource": format!("{}{}", public_url(&settings, &engine, &request), suffix),
         "authorization_servers": [settings.issuer],
         "bearer_methods_supported": ["header"],
         "resource_name": "HexDB",

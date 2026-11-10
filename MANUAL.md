@@ -1930,12 +1930,22 @@ hexdb config set oauth.user_claim email      # the default
 
 **What HexDB checks.** A bearer token that is a JWT is checked only when `oauth.issuer` and `oauth.audience` are set:
 - The signature, with the provider's keys. They're found through `<issuer>/.well-known/openid-configuration`, cached for an hour, and fetched again (at most once a minute) for a key ID HexDB hasn't seen, so the provider's key rotation just works. If the provider can't be reached, the keys fetched earlier keep working. RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384 and EdDSA are accepted; `none` and shared-secret (HS*) tokens never are.
-- `iss` is the provider's issuer, `aud` names `oauth.audience`, and the time is within `nbf` and `exp`, allowing a minute for clock differences.
+- `iss` is the provider's issuer, `aud` names `oauth.audience` (or, with `oauth.resource` set, the lattice's URL or its `/mcp` endpoint; see below), and the time is within `nbf` and `exp`, allowing a minute for clock differences.
 - The `oauth.user_claim` claim equals an existing user's login or, failing that, email address, ignoring case. HexDB never creates users from tokens: unknown identities, and users whose address two accounts share, are refused, so administrators decide who gets in and with which roles.
 
 **Then** the request runs as that user, on every endpoint (REST, GraphQL, SQL, MCP, A2A), exactly as with an API key: their roles, row filters and field masks apply, a locked user is refused, and `GET /auth/me` shows `"credential": {"kind": "oauth", "issuer", "subject"}`. A refused token gets the same 401 as a wrong API key; the server log says why (`OAuth token refused: ...`). The provider's discovery and key URLs must use HTTPS (plain HTTP only on `localhost`, for testing).
 
 **Discovery for clients.** While OAuth is on, `GET /.well-known/oauth-protected-resource` (RFC 9728) names the provider, a 401 without credentials carries `WWW-Authenticate: Bearer realm="HexDB", resource_metadata="..."` pointing to it (as MCP clients expect), and the A2A agent card lists an `openIdConnectSecurityScheme` beside the bearer scheme.
+
+**MCP clients that sign in with OAuth.** An MCP client that follows the MCP authorization spec (Claude Desktop and Claude Code among them) finds the provider on its own: a 401 from `/mcp` points to `/.well-known/oauth-protected-resource/mcp`, which describes the MCP endpoint itself. The client then asks the provider for a token for that endpoint, naming it as the resource (RFC 8707), so the token's `aud` is the endpoint's URL rather than an API identifier. Set `oauth.resource` to the lattice's public URL so HexDB accepts those:
+
+```bash
+hexdb config set oauth.resource "https://hexdb.example.com"
+```
+
+- Tokens whose `aud` is that URL, or that URL with `/mcp`, are accepted alongside `oauth.audience` (which may then be left empty). The metadata names that URL, and `/mcp`'s metadata names `https://hexdb.example.com/mcp`. Without `oauth.resource`, both use the address each request came in on, and only `oauth.audience` is accepted, since a request's own `Host` header can't vouch for a token.
+- At the provider, register the API with the URL as its identifier (Auth0: an API whose identifier is `https://hexdb.example.com/mcp`; Okta and Keycloak: an audience or resource of that value). Microsoft Entra ID issues tokens for `api://` identifiers and ignores RFC 8707 resource indicators, so with Entra keep `oauth.audience` and configure the client with the scope of the HexDB API.
+- Clients that register themselves (dynamic client registration, RFC 7591) need a provider that allows it; otherwise register the client at the provider and give the client its client ID. HexDB issues no tokens and registers no clients: it accepts the provider's tokens and maps them to existing users as above.
 
 ### Multi-factor authentication
 
@@ -2680,7 +2690,7 @@ All of it is also bounded by `ai.monthly_token_budget`. Chat requests sent to a 
 claude mcp add --transport http hexdb https://hexdb.example.com/mcp --header "Authorization: Bearer hxk_..."
 ```
 
-The tools are the same as the chat's, and all read-only: `list_tessellations`, `describe_tessellation` (schema, indexes, text-search fields, sample field names), `query` (filter, sort, fields), `get_document`, `search` (full text), `count`, `aggregate`, and `sql` (a `SELECT` on one tessellation). An [OAuth access token](#oauth-access-tokens) works in place of the key. They run with the key's permissions, row filters and field masks, return at most 25 documents and about 24 KB, and shorten long strings. The MCP server doesn't call an AI provider (the client brings its own model) and costs no tokens here. Any hex answers (the [Oracle](#the-oracle), when the lattice has one); `GET /mcp` (an event stream) returns 405.
+The tools are the same as the chat's, and all read-only: `list_tessellations`, `describe_tessellation` (schema, indexes, text-search fields, sample field names), `query` (filter, sort, fields), `get_document`, `search` (full text), `count`, `aggregate`, and `sql` (a `SELECT` on one tessellation). An [OAuth access token](#oauth-access-tokens) works in place of the key, and MCP clients that sign in with OAuth find the provider on their own (see [MCP clients that sign in with OAuth](#oauth-access-tokens)). They run with the key's permissions, row filters and field masks, return at most 25 documents and about 24 KB, and shorten long strings. The MCP server doesn't call an AI provider (the client brings its own model) and costs no tokens here. Any hex answers (the [Oracle](#the-oracle), when the lattice has one); `GET /mcp` (an event stream) returns 405.
 
 ### A2A (Agent2Agent)
 

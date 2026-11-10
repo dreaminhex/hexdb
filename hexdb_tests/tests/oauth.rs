@@ -171,6 +171,27 @@ fn provider_tokens_authenticate_as_existing_users() -> Result<()> {
     assert_eq!(card.body["securitySchemes"]["oidc"]["openIdConnectSecurityScheme"]["openIdConnectUrl"], format!("{}/.well-known/openid-configuration", provider.issuer));
     assert_eq!(card.body["securityRequirements"].as_array().map(Vec::len), Some(2), "either scheme: {}", card.body);
 
+    // MCP clients ask the provider for a token for the lattice's URL or its /mcp
+    // endpoint (RFC 8707): accepted once oauth.resource names this lattice, and the
+    // MCP endpoint has metadata of its own, which a 401 from /mcp points to.
+    configure(&server, json!({ "oauth.user_claim": "email" }))?;
+    let for_mcp = provider.token(json!({ "aud": "https://hexdb.example.com/mcp" }));
+    assert_eq!(server.request_as(Some(&for_mcp), Method::GET, &doc, None, &[])?.status, StatusCode::UNAUTHORIZED, "not before oauth.resource is set");
+    configure(&server, json!({ "oauth.resource": "https://hexdb.example.com/" }))?;
+    assert_eq!(status_with(&server, &for_mcp, &doc, StatusCode::OK)?, StatusCode::OK);
+    let for_site = provider.token(json!({ "aud": ["https://hexdb.example.com", "api://unrelated"] }));
+    assert_eq!(server.request_as(Some(&for_site), Method::GET, &doc, None, &[])?.status, StatusCode::OK);
+    let elsewhere = provider.token(json!({ "aud": "https://other.example.com/mcp" }));
+    assert_eq!(server.request_as(Some(&elsewhere), Method::GET, &doc, None, &[])?.status, StatusCode::UNAUTHORIZED);
+    let mcp_metadata = server.request_as(None, Method::GET, "/.well-known/oauth-protected-resource/mcp", None, &[])?;
+    assert_eq!(mcp_metadata.body["resource"], "https://hexdb.example.com/mcp", "{}", mcp_metadata.body);
+    assert_eq!(mcp_metadata.body["authorization_servers"], json!([provider.issuer]));
+    let root = server.request_as(None, Method::GET, "/.well-known/oauth-protected-resource", None, &[])?;
+    assert_eq!(root.body["resource"], "https://hexdb.example.com", "{}", root.body);
+    let anonymous = server.request_as(None, Method::POST, "/mcp", Some(&json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" })), &[])?;
+    let challenge = anonymous.headers["www-authenticate"].to_str()?.to_string();
+    assert!(challenge.contains("resource_metadata=\"https://hexdb.example.com/.well-known/oauth-protected-resource/mcp\""), "{}", challenge);
+
     // Turned off again: tokens stop working, and discovery says nothing.
     configure(&server, json!({ "oauth.issuer": "" }))?;
     assert_eq!(status_with(&server, &agent, &doc, StatusCode::UNAUTHORIZED)?, StatusCode::UNAUTHORIZED);
