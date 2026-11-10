@@ -1267,6 +1267,7 @@ impl HexDBEngine {
                         document,
                         created: created.contains(&i),
                         origin: origin.clone(),
+                        commit_last: first + count - 1,
                     })
                 })
                 .collect();

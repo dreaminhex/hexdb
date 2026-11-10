@@ -270,7 +270,14 @@ pub async fn changes(
     loop {
         let (backlog, mut receiver) = engine.changes.follow(params.after).map_err(gone)?;
         if !backlog.is_empty() || tokio::time::Instant::now() >= deadline {
-            let taken: Vec<_> = backlog.into_iter().take(limit).collect();
+            // Whole commits only, so the replica applies each transaction whole.
+            let taken: Vec<_> = match hexdb_core::changes::whole_commits(backlog.clone(), limit) {
+                Some(taken) => taken,
+                None => {
+                    let end = backlog.first().map(|c| c.commit_end()).unwrap_or(params.after);
+                    backlog.into_iter().take_while(|c| c.seq <= end).collect()
+                }
+            };
             let last_seq = taken.last().map_or(params.after, |c| c.seq);
             let changes = taken
                 .iter()

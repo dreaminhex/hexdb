@@ -1016,6 +1016,7 @@ impl HexDBEngine {
                 tessellation: name.to_string(),
                 id: None,
                 document: None,
+                commit_last: 0,
             };
             self.changes.complete(drop_seq, 1, if saved.is_ok() { vec![change] } else { Vec::new() });
             saved?;
