@@ -26,10 +26,26 @@ impl HexDBEngine {
     /// Up to `limit` changes after `after`, oldest first: from memory when the
     /// feed still holds them, otherwise from the archive. Callers page by
     /// passing the last change's `seq`; an empty result means caught up.
+    /// Never ends inside a commit (see `changes::whole_commits`), so a replica
+    /// applying what it reads exposes each transaction whole or not at all; a
+    /// single commit bigger than `limit` comes whole.
     pub async fn changes_after(&self, after: u64, limit: usize) -> Result<Vec<Arc<Change>>, HistoryExpired> {
-        match self.changes.since(after, limit) {
-            Ok(changes) => Ok(changes),
-            Err(expired) => self.changes_from_disk(after, expired.available_after, limit).await,
+        let read = match self.changes.since(after, limit) {
+            Ok(changes) => changes,
+            Err(expired) => self.changes_from_disk(after, expired.available_after, limit).await?,
+        };
+        match crate::changes::whole_commits(read.clone(), limit) {
+            Some(changes) => Ok(changes),
+            None => {
+                // The first commit is longer than the limit: read up to its end.
+                let end = read.first().map(|c| c.commit_end()).unwrap_or(after);
+                let wanted = (end.saturating_sub(after)).max(1) as usize;
+                let read = match self.changes.since(after, wanted) {
+                    Ok(changes) => changes,
+                    Err(expired) => self.changes_from_disk(after, expired.available_after, wanted).await?,
+                };
+                Ok(read.into_iter().take_while(|c| c.seq <= end).collect())
+            }
         }
     }
 
@@ -66,7 +82,7 @@ impl HexDBEngine {
                     WalOp::Delete { tessellation, id } => (ChangeKind::Delete, tessellation, Some(id), None),
                     WalOp::Batch(_) => return None,
                 };
-                Some(Change { seq: h.seq, timestamp, kind, tessellation, id, document, created: h.created, origin: h.origin })
+                Some(Change { seq: h.seq, timestamp, kind, tessellation, id, document, created: h.created, origin: h.origin, commit_last: h.commit_last })
             })
             .collect();
         // Tessellation drops aren't WAL records; the catalog remembers when they happened.
@@ -76,10 +92,10 @@ impl HexDBEngine {
             catalog.dropped.iter().filter(|(_, seq)| **seq > after && **seq <= last).map(|(n, s)| (n.clone(), *s)).collect()
         };
         for (tessellation, seq) in drops {
-            changes.push(Change { seq, timestamp: Utc::now(), kind: ChangeKind::DropTessellation, tessellation, id: None, document: None, created: false, origin: None });
+            changes.push(Change { seq, timestamp: Utc::now(), kind: ChangeKind::DropTessellation, tessellation, id: None, document: None, created: false, origin: None, commit_last: 0 });
         }
         changes.sort_by_key(|c| c.seq);
-        changes.truncate(limit);
+        // Whole WAL records (commits) were read; `changes_after` trims to the limit between commits.
         Ok(changes.into_iter().map(Arc::new).collect())
     }
 

@@ -52,6 +52,44 @@ pub struct Change {
     /// The trigger whose run made this change, if any (triggers don't fire on these).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The last sequence number of the commit this change belongs to (0: the
+    /// change is a commit of its own). Readers of the feed never stop inside a
+    /// commit, so a replica applies a transaction whole (see `whole_commits`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub commit_last: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+impl Change {
+    /// The last sequence number of this change's commit.
+    pub fn commit_end(&self) -> u64 {
+        self.commit_last.max(self.seq)
+    }
+}
+
+/// Up to `limit` changes (oldest first) without splitting a commit: a commit
+/// the limit would cut is left for the next read. `None` when the very first
+/// commit alone is longer than `limit`: read again up to its end
+/// (`first.commit_end()`), and take it whole.
+pub fn whole_commits(mut changes: Vec<Arc<Change>>, limit: usize) -> Option<Vec<Arc<Change>>> {
+    if changes.len() > limit {
+        changes.truncate(limit);
+    }
+    let Some(last) = changes.last() else { return Some(changes) };
+    let end = last.commit_end();
+    if end == last.seq {
+        return Some(changes);
+    }
+    // The last commit continues beyond what was read: drop its part.
+    changes.retain(|c| c.commit_end() != end);
+    if changes.is_empty() {
+        None
+    } else {
+        Some(changes)
+    }
 }
 
 impl Change {
@@ -239,11 +277,27 @@ mod tests {
     use super::*;
 
     fn change(seq: u64) -> Change {
-        Change { seq, timestamp: Utc::now(), kind: ChangeKind::Delete, tessellation: "t".into(), id: Some(Ulid::generate()), document: None, created: false, origin: None }
+        Change { seq, timestamp: Utc::now(), kind: ChangeKind::Delete, tessellation: "t".into(), id: Some(Ulid::generate()), document: None, created: false, origin: None, commit_last: 0 }
     }
 
     fn seqs(changes: &[Arc<Change>]) -> Vec<u64> {
         changes.iter().map(|c| c.seq).collect()
+    }
+
+    /// HDB-08: a read of the feed never ends inside a commit.
+    #[test]
+    fn reads_stop_between_commits() {
+        let commit = |seqs: std::ops::RangeInclusive<u64>| -> Vec<Arc<Change>> {
+            let last = *seqs.end();
+            seqs.map(|s| Arc::new(Change { commit_last: last, ..change(s) })).collect()
+        };
+        let mut all = commit(1..=3);
+        all.extend(commit(4..=5));
+        all.extend(commit(6..=6));
+        assert_eq!(seqs(&whole_commits(all.clone(), 4).unwrap()), vec![1, 2, 3], "4 would cut the second commit");
+        assert_eq!(seqs(&whole_commits(all.clone(), 5).unwrap()), vec![1, 2, 3, 4, 5]);
+        assert_eq!(seqs(&whole_commits(all.clone(), 10).unwrap()), vec![1, 2, 3, 4, 5, 6]);
+        assert!(whole_commits(all, 2).is_none(), "the first commit alone is longer than the limit");
     }
 
     #[test]

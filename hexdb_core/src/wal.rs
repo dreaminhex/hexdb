@@ -466,6 +466,8 @@ pub struct HistoryOp {
     pub op: WalOp,
     pub created: bool,
     pub origin: Option<String>,
+    /// The last sequence number of the record (commit) this op came in.
+    pub commit_last: u64,
 }
 
 /// Up to `limit` operations with `after < seq <= up_to`, oldest first, from
@@ -490,13 +492,20 @@ pub fn read_history(dir: &Path, keys: &crate::crypt::KeyRing, after: u64, up_to:
             let time = record.time;
             let created = std::mem::take(&mut record.created);
             let origin = record.origin.take();
-            for (seq, op) in record.into_ops() {
-                if seq > up_to || out.len() >= limit {
+            // Whole records only: a commit is never cut by the limit.
+            if out.len() >= limit {
+                done = true;
+                return false;
+            }
+            let ops = record.into_ops();
+            let commit_last = ops.last().map(|(seq, _)| *seq).unwrap_or(0);
+            for (seq, op) in ops {
+                if seq > up_to {
                     done = true;
                     return false;
                 }
                 if seq > after {
-                    out.push(HistoryOp { seq, time, op, created: created.contains(&seq), origin: origin.clone() });
+                    out.push(HistoryOp { seq, time, op, created: created.contains(&seq), origin: origin.clone(), commit_last });
                 }
             }
             true
