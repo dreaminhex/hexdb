@@ -86,3 +86,24 @@ fn combined_roles_never_show_what_both_hide() -> Result<()> {
     assert!(!sql.to_string().contains("synthetic-secret"), "{}", sql);
     Ok(())
 }
+
+/// HDB-05: a replay is held to the caller's rows as they are now: once the
+/// row is outside them, the replay is refused and nothing is written again.
+#[test]
+fn a_replay_after_row_access_is_revoked_is_refused() -> Result<()> {
+    let server = TestServer::start()?;
+    server.insert("accounts", &json!({ "tenant": "seed" }))?;
+    let writer = user(&server, "tenant-writer", json!(["read", "write"]), json!({ "filter": { "tenant": "A" } }))?;
+    let body = json!({ "tenant": "A", "n": 1 });
+    let key = [("Idempotency-Key", "review-row-revoked")];
+    let first = server.request_as(Some(&writer), Method::POST, "/accounts", Some(&body), &key)?;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    // The role now covers tenant B only.
+    let r = server.request(Method::PUT, "/roles/tenant-writer", Some(&json!({ "name": "tenant-writer", "permissions": ["read", "write"], "restrictions": { "accounts": { "filter": { "tenant": "B" } } } })), &[])?;
+    assert!(r.status.is_success(), "{}", r.body);
+    let replay = server.request_as(Some(&writer), Method::POST, "/accounts", Some(&body), &key)?;
+    assert_eq!(replay.status, StatusCode::FORBIDDEN, "{}", replay.body);
+    let all = server.request(Method::POST, "/accounts/_query", Some(&json!({ "filter": { "tenant": "A" } })), &[])?.body;
+    assert_eq!(all["documents"].as_array().map(Vec::len), Some(1), "written once: {}", all);
+    Ok(())
+}

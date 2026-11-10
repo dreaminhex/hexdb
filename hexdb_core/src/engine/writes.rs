@@ -948,7 +948,8 @@ impl HexDBEngine {
             let mut idem_seq = 0;
             if let Some(k) = &idem {
                 match self.idempotency_lookup(k).await? {
-                    IdempotencyLookup::Replay(result, _) => {
+                    IdempotencyLookup::Replay(result, seq) => {
+                        let result = self.replay_result(result, seq).await?;
                         let value = serde_json::from_value(result)
                             .map_err(|e| anyhow!("Stored idempotent result is unreadable: {}", e))?;
                         return Ok(Outcome { value, replayed: true });
@@ -972,8 +973,8 @@ impl HexDBEngine {
     /// succeeded. Errors if the key was used with a different request.
     pub(crate) async fn replayed<T: DeserializeOwned>(&self, k: &IdempotencyKey) -> Result<Option<T>> {
         match self.idempotency_lookup(k).await? {
-            IdempotencyLookup::Replay(result, _) => Ok(Some(
-                serde_json::from_value(result).map_err(|e| anyhow!("Stored idempotent result is unreadable: {}", e))?,
+            IdempotencyLookup::Replay(result, seq) => Ok(Some(
+                serde_json::from_value(self.replay_result(result, seq).await?).map_err(|e| anyhow!("Stored idempotent result is unreadable: {}", e))?,
             )),
             IdempotencyLookup::Absent { .. } => Ok(None),
         }
@@ -989,11 +990,66 @@ impl HexDBEngine {
         Ok(InflightGuard { engine: self, key: key.to_string() })
     }
 
+    /// A stored result as a replay may return it now. The write isn't run
+    /// again, but what's returned is held to today's rules:
+    /// - with `replication.min_acks`, the original commit (its idempotency
+    ///   record, `seq`) must have reached the replicas, as the first attempt
+    ///   required; a retry gets the same replication timeout until it has;
+    /// - the documents in it are shown as the caller may see them now (their
+    ///   current row filters, hidden and masked fields), and one the caller may
+    ///   no longer read refuses the replay.
+    pub(crate) async fn replay_result(&self, mut stored: Value, seq: u64) -> Result<Value> {
+        self.wait_for_acks(seq, &[IDEMPOTENCY_TESSELLATION]).await?;
+        self.project_replayed(&mut stored)?;
+        Ok(stored)
+    }
+
+    /// Apply the caller's current read scope to every document in a stored result:
+    /// whole documents (`{"id", "tessellation", "json"}`) and transaction results
+    /// (`{"tessellation", "document"}`), wherever they are in it.
+    fn project_replayed(&self, value: &mut Value) -> Result<()> {
+        let gone = || -> anyhow::Error { EngineError::Forbidden("The result of this earlier request includes a document your role can no longer read.".into()).into() };
+        match value {
+            Value::Array(items) => items.iter_mut().try_for_each(|item| self.project_replayed(item)),
+            Value::Object(map) => {
+                let tess = map.get("tessellation").and_then(Value::as_str).map(String::from);
+                if let Some(tess) = tess {
+                    let scope = self.caller_scope(&tess, Action::Read);
+                    if !scope.is_full() {
+                        // A stored document: its fields under "json".
+                        if map.get("json").is_some_and(Value::is_object) && map.get("id").is_some_and(Value::is_string) {
+                            let doc: Document = serde_json::from_value(Value::Object(map.clone())).map_err(|e| anyhow!("Stored idempotent result is unreadable: {}", e))?;
+                            if !scope.allows(&doc) {
+                                return Err(gone());
+                            }
+                            if let Some(json) = map.get_mut("json") {
+                                scope.mask_json(json);
+                            }
+                            return Ok(());
+                        }
+                        // A transaction's result: the document as the API returns it.
+                        if let Some(document) = map.get_mut("document").filter(|d| d.is_object()) {
+                            let fields: serde_json::Map<String, Value> = document.as_object().map(|m| m.iter().filter(|(k, _)| k.as_str() != "id" && !k.starts_with('_')).map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
+                            let doc = Document { id: Ulid::nil(), tessellation: tess.clone(), data: crate::document::infer_fields_from_json(&Value::Object(fields)), ttl: None };
+                            if !scope.allows(&doc) {
+                                return Err(gone());
+                            }
+                            scope.mask_json(document);
+                            return Ok(());
+                        }
+                    }
+                }
+                map.values_mut().try_for_each(|v| self.project_replayed(v))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The stored result for an idempotency key (if this request already
     /// succeeded) and the record's version, for `expected_seq`.
     pub(crate) async fn idempotency_lookup_seq(&self, k: &IdempotencyKey) -> Result<(Option<Value>, u64)> {
         Ok(match self.idempotency_lookup(k).await? {
-            IdempotencyLookup::Replay(result, seq) => (Some(result), seq),
+            IdempotencyLookup::Replay(result, seq) => (Some(self.replay_result(result, seq).await?), seq),
             IdempotencyLookup::Absent { seq } => (None, seq),
         })
     }
