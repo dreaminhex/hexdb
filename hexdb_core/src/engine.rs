@@ -307,6 +307,8 @@ pub struct HexDBEngine {
     pub(crate) seal_policy: std::sync::RwLock<Arc<crate::sealed::SealPolicy>>,
     /// AI calls running on this hex (`ai.max_concurrent_calls`).
     pub(crate) ai_gate: crate::ai::AiGate,
+    /// Active peers as last counted (`check_quorum` falls back on it when the peer list is busy).
+    pub(crate) active_peers_seen: std::sync::atomic::AtomicUsize,
     /// The next policy refresh also seals what WAL replay put in the hex.
     seal_pending: std::sync::atomic::AtomicBool,
     /// Documents waiting to be embedded for vector indexes (see `vectors`).
@@ -591,6 +593,7 @@ impl HexDBEngine {
             sealer,
             seal_policy: Default::default(),
             ai_gate: Default::default(),
+            active_peers_seen: std::sync::atomic::AtomicUsize::new(0),
             seal_pending: std::sync::atomic::AtomicBool::new(true),
             embeddings: Default::default(),
             token_key,

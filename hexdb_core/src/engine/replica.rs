@@ -187,7 +187,17 @@ impl HexDBEngine {
         if quorum <= 1 {
             return Ok(());
         }
-        let visible = 1 + self.peers.try_lock().map(|peers| peers.iter().filter(|p| p.status == "active").count()).unwrap_or(quorum);
+        // The peer list as it is now, or, while another task holds it, as last
+        // counted (zero before any count): a busy list is never taken as a quorum.
+        let active = match self.peers.try_lock() {
+            Ok(peers) => {
+                let active = peers.iter().filter(|p| p.status == "active").count();
+                self.active_peers_seen.store(active, std::sync::atomic::Ordering::Relaxed);
+                active
+            }
+            Err(_) => self.active_peers_seen.load(std::sync::atomic::Ordering::Relaxed),
+        };
+        let visible = 1 + active;
         if visible < quorum {
             return Err(EngineError::NoQuorum(format!(
                 "This hex sees {} of the {} hexes needed to accept writes (replication.quorum). It may be cut off from the rest of the lattice.",
