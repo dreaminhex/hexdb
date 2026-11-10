@@ -2174,6 +2174,25 @@ curl -X DELETE http://localhost:7700/blocklist/01J...
 - Entries are documents in the `_blocklist` system tessellation: they replicate to every hex and apply there within a second; an expiring entry is a document with a TTL. Adding and removing are audited (`security.block`, `security.unblock`).
 - The admin UI's Blocklist page (under Security) lists, adds and removes entries.
 
+### AI security reviews
+
+HexDB can have the lattice's AI provider read the audit trail for signs of attack or misuse, on a schedule, and email administrators what it finds. It's off until an administrator turns it on, on the admin UI's **Security Reviews** page (under Security) or with the settings below.
+
+```bash
+hexdb config set email.smtp_url        # prompts: smtps://user:password@smtp.example.com:465
+hexdb config set email.from "HexDB <hexdb@example.com>"
+hexdb config set security.review.enabled true
+hexdb config set security.review.interval_hours 6      # 1 to 24; 24 by default
+```
+
+- **What it reads.** HexDB sums up the audit trail since the last review itself: failed sign-ins by client address (with the logins tried) and by login (with the addresses), refused requests by user, addresses a user hadn't used in the week before, activity by hour (UTC), and the recent administrative and security-relevant events (users, roles, keys, configuration, deletes and purges, detokenization, the blocklist, functions and triggers). The AI gets that summary, at most 5,000 events' worth: counts, logins, addresses and actions, never documents.
+- **What comes back.** A severity (none, low, medium or high), a short summary, and findings, each with its evidence and what to do. The overall severity is at least that of the worst finding. Treat it as a lead, not a verdict: check the evidence in the audit trail before acting.
+- **Who's told.** A review of medium severity or worse is emailed to `security.review.recipients` (addresses separated by commas), or, if that's empty, to every administrator with an email address. Every review, quiet or not, is kept for 90 days and listed on the Security Reviews page, with whom it was emailed to or why it wasn't. Each is audited as `security.review`.
+- **Where it runs.** On the lattice's [Oracle](#the-oracle) when one is live (the audit trail replicates to it, and it sends the finished review to the Overseer to keep), otherwise on the Overseer. Usage counts as the `security.review` feature, within `ai.monthly_token_budget`; a review takes a few thousand tokens.
+- **By hand.** **Review now** on the page, or `POST /security/reviews`, reviews the last `security.review.interval_hours` at once and returns the review; `GET /security/reviews` lists them (administrators).
+
+**Outbound email.** `email.smtp_url` names the SMTP server with its credentials; it's a secret, so it's write-only. `smtps://` uses TLS from the start (usually port 465); `smtp://host:587?tls=required` upgrades with STARTTLS; plain `smtp://` sends unencrypted and is only for a relay on the same machine or network. Any provider with SMTP works (Amazon SES, Postmark, Resend, SendGrid, Microsoft 365, Gmail with an app password). `email.from` is the sender. **Send me a test email** on the Security Reviews page, or `POST /security/email-test` (`{"to"?}`, your own address by default), checks the settings; errors never show the URL.
+
 ### Browsers
 
 - Cookie-authenticated changes must come from the same origin (CSRF protection), and cross-site sign-in is refused.
@@ -2617,6 +2636,10 @@ hexdb config rollback 3 -m "bad key"
 | `ai.model`, `ai.base_url`, `ai.api_key` | empty | Model, API base URL (required for Azure OpenAI and OpenAI-compatible endpoints), key |
 | `ai.monthly_token_budget` | 1,000,000 | Tokens AI features may use per calendar month (0: no limit) |
 | `ai.max_concurrent_calls` | 8 | AI provider calls one hex makes at once; more wait up to 30 s for a turn (0: no limit) |
+| `email.smtp_url`, `email.from` | empty | Outbound email: the SMTP server (a secret) and the sender; see [AI security reviews](#ai-security-reviews) |
+| `security.review.enabled` | false | Have the AI review the audit trail on a schedule |
+| `security.review.interval_hours` | 24 | Hours between reviews (1 to 24) |
+| `security.review.recipients` | empty | Who medium-or-worse reviews are emailed to (empty: administrators with an email address) |
 | `ai.max_tokens_per_file` | 4,000 | Tokens one file may use |
 | `ai.tagging.enabled` | false | AI tags and descriptions for uploaded files |
 | `ai.tagging.tessellations` | empty (all) | Files tessellations whose new files are tagged, comma-separated |

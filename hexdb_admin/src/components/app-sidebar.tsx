@@ -9,6 +9,7 @@ import {
   IconListCheck,
   IconVirus,
   IconBan,
+  IconShieldSearch,
   IconTrashX,
   IconMathFunction,
   IconMessageChatbot,
@@ -85,6 +86,7 @@ const SECTIONS: { label?: string; items: NavItem[] }[] = [
       { title: "Audit Trail", route: "/audit", icon: IconListCheck, requires: "audit" },
       { title: "Quarantine", route: "/quarantine", icon: IconVirus, requires: "admin" },
       { title: "Blocklist", route: "/blocklist", icon: IconBan, requires: "admin" },
+      { title: "Security Reviews", route: "/security-reviews", icon: IconShieldSearch, requires: "admin" },
     ],
   },
   {

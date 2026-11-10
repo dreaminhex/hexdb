@@ -16,6 +16,7 @@ const AskPage = lazy(() => import("@/pages/ask").then((m) => ({ default: m.AskPa
 const SharesPage = lazy(() => import("@/pages/shares").then((m) => ({ default: m.SharesPage })))
 const DeletesPage = lazy(() => import("@/pages/deletes").then((m) => ({ default: m.DeletesPage })))
 const BlocklistPage = lazy(() => import("@/pages/blocklist").then((m) => ({ default: m.BlocklistPage })))
+const SecurityReviewsPage = lazy(() => import("@/pages/security-reviews").then((m) => ({ default: m.SecurityReviewsPage })))
 const QuarantinePage = lazy(() => import("@/pages/quarantine").then((m) => ({ default: m.QuarantinePage })))
 const AuditPage = lazy(() => import("@/pages/audit").then((m) => ({ default: m.AuditPage })))
 const ConfigurationPage = lazy(() => import("@/pages/configuration").then((m) => ({ default: m.ConfigurationPage })))
@@ -59,6 +60,7 @@ const PAGES: Record<string, Page> = {
   "/audit": { title: "Audit Trail", element: AuditPage, requires: "audit" },
   "/quarantine": { title: "Quarantine", element: QuarantinePage, requires: "admin" },
   "/blocklist": { title: "IP Blocklist", element: BlocklistPage, requires: "admin" },
+  "/security-reviews": { title: "Security Reviews", element: SecurityReviewsPage, requires: "admin" },
   "/logs": { title: "Logs", element: LogsPage, requires: "logs" },
   "/plugins": { title: "Plugins", element: PluginsPage, requires: "plugins" },
   "/configuration": { title: "Configuration", element: ConfigurationPage, requires: "view_config" },

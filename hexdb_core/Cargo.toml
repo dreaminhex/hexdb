@@ -37,6 +37,8 @@ sha1 = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # Signature checks for OAuth access tokens (already in the build through rustls).
 ring = "0.17"
+# Outbound email (the security reviewer), over SMTP with TLS.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "hostname"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 sqlparser = "0.63.0"
 fastcdc = "5.0.0"

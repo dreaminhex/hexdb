@@ -32,6 +32,8 @@ pub mod mfa;
 pub mod settings;
 pub mod lattice_config;
 pub mod ai;
+pub mod email;
+pub mod review;
 pub mod shares;
 pub mod blocklist;
 pub mod queues;

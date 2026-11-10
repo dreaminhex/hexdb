@@ -369,6 +369,7 @@ async fn server() -> anyhow::Result<()> {
 
     // Embed documents for vector indexes with source fields (on the Overseer).
     hexdb_core::engine::spawn_embedding_task(engine.clone(), shutdown_rx.clone());
+    hexdb_core::review::spawn_review_task(engine.clone(), shutdown_rx.clone());
 
     // Apply `hexdb reset-password` requests left in the storage folder.
     hexdb_core::recovery::spawn_recovery_task(engine.clone(), shutdown_rx.clone());

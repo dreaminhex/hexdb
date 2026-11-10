@@ -126,7 +126,11 @@ fn mock_claude() -> Result<(u16, Seen)> {
             record.lock().unwrap().push(body.clone());
             let last = body["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or(Value::Null);
             let results: Vec<String> = last["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "tool_result").filter_map(|c| c["content"].as_str().map(String::from)).collect();
-            let reply = if let Some(result) = results.first() {
+            let reviewing = body["system"].as_str().is_some_and(|s| s.contains("security reviewer"));
+            let reply = if reviewing {
+                let verdict = json!({ "severity": "medium", "summary": "Repeated failed sign-ins from one address.", "findings": [{ "title": "Password guessing", "severity": "medium", "evidence": "failed sign-ins from 127.0.0.1", "recommendation": "Block the address." }] });
+                json!({ "content": [{ "type": "text", "text": verdict.to_string() }], "stop_reason": "end_turn", "usage": { "input_tokens": 300, "output_tokens": 60 } })
+            } else if let Some(result) = results.first() {
                 json!({ "content": [{ "type": "text", "text": format!("The tool said: {}", result) }], "stop_reason": "end_turn", "usage": { "input_tokens": 40, "output_tokens": 10 } })
             } else if body["tools"].is_array() {
                 json!({ "content": [{ "type": "text", "text": "Let me count." }, { "type": "tool_use", "id": "call_1", "name": "count", "input": { "tessellation": "orders" } }], "stop_reason": "tool_use", "usage": { "input_tokens": 30, "output_tokens": 8 } })
@@ -180,6 +184,98 @@ fn streamed(server: &TestServer, key: &str, question: &str) -> Result<Vec<(Strin
             Some((event, serde_json::from_str(data).ok()?))
         })
         .collect())
+}
+
+/// A bare SMTP server that takes messages and hands each one's text over.
+fn mock_smtp() -> Result<(u16, std::sync::mpsc::Receiver<String>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut writer = stream.try_clone().unwrap();
+            let mut reader = BufReader::new(stream);
+            let _ = writer.write_all(b"220 mock ESMTP\r\n");
+            let mut message = String::new();
+            let mut in_data = false;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                if in_data {
+                    if line == ".\r\n" {
+                        in_data = false;
+                        let _ = sender.send(std::mem::take(&mut message));
+                        let _ = writer.write_all(b"250 queued\r\n");
+                    } else {
+                        message.push_str(&line);
+                    }
+                    continue;
+                }
+                let reply: &[u8] = match line.get(..4).map(str::to_ascii_uppercase).as_deref() {
+                    Some("EHLO") | Some("HELO") => b"250 mock\r\n",
+                    Some("DATA") => {
+                        in_data = true;
+                        b"354 go ahead\r\n"
+                    }
+                    Some("QUIT") => {
+                        let _ = writer.write_all(b"221 bye\r\n");
+                        break;
+                    }
+                    _ => b"250 ok\r\n",
+                };
+                let _ = writer.write_all(reply);
+            }
+        }
+    });
+    Ok((port, receiver))
+}
+
+#[test]
+fn the_ai_reviews_the_audit_trail_and_emails_what_it_finds() -> Result<()> {
+    let server = TestServer::start()?;
+    let (port, seen) = mock_claude()?;
+    let (smtp, inbox) = mock_smtp()?;
+    configure(&server, json!({ "ai.provider": "anthropic", "ai.base_url": format!("http://127.0.0.1:{}", port), "ai.api_key": "sk-test-review-01", "ai.model": "claude-test" }))?;
+    let reader = server.user_with_roles("rita", json!([{ "name": "reader", "tessellations": ["orders"] }]))?;
+    // Something worth a look: failed sign-ins.
+    for _ in 0..6 {
+        server.request_as(None, Method::POST, "/auth/login", Some(&json!({ "login": "hexdbadmin", "password": "guess" })), &[])?;
+    }
+
+    // Administrators only; without email set up the review is kept and says why it wasn't sent.
+    assert_eq!(server.request_as(Some(&reader), Method::POST, "/security/reviews", None, &[])?.status, StatusCode::FORBIDDEN);
+    let review = server.request(Method::POST, "/security/reviews", None, &[])?;
+    assert_eq!(review.status, StatusCode::OK, "{}", review.body);
+    assert_eq!(review.body["severity"], "medium", "{}", review.body);
+    assert_eq!(review.body["findings"][0]["title"], "Password guessing");
+    assert!(review.body["events"].as_u64().unwrap() >= 6, "{}", review.body);
+    assert!(review.body["email_error"].as_str().unwrap().contains("email"), "{}", review.body);
+    // The model got the counts, not documents.
+    let sent = seen.lock().unwrap().iter().rev().find(|b| b["system"].as_str().is_some_and(|s| s.contains("security reviewer"))).cloned().unwrap();
+    let summary: Value = serde_json::from_str(sent["messages"][0]["content"][0]["text"].as_str().unwrap())?;
+    assert!(summary["failed_sign_ins_by_login"].as_array().unwrap().iter().any(|f| f["key"] == "hexdbadmin" && f["failures"].as_u64().unwrap() >= 6), "{}", summary);
+
+    // With SMTP set up, a test email and the review's email arrive.
+    configure(&server, json!({ "email.smtp_url": format!("smtp://127.0.0.1:{}", smtp), "email.from": "HexDB <hexdb@example.com>", "security.review.recipients": "sec@example.com, ops@example.com" }))?;
+    let test = server.request(Method::POST, "/security/email-test", Some(&json!({ "to": "me@example.com" })), &[])?;
+    assert_eq!(test.status, StatusCode::OK, "{}", test.body);
+    let message = inbox.recv_timeout(std::time::Duration::from_secs(10))?;
+    assert!(message.contains("To: me@example.com") && message.contains("Outbound email works"), "{}", message);
+    let review = server.request(Method::POST, "/security/reviews", None, &[])?;
+    assert_eq!(review.body["emailed_to"], json!(["sec@example.com", "ops@example.com"]), "{}", review.body);
+    let message = inbox.recv_timeout(std::time::Duration::from_secs(10))?;
+    assert!(message.contains("Subject: HexDB security review: medium severity, 1 finding") && message.contains("Password guessing"), "{}", message);
+
+    // Both are listed, newest first, and audited.
+    let listed = server.request(Method::GET, "/security/reviews", None, &[])?.body;
+    assert_eq!(listed["reviews"].as_array().unwrap().len(), 2, "{}", listed);
+    assert_eq!(listed["email"], true);
+    assert!(listed["reviews"][0]["started"].as_i64() >= listed["reviews"][1]["started"].as_i64());
+    let audit = server.request(Method::GET, "/audit?action=security.review", None, &[])?.body;
+    assert_eq!(audit["events"].as_array().unwrap().len(), 2, "{}", audit);
+    Ok(())
 }
 
 fn configure(server: &TestServer, changes: Value) -> Result<()> {

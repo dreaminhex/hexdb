@@ -103,7 +103,7 @@ fn is_lattice_route(method: &Method, path: &str) -> bool {
         Method::GET => {
             matches!(rest, "snapshot" | "catalog" | "changes") || one_segment("snapshot/") || one_segment("slice-snapshot/") || one_segment("chunks/")
         }
-        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "ai-tool" | "throttle" | "share-download" | "elect" | "rehash-key"),
+        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "ai-tool" | "security-review" | "throttle" | "share-download" | "elect" | "rehash-key"),
         _ => false,
     }
 }

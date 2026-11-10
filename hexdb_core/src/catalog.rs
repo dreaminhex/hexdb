@@ -31,7 +31,7 @@ const RESERVED_NAMES: &[&str] = &[
 /// stored under such a name earlier stays usable (`HexDBEngine::create_tessellation`).
 /// A route's tessellation would be reachable through SQL, GraphQL and
 /// transactions but hidden behind the route over REST.
-pub const NEW_ROUTE_NAMES: &[&str] = &["queues", "shares", "mcp", "quarantine", "users", "roles", "updates", "a2a", "ready"];
+pub const NEW_ROUTE_NAMES: &[&str] = &["queues", "shares", "mcp", "quarantine", "users", "roles", "updates", "a2a", "ready", "security"];
 
 /// True if `name` is an API route's first path segment, so a tessellation can't be created under it.
 pub fn is_route_name(name: &str) -> bool {

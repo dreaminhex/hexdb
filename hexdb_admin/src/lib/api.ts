@@ -477,6 +477,35 @@ export interface Tessellation {
   children?: { tessellation: string; field: string; on_delete: OnDelete }[]
 }
 
+/** An AI review of the audit trail (GET /security/reviews). */
+export interface SecurityReview {
+  id: string
+  trigger: string
+  started: number
+  finished: number
+  window_from: number
+  window_to: number
+  severity: "none" | "low" | "medium" | "high" | "error"
+  summary: string
+  findings: { title: string; severity: string; evidence: string; recommendation: string }[]
+  events: number
+  model: string
+  tokens: number
+  hex: string
+  emailed_to: string[]
+  email_error?: string
+  error?: string
+}
+
+export interface SecurityReviews {
+  enabled: boolean
+  interval_hours: number
+  email: boolean
+  ai: boolean
+  next_due: number | null
+  reviews: SecurityReview[]
+}
+
 /** An IP blocklist entry (GET /blocklist). */
 export interface BlockEntry {
   id: string
@@ -1177,6 +1206,9 @@ export const api = {
   deleteShare: (code: string) => request<void>("DELETE", `/shares/${encodeURIComponent(code)}`),
   quarantine: () => request<{ files: QuarantinedFile[] }>("GET", "/quarantine"),
   blocklist: () => request<{ entries: BlockEntry[] }>("GET", "/blocklist").then((r) => r.entries),
+  securityReviews: () => request<SecurityReviews>("GET", "/security/reviews"),
+  runSecurityReview: () => request<SecurityReview>("POST", "/security/reviews"),
+  testEmail: (to?: string) => request<{ sent_to: string }>("POST", "/security/email-test", to ? { to } : {}),
   addBlock: (input: { address: string; note?: string; expires_in_hours?: number }) => request<BlockEntry>("POST", "/blocklist", input),
   removeBlock: (id: string) => request<void>("DELETE", `/blocklist/${encodeURIComponent(id)}`),
   releaseQuarantined: (id: string) => request<{ document: Record<string, unknown>; created: boolean }>("POST", `/quarantine/${encodeURIComponent(id)}/release`),

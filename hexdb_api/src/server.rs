@@ -201,6 +201,8 @@ pub(crate) fn is_long_running(path: &str) -> bool {
         || path == "/a2a"
         // So are chat answers, streamed or not.
         || path == "/ai/chat"
+        // A security review waits for the AI's answer.
+        || path == "/security/reviews"
         // File uploads and downloads take as long as the file needs.
         || path.contains("/_files/")
         || path.contains("/_uploads/")
