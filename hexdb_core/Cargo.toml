@@ -1,6 +1,6 @@
 [package]
 name = "hexdb_core"
-version = "2.4.5"
+version = "2.4.6"
 license = "Apache-2.0"
 edition = "2021"
 
