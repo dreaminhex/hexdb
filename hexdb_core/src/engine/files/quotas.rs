@@ -16,6 +16,10 @@
 // each files tessellation gets an index on `uploaded_by` the first time a
 // quota is counted.
 //
+// Uploads committing at the same time can't share the room left: the commit
+// reserves its size (`reserve_quota`) between the check and the commit, and
+// checks count what other uploads have reserved.
+//
 // A files tessellation can have limits of its own too (`quota` in its catalog
 // entry, set with PUT /tessellations/{name}/quota): everything it holds, its
 // earlier versions and trashed files included, whoever uploaded them.
@@ -45,9 +49,45 @@ fn tess_key(tess: &str) -> String {
     format!("\u{0}tess:{}", tess)
 }
 
-/// Usage per user (and per tessellation), counted recently.
+/// Usage per user (and per tessellation), counted recently, and what uploads
+/// being committed have reserved.
 #[derive(Default)]
-pub struct QuotaCache(Mutex<HashMap<String, (Instant, QuotaUsage)>>);
+pub struct QuotaCache {
+    usage: Mutex<HashMap<String, (Instant, QuotaUsage)>>,
+    reserved: Mutex<HashMap<String, QuotaUsage>>,
+    /// Held from a commit's check until its reservation is made, so two
+    /// commits can't both see the same room.
+    gate: tokio::sync::Mutex<()>,
+}
+
+impl QuotaCache {
+    fn reserved(&self, key: &str) -> QuotaUsage {
+        self.reserved.lock().unwrap().get(key).copied().unwrap_or_default()
+    }
+}
+
+/// Room an upload holds in its user's and tessellation's quotas until it
+/// commits (when the committed usage is counted instead) or fails.
+pub(crate) struct QuotaReservation<'a> {
+    cache: &'a QuotaCache,
+    keys: [String; 2],
+    usage: QuotaUsage,
+}
+
+impl Drop for QuotaReservation<'_> {
+    fn drop(&mut self) {
+        let mut reserved = self.cache.reserved.lock().unwrap();
+        for key in &self.keys {
+            if let Some(held) = reserved.get_mut(key) {
+                held.bytes = held.bytes.saturating_sub(self.usage.bytes);
+                held.files = held.files.saturating_sub(self.usage.files);
+                if *held == QuotaUsage::default() {
+                    reserved.remove(key);
+                }
+            }
+        }
+    }
+}
 
 /// A user's limits; none: no limit.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -73,7 +113,7 @@ impl HexDBEngine {
 
     /// What `login`'s uploads keep stored (counted at most a minute ago).
     pub async fn quota_usage(&self, login: &str) -> Result<QuotaUsage> {
-        if let Some((at, usage)) = self.quota_cache.0.lock().unwrap().get(login) {
+        if let Some((at, usage)) = self.quota_cache.usage.lock().unwrap().get(login) {
             if at.elapsed() < CACHE_FOR {
                 return Ok(*usage);
             }
@@ -106,12 +146,30 @@ impl HexDBEngine {
                 offset += count;
             }
         }
-        self.quota_cache.0.lock().unwrap().insert(login.to_string(), (Instant::now(), usage));
+        self.quota_cache.usage.lock().unwrap().insert(login.to_string(), (Instant::now(), usage));
         Ok(usage)
     }
 
+    /// `check_quota`, then hold the room until the returned reservation is
+    /// dropped: after the commit has added the upload to the counted usage
+    /// (`quota_add`), or when it fails.
+    pub(crate) async fn reserve_quota(&self, login: &str, tess: &str, bytes: u64, new_file: bool) -> Result<QuotaReservation<'_>> {
+        let _gate = self.quota_cache.gate.lock().await;
+        self.check_quota(login, tess, bytes, new_file).await?;
+        let usage = QuotaUsage { bytes, files: u64::from(new_file) };
+        let keys = [login.to_string(), tess_key(tess)];
+        let mut reserved = self.quota_cache.reserved.lock().unwrap();
+        for key in &keys {
+            let held = reserved.entry(key.clone()).or_default();
+            held.bytes += usage.bytes;
+            held.files += usage.files;
+        }
+        Ok(QuotaReservation { cache: &self.quota_cache, keys, usage })
+    }
+
     /// Refuse an upload to `tess` of `bytes` (a new file when `new_file`) that
-    /// would take `login`, or the tessellation, past a limit.
+    /// would take `login`, or the tessellation, past a limit, counting what
+    /// other uploads being committed have reserved.
     pub async fn check_quota(&self, login: &str, tess: &str, bytes: u64, new_file: bool) -> Result<()> {
         self.check_tessellation_quota(tess, bytes, new_file).await?;
         // HexDB's own work (replication, restores by the system) has no user quota.
@@ -122,7 +180,8 @@ impl HexDBEngine {
         if limits.bytes.is_none() && limits.files.is_none() {
             return Ok(());
         }
-        let usage = self.quota_usage(login).await?;
+        let (counted, reserved) = (self.quota_usage(login).await?, self.quota_cache.reserved(login));
+        let usage = QuotaUsage { bytes: counted.bytes + reserved.bytes, files: counted.files + reserved.files };
         if let Some(max) = limits.bytes.filter(|max| usage.bytes.saturating_add(bytes) > *max) {
             return Err(EngineError::QuotaExceeded(format!(
                 "This would take your files past your {} MB quota ({} MB used). Delete files or old versions, empty your trash, or ask an administrator for more.",
@@ -139,7 +198,7 @@ impl HexDBEngine {
 
     /// Add a committed upload to `login`'s and `tess`'s counted usage.
     pub(crate) fn quota_add(&self, login: &str, tess: &str, bytes: u64, new_file: bool) {
-        let mut cache = self.quota_cache.0.lock().unwrap();
+        let mut cache = self.quota_cache.usage.lock().unwrap();
         for key in [login.to_string(), tess_key(tess)] {
             if let Some((_, usage)) = cache.get_mut(&key) {
                 usage.bytes += bytes;
@@ -160,7 +219,7 @@ impl HexDBEngine {
             return Err(EngineError::Invalid(format!("'{}' isn't a files tessellation; only files tessellations have quotas.", tess)).into());
         }
         self.set_quota_unchecked(tess, quota.filter(|q| q.mb.is_some() || q.files.is_some()))?;
-        self.quota_cache.0.lock().unwrap().remove(&tess_key(tess));
+        self.quota_cache.usage.lock().unwrap().remove(&tess_key(tess));
         Ok(())
     }
 
@@ -180,7 +239,7 @@ impl HexDBEngine {
     /// versions, and its trashed files (counted at most a minute ago).
     pub async fn tessellation_usage(&self, tess: &str) -> Result<QuotaUsage> {
         let key = tess_key(tess);
-        if let Some((at, usage)) = self.quota_cache.0.lock().unwrap().get(&key) {
+        if let Some((at, usage)) = self.quota_cache.usage.lock().unwrap().get(&key) {
             if at.elapsed() < CACHE_FOR {
                 return Ok(*usage);
             }
@@ -205,13 +264,14 @@ impl HexDBEngine {
                 add(&doc.data_json());
             }
         }
-        self.quota_cache.0.lock().unwrap().insert(key, (Instant::now(), usage));
+        self.quota_cache.usage.lock().unwrap().insert(key, (Instant::now(), usage));
         Ok(usage)
     }
 
     async fn check_tessellation_quota(&self, tess: &str, bytes: u64, new_file: bool) -> Result<()> {
         let Some(quota) = self.tessellation_quota(tess) else { return Ok(()) };
-        let usage = self.tessellation_usage(tess).await?;
+        let (counted, reserved) = (self.tessellation_usage(tess).await?, self.quota_cache.reserved(&tess_key(tess)));
+        let usage = QuotaUsage { bytes: counted.bytes + reserved.bytes, files: counted.files + reserved.files };
         if let Some(mb) = quota.mb.filter(|m| *m > 0) {
             if usage.bytes.saturating_add(bytes) > mb.saturating_mul(1024 * 1024) {
                 return Err(EngineError::QuotaExceeded(format!(
@@ -231,7 +291,7 @@ impl HexDBEngine {
 
     /// Forget counted usage (after deletes and purges, which free space).
     pub(crate) fn quota_forget(&self) {
-        self.quota_cache.0.lock().unwrap().clear();
+        self.quota_cache.usage.lock().unwrap().clear();
     }
 
     /// `login`'s limits and usage, for display.
