@@ -470,6 +470,8 @@ Every REST write accepts an `Idempotency-Key` header (1-255 printable ASCII char
 - A retry with the same key and the same request returns the original response with `Idempotent-Replayed: true` instead of writing again, even after a crash.
 - Reusing a key for a different request returns 422. A retry while the first request is still running returns 409.
 - Keys are scoped to the user, so one user can't replay or block another's.
+- A replay is answered under the caller's access as it is now, not as it was: a document the caller can no longer read is refused with 403, and hidden and masked fields follow the caller's current roles.
+- With `replication.min_acks` set, a replay waits for the replicas like the original write, so a retry after a `replication_timeout` gets 503 again until enough replicas have the write.
 
 Implementation: the record lives in the `_idempotency` system tessellation, keyed by user and key. It holds a hash of the method, path and body, plus the response. Writing it in the same batch as the data is what makes "written, but the response was lost" impossible to observe.
 
@@ -605,6 +607,7 @@ Each delete batch has a record in the delete history and its documents in the tr
 
 - Auditors see every batch; other users see their own, and the batches whose tessellations they can all read.
 - Restoring needs `write` on the batch's document tessellations and `restore` on its files tessellations; purging needs `write` and `delete`.
+- A document whose vault values are gone can't come back (409), since its tokens would open nothing. Vault entries are kept while a document holding them is in the trash, so this happens only after the values were removed some other way.
 - A document comes back exactly as it was stored: its ID, fields, expiry and `_schema` stamp. It isn't validated against a newer schema version; the next background migration upgrades it.
 - In the trash, masked fields stay sealed and tokenized fields stay tokens. The history keeps a delete's filter with the values tested against such fields replaced by `[redacted]`.
 - With `storage.trash_days = 0`, deleted documents aren't kept: the history still records each delete, but it can't be restored. Files always go to the files trash (`files.trash_days`). A hex where either is 0 says so in its startup log, in `/status` (`storage.trash_warning`) and on the admin UI's Deletes page.
@@ -641,7 +644,7 @@ REST (listing, `_query`, `count`, `_update`), GraphQL, functions, stream sources
 | `$and`, `$or`, `$not` (top level) | Combine filters |
 | `$text` (top level) | Full-text search; see [section 7](#7-full-text-search-and-analyzers) |
 
-Dotted paths reach into nested objects. A condition on an array field matches if any element matches. Every operator can also be written with `_` instead of `$` (`_gte`, `_or`). Use that form inside GraphQL query text, where `$` marks a variable.
+Dotted paths reach into nested objects. A condition on an array field matches if any element matches. Numbers compare exactly: integers too large for a double (beyond 2^53) aren't rounded, so `9007199254740993` and `9007199254740992` are different values, in filters, sorting and indexes. Every operator can also be written with `_` instead of `$` (`_gte`, `_or`). Use that form inside GraphQL query text, where `$` marks a variable.
 
 ### Listing, sorting and paging
 
@@ -988,7 +991,7 @@ Indexes speed up filtered queries, counts, aggregations and `_update`. They neve
 
 | Kind | Covers | Answers |
 | --- | --- | --- |
-| Field | One field or several (composite), optionally `unique` | Equality, `$in`, ranges and `$startsWith` on the first field; equality on all fields together. Array values index each element |
+| Field | One field or several (composite), optionally `unique` | Equality, `$in`, ranges and `$startsWith` on the first field; equality on all fields together. Array values index each element. A document that would have more than 1,000 keys in one index (a long array, or arrays multiplied in a composite) isn't indexed by it and is checked on every lookup instead, so it's never missed; a unique index refuses such a document |
 | Text | One or more string fields, with an analyzer; at most one per tessellation | `$text` |
 | Vector | One field holding a vector (an array of numbers), optionally filled from source fields by the embeddings provider | Similarity searches (`near`); see [Vector search](#vector-search) |
 
@@ -2033,7 +2036,7 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 
 **The parts:**
 - `filter` (the filter language) limits the documents the role can see and write. `{"$user": "login"}`, `{"$user": "id"}`, `{"$user": "email"}` and `{"$user": "attributes.<name>"}` stand for the caller's values. Users' attributes are set by administrators: a JSON object of up to 50 entries. A missing attribute makes the filter match nothing, never everything.
-- `hide` lists fields (dotted paths) the role can't see or change.
+- `hide` lists fields (dotted paths) the role can't see or change. A path goes through arrays: `items.cost` hides `cost` in every element of `items`. Hiding a field hides everything inside it.
 - `mask` lists fields the role sees masked, for card numbers, account numbers and other values a role needs to recognize but not read (PCI DSS requirement 3.4). Each field says how many characters stay: `show_first` (up to 6) and `show_last` (up to 4), both 0 by default. `{"card_number": {"show_last": 4}}` makes `4111111111111111` read as `************1111`. Strings and numbers keep their length; a value that would keep fewer than 4 characters masked is masked whole; objects, arrays and booleans read as `********`; null stays null. A field can't be both hidden and masked by one role.
 - `folders` (files tessellations) limits the role to files in these folders and their subfolders, e.g. `["/inbox/", "/shared/2026/"]`: the same as a filter on `path`, and both must match when a role has both.
 
@@ -2049,8 +2052,8 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 **Combining grants.** When several of a user's grants allow an action on a tessellation:
 - an unrestricted grant makes access unrestricted;
 - otherwise the user sees the documents any of their filters allows;
-- a field is hidden only if every grant hides it;
-- a field every grant hides or masks, and at least one masks, is masked, showing as many characters as the most revealing of those masks.
+- a field is hidden only if every grant hides it, or a field around it;
+- a field every grant hides or masks (itself or a field around it), and at least one masks, is masked, showing as many characters as the most revealing of those masks. So two roles that each show what the other hides (one hides `card`, the other `card.number`) never add up to `card.number` in the clear.
 
 **Reads:**
 - Queries, counts, aggregations, `GET /tessellations/{name}`, GraphQL, the change feed and functions only see matching documents. Other documents read as not found.
@@ -2095,7 +2098,8 @@ curl -X POST http://localhost:7700/accounts -H "Content-Type: application/json" 
 # stored: "card": "tok_q3v6...k2m_1111", "ssn": "tok_7hd2...xa_6789"
 ```
 
-- **Tokens.** `tok_` followed by 26 lowercase base32 characters (a keyed BLAKE3 hash of the value under a key derived from the lattice key), then `_` and the value's last 4 characters when it has at least 10. Shorter values show nothing. Equal values give equal tokens across the lattice.
+- **Tokens.** `tok_` followed by 26 lowercase base32 characters (a keyed BLAKE3 hash of the value under the lattice's tokenization key), then `_` and the value's last 4 characters when it has at least 10. Shorter values show nothing. Equal values give equal tokens across the lattice. The tokenization key is derived from the lattice key when the data is created, then kept in the catalog (and in backups) and shared with every hex that joins, so rotating `storage.encryption_key` or `network.lattice_secret` changes no token and lookups by value keep working.
+- **Arrays.** A tokenized path goes through arrays: `cards.number` tokenizes `number` in every element of `cards`.
 - **Lookups.** Filters comparing a tokenized field for equality (a plain value, `$eq`, `$ne`, `$in`, `$nin`) compare tokens. So `{"card": "4111111111111111"}` finds the document in REST, GraphQL and SQL (`WHERE card = ?`, also in joins, subqueries and expressions, where `=`, `<>`, `IN` and `IS [NOT] DISTINCT FROM` with a value compare tokens), and unique indexes work. Joining two tessellations on tokenized fields works too, since equal values give equal tokens. Ranges, prefixes, `$contains` and full-text search can't see values. Filtering by the token itself works too.
 - **Writes.** Schema rules (`required`, `min_length`, `max_length`, ...) check the real value, before it's replaced. A token written back unchanged, as a document read and saved again carries it, is kept as it is, and length rules don't apply to it. A write's answer, a transaction's results and the stored answer of a request with an `Idempotency-Key` all show tokens, as stored, never the values sent.
 - **One-way** tokens can't be turned back into the value by anyone, administrators included: use them for values you only need to match, such as de-duplicating customers by national ID.
@@ -2107,9 +2111,9 @@ curl -X POST http://localhost:7700/accounts -H "Content-Type: application/json" 
   # {"values": {"tok_q3v6...k2m_1111": "4111111111111111"}}
   ```
 
-  It takes up to 1,000 tokens. A token that isn't a vault token of that tessellation (one-way, unknown, or another tessellation's) gives `null`. A role that hides or masks a vault field can't detokenize in that tessellation, even with the permission. Each call is audited as `token.detokenize`, with how many tokens were asked for and found, never the values.
+  It takes up to 1,000 tokens. A token that isn't a vault token of that tessellation (one-way, unknown, or another tessellation's) gives `null`. Each token opens only if the caller may read its field: a role that hides or masks a vault field (or a field around it) can't detokenize that field, even with the permission. With a row filter, a token opens only if a document the caller can read holds it at that field; any other token gives `null`, so a token copied from a hidden row reveals nothing. Each call is audited as `token.detokenize`, with how many tokens were asked for and found, never the values.
 - **Adding it later.** A new schema version that tokenizes a field rewrites the existing documents in the background, like any schema migration (`GET /tessellations/{name}/schemas` shows the progress).
-- **Vault cleanup.** Each tessellation has its own vault entry per token, shared by every document there with that value. Entries no document in their tessellation holds any more (the documents were deleted or changed, or the tessellation was dropped) are deleted with each compaction (`storage.compaction_frequency`, or `POST /compact`, whose answer includes `vault_tokens_deleted`). After that, the old token gives `null`.
+- **Vault cleanup.** Each tessellation has its own vault entry per token, shared by every document there with that value. Entries no document in their tessellation holds any more, in the tessellation or in its [trash](#the-trash-and-the-delete-history) (the documents were changed, deleted and purged from the trash or expired there, or the tessellation was dropped), are deleted with each compaction (`storage.compaction_frequency`, or `POST /compact`, whose answer includes `vault_tokens_deleted`). After that, the old token gives `null`.
 - **Masks still apply.** A masked tokenized field shows its token masked, and tokenization can be combined with [sealed fields](#row-filters-and-field-masks).
 
 ### The audit trail
@@ -2267,7 +2271,7 @@ Every hex runs the same election over the same view, so they agree without a con
 
 1. Candidates are live hexes whose `identity.role` is `auto` or `overseer`.
 2. A hex that is already Overseer keeps the role while it's alive, whatever the others prefer, so leadership doesn't flap when a larger hex joins and no hex takes the role without the writes the sitting Overseer accepted. If two claim it (after a partition heals), one that prefers `overseer` wins, then the better-ranked one.
-3. Otherwise, if any candidates prefer `overseer`, only those count. Then, in a sliced lattice, the hex furthest along the change history wins, and among those equally far along, the one holding the most slices, so a hex with every slice is preferred to one that would have to collect them first. Then (and in a lattice without slicing) candidates are ranked by RAM, then disk, then ID.
+3. Otherwise the data decides first: only the hexes furthest along the change history most of them follow can take over, so a replica that already has a write is never passed over for one that doesn't (one still in a full sync counts only if no other is that far along). Among those, if any prefer `overseer`, only those count. Then, in a sliced lattice, the one holding the most slices wins, so a hex with every slice is preferred to one that would have to collect them first. Then candidates are ranked by RAM, then disk, then ID.
 4. Every other hex is a Harvester, or a Replicant if it prefers that. `harvester` and `replicant` hexes never lead.
 
 **A hex that prefers to lead gets the role back by handover.** When a hex with `identity.role = "overseer"` comes back while another hex leads (it was away, or handed over when it stopped), it follows like any replica. Once it has every change, the sitting Overseer hands the role to it, the same way an Overseer hands over before stopping (writes are held for a moment; one caught mid-commit gets 503 with a retry hint), and carries on as a replica. If the handover can't finish, the sitting Overseer keeps the role and tries again five minutes later.
@@ -2283,7 +2287,7 @@ A hex that restarts reports where its data really is: an Overseer that restarts 
 The Overseer keeps all the data. With two or more replicas, they share it in slices by default instead of each keeping a full copy (see [Slicing](#slicing)). A replica:
 
 1. **Full sync.** It reads a consistent snapshot from the Overseer: its sequence number S, its tessellations and index definitions, then every document with its version, page by page. Local data the Overseer doesn't have is removed.
-2. **Streaming.** It follows the Overseer's change feed after S with long polls, applying each batch atomically together with its replication cursor, so a crash can't leave data and cursor out of step. A change older than the snapshot's version of a document is skipped, so changes made during the snapshot apply exactly once.
+2. **Streaming.** It follows the Overseer's change feed after S with long polls, applying each batch atomically together with its replication cursor, so a crash can't leave data and cursor out of step. A batch never ends inside a commit, so a replica shows a transaction whole or not at all. A change older than the snapshot's version of a document is skipped, so changes made during the snapshot apply exactly once.
 
 **Resuming.**
 - The cursor names the Overseer's history ID, kept in its catalog, and a position in it.
