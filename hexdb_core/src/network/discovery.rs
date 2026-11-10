@@ -135,18 +135,33 @@ pub struct PeerHex {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lag_ms: Option<u64>,
     /// When this hex's discovery listener started (epoch ms; 0 from hexes
-    /// before 2.5, which count as listening since long ago). Hexes started
+    /// before 2.4.6, which count as listening since long ago). Hexes started
     /// together settle on the one that listened first (see `settle_start`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub listening_since: i64,
+    /// The same instant in epoch nanoseconds (0 from 2.4.6 and earlier):
+    /// two hexes started together can start listening in the same millisecond.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub listening_since_ns: i64,
 }
 
 fn is_zero(n: &i64) -> bool {
     *n == 0
 }
 
-/// When this process's discovery listener started (0 until it has).
+/// When this process's discovery listener started (0 until it has), in ms and ns.
 static LISTENING_SINCE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static LISTENING_SINCE_NS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// When a hex started listening, as precisely as it says (nanoseconds; a hex
+/// that gives only milliseconds counts from the start of its millisecond).
+fn listened_at(hex: &PeerHex) -> i128 {
+    if hex.listening_since_ns != 0 {
+        hex.listening_since_ns as i128
+    } else {
+        hex.listening_since as i128 * 1_000_000
+    }
+}
 
 /// For a hex taking its second look at startup: of the hexes claiming the
 /// Overseer role (itself included), only the one whose discovery listener
@@ -158,7 +173,10 @@ pub fn settle_start(mut local: PeerHex, mut peers: Vec<PeerHex>) -> (PeerHex, Ve
     let first = std::iter::once(&local)
         .chain(peers.iter())
         .filter(|h| h.role == ROLE_OVERSEER)
-        .min_by(|a, b| a.listening_since.cmp(&b.listening_since).then(a.id.cmp(&b.id)))
+        // Exact to the nanosecond: in a tie, the one that looked later can't
+        // know whether the other saw it, so ties must not happen (the ID only
+        // breaks ties with hexes that report milliseconds).
+        .min_by(|a, b| listened_at(a).cmp(&listened_at(b)).then(a.id.cmp(&b.id)))
         .map(|h| h.id.clone());
     let Some(first) = first else { return (local, peers) };
     if local.role == ROLE_OVERSEER && local.id != first {
@@ -272,6 +290,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         knows: sees(&engine.peers.lock().await),
         lag_ms: replication.2,
         listening_since: LISTENING_SINCE.load(std::sync::atomic::Ordering::Relaxed),
+        listening_since_ns: LISTENING_SINCE_NS.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
@@ -431,7 +450,9 @@ pub fn spawn_discovery_lifeline(engine: Arc<HexDBEngine>, listener: std::net::Tc
         }
     });
     listener.set_nonblocking(true)?;
-    LISTENING_SINCE.store(Utc::now().timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
+    let now = Utc::now();
+    LISTENING_SINCE_NS.store(now.timestamp_nanos_opt().unwrap_or_else(|| now.timestamp_millis().saturating_mul(1_000_000)), std::sync::atomic::Ordering::Relaxed);
+    LISTENING_SINCE.store(now.timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
     std::thread::Builder::new().name("hexdb-lifeline".into()).spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
@@ -973,6 +994,7 @@ mod tests {
             knows: Vec::new(),
             lag_ms: None,
             listening_since: 0,
+            listening_since_ns: 0,
         }
     }
 
@@ -1152,6 +1174,13 @@ mod tests {
         assert_eq!(elect(&local, &peers), ROLE_HARVESTER);
         let (local, peers) = settle_start(claim("b", 1_000), vec![claim("a", 1_000)]);
         assert_eq!(elect(&local, &peers), ROLE_HARVESTER);
+        // Started in the same millisecond: the nanoseconds decide, not the ID
+        // (which would let "a" keep its claim after "b", earlier, kept its own).
+        let precise = |id: &str, ns: i64| PeerHex { listening_since_ns: 1_000_000_000 + ns, ..claim(id, 1_000) };
+        let (local, peers) = settle_start(precise("a", 400_000), vec![precise("b", 100_000)]);
+        assert_eq!(elect(&local, &peers), ROLE_HARVESTER, "b listened 0.3 ms earlier");
+        let (local, peers) = settle_start(precise("b", 100_000), vec![precise("a", 400_000)]);
+        assert_eq!(elect(&local, &peers), ROLE_OVERSEER);
         // Nobody claiming: nothing changes.
         let (local, peers) = settle_start(hex("c", "", "auto", 1), vec![hex("d", ROLE_HARVESTER, "auto", 1)]);
         assert_eq!((local.role.as_str(), peers[0].role.as_str()), ("", ROLE_HARVESTER));
