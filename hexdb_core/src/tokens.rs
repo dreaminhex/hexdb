@@ -6,8 +6,10 @@
 //
 //   tok_<26 characters>_1111
 //
-// The token is a keyed BLAKE3 hash of the value under a key derived from the
-// lattice key, in lowercase base32, followed by the value's last 4 characters
+// The token is a keyed BLAKE3 hash of the value under the lattice's
+// tokenization key (derived from the lattice key when the data is created,
+// then kept in the catalog and shared with every hex, so rotating keys never
+// changes a token), in lowercase base32, followed by the value's last 4 characters
 // when it has at least 10 (PCI DSS allows showing the last 4 of a card
 // number). Equal values give equal tokens across the lattice, so equality
 // filters, unique indexes and joins work: filters on a tokenized field are
@@ -44,12 +46,30 @@ const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 /// Documents read at a time by the vault sweep.
 const PAGE: usize = 1000;
 
+/// Associated data sealing the tokenization key for other hexes.
+const TOKEN_KEY_AAD: &[u8] = b"HexDB token key";
+
 /// The lattice's tokenization key.
 pub struct TokenKey(Zeroizing<[u8; 32]>);
 
 impl TokenKey {
+    /// The key a new lattice's data starts with (what every earlier HexDB
+    /// used), so independently started hexes agree before they first sync.
+    pub fn derive(lattice_key: &[u8; 32]) -> [u8; 32] {
+        blake3::derive_key("HexDB 2026 tokenization v1", lattice_key)
+    }
+
+    /// The key derived from a lattice key (see `derive`).
     pub fn new(lattice_key: &[u8; 32]) -> TokenKey {
-        TokenKey(Zeroizing::new(blake3::derive_key("HexDB 2026 tokenization v1", lattice_key)))
+        TokenKey::from_bytes(TokenKey::derive(lattice_key))
+    }
+
+    pub fn from_bytes(key: [u8; 32]) -> TokenKey {
+        TokenKey(Zeroizing::new(key))
+    }
+
+    fn bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 
     /// The token for a value.
@@ -104,6 +124,32 @@ pub(crate) enum VaultEntry {
 }
 
 impl HexDBEngine {
+    /// The tokenization key, sealed for other hexes (hex).
+    pub(crate) fn sealed_token_key(&self) -> String {
+        hex::encode(self.lattice_keys.seal(self.token_key.read().unwrap().bytes(), TOKEN_KEY_AAD))
+    }
+
+    /// Use the Overseer's tokenization key, so a value has the same token on
+    /// every hex (a hex that joined after a key rotation would otherwise
+    /// derive another one).
+    pub(crate) fn adopt_token_key(&self, sealed: &str) -> Result<()> {
+        if sealed.is_empty() {
+            return Ok(());
+        }
+        let key: [u8; 32] = hex::decode(sealed)
+            .ok()
+            .and_then(|s| self.lattice_keys.open(&s, TOKEN_KEY_AAD))
+            .and_then(|k| <[u8; 32]>::try_from(k).ok())
+            .ok_or_else(|| anyhow::anyhow!("the Overseer's tokenization key can't be opened with this hex's lattice key"))?;
+        if self.token_key.read().unwrap().bytes() == &key {
+            return Ok(());
+        }
+        self.update_catalog(|catalog| catalog.token_key = hex::encode(key))?;
+        *self.token_key.write().unwrap() = TokenKey::from_bytes(key);
+        info!("🔑 Adopted the lattice's tokenization key.");
+        Ok(())
+    }
+
     /// The tokenized fields of a tessellation's current schema: (path, kind).
     pub(crate) fn tokenized_fields(&self, tess: &str) -> Vec<(String, Tokenize)> {
         self.schemas(tess)
@@ -127,7 +173,7 @@ impl HexDBEngine {
                     return;
                 }
                 let plain = Zeroizing::new(std::mem::take(value));
-                let token = self.token_key.token(&plain);
+                let token = self.token_key.read().unwrap().token(&plain);
                 if *kind == Tokenize::Vault {
                     let sealed = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, self.lattice_keys.seal(plain.as_bytes(), aad(&token).as_bytes()));
                     vault.push(VaultEntry::New(vault_id(tess, &token), json!({ "token": token, "tessellation": tess, "field": path, "value": sealed })));
@@ -141,7 +187,7 @@ impl HexDBEngine {
     /// The token a filter value on a tokenized field compares with.
     pub(crate) fn token_for_filter(&self, value: &Value) -> Option<Value> {
         match value {
-            Value::String(s) if !is_token(s) => Some(Value::String(self.token_key.token(s))),
+            Value::String(s) if !is_token(s) => Some(Value::String(self.token_key.read().unwrap().token(s))),
             _ => None,
         }
     }

@@ -314,7 +314,7 @@ pub struct HexDBEngine {
     /// Documents waiting to be embedded for vector indexes (see `vectors`).
     pub(crate) embeddings: vectors::EmbedState,
     /// Makes tokens for tokenized fields (see `crate::tokens`).
-    pub(crate) token_key: crate::tokens::TokenKey,
+    pub(crate) token_key: std::sync::RwLock<crate::tokens::TokenKey>,
     /// The OpenID Connect provider's keys and verified access tokens (see `crate::oauth`).
     pub(crate) oauth: crate::oauth::OAuth,
     /// Nonces of discovery hellos and replication requests already seen.
@@ -397,7 +397,6 @@ impl HexDBEngine {
         let wal_dir = storage_dir.join("wal");
         // Before anything is read: stored documents may hold sealed fields.
         let sealer = crate::sealed::Sealer::new(&config.lattice_keys()?);
-        let token_key = crate::tokens::TokenKey::new(&config.lattice_key()?);
         std::fs::create_dir_all(&storage_dir)
             .with_context(|| format!("Failed to create {}", storage_dir.display()))?;
         let scanner = crate::scan::Scanner::from_config(&config.files.scan).context("files.scan")?.map(Arc::new);
@@ -437,6 +436,18 @@ impl HexDBEngine {
         if content_key_created {
             catalog.content_key = hex::encode(crate::crypt::random_bytes(32));
         }
+        // The tokenization key: kept from the data's creation, never re-derived
+        // from a rotated key.
+        let token_key_created = catalog.token_key.is_empty();
+        if token_key_created {
+            catalog.token_key = hex::encode(crate::tokens::TokenKey::derive(&config.lattice_key()?));
+        }
+        let token_key = std::sync::RwLock::new(crate::tokens::TokenKey::from_bytes(
+            hex::decode(&catalog.token_key)
+                .ok()
+                .and_then(|k| k.try_into().ok())
+                .ok_or_else(|| anyhow!("The catalog's tokenization key is corrupt."))?,
+        ));
         let content_key: [u8; 32] = hex::decode(&catalog.content_key)
             .ok()
             .and_then(|k| k.try_into().ok())
@@ -457,7 +468,7 @@ impl HexDBEngine {
             sst.purge_dropped(tess, dropped_seq).await?;
         }
         // Register tessellations found on disk but missing from the catalog.
-        let mut catalog_changed = history_created || lattice_changed || identity_changed || content_key_created;
+        let mut catalog_changed = history_created || lattice_changed || identity_changed || content_key_created || token_key_created;
         for tess in sst.tessellations().await {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(

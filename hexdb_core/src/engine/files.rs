@@ -843,6 +843,13 @@ impl HexDBEngine {
         Ok(())
     }
 
+    /// Change the catalog and save it.
+    pub(crate) fn update_catalog(&self, change: impl FnOnce(&mut crate::catalog::Catalog)) -> Result<()> {
+        let mut catalog = self.catalog.lock().unwrap();
+        change(&mut catalog);
+        catalog.save(&self.storage_dir, &self.keys)
+    }
+
     /// Give a replicated tessellation the Overseer's kind (e.g. "files").
     pub(crate) fn set_replicated_kind(&self, name: &str, kind: &str) -> Result<()> {
         let mut catalog = self.catalog.lock().unwrap();

@@ -301,6 +301,10 @@ pub struct SnapshotMeta {
     /// (hex). Every hex in a lattice names a chunk the same way.
     #[serde(default)]
     pub content_key: String,
+    /// The tokenization key, sealed the same way (hex). Every hex in a
+    /// lattice tokenizes a value the same way.
+    #[serde(default)]
+    pub token_key: String,
     /// The history this Overseer took over, if it was promoted (see `Continuation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<Continuation>,
@@ -399,6 +403,7 @@ impl HexDBEngine {
             seq,
             tessellations: self.tessellation_details().into_iter().filter(|(name, _)| !crate::engine::is_local_only(name)).collect(),
             content_key: self.sealed_content_key(),
+            token_key: self.sealed_token_key(),
             continues: self.continuation.read().unwrap().clone(),
         }
     }
@@ -728,6 +733,7 @@ impl Follower {
 
         let engine = self.engine.clone();
         engine.adopt_content_key(&meta.content_key)?;
+        engine.adopt_token_key(&meta.token_key)?;
         let slices = self.wanted_slices(overseer).await;
         let wanted: HashSet<&str> = meta.tessellations.iter().map(|(n, _)| n.as_str()).collect();
         for (name, _) in engine.tessellation_details() {
@@ -1217,6 +1223,7 @@ impl Follower {
     async fn sync_catalog(&mut self, base: &str) -> Result<()> {
         let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
         self.engine.adopt_content_key(&meta.content_key)?;
+        self.engine.adopt_token_key(&meta.token_key)?;
         for (name, info) in &meta.tessellations {
             self.engine.ensure_replicated_tessellation(name)?;
             self.engine.set_replicated_kind(name, &info.kind)?;
