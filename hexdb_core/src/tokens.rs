@@ -258,8 +258,38 @@ impl HexDBEngine {
         Ok(deleted)
     }
 
+    /// Vault tokens in `doc`'s vault-tokenized fields whose vault entry is gone
+    /// (a restore checks, rather than bring back a token nothing opens).
+    pub(crate) async fn missing_vault_values(&self, doc: &crate::Document) -> Result<Vec<String>> {
+        let fields: Vec<String> = self.tokenized_fields(&doc.tessellation).into_iter().filter(|(_, k)| *k == Tokenize::Vault).map(|(p, _)| p).collect();
+        if fields.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut json = doc.data_json();
+        let mut tokens = Vec::new();
+        for path in &fields {
+            crate::access::for_each_at(&mut json, path, &mut |v| {
+                if let Value::String(s) = v {
+                    if is_token(s) {
+                        tokens.push(s.clone());
+                    }
+                }
+            });
+        }
+        let mut missing = Vec::new();
+        for token in tokens {
+            if self.get_system_document(VAULT_TESSELLATION, vault_id(&doc.tessellation, &token)).await?.is_none() {
+                missing.push(token);
+            }
+        }
+        Ok(missing)
+    }
+
     /// Every token held anywhere in a tessellation's documents (whatever its
-    /// schema says now: a field that stopped being tokenized keeps its tokens).
+    /// schema says now: a field that stopped being tokenized keeps its tokens),
+    /// and in its documents in the trash, which can still be restored: a vault
+    /// value stays until the last document that could come back with it is
+    /// purged or expires.
     async fn tokens_in_use(&self, tess: &str) -> Result<HashSet<String>> {
         fn collect(value: &Value, out: &mut HashSet<String>) {
             match value {
@@ -272,6 +302,12 @@ impl HexDBEngine {
             }
         }
         let mut out = HashSet::new();
+        if self.tessellation_exists(crate::engine::deletes::TRASH_TESSELLATION) {
+            let from = crate::filter::Filter::parse(&json!({ "from": tess }))?;
+            for entry in self.matching_documents(crate::engine::deletes::TRASH_TESSELLATION, &from).await? {
+                collect(&entry.data_json()[crate::engine::deletes::TRASHED_DOCUMENT], &mut out);
+            }
+        }
         if !self.tessellation_exists(tess) {
             return Ok(out);
         }
