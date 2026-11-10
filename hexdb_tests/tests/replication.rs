@@ -186,3 +186,40 @@ fn catalog_changes_and_sealed_fields_reach_the_replica() -> Result<()> {
     assert_eq!(overseer.get_doc("payments", &id)?.unwrap()["card"], "4111111111111111");
     Ok(())
 }
+
+/// With `min_acks`, an acknowledged upload's content is on the replica too,
+/// not just its document: a replica copies file content after applying the
+/// document, and counts as acknowledging only once it has it. Here the
+/// Overseer is killed the moment the upload is acknowledged, and the replica,
+/// with no other hex to fetch from, still serves the whole file.
+#[test]
+fn min_acks_covers_the_content_of_uploaded_files() -> Result<()> {
+    let ports = [TestServer::free_port()?, TestServer::free_port()?];
+    let mut overseer = TestServer::start_with(pair(ports, 0, 4096, ""))?;
+    let res = overseer.request(Method::POST, "/tessellations", Some(&json!({ "name": "media", "kind": "files" })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    let replica = TestServer::start_with(pair(ports, 1, 1024, ""))?;
+    wait_until(Duration::from_secs(30), "the replica to stream", || Ok(replication(&replica)?["state"] == "streaming"))?;
+    // Synchronous from here on (set once the replica is signed in: its sign-in is a write).
+    let res = overseer.request(Method::PUT, "/settings", Some(&json!({ "replication.min_acks": 1, "replication.ack_timeout_ms": 30000 })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+
+    // Incompressible bytes, several chunks' worth, so copying takes a while.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let data: Vec<u8> = (0..16 * 1024 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect();
+    let res = overseer.send_bytes(Method::PUT, "/media/_files/big.bin", data.clone(), &[])?;
+    assert_eq!(res.status, 201, "{}", res.body);
+    overseer.kill();
+
+    let (status, _, body) = replica.get_bytes("/media/_files/big.bin", &[])?;
+    assert_eq!(status, 200, "the replica serves the file with the Overseer gone: {}", String::from_utf8_lossy(&body[..body.len().min(300)]));
+    assert!(body == data, "the replica's copy is the whole file ({} of {} bytes)", body.len(), data.len());
+    Ok(())
+}

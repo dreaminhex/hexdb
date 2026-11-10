@@ -145,6 +145,7 @@ pub fn app_router(
         .route("/lattice/revoke", post(crate::lattice::revoke))
         .route("/lattice/audit", post(crate::lattice::audit))
         .route("/lattice/ai-usage", post(crate::lattice::ai_usage))
+        .route("/lattice/content", post(crate::lattice::content))
         .route(crate::oracle::TOOL_PATH, post(crate::oracle::ai_tool))
         .route(hexdb_core::review::STORE_PATH, post(crate::reviews::store))
         .route("/security/reviews", get(crate::reviews::list).post(crate::reviews::run))

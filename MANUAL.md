@@ -2368,7 +2368,7 @@ ack_timeout_ms = 5000 # on timeout the write stays committed and the client gets
 quorum = 2            # hexes (including itself) the Overseer must see to accept writes
 ```
 
-- **`min_acks`.** With it set, an acknowledged write exists on at least that many replicas. Writes to system tessellations that don't need it (the audit trail, sign-in throttling, replication state, plugin cursors) don't wait.
+- **`min_acks`.** With it set, an acknowledged write exists on at least that many replicas. For an upload (any write to a files tessellation), that includes the file's content: a replica copies content after applying the file's document, and counts only once it has it, so an acknowledged upload survives losing the Overseer right after. Writes to system tessellations that don't need it (the audit trail, sign-in throttling, replication state, plugin cursors) don't wait.
 - **`quorum`.** A hex cut off from the rest stops taking writes, with 503 `no_quorum`. With a majority quorum (2 of 3, 3 of 5), a network partition can't leave two Overseers both accepting writes. Startup work that needs to write (creating the first admin) waits for the quorum.
 
 ### Slicing

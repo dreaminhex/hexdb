@@ -38,6 +38,7 @@ use tracing::{debug, info, warn};
 use ulid::Ulid;
 
 pub(crate) mod ai_files;
+pub(crate) mod content;
 pub(crate) mod quotas;
 
 /// What the client says about an upload.
@@ -102,6 +103,8 @@ pub struct FileSync {
     client: std::sync::OnceLock<Option<reqwest::Client>>,
     pub(crate) fetched: std::sync::atomic::AtomicU64,
     pub(crate) failed: std::sync::atomic::AtomicU64,
+    /// How far this replica holds the content of the files it applied (see `content`).
+    pub(crate) content: content::ContentProgress,
 }
 
 impl Default for FileSync {
@@ -114,6 +117,7 @@ impl Default for FileSync {
             client: std::sync::OnceLock::new(),
             fetched: Default::default(),
             failed: Default::default(),
+            content: Default::default(),
         }
     }
 }
@@ -975,6 +979,7 @@ impl HexDBEngine {
         if let Some(e) = results.into_iter().find_map(Result::err) {
             return Err(e);
         }
+        self.content_copied(manifest);
         Ok(())
     }
 
@@ -994,6 +999,8 @@ impl HexDBEngine {
                 }
             }
         }
+        // Content no document refers to any more won't come: stop waiting for it.
+        self.content_still_referenced(&manifests);
         let mut queued = 0;
         for manifest in manifests {
             // A manifest that's here usually means its chunks are too; check them anyway (cheap).
