@@ -7,7 +7,7 @@
 class Hexdb < Formula
   desc "Document database with REST, GraphQL, SQL, replication and an admin UI"
   homepage "https://hexdb.app"
-  version "2.4.3"
+  version "2.4.4"
   license "Apache-2.0"
 
   on_macos do

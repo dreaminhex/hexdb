@@ -1,6 +1,6 @@
 [package]
 name = "hexdb_cli"
-version = "2.4.3"
+version = "2.4.4"
 license = "Apache-2.0"
 edition = "2021"
 
