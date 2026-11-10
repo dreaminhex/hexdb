@@ -305,6 +305,8 @@ pub struct HexDBEngine {
     /// Seals masked fields in memory (see `crate::sealed`).
     pub(crate) sealer: crate::sealed::Sealer,
     pub(crate) seal_policy: std::sync::RwLock<Arc<crate::sealed::SealPolicy>>,
+    /// Active peers as last counted (`check_quorum` falls back on it when the peer list is busy).
+    pub(crate) active_peers_seen: std::sync::atomic::AtomicUsize,
     /// The next policy refresh also seals what WAL replay put in the hex.
     seal_pending: std::sync::atomic::AtomicBool,
     /// Documents waiting to be embedded for vector indexes (see `vectors`).
@@ -588,6 +590,7 @@ impl HexDBEngine {
             lattice_keys,
             sealer,
             seal_policy: Default::default(),
+            active_peers_seen: std::sync::atomic::AtomicUsize::new(0),
             seal_pending: std::sync::atomic::AtomicBool::new(true),
             embeddings: Default::default(),
             token_key,

@@ -820,7 +820,10 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: 
         }
         count_misses(&mut members, &answered, &seen_by_others, on_time);
         members.retain(|m| now - m.last_seen <= forget_after);
-        members.iter().filter(|m| m.status == "active").map(|m| m.hex.clone()).collect()
+        let active: Vec<PeerHex> = members.iter().filter(|m| m.status == "active").map(|m| m.hex.clone()).collect();
+        // The count the quorum check uses while the list is busy.
+        engine.active_peers_seen.store(active.len(), std::sync::atomic::Ordering::Relaxed);
+        active
     };
 
     let local = local_identity(engine).await;
