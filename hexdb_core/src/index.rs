@@ -38,7 +38,7 @@ use std::ops::Bound;
 use ulid::Ulid;
 
 /// Most index keys one document may produce in one index (arrays multiply).
-const MAX_KEYS_PER_DOCUMENT: usize = 1_000;
+pub(crate) const MAX_KEYS_PER_DOCUMENT: usize = 1_000;
 /// Most indexes per tessellation.
 pub const MAX_INDEXES: usize = 32;
 
@@ -231,6 +231,11 @@ impl KeyPart {
 
 type Key = Vec<KeyPart>;
 
+/// How many keys these per-field values make (their product), saturating.
+fn key_count(per_path: &[Vec<KeyPart>]) -> usize {
+    per_path.iter().fold(1usize, |n, parts| n.saturating_mul(parts.len().max(1)))
+}
+
 /// Keys for one field: each scalar value (array elements expanded), or Null if missing.
 fn field_keys(json: &Value, path: &[String]) -> Vec<KeyPart> {
     let values = resolve(json, path);
@@ -266,6 +271,10 @@ pub(crate) struct FieldIndex {
     /// as a whole, not by the elements they're indexed under, so index order
     /// isn't sort order while any exist.
     irregular: HashSet<Ulid>,
+    /// Documents with more keys than `MAX_KEYS_PER_DOCUMENT` (a long array, or
+    /// arrays multiplied in a compound index): they get no keys and are a
+    /// candidate for every lookup, checked against the filter like any other.
+    overflow: HashSet<Ulid>,
 }
 
 pub(crate) struct TextIndex {
@@ -331,7 +340,8 @@ pub(crate) fn source_text(json: &Value, source: &[Vec<String>]) -> String {
 
 /// Bump when what an index stores for a document changes (keys or text
 /// tokens), so snapshots from older builds are rebuilt instead of trusted.
-/// 2: numbers in keys are exact (integers beyond f64's range kept apart).
+/// 2: numbers in keys are exact (integers beyond f64's range kept apart), and
+/// documents with too many keys are kept as overflow instead of a cut-off key list.
 pub(crate) const SNAPSHOT_VERSION: u32 = 2;
 
 /// An index's contents at a sequence number, saved so startup doesn't have
@@ -354,8 +364,8 @@ pub(crate) struct IndexSnapshot {
 
 #[derive(Serialize, Deserialize)]
 enum SnapshotData {
-    /// (document, keys, irregular)
-    Field(Vec<(Ulid, Vec<Key>, bool)>),
+    /// (document, keys, irregular, overflow)
+    Field(Vec<(Ulid, Vec<Key>, bool, bool)>),
     /// (document, words)
     Text(Vec<(Ulid, Vec<String>)>),
     /// (document, vector as stored)
@@ -394,6 +404,7 @@ impl Index {
                 entries: BTreeMap::new(),
                 by_doc: HashMap::new(),
                 irregular: HashSet::new(),
+                overflow: HashSet::new(),
             }),
             IndexKind::Text => IndexData::Text(TextIndex { paths, analyzer, words: HashMap::new(), by_doc: HashMap::new() }),
             IndexKind::Vector => IndexData::Vector(VectorIndex {
@@ -410,7 +421,7 @@ impl Index {
     /// The index's contents, for a snapshot.
     pub(crate) fn snapshot(&self, tessellation: &str, seq: u64) -> IndexSnapshot {
         let data = match &self.data {
-            IndexData::Field(f) => SnapshotData::Field(f.by_doc.iter().map(|(id, keys)| (*id, keys.clone(), f.irregular.contains(id))).collect()),
+            IndexData::Field(f) => SnapshotData::Field(f.by_doc.iter().map(|(id, keys)| (*id, keys.clone(), f.irregular.contains(id), f.overflow.contains(id))).collect()),
             IndexData::Text(t) => SnapshotData::Text(t.by_doc.iter().map(|(id, words)| (*id, words.clone())).collect()),
             IndexData::Vector(v) => SnapshotData::Vector(v.store.entries()),
         };
@@ -428,12 +439,15 @@ impl Index {
         let mut index = Index::with_analyzer(snapshot.def, analyzer);
         match (&mut index.data, snapshot.data) {
             (IndexData::Field(f), SnapshotData::Field(docs)) => {
-                for (id, keys, irregular) in docs {
+                for (id, keys, irregular, overflow) in docs {
                     for key in &keys {
                         f.entries.entry(key.clone()).or_default().insert(id);
                     }
                     if irregular {
                         f.irregular.insert(id);
+                    }
+                    if overflow {
+                        f.overflow.insert(id);
                     }
                     f.by_doc.insert(id, keys);
                 }
@@ -512,7 +526,7 @@ impl Index {
     /// (descending keys when `descending`), IDs ascending within a key.
     pub(crate) fn ordered(&self, descending: bool) -> Option<Vec<(KeyPart, Ulid)>> {
         let IndexData::Field(f) = &self.data else { return None };
-        if f.paths.len() != 1 || !f.irregular.is_empty() {
+        if f.paths.len() != 1 || !f.irregular.is_empty() || !f.overflow.is_empty() {
             return None;
         }
         let mut out = Vec::with_capacity(f.by_doc.len());
@@ -538,20 +552,23 @@ impl Index {
     }
 
     /// Keys a document produces in a field index (empty for text indexes).
+    /// A document's keys, or none at all if it would have more than
+    /// `MAX_KEYS_PER_DOCUMENT` (`overflows_json`): never just some of them,
+    /// which would make lookups miss it.
     fn keys_for(&self, json: &Value) -> Vec<Key> {
         let IndexData::Field(f) = &self.data else { return Vec::new() };
+        let per_path: Vec<Vec<KeyPart>> = f.paths.iter().map(|path| field_keys(json, path)).collect();
+        if key_count(&per_path) > MAX_KEYS_PER_DOCUMENT {
+            return Vec::new();
+        }
         let mut keys: Vec<Key> = vec![Vec::new()];
-        for path in &f.paths {
-            let parts = field_keys(json, path);
+        for parts in &per_path {
             let mut next = Vec::with_capacity(keys.len() * parts.len().max(1));
             for prefix in &keys {
-                for part in &parts {
+                for part in parts {
                     let mut key = prefix.clone();
                     key.push(part.clone());
                     next.push(key);
-                    if next.len() >= MAX_KEYS_PER_DOCUMENT {
-                        break;
-                    }
                 }
             }
             keys = next;
@@ -559,11 +576,24 @@ impl Index {
         keys
     }
 
+    /// True if a document has too many keys for this index (see `FieldIndex::overflow`).
+    fn overflows_json(&self, json: &Value) -> bool {
+        let IndexData::Field(f) = &self.data else { return false };
+        let per_path: Vec<Vec<KeyPart>> = f.paths.iter().map(|path| field_keys(json, path)).collect();
+        key_count(&per_path) > MAX_KEYS_PER_DOCUMENT
+    }
+
+    /// True if `doc` has too many keys for this index (a unique index refuses it).
+    pub(crate) fn overflows(&self, doc: &Document) -> bool {
+        self.overflows_json(&self.json_of(doc))
+    }
+
     /// Remove a document from the index.
     pub(crate) fn remove(&mut self, id: &Ulid) {
         match &mut self.data {
             IndexData::Field(f) => {
                 f.irregular.remove(id);
+                f.overflow.remove(id);
                 for key in f.by_doc.remove(id).unwrap_or_default() {
                     if let Some(ids) = f.entries.get_mut(&key) {
                         ids.remove(id);
@@ -592,8 +622,12 @@ impl Index {
         self.remove(&doc.id);
         let json = self.json_of(doc);
         let keys = self.keys_for(&json);
+        let overflows = self.overflows_json(&json);
         match &mut self.data {
             IndexData::Field(f) => {
+                if overflows {
+                    f.overflow.insert(doc.id);
+                }
                 for key in &keys {
                     f.entries.entry(key.clone()).or_default().insert(doc.id);
                 }
@@ -821,7 +855,11 @@ fn plan_node(indexes: &[Index], node: &Node, used: &mut Vec<String>) -> Option<B
             if best.is_some() {
                 used.push(index.def.name.clone());
             }
-            best
+            // Documents with too many keys to index are always candidates.
+            best.map(|mut ids| {
+                ids.extend(f.overflow.iter().copied());
+                ids
+            })
         }
         Node::Text { terms, .. } => {
             let index = indexes.iter().find(|i| i.usable() && i.def.kind == IndexKind::Text)?;
@@ -864,7 +902,9 @@ fn composite_equality(indexes: &[Index], nodes: &[Node], used: &mut Vec<String>)
     let IndexData::Field(f) = &index.data else { return None };
     let key: Key = index.def.fields.iter().map(|field| pinned[field].clone()).collect();
     used.push(index.def.name.clone());
-    Some(f.entries.get(&key).cloned().unwrap_or_default())
+    let mut ids = f.entries.get(&key).cloned().unwrap_or_default();
+    ids.extend(f.overflow.iter().copied());
+    Some(ids)
 }
 
 /// IDs whose first key part satisfies `op`, or `None` if the index can't answer it.
@@ -1053,6 +1093,30 @@ mod tests {
         let p = plan(&indexes, &Filter::parse(&json!({ "$text": "rust databases" })).unwrap()).unwrap();
         assert_eq!(p.candidates, BTreeSet::from([docs[0].id]));
         check(&indexes, &docs, json!({ "city": "Auckland" }), false);
+    }
+
+    /// HDB-14: a document with too many keys is never indexed by a prefix of
+    /// them: it's a candidate for every lookup instead, at 1,000 and 1,001
+    /// values alike, in compound indexes too, and a unique index refuses it.
+    #[test]
+    fn documents_with_too_many_keys_are_always_candidates() {
+        let at_limit = doc(json!({ "tags": (0..1000).collect::<Vec<_>>() }));
+        let over = doc(json!({ "tags": (0..1001).collect::<Vec<_>>() }));
+        let compound = doc(json!({ "a": (0..40).collect::<Vec<_>>(), "b": (0..40).collect::<Vec<_>>() }));
+        let plain = doc(json!({ "tags": [5], "a": 1, "b": 1 }));
+        let docs = vec![at_limit.clone(), over.clone(), compound.clone(), plain.clone()];
+        let tags = ready(field(&["tags"]), &docs);
+        let ab = ready(field(&["a", "b"]), &docs);
+        for value in [0, 999, 1000, 5] {
+            check(std::slice::from_ref(&tags), &docs, json!({ "tags": value }), true);
+        }
+        check(std::slice::from_ref(&ab), &docs, json!({ "a": 39, "b": 39 }), true);
+        assert!(!tags.overflows(&at_limit) && tags.overflows(&over) && ab.overflows(&compound) && !ab.overflows(&plain));
+        // The sort walk isn't used while some documents have no keys.
+        assert!(tags.ordered(false).is_none());
+        let mut unique = field(&["tags"]);
+        unique.unique = true;
+        assert!(ready(unique, std::slice::from_ref(&plain)).overflows(&over));
     }
 
     #[test]

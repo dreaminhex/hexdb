@@ -1428,6 +1428,16 @@ impl HexDBEngine {
             let WalOp::Put(doc) = &item.op else { continue };
             let Some(list) = indexes.by_tessellation.get(&doc.tessellation) else { continue };
             for index in list.iter().filter(|i| i.def.unique) {
+                if index.overflows(doc) {
+                    return Err(EngineError::Invalid(format!(
+                        "Unique index '{}' on '{}': this document has more than {} values for {}, too many to check for duplicates.",
+                        index.def.name,
+                        doc.tessellation,
+                        crate::index::MAX_KEYS_PER_DOCUMENT,
+                        index.def.fields.join(" + ")
+                    ))
+                    .into());
+                }
                 if let Some(other) = index.unique_conflict(doc, &changing[doc.tessellation.as_str()]) {
                     return Err(EngineError::Conflict(format!(
                         "Unique index '{}' on '{}': document {} already has this {}.",
