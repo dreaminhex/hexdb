@@ -607,7 +607,7 @@ Each delete batch has a record in the delete history and its documents in the tr
 - Restoring needs `write` on the batch's document tessellations and `restore` on its files tessellations; purging needs `write` and `delete`.
 - A document comes back exactly as it was stored: its ID, fields, expiry and `_schema` stamp. It isn't validated against a newer schema version; the next background migration upgrades it.
 - In the trash, masked fields stay sealed and tokenized fields stay tokens. The history keeps a delete's filter with the values tested against such fields replaced by `[redacted]`.
-- With `storage.trash_days = 0`, deleted documents aren't kept: the history still records each delete, but it can't be restored. Files always go to the files trash (`files.trash_days`).
+- With `storage.trash_days = 0`, deleted documents aren't kept: the history still records each delete, but it can't be restored. Files always go to the files trash (`files.trash_days`). A hex where either is 0 says so in its startup log, in `/status` (`storage.trash_warning`) and on the admin UI's Deletes page.
 - Not deletes, so not in the trash or the history: TTL expiry, dropping a tessellation, and system tessellations.
 
 Audit events (area `data`): `data.delete.filter`, `data.delete.folder`, `data.delete.cascade` (a single delete that took other documents with it), `data.delete.transaction` (a transaction that deleted more than one document), `data.restore` and `data.purge`. A plain delete of one document is in the history and the trash, not the audit trail.
@@ -3042,7 +3042,7 @@ See [drivers/java/README.md](drivers/java/README.md) for every property, convers
 
 **Why did my write return 503 but the data is there?** With `replication.min_acks` set, the write committed on the Overseer, but not enough replicas confirmed within `ack_timeout_ms`. Retry with the same idempotency key to be safe.
 
-**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `sql`, `config`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations.
+**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `sql`, `config`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations. Routes added since 2.0 (`queues`, `shares`, `mcp`, `quarantine`, `updates`, `a2a`, `ready`) can't be new tessellation names either, but a tessellation an earlier version created under one of them stays usable through SQL, GraphQL and transactions.
 
 **A replica is far behind or keeps re-syncing.**
 1. Check the Logs page on the replica, filtered by `hexdb_core::replication`.

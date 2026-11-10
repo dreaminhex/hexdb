@@ -379,8 +379,6 @@ const METRICS_FILE: &str = "metrics-history.hxe";
 /// The query advisor's saved statistics.
 const QUERY_STATS_FILE: &str = "query-stats.hxe";
 
-/// API routes added since 2.0 that a new tessellation can't be named (see `create_tessellation`).
-const NEW_ROUTE_NAMES: &[&str] = &["queues", "shares", "mcp", "quarantine"];
 
 impl HexDBEngine {
     /// Open (or create) the storage directory, recover from SSTables and the
@@ -914,10 +912,10 @@ impl HexDBEngine {
     pub fn create_tessellation(&self, name: &str, kind: &str) -> Result<bool> {
         if kind == "user" || kind == crate::files::FILES_KIND {
             self.ensure_writable()?;
-            // Names that became API routes in 2.0. Unlike the older reserved
+            // Names that became API routes later. Unlike the older reserved
             // names they're refused only for new tessellations, so data an
             // earlier version stored under them stays writable.
-            if NEW_ROUTE_NAMES.iter().any(|r| r.eq_ignore_ascii_case(name)) && !self.tessellation_exists(name) {
+            if crate::catalog::NEW_ROUTE_NAMES.iter().any(|r| r.eq_ignore_ascii_case(name)) && !self.tessellation_exists(name) {
                 return Err(EngineError::Invalid(format!("'{}' is reserved and can't be used as a new tessellation name.", name)).into());
             }
         }

@@ -27,6 +27,16 @@ const RESERVED_NAMES: &[&str] = &[
     "audit", "settings", "join", "streams", "functions", "schedules", "analyzers", "schemas", "openapi", "backup", "backups", "triggers",
     "sql", "scrub", "config", "ai", "deletes", "blocklist",
 ];
+/// API routes added since 2.0 that a new tessellation can't be named; one
+/// stored under such a name earlier stays usable (`HexDBEngine::create_tessellation`).
+/// A route's tessellation would be reachable through SQL, GraphQL and
+/// transactions but hidden behind the route over REST.
+pub const NEW_ROUTE_NAMES: &[&str] = &["queues", "shares", "mcp", "quarantine", "users", "roles", "updates", "a2a", "ready"];
+
+/// True if `name` is an API route's first path segment, so a tessellation can't be created under it.
+pub fn is_route_name(name: &str) -> bool {
+    RESERVED_NAMES.iter().chain(NEW_ROUTE_NAMES).any(|r| r.eq_ignore_ascii_case(name))
+}
 const MAX_NAME_LEN: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

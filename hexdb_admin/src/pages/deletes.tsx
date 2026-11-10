@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { IconEye, IconRestore, IconTrashX } from "@tabler/icons-react"
+import { IconAlertTriangle, IconEye, IconRestore, IconTrashX } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -57,6 +57,8 @@ export function DeletesPage() {
     15_000,
     [kind, applied],
   )
+  const status = usePoll(() => api.status(), 60_000, [])
+  const trashWarning = status.data?.storage.trash_warning
   const [action, setAction] = useState<Action | null>(null)
   const [details, setDetails] = useState<DeleteBatch | null>(null)
 
@@ -73,6 +75,11 @@ export function DeletesPage() {
         or purge it to delete it for good. Deleted documents stay in the trash for storage.trash_days (30 by default).
         {!has(me, "audit") && " You see your own deletes; the audit permission shows everyone's."}
       </p>
+      {trashWarning && (
+        <p className="flex items-center gap-2 text-sm text-amber-600 dark:text-amber-400">
+          <IconAlertTriangle className="size-4 shrink-0" /> {trashWarning}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-2">
         <Select value={kind} onValueChange={setKind}>
           <SelectTrigger size="sm" className="w-44" aria-label="Kind">

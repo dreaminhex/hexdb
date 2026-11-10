@@ -384,4 +384,22 @@ mod tests {
         assert!(is_ui_path("/ui") && is_ui_path("/ui/") && is_ui_path("/ui/assets/x.js"));
         assert!(!is_ui_path("/uikit") && !is_ui_path("/uploads/1") && !is_ui_path("/"));
     }
+
+    /// Every route's first path segment is a name no new tessellation can
+    /// take, or the route would hide the tessellation over REST.
+    #[test]
+    fn every_route_name_is_reserved() {
+        let source = include_str!("routes.rs");
+        let mut checked = 0;
+        for part in source.split(".route(\"/").skip(1) {
+            let segment: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+            // Path parameters, the root, and names a tessellation can't have anyway ('.', '_').
+            if segment.is_empty() || segment.starts_with('_') || hexdb_core::catalog::validate_tessellation_name(&segment).is_err() && !hexdb_core::catalog::is_route_name(&segment) {
+                continue;
+            }
+            assert!(hexdb_core::catalog::is_route_name(&segment), "/{} is a route but a tessellation can still be named '{}'", segment, segment);
+            checked += 1;
+        }
+        assert!(checked > 30, "found only {} routes", checked);
+    }
 }

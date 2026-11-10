@@ -106,6 +106,19 @@ pub struct StorageMetrics {
     /// Malware scanning of uploads: engines and versions, a warning when it's weaker
     /// than it should be, and how many files are quarantined. Null when it's off.
     pub scan: Option<serde_json::Value>,
+    /// Set when deletes can't be undone: `storage.trash_days` or
+    /// `files.trash_days` is 0, so deleted documents or files aren't kept.
+    pub trash_warning: Option<String>,
+}
+
+/// Why deletes on this hex can't be undone, if they can't (see `StorageMetrics::trash_warning`).
+pub fn trash_warning(config: &crate::config::HexConfig) -> Option<String> {
+    match (config.storage.trash_days == 0, config.files.trash_days == 0) {
+        (false, false) => None,
+        (true, false) => Some("storage.trash_days is 0: deleted documents aren't kept, so their deletes can't be undone (the delete history still records them).".into()),
+        (false, true) => Some("files.trash_days is 0: deleted files aren't kept, so their deletes can't be undone.".into()),
+        (true, true) => Some("storage.trash_days and files.trash_days are 0: deleted documents and files aren't kept, so deletes can't be undone (the delete history still records them).".into()),
+    }
 }
 
 /// Operation counters since startup.
@@ -315,6 +328,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             sstable_files_on_old_keys: engine.sst_files_needing_rewrite().await,
             files: engine.files_stats(),
             scan: engine.scan_status().await,
+            trash_warning: trash_warning(&engine.config),
         },
         operations: OperationMetrics {
             reads_total: stats.reads_total,
@@ -456,6 +470,16 @@ pub async fn sample(engine: &HexDBEngine) -> MetricsSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hex_that_keeps_no_trash_says_so() {
+        let mut config = crate::config::HexConfig::default();
+        assert_eq!(trash_warning(&config), None);
+        config.storage.trash_days = 0;
+        assert!(trash_warning(&config).is_some_and(|w| w.contains("storage.trash_days") && !w.contains("files.trash_days")));
+        config.files.trash_days = 0;
+        assert!(trash_warning(&config).is_some_and(|w| w.contains("storage.trash_days and files.trash_days")));
+    }
 
     fn at(seconds: i64) -> MetricsSample {
         MetricsSample {

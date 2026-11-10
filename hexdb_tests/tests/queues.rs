@@ -69,11 +69,14 @@ fn queues_deliver_to_one_consumer_with_permissions() -> Result<()> {
     assert_eq!(server.request_as(Some(&producer), Method::DELETE, "/queues/jobs", None, &[])?.status, StatusCode::FORBIDDEN);
     assert_eq!(server.request(Method::DELETE, "/queues/jobs", None, &[])?.status, StatusCode::NO_CONTENT);
 
-    // The names of routes added in 2.0 can't be new tessellations.
-    for name in ["queues", "shares", "mcp"] {
+    // The names of routes added since 2.0 can't be new tessellations, made
+    // explicitly or by a first insert.
+    for name in ["queues", "shares", "mcp", "quarantine", "updates", "a2a", "ready"] {
         let res = post(&server, None, "/tessellations", json!({ "name": name }))?;
         assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}: {}", name, res.body);
     }
+    let res = post(&server, None, "/transactions", json!({ "operations": [{ "op": "insert", "tessellation": "updates", "data": { "n": 1 } }] }))?;
+    assert!(!res.status.is_success(), "a first insert can't make 'updates' either: {}", res.body);
     Ok(())
 }
 

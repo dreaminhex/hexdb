@@ -340,6 +340,8 @@ export interface Status {
     next_sequence: number
     /** Malware scanning; null when it's off (files.scan.enabled = false). */
     scan?: ScanStatus | null
+    /** Set when deletes can't be undone (storage.trash_days or files.trash_days is 0). */
+    trash_warning?: string | null
   }
   operations: { reads_total: number; writes_total: number; queries_total: number }
   updates?: ReleaseCheck

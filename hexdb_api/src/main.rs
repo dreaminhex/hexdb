@@ -224,6 +224,9 @@ async fn server() -> anyhow::Result<()> {
     } else {
         warn!("⚠️ files.sandbox is off: files are parsed in the server process.");
     }
+    if let Some(warning) = hexdb_core::metrics::trash_warning(&config) {
+        warn!("⚠️ {}", warning);
+    }
     let opening = std::time::Instant::now();
     let engine = match HexDBEngine::open(config.clone(), identity, keys.clone()).await {
         Ok(engine) => Arc::new(engine),
