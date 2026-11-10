@@ -436,18 +436,88 @@ fn eval_op(op: &Op, values: &[&Value]) -> bool {
     }
 }
 
-/// Equality that treats 1 and 1.0 as equal.
+/// Equality that treats 1 and 1.0 as equal, and compares integers exactly
+/// (9007199254740993 isn't 9007199254740992, as it would be as an f64).
 fn json_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (Value::Number(x), Value::Number(y)) => number_cmp(x, y) == Some(Ordering::Equal),
         _ => a == b,
     }
+}
+
+/// A JSON number exactly: an integer (any i64 or u64), or a float.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Exact {
+    Int(i128),
+    Float(f64),
+}
+
+impl Exact {
+    /// The number, with whole floats that fit as integers (so 1.0 is 1).
+    pub(crate) fn of(n: &serde_json::Number) -> Option<Exact> {
+        if let Some(i) = n.as_i64() {
+            return Some(Exact::Int(i as i128));
+        }
+        if let Some(u) = n.as_u64() {
+            return Some(Exact::Int(u as i128));
+        }
+        let f = n.as_f64()?;
+        Some(Exact::from_f64(f))
+    }
+
+    pub(crate) fn from_f64(f: f64) -> Exact {
+        // Whole floats within i128 convert exactly; -0.0 becomes 0.
+        if f.fract() == 0.0 && f.abs() < 1.7e38 {
+            Exact::Int(f as i128)
+        } else {
+            Exact::Float(f)
+        }
+    }
+
+    /// Total order: integers exactly, floats by value (NaN last), mixed exactly.
+    pub(crate) fn cmp(&self, other: &Exact) -> Ordering {
+        match (self, other) {
+            (Exact::Int(a), Exact::Int(b)) => a.cmp(b),
+            (Exact::Float(a), Exact::Float(b)) => a.total_cmp(b),
+            (Exact::Int(i), Exact::Float(f)) => int_float_cmp(*i, *f),
+            (Exact::Float(f), Exact::Int(i)) => int_float_cmp(*i, *f).reverse(),
+        }
+    }
+}
+
+/// An integer against a float that isn't whole (or is out of i128's range), exactly.
+fn int_float_cmp(i: i128, f: f64) -> Ordering {
+    if f.is_nan() {
+        return Ordering::Less;
+    }
+    if f >= 1.7e38 {
+        return Ordering::Less;
+    }
+    if f <= -1.7e38 {
+        return Ordering::Greater;
+    }
+    // f isn't whole here, so i is never equal to it: compare with its floor.
+    let floor = f.floor() as i128;
+    if i <= floor {
+        Ordering::Less
+    } else {
+        Ordering::Greater
+    }
+}
+
+/// Compare two JSON numbers exactly (see [`Exact`]).
+pub(crate) fn number_cmp(a: &serde_json::Number, b: &serde_json::Number) -> Option<Ordering> {
+    let (a, b) = (Exact::of(a)?, Exact::of(b)?);
+    if matches!(a, Exact::Float(f) if f.is_nan()) || matches!(b, Exact::Float(f) if f.is_nan()) {
+        return None;
+    }
+    Some(a.cmp(&b))
 }
 
 /// Order two values of the same kind (numbers or strings). Mixed kinds don't compare.
 pub(crate) fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64()?.partial_cmp(&y.as_f64()?),
+        (Value::Number(x), Value::Number(y)) => number_cmp(x, y),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
         _ => None,
@@ -580,6 +650,25 @@ mod tests {
 
     fn check(filter: Value, document: &Document) -> bool {
         Filter::parse(&filter).unwrap().matches(document)
+    }
+
+    /// HDB-04: integers beyond f64's exact range compare exactly; 1 still equals 1.0.
+    #[test]
+    fn large_integers_compare_exactly() {
+        let n = |v: serde_json::Value| v.as_number().cloned().unwrap();
+        assert_eq!(number_cmp(&n(json!(9007199254740992u64)), &n(json!(9007199254740993u64))), Some(Ordering::Less));
+        assert_eq!(number_cmp(&n(json!(1)), &n(json!(1.0))), Some(Ordering::Equal));
+        assert_eq!(number_cmp(&n(json!(u64::MAX)), &n(json!(i64::MIN))), Some(Ordering::Greater));
+        assert_eq!(number_cmp(&n(json!(2)), &n(json!(2.5))), Some(Ordering::Less));
+        assert_eq!(number_cmp(&n(json!(3)), &n(json!(2.5))), Some(Ordering::Greater));
+        assert_eq!(number_cmp(&n(json!(-3)), &n(json!(-2.5))), Some(Ordering::Less));
+        assert_eq!(number_cmp(&n(json!(-2)), &n(json!(-2.5))), Some(Ordering::Greater));
+        assert_eq!(number_cmp(&n(json!(0)), &n(json!(-0.0))), Some(Ordering::Equal));
+        let f = Filter::parse(&json!({ "t": 9007199254740992u64 })).unwrap();
+        assert!(!f.matches(&doc(json!({ "t": 9007199254740993u64 }))));
+        assert!(f.matches(&doc(json!({ "t": 9007199254740992u64 }))));
+        let range = Filter::parse(&json!({ "t": { "$gt": 9007199254740992u64 } })).unwrap();
+        assert!(range.matches(&doc(json!({ "t": 9007199254740993u64 }))));
     }
 
     #[test]
