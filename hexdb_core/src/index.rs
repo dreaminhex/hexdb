@@ -164,8 +164,25 @@ impl IndexDef {
 pub(crate) enum KeyPart {
     Null,
     Bool(bool),
-    Num(f64),
+    /// Exact: whole numbers as integers (any i64 or u64), others as floats.
+    Num(NumKey),
     Str(String),
+}
+
+/// A number in an index key, exactly (see `crate::filter::Exact`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub(crate) enum NumKey {
+    Int(i128),
+    Float(f64),
+}
+
+impl NumKey {
+    fn exact(self) -> crate::filter::Exact {
+        match self {
+            NumKey::Int(i) => crate::filter::Exact::Int(i),
+            NumKey::Float(f) => crate::filter::Exact::Float(f),
+        }
+    }
 }
 
 impl Eq for KeyPart {}
@@ -188,7 +205,7 @@ impl Ord for KeyPart {
         }
         match (self, other) {
             (KeyPart::Bool(a), KeyPart::Bool(b)) => a.cmp(b),
-            (KeyPart::Num(a), KeyPart::Num(b)) => a.total_cmp(b),
+            (KeyPart::Num(a), KeyPart::Num(b)) => a.exact().cmp(&b.exact()),
             (KeyPart::Str(a), KeyPart::Str(b)) => a.cmp(b),
             _ => rank(self).cmp(&rank(other)),
         }
@@ -201,8 +218,11 @@ impl KeyPart {
         Some(match value {
             Value::Null => KeyPart::Null,
             Value::Bool(b) => KeyPart::Bool(*b),
-            // -0.0 and 0.0 compare equal in filters; normalize for total_cmp.
-            Value::Number(n) => KeyPart::Num(n.as_f64().map(|f| if f == 0.0 { 0.0 } else { f })?),
+            // Exactly, with whole floats as integers (1.0 is 1, -0.0 is 0), as filters compare.
+            Value::Number(n) => KeyPart::Num(match crate::filter::Exact::of(n)? {
+                crate::filter::Exact::Int(i) => NumKey::Int(i),
+                crate::filter::Exact::Float(f) => NumKey::Float(f),
+            }),
             Value::String(s) => KeyPart::Str(s.clone()),
             _ => return None,
         })
@@ -311,7 +331,8 @@ pub(crate) fn source_text(json: &Value, source: &[Vec<String>]) -> String {
 
 /// Bump when what an index stores for a document changes (keys or text
 /// tokens), so snapshots from older builds are rebuilt instead of trusted.
-pub(crate) const SNAPSHOT_VERSION: u32 = 1;
+/// 2: numbers in keys are exact (integers beyond f64's range kept apart).
+pub(crate) const SNAPSHOT_VERSION: u32 = 2;
 
 /// An index's contents at a sequence number, saved so startup doesn't have
 /// to rebuild it from every document (see `engine::indexing`).
