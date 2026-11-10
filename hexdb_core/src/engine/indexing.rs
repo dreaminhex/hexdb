@@ -351,6 +351,15 @@ impl HexDBEngine {
             if index.contains(&doc.id) {
                 continue;
             }
+            if index.def.unique && index.overflows(doc) {
+                return Err(EngineError::Invalid(format!(
+                    "Can't create unique index '{}': document {} has more than {} values for it, too many to check for duplicates.",
+                    index.def.name,
+                    doc.id,
+                    crate::index::MAX_KEYS_PER_DOCUMENT
+                ))
+                .into());
+            }
             if let Some(other) = index.unique_conflict(doc, &HashSet::new()) {
                 return Err(EngineError::Conflict(format!(
                     "Can't create unique index '{}': documents {} and {} share a value.",
