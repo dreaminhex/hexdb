@@ -117,6 +117,7 @@ pub const CONFIG: &[ConfigDef] = &[
     text("ai.model", "Model name, e.g. the provider's model ID (empty: the provider's default)."),
     def("ai.base_url", ConfigKind::Url, "\"\"", "API base URL (empty: the provider's public API). Required for Azure OpenAI and OpenAI-compatible endpoints."),
     secret("ai.api_key", "API key for the AI provider."),
+    def("ai.max_concurrent_calls", ConfigKind::Integer { min: 0, max: 1000 }, "8", "Most calls to the AI providers one hex makes at once (questions, file tagging, embeddings); more wait up to 30 s for a turn, then get 429 with Retry-After (0: no limit)."),
     def("ai.monthly_token_budget", ConfigKind::Integer { min: 0, max: 1_000_000_000_000 }, "1000000", "Most tokens AI features may use per calendar month; they pause when it is reached (0: no limit)."),
     def("ai.max_tokens_per_file", ConfigKind::Integer { min: 100, max: 1_000_000 }, "4000", "Most tokens one file may use (input and output)."),
     def("ai.tagging.enabled", ConfigKind::Boolean, "false", "Let the AI add tags and a description to files as they are uploaded."),

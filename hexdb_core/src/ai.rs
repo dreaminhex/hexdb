@@ -41,6 +41,57 @@ pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 /// Claude models that accept server-side refusal fallbacks (`fallbacks: "default"`).
 const FALLBACK_MODELS: &[&str] = &["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"];
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a call waits for one of the hex's `ai.max_concurrent_calls` slots.
+const SLOT_WAIT: Duration = Duration::from_secs(30);
+
+/// The AI calls running on this hex, held to `ai.max_concurrent_calls`, so a
+/// burst of questions, file tagging and embeddings can't send a provider more
+/// at once than its rate limits (or a local model's machine) allow.
+#[derive(Debug, Default)]
+pub struct AiGate {
+    running: std::sync::Mutex<usize>,
+    freed: tokio::sync::Notify,
+}
+
+/// A running call's slot, given back when it's dropped.
+pub struct AiSlot<'a>(&'a AiGate);
+
+impl Drop for AiSlot<'_> {
+    fn drop(&mut self) {
+        *self.0.running.lock().unwrap() -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
+impl AiGate {
+    /// The calls running now.
+    pub fn running(&self) -> usize {
+        *self.running.lock().unwrap()
+    }
+
+    /// Wait for a slot (at most `limit` calls at once; 0: no limit), up to `wait`.
+    pub async fn slot(&self, limit: usize, wait: Duration) -> Result<AiSlot<'_>> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            // Registered before checking, so a slot freed in between isn't missed.
+            let freed = self.freed.notified();
+            {
+                let mut running = self.running.lock().unwrap();
+                if limit == 0 || *running < limit {
+                    *running += 1;
+                    return Ok(AiSlot(self));
+                }
+            }
+            if tokio::time::timeout_at(deadline, freed).await.is_err() {
+                return Err(EngineError::RateLimited(
+                    format!("The AI provider is busy: {} calls are already running on this hex (ai.max_concurrent_calls). Try again shortly.", limit),
+                    5,
+                )
+                .into());
+            }
+        }
+    }
+}
 
 /// Part of a prompt.
 #[derive(Debug, Clone)]
@@ -279,6 +330,7 @@ impl HexDBEngine {
             return Ok(Embeddings { vectors: Vec::new(), model: provider.model, tokens: 0 });
         }
         self.check_ai_budget().await?;
+        let _slot = self.ai_slot().await?;
         match post_embeddings(&provider, texts, purpose).await {
             Ok((vectors, tokens)) => {
                 self.record_ai_usage(feature, tokens, 0, true).await;
@@ -313,6 +365,7 @@ impl HexDBEngine {
             16_000
         };
         let max_tokens = request.max_tokens.clamp(16, cap);
+        let _slot = self.ai_slot().await?;
         let started = Instant::now();
         let result = match provider.kind.as_str() {
             "anthropic" => call_anthropic(&provider, &request, max_tokens).await,
@@ -340,6 +393,7 @@ impl HexDBEngine {
         }
         self.check_ai_budget().await?;
         let max_tokens = request.max_tokens.clamp(16, 16_000);
+        let _slot = self.ai_slot().await?;
         let started = Instant::now();
         let result = match provider.kind.as_str() {
             "anthropic" => chat_anthropic(&provider, &request, max_tokens).await,
@@ -367,6 +421,12 @@ impl HexDBEngine {
             max_tokens: 2000,
         })
         .await
+    }
+
+    /// A slot for one call to a provider (see [`AiGate`]).
+    async fn ai_slot(&self) -> Result<AiSlot<'_>> {
+        let limit = self.config_value("ai.max_concurrent_calls").as_u64().unwrap_or(8) as usize;
+        self.ai_gate.slot(limit, SLOT_WAIT).await
     }
 
     /// Refuse when this month's usage has reached `ai.monthly_token_budget`.
@@ -1004,6 +1064,30 @@ mod tests {
             pieces.push(piece);
         }
         assert_eq!(pieces, vec![ChatStream::Text("Let me ".into()), ChatStream::Text("count.".into())]);
+    }
+
+    #[tokio::test]
+    async fn ai_calls_wait_for_a_slot_then_give_up() {
+        let gate: &'static AiGate = Box::leak(Box::default());
+        let first = gate.slot(2, Duration::from_millis(50)).await.unwrap();
+        let _second = gate.slot(2, Duration::from_millis(50)).await.unwrap();
+        assert_eq!(gate.running(), 2);
+        // A third waits, and gets the first's slot when it's given back...
+        let waiting = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(first);
+        });
+        let third = gate.slot(2, Duration::from_secs(5)).await.unwrap();
+        waiting.await.unwrap();
+        assert_eq!(gate.running(), 2);
+        // ...and a fourth gives up when none is freed in time.
+        let refused = gate.slot(2, Duration::from_millis(30)).await.err().unwrap();
+        assert!(refused.to_string().contains("ai.max_concurrent_calls"), "{}", refused);
+        drop(third);
+        assert_eq!(gate.running(), 1);
+        // 0: no limit.
+        let many: Vec<_> = futures::future::join_all((0..5).map(|_| gate.slot(0, Duration::ZERO))).await;
+        assert!(many.iter().all(Result::is_ok));
     }
 
     #[test]

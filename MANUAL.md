@@ -2609,6 +2609,7 @@ hexdb config rollback 3 -m "bad key"
 | `ai.provider` | `none` | `none`, `anthropic`, `openai`, `github` (GitHub Models), `azure_openai`, `openai_compatible` |
 | `ai.model`, `ai.base_url`, `ai.api_key` | empty | Model, API base URL (required for Azure OpenAI and OpenAI-compatible endpoints), key |
 | `ai.monthly_token_budget` | 1,000,000 | Tokens AI features may use per calendar month (0: no limit) |
+| `ai.max_concurrent_calls` | 8 | AI provider calls one hex makes at once; more wait up to 30 s for a turn (0: no limit) |
 | `ai.max_tokens_per_file` | 4,000 | Tokens one file may use |
 | `ai.tagging.enabled` | false | AI tags and descriptions for uploaded files |
 | `ai.tagging.tessellations` | empty (all) | Files tessellations whose new files are tagged, comma-separated |
@@ -2641,6 +2642,7 @@ Every AI feature (the query advisor, file tagging, video thumbnails, and plugins
 A ChatGPT subscription can't be used by applications; `openai` needs an OpenAI API key. GitHub Copilot has no API for other applications; GitHub Models is the closest. With Claude models that support it, HexDB asks the API to retry a request the model declines on another model (`fallbacks: "default"`).
 
 - **Budget.** Each call's input and output tokens are added to the month's usage, per feature, in the `_ai_usage` system tessellation (replicas send theirs to the Overseer). Once the month's total reaches `ai.monthly_token_budget`, calls are refused with 429 until the next month or a higher budget (0: no limit). File features also stay within `ai.max_tokens_per_file` per call; other calls within 16,000 tokens.
+- **Calls at once.** Each hex makes at most `ai.max_concurrent_calls` calls to its providers at a time (8 by default; questions, file tagging and embeddings together), so a burst can't exceed a provider's rate limits or swamp a local model's machine. A call beyond that waits for a turn, up to 30 seconds, then gets 429 with `Retry-After: 5`. A streamed answer holds its turn while it streams.
 - **Errors.** A provider's error is returned as 502 `ai_provider_error` with any copy of the key removed; a provider's 429 is returned as 429, and so is a used-up budget. `POST /ai/test` answers 200 with `"ok": false` and the error instead, and 400 when no provider is configured.
 
 ```bash
