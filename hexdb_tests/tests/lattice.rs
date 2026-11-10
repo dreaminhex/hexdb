@@ -551,3 +551,17 @@ fn a_hex_is_ready_only_once_it_has_the_data() -> Result<()> {
     Ok(())
 }
 
+
+/// Hexes started at the same moment don't each start as Overseer: one that has
+/// peers configured and finds none looks again once it answers probes itself. (With
+/// long discovery rounds, two Overseers would stay two until the next round.)
+#[test]
+fn hexes_started_together_start_with_one_overseer() -> Result<()> {
+    let cluster = Cluster::new(2)?;
+    let options: Vec<TestOptions> = (0..2).map(|i| TestOptions { discovery_interval_seconds: Some(30), ..cluster.options(i, 1024, "auto") }).collect();
+    let started: Vec<std::thread::JoinHandle<Result<TestServer>>> = options.into_iter().map(|o| std::thread::spawn(move || TestServer::start_with(o))).collect();
+    let servers: Vec<TestServer> = started.into_iter().map(|h| h.join().unwrap()).collect::<Result<_>>()?;
+    let roles: Vec<String> = servers.iter().map(role).collect::<Result<_>>()?;
+    assert_eq!(roles.iter().filter(|r| r.as_str() == "Overseer").count(), 1, "roles right after a simultaneous start: {:?}", roles);
+    Ok(())
+}

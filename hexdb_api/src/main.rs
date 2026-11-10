@@ -153,7 +153,7 @@ async fn server() -> anyhow::Result<()> {
         info!("🐾 No identity.name configured; this hex is now called '{}'. The name is saved and kept on later starts.", name);
     }
 
-    let peers = discover_peers(&config, &id.to_string(), &name).await;
+    let mut peers = discover_peers(&config, &id.to_string(), &name).await;
 
     let peer_names: HashSet<&str> = peers.iter().map(|p| p.name.as_str()).collect();
     if peer_names.contains(name.as_str()) {
@@ -233,6 +233,21 @@ async fn server() -> anyhow::Result<()> {
         }
     };
     info!("✅ Hex '{}' (id: {}) initializing as {}...", engine.name, engine.id, engine.role());
+    // Answer other hexes' discovery handshakes from here on. Bound here, so a
+    // hex that can't be reached stops instead of running without its lattice.
+    let discovery = bind_discovery(&config.network.discovery_endpoint).await?;
+    hexdb_core::network::discovery::spawn_discovery_lifeline(engine.clone(), discovery)?;
+    // Hexes started at the same moment (a new lattice, or one restarted whole)
+    // each probe before the others listen, and alone each would start as
+    // Overseer. One that has peers configured and found none looks again now
+    // that it answers probes itself: of two such hexes, the one that looks
+    // later finds the other, and two that find each other agree on one.
+    if peers.is_empty() && !config.network.peers.is_empty() {
+        peers = discover_peers(&config, &id.to_string(), &name).await;
+        if !peers.is_empty() {
+            info!("🤝 Found the lattice on a second look.");
+        }
+    }
     // A sliced replica's slices, history and position; one starting as the
     // Overseer with only some slices collects the rest before serving data.
     engine.restore_replication_state().await;
@@ -277,12 +292,6 @@ async fn server() -> anyhow::Result<()> {
     // while an Overseer hands its role over, then `shutdown_tx` stops everything.
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
     let (stop_tx, mut stop_rx) = watch::channel(());
-
-    // Answer other hexes' discovery handshakes.
-    // Bound here, so a hex that can't be reached stops instead of running without its lattice.
-    let discovery = bind_discovery(&config.network.discovery_endpoint).await?;
-    let listening = engine.clone();
-    hexdb_core::network::discovery::spawn_discovery_lifeline(listening, discovery)?;
 
     // Initialize security settings & create defaults if not present.
     info!("🔐 Initializing security settings...");
