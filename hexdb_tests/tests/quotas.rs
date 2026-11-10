@@ -91,3 +91,30 @@ fn uploads_stop_at_the_quota_and_deleting_frees_room() -> Result<()> {
     assert!(indexes["indexes"].as_array().unwrap().iter().any(|i| i == "uploaded_by"), "{}", indexes);
     Ok(())
 }
+
+/// Uploads committing at the same time can't share the room left: each
+/// reserves its size between the quota check and the commit.
+#[test]
+fn concurrent_uploads_never_go_past_the_quota() -> Result<()> {
+    let server = TestServer::start()?;
+    assert!(server.request(Method::POST, "/tessellations", Some(&json!({ "name": "media", "kind": "files" })), &[])?.status.is_success());
+    let key = server.user_with_roles("una", json!([{ "name": "writer", "tessellations": ["media"] }]))?;
+    let res = server.request(Method::PATCH, "/users/una", Some(&json!({ "quota_mb": 1 })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    // Count the (empty) usage first, so every upload checks against the same cached figure.
+    assert_eq!(server.request_as(Some(&key), Method::GET, "/auth/quota", None, &[])?.body["used_bytes"], 0);
+
+    let statuses: Vec<StatusCode> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8u8).map(|i| {
+            let (server, key) = (&server, &key);
+            scope.spawn(move || put(server, key, &format!("f{}.bin", i), bytes(300 * 1024, i)).map(|(status, _)| status))
+        }).collect();
+        handles.into_iter().map(|h| h.join().expect("upload thread")).collect::<Result<Vec<_>>>()
+    })?;
+    let stored = statuses.iter().filter(|s| **s == StatusCode::CREATED).count();
+    assert!(statuses.iter().all(|s| *s == StatusCode::CREATED || *s == StatusCode::INSUFFICIENT_STORAGE), "{:?}", statuses);
+    assert_eq!(stored, 3, "three 300 KB files fit in 1 MB: {:?}", statuses);
+    let quota = server.request_as(Some(&key), Method::GET, "/auth/quota", None, &[])?.body;
+    assert!(quota["used_bytes"].as_u64().unwrap() <= 1024 * 1024, "{}", quota);
+    Ok(())
+}

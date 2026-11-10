@@ -389,7 +389,7 @@ impl HexDBEngine {
         let login = caller_login();
         // Quotas (a new version counts its size; a new file counts one file too).
         let existing = self.find_file(tess, path, name).await?.is_some();
-        self.check_quota(&login, tess, size, !existing).await?;
+        let reservation = self.reserve_quota(&login, tess, size, !existing).await?;
         for _ in 0..MAX_WRITE_RETRIES {
             let now = now_text();
             let modified = options.modified_at.map(time_text).unwrap_or_else(|| now.clone());
@@ -457,6 +457,7 @@ impl HexDBEngine {
                     drop(pins);
                     self.queue_extraction(tess, stored_doc.id, false);
                     self.quota_add(&login, tess, size, created);
+                    drop(reservation);
                 return Ok(UploadResult { document: read.mask(stored_doc), created, unchanged: false });
                 }
                 Ok(false) => continue,
