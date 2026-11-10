@@ -244,6 +244,64 @@ pub fn unsealed(doc: &Document) -> Document {
     Document { id: doc.id, tessellation: doc.tessellation.clone(), data, ttl: doc.ttl }
 }
 
+/// The sealed paths of every engine in this process, for wiping documents as
+/// they're freed (`wipe_dropped`); `ANY_SEALED` is false while there are none.
+static WIPE_POLICY: RwLock<Option<Arc<SealPolicy>>> = RwLock::new(None);
+static ANY_SEALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Add an engine's sealed paths to those wiped from freed documents.
+pub fn register_wipe_paths(policy: &SealPolicy) {
+    if policy.is_empty() {
+        return;
+    }
+    let mut current = WIPE_POLICY.write().unwrap_or_else(|e| e.into_inner());
+    let mut merged = current.as_deref().cloned().unwrap_or_default();
+    for (tess, paths) in &policy.tessellations {
+        merged.tessellations.entry(tess.clone()).or_default().extend(paths.iter().cloned());
+    }
+    merged.everywhere.extend(policy.everywhere.iter().cloned());
+    if current.as_deref() != Some(&merged) {
+        *current = Some(Arc::new(merged));
+    }
+    ANY_SEALED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Overwrite the opened values of sealed fields in a document being freed:
+/// the strings at its tessellation's sealed paths (envelopes are left alone).
+pub fn wipe_dropped(doc: &mut Document) {
+    if !ANY_SEALED.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let Some(policy) = WIPE_POLICY.read().unwrap_or_else(|e| e.into_inner()).clone() else { return };
+    if policy.everywhere.is_empty() && !policy.tessellations.contains_key(&doc.tessellation) {
+        return;
+    }
+    fn wipe_field(value: &mut crate::document::FieldValue) {
+        use crate::document::FieldValue;
+        match value {
+            FieldValue::String(s) | FieldValue::DateTime(s) => zeroize::Zeroize::zeroize(s),
+            FieldValue::Binary(b) => zeroize::Zeroize::zeroize(b),
+            FieldValue::Array(items) => items.iter_mut().for_each(wipe_field),
+            FieldValue::Object(map) if !map.contains_key(MARK) => map.values_mut().for_each(wipe_field),
+            _ => {}
+        }
+    }
+    for path in policy.paths(&doc.tessellation) {
+        let mut parts = path.split('.');
+        let Some(first) = parts.next() else { continue };
+        let mut at = doc.data.get_mut(first);
+        for part in parts {
+            at = match at {
+                Some(crate::document::FieldValue::Object(map)) => map.get_mut(part),
+                _ => None,
+            };
+        }
+        if let Some(value) = at {
+            wipe_field(value);
+        }
+    }
+}
+
 /// Overwrite the strings in a value before it's freed (best effort: copies
 /// made along the way aren't reached).
 pub fn wipe(mut value: Value) {
@@ -361,6 +419,30 @@ mod tests {
         assert_eq!(tokens.token(&json!("a")), tokens.token(&json!("a")));
         assert_ne!(tokens.token(&json!("a")), tokens.token(&json!("b")));
         assert!(covers("bank", "bank.iban") && covers("bank.iban.x", "bank.iban") && !covers("bankrupt", "bank"));
+    }
+
+    #[test]
+    fn freed_documents_lose_their_opened_sealed_values() {
+        let mut policy = SealPolicy::default();
+        policy.tessellations.insert("wipe_cards".into(), ["card.number".to_string(), "pin".to_string()].into());
+        register_wipe_paths(&policy);
+        let envelope = sealer().seal("wipe_cards", "x", "pin", &json!("1234"));
+        let mut doc = Document {
+            id: ulid::Ulid::generate(),
+            tessellation: "wipe_cards".into(),
+            data: crate::document::infer_fields_from_json(&json!({ "card": { "number": "4111111111111111", "brand": "visa" }, "pin": envelope, "name": "Ada" })),
+            ttl: None,
+        };
+        wipe_dropped(&mut doc);
+        let json = doc.data_json();
+        assert_eq!(json["card"]["number"], "", "the opened value is overwritten");
+        assert_eq!((json["card"]["brand"].as_str(), json["name"].as_str()), (Some("visa"), Some("Ada")), "other fields are left alone");
+        assert!(is_envelope(&json["pin"]) && json["pin"][MARK].as_str().is_some_and(|e| !e.is_empty()), "a still-sealed value is left alone");
+        // Other tessellations aren't touched.
+        let data = crate::document::infer_fields_from_json(&json!({ "card": { "number": "5" } }));
+        let mut other = Document { id: doc.id, tessellation: "wipe_other".into(), data, ttl: None };
+        wipe_dropped(&mut other);
+        assert_eq!(other.data_json()["card"]["number"], "5");
     }
 
     #[test]

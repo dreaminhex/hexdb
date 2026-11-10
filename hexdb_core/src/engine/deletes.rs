@@ -988,7 +988,7 @@ impl HexDBEngine {
         let mut files = Vec::new();
         let mut added = Vec::new();
         for key in &deletes {
-            let (Some(previous), _) = self.read_latest(key).await? else { continue };
+            let (Some(mut previous), _) = self.read_latest(key).await? else { continue };
             *counts.entry(key.tessellation.clone()).or_default() += 1;
             if self.tessellation_info(&key.tessellation).is_some_and(|t| t.is_files()) {
                 // The files trash keeps it (engine::files); the batch remembers where.
@@ -1007,7 +1007,7 @@ impl HexDBEngine {
             if let Some(expires) = previous.ttl {
                 data.insert("expires_at".into(), FieldValue::Integer(expires));
             }
-            data.insert(TRASHED_DOCUMENT.into(), FieldValue::Object(previous.data));
+            data.insert(TRASHED_DOCUMENT.into(), FieldValue::Object(std::mem::take(&mut previous.data)));
             let entry = Document { id: Ulid::generate(), tessellation: TRASH_TESSELLATION.into(), data, ttl: Some(now + trash_days * DAY_MILLIS) };
             added.push(BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op: WalOp::Put(entry), expected_seq: None });
         }
@@ -1178,13 +1178,13 @@ impl HexDBEngine {
                 if items.iter().any(|i| i.key == key) {
                     continue;
                 }
-                let (Some(doc), seq) = self.read_latest(&key).await? else { continue };
+                let (Some(mut doc), seq) = self.read_latest(&key).await? else { continue };
                 let mut json = doc.data_json();
                 if !get_path(&json, field).is_none_or(Value::is_null) {
                     continue;
                 }
                 set_path(&mut json, field, link["value"].clone());
-                let doc = Document { data: infer_fields_from_json(&json), ..doc };
+                doc.data = infer_fields_from_json(&json);
                 items.push(BatchItem { key, op: WalOp::Put(doc), expected_seq: Some(seq) });
                 summary.relinked += 1;
             }

@@ -54,6 +54,15 @@ pub struct Document {
     pub ttl: Option<i64>, // epoch millis when the document expires
 }
 
+/// A document whose tessellation has sealed fields may hold their opened
+/// values (a request read it): those strings are overwritten as it's freed.
+/// Costs nothing while no role masks any field.
+impl Drop for Document {
+    fn drop(&mut self) {
+        crate::sealed::wipe_dropped(self);
+    }
+}
+
 /// True if stored document bytes use the earlier type-tagged form (no
 /// `"json":` field near the start, where the current form puts it).
 pub fn is_legacy_stored(bytes: &[u8]) -> bool {

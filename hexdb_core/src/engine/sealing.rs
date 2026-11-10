@@ -106,6 +106,7 @@ impl HexDBEngine {
         if *old == policy && !first {
             return;
         }
+        crate::sealed::register_wipe_paths(&policy);
         *self.seal_policy.write().unwrap() = Arc::new(policy.clone());
 
         // Every tessellation the hex, the indexes or the change feed has whose sealed fields changed.

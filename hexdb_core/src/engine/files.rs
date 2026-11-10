@@ -1103,7 +1103,11 @@ impl HexDBEngine {
             .matching_documents(TRASH_TESSELLATION, &filter)
             .await?
             .into_iter()
-            .filter(|d| read.allows(&Document { tessellation: tess.to_string(), ..d.clone() }))
+            .filter(|d| {
+                let mut as_file = d.clone();
+                as_file.tessellation = tess.to_string();
+                read.allows(&as_file)
+            })
             .map(|d| read.mask(d))
             .collect())
     }
@@ -1121,7 +1125,8 @@ impl HexDBEngine {
         if as_map(&doc).get("from").and_then(Value::as_str) != Some(tess) {
             return Err(missing());
         }
-        let as_file = Document { tessellation: tess.to_string(), ..doc.clone() };
+        let mut as_file = doc.clone();
+        as_file.tessellation = tess.to_string();
         if !self.caller_scope(tess, Action::Read).allows(&as_file) {
             return Err(missing());
         }
