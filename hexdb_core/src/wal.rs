@@ -94,6 +94,11 @@ impl WalRecord {
 }
 
 enum WalCommand {
+    #[cfg(test)]
+    ReviewPause {
+        entered: oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
     Append {
         record: WalRecord,
         ack: oneshot::Sender<std::result::Result<(), String>>,
@@ -129,6 +134,15 @@ pub struct WalWriter {
 }
 
 impl WalWriter {
+    /// Review-only fault injection: suspend the writer to model slow storage.
+    #[cfg(test)]
+    pub(crate) async fn pause_for_review(&self) -> std::sync::mpsc::Sender<()> {
+        let (entered, ready) = oneshot::channel();
+        let (release, receiver) = std::sync::mpsc::channel();
+        self.tx.send(WalCommand::ReviewPause { entered, release: receiver }).await.unwrap();
+        ready.await.unwrap();
+        release
+    }
     /// Start the writer thread with a new segment for records from `next_seq` on.
     pub fn start(dir: &Path, keys: &crate::crypt::KeyRing, compression_level: i32, sync: bool, next_seq: u64) -> Result<Self> {
         fs::create_dir_all(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
@@ -228,6 +242,11 @@ impl WriterState {
 
             for cmd in batch {
                 match cmd {
+                    #[cfg(test)]
+                    WalCommand::ReviewPause { entered, release } => {
+                        let _ = entered.send(());
+                        let _ = release.recv();
+                    }
                     WalCommand::Append { record, ack } => {
                         if self.failed.load(Ordering::SeqCst) {
                             let _ = ack.send(Err("WAL unavailable after an earlier failure".into()));

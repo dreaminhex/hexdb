@@ -363,6 +363,10 @@ pub struct HexDBEngine {
 
 const MAX_WRITE_RETRIES: usize = 16;
 
+#[cfg(test)]
+#[path = "review_regressions.rs"]
+mod review_regressions;
+
 /// An Overseer in a fresh temporary directory, for in-crate tests. Returns the
 /// engine and the directory (delete it when done).
 #[cfg(test)]

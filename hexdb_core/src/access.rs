@@ -291,15 +291,18 @@ impl Scope {
             remove_path(json, path);
         }
         for (path, mask) in &self.masked {
-            if let Some(value) = get_path_mut(json, path) {
-                *value = mask.apply(value);
-            }
+            for_each_at(json, path, &mut |value| *value = mask.apply(value));
         }
     }
 
-    /// The mask on a SQL column or top-level field, if it's masked.
+    /// The mask on a SQL column or field: its own, or one on a field around it.
     pub fn mask_of(&self, path: &str) -> Option<FieldMask> {
-        self.masked.iter().find(|(m, _)| m == path).map(|(_, mask)| *mask)
+        self.masked.iter().filter(|(m, _)| is_within(path, m)).map(|(_, mask)| *mask).reduce(FieldMask::wider)
+    }
+
+    /// True if `path` is hidden or masked for the caller, itself or through a field around it.
+    pub fn protects(&self, path: &str) -> bool {
+        self.hidden.iter().chain(self.masked.iter().map(|(m, _)| m)).any(|p| is_within(path, p))
     }
 
     /// Hidden and masked fields together: what the caller can't query on or write.
@@ -316,6 +319,16 @@ impl Scope {
         let old_json = old.data_json();
         let mut json = doc.data_json();
         for (path, _) in self.protected() {
+            // A path through an array can't be put back element by element: the
+            // whole top-level field is kept as stored (the caller can't change it).
+            if crosses_array(&old_json, path) || crosses_array(&json, path) {
+                let top = path.split('.').next().unwrap_or(path);
+                remove_path(&mut json, top);
+                if let Some(value) = old_json.get(top) {
+                    set_path(&mut json, top, value.clone());
+                }
+                continue;
+            }
             remove_path(&mut json, path);
             if let Some(value) = get_path(&old_json, path) {
                 set_path(&mut json, path, value.clone());
@@ -393,32 +406,72 @@ fn overlaps(a: &str, b: &str) -> bool {
     a == b || a.strip_prefix(b).is_some_and(|rest| rest.starts_with('.')) || b.strip_prefix(a).is_some_and(|rest| rest.starts_with('.'))
 }
 
+/// True if `path` is `outer` or inside it.
+pub(crate) fn is_within(path: &str, outer: &str) -> bool {
+    path == outer || path.strip_prefix(outer).is_some_and(|rest| rest.starts_with('.'))
+}
+
+// Field paths in restrictions are dotted object keys; an array on the way
+// applies the rest of the path to each of its elements (as queries do), so
+// `contacts.ssn` covers `{"contacts": [{"ssn": ...}, ...]}`, nested arrays too.
+
+/// Remove the field at `path` wherever it is, through arrays.
 fn remove_path(json: &mut Value, path: &str) {
-    let mut parts = path.split('.').peekable();
-    let mut current = json;
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            if let Value::Object(map) = current {
-                map.remove(part);
-            }
-            return;
-        }
-        match current {
-            Value::Object(map) => match map.get_mut(part) {
-                Some(next) => current = next,
-                None => return,
+    fn walk(value: &mut Value, parts: &[&str]) {
+        match value {
+            Value::Array(items) => items.iter_mut().for_each(|item| walk(item, parts)),
+            Value::Object(map) => match parts {
+                [] => {}
+                [last] => {
+                    map.remove(*last);
+                }
+                [first, rest @ ..] => {
+                    if let Some(next) = map.get_mut(*first) {
+                        walk(next, rest);
+                    }
+                }
             },
-            _ => return,
+            _ => {}
         }
     }
+    let parts: Vec<&str> = path.split('.').collect();
+    walk(json, &parts);
+}
+
+/// Call `f` on every value at `path`, through arrays.
+pub(crate) fn for_each_at(json: &mut Value, path: &str, f: &mut dyn FnMut(&mut Value)) {
+    fn walk(value: &mut Value, parts: &[&str], f: &mut dyn FnMut(&mut Value)) {
+        match (value, parts) {
+            (value, []) => f(value),
+            (Value::Array(items), parts) => items.iter_mut().for_each(|item| walk(item, parts, f)),
+            (Value::Object(map), [first, rest @ ..]) => {
+                if let Some(next) = map.get_mut(*first) {
+                    walk(next, rest, f);
+                }
+            }
+            _ => {}
+        }
+    }
+    let parts: Vec<&str> = path.split('.').collect();
+    walk(json, &parts, f);
+}
+
+/// True if an array lies on the way to `path` (not counting the value at the end).
+fn crosses_array(json: &Value, path: &str) -> bool {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = json;
+    for part in &parts[..parts.len().saturating_sub(1)] {
+        match current.get(part) {
+            Some(Value::Array(_)) => return true,
+            Some(next) => current = next,
+            None => return false,
+        }
+    }
+    false
 }
 
 fn get_path<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
     path.split('.').try_fold(json, |current, part| current.get(part))
-}
-
-fn get_path_mut<'a>(json: &'a mut Value, path: &str) -> Option<&'a mut Value> {
-    path.split('.').try_fold(json, |current, part| current.get_mut(part))
 }
 
 fn set_path(json: &mut Value, path: &str, value: Value) {
@@ -432,6 +485,57 @@ fn set_path(json: &mut Value, path: &str, value: Value) {
         }
         current = map.entry(part.to_string()).or_insert_with(|| Value::Object(Map::new()));
     }
+}
+
+/// The fields still protected when grants combine. The caller sees the union
+/// of what each grant shows, so a field stays protected only if every grant
+/// protects it, by its own entry or one for a field around it (a grant hiding
+/// `profile` protects `profile.ssn`), and is masked if any of those grants
+/// masks it (the more revealing mask wins). Every path some grant names is a
+/// candidate; a grant hiding only `profile.ssn` doesn't protect `profile`.
+fn combine_protections(per_grant: &[BTreeMap<String, Option<FieldMask>>]) -> BTreeMap<String, Option<FieldMask>> {
+    // How one grant treats `path`: None if it shows it, Some(None) hidden, Some(Some(mask)) masked.
+    fn treatment(grant: &BTreeMap<String, Option<FieldMask>>, path: &str) -> Option<Option<FieldMask>> {
+        let mut found: Option<Option<FieldMask>> = None;
+        for (protected, mask) in grant.iter().filter(|(p, _)| is_within(path, p)) {
+            let _ = protected;
+            found = Some(match (found, mask) {
+                // Hidden anywhere around it: hidden.
+                (Some(None), _) | (_, None) => None,
+                (Some(Some(a)), Some(b)) => Some(a.wider(*b)),
+                (None, Some(b)) => Some(*b),
+            });
+        }
+        found
+    }
+    let candidates: std::collections::BTreeSet<&String> = per_grant.iter().flat_map(|g| g.keys()).collect();
+    let mut out = BTreeMap::new();
+    for path in candidates {
+        let mut combined: Option<Option<FieldMask>> = None;
+        let mut every = true;
+        for grant in per_grant {
+            match treatment(grant, path) {
+                None => {
+                    every = false;
+                    break;
+                }
+                Some(t) => {
+                    combined = Some(match (combined, t) {
+                        (None, t) => t,
+                        // Masked by one grant, hidden by another: the caller sees it masked.
+                        (Some(None), t) | (Some(t), None) => t,
+                        (Some(Some(a)), Some(b)) => Some(a.wider(b)),
+                    });
+                }
+            }
+        }
+        if every {
+            if let Some(t) = combined {
+                out.insert(path.clone(), t);
+            }
+        }
+    }
+    out
 }
 
 fn invalid(message: String) -> anyhow::Error {
@@ -487,8 +591,8 @@ impl Principal {
         }
         let mut filters = Vec::new();
         let mut all_rows = false;
-        // Each field some grant hides or masks: None while hidden by all so far, Some(mask) once one masks it.
-        let mut protected: Option<BTreeMap<String, Option<FieldMask>>> = None;
+        // Each grant's hidden and masked fields; combined below by what each grant actually shows.
+        let mut per_grant: Vec<BTreeMap<String, Option<FieldMask>>> = Vec::new();
         let mut any = false;
         for grant in &self.grants {
             if !grant.permissions.contains(&action) || !grant.tessellations.iter().any(|t| t == "*" || t == tessellation) {
@@ -512,26 +616,13 @@ impl Principal {
                 .map(|h| (h.trim().to_string(), None))
                 .chain(restriction.mask.iter().map(|(m, mask)| (m.trim().to_string(), Some(*mask))))
                 .collect();
-            // A field stays protected only if every grant protects it, and is masked if any grant masks it.
-            protected = Some(match protected {
-                None => fields,
-                Some(so_far) => so_far
-                    .into_iter()
-                    .filter_map(|(path, a)| {
-                        let b = *fields.get(&path)?;
-                        Some((path, match (a, b) {
-                            (Some(a), Some(b)) => Some(a.wider(b)),
-                            (a, b) => a.or(b),
-                        }))
-                    })
-                    .collect(),
-            });
+            per_grant.push(fields);
         }
         if !any {
             return Scope::full();
         }
         let (mut hidden, mut masked) = (Vec::new(), Vec::new());
-        for (path, mask) in protected.unwrap_or_default() {
+        for (path, mask) in combine_protections(&per_grant) {
             match mask {
                 None => hidden.push(path),
                 Some(mask) => masked.push((path, mask)),
@@ -657,6 +748,49 @@ mod tests {
             scope.masked,
             vec![("card".to_string(), FieldMask { show_first: 0, show_last: 4 }), ("phone".to_string(), FieldMask { show_first: 3, show_last: 2 })]
         );
+    }
+
+    /// HDB-02: a hidden or masked path reaches into arrays (nested ones too).
+    #[test]
+    fn hidden_and_masked_fields_inside_arrays_are_protected() {
+        let p = principal(vec![("r", vec![Action::Read], json!({ "*": { "hide": ["contacts.ssn"], "mask": { "contacts.phone": { "show_last": 2 }, "groups.members.card": { "show_last": 4 } } } }))], json!({}));
+        let scope = p.scope("orders", Action::Read);
+        let seen = scope
+            .mask(doc(json!({
+                "contacts": [{ "ssn": "synthetic-secret", "name": "Ada", "phone": "5551234" }, { "ssn": "another", "name": "Bo" }],
+                "groups": [{ "members": [{ "card": "4111111111111111" }] }]
+            })))
+            .data_json();
+        assert_eq!(seen["contacts"], json!([{ "name": "Ada", "phone": "*****34" }, { "name": "Bo" }]), "{}", seen);
+        assert_eq!(seen["groups"][0]["members"][0]["card"], "************1111");
+        assert!(scope.protects("contacts.ssn") && scope.protects("contacts.phone") && !scope.protects("contacts.name"));
+    }
+
+    /// HDB-03: grants combine by what each shows, so a field hidden by every
+    /// grant (one through its parent) stays hidden.
+    #[test]
+    fn overlapping_parent_and_child_protections_stay_protected() {
+        let p = principal(
+            vec![("a", vec![Action::Read], json!({ "*": { "hide": ["profile"] } })), ("b", vec![Action::Read], json!({ "*": { "hide": ["profile.ssn"] } }))],
+            json!({}),
+        );
+        let scope = p.scope("orders", Action::Read);
+        let seen = scope.mask(doc(json!({ "profile": { "ssn": "synthetic-secret", "name": "Ada" }, "n": 1 }))).data_json();
+        assert_eq!(seen, json!({ "profile": { "name": "Ada" }, "n": 1 }), "the union of the two views");
+        // A parent masked by one grant and a child hidden by the other: the child is masked, not shown.
+        let p = principal(
+            vec![("a", vec![Action::Read], json!({ "*": { "mask": { "profile": { "show_last": 0 } } } })), ("b", vec![Action::Read], json!({ "*": { "hide": ["profile.ssn"] } }))],
+            json!({}),
+        );
+        let scope = p.scope("orders", Action::Read);
+        assert!(scope.protects("profile.ssn"));
+        assert_ne!(scope.mask(doc(json!({ "profile": { "ssn": "synthetic-secret" } }))).data_json()["profile"]["ssn"], "synthetic-secret");
+        // A grant that shows the field still wins.
+        let p = principal(
+            vec![("a", vec![Action::Read], json!({ "*": { "hide": ["profile"] } })), ("b", vec![Action::Read], json!({ "*": { "hide": ["n"] } }))],
+            json!({}),
+        );
+        assert!(p.scope("orders", Action::Read).is_full() || !p.scope("orders", Action::Read).protects("profile.ssn"));
     }
 
     #[test]
