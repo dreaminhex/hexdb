@@ -255,12 +255,25 @@ pub(crate) struct TextIndex {
     by_doc: HashMap<Ulid, Vec<String>>,
 }
 
+/// The source that embeds a file's picture (its thumbnail), in a files tessellation.
+pub const IMAGE_SOURCE: &str = "$image";
+
+/// What one document's embedding is made of (see `Index::needs_embedding`).
+pub(crate) struct EmbedJob {
+    pub text: String,
+    pub hash: String,
+    /// The file's thumbnail chunk, for an index with the `$image` source.
+    pub image: Option<(String, String)>,
+}
+
 /// A vector index: one vector per document (see `crate::vector`).
 pub(crate) struct VectorIndex {
     path: Vec<String>,
     pub(crate) store: crate::vector::VectorStore,
     /// Fields embedded into `path` (auto-embedding), and the model in use.
     source: Vec<Vec<String>>,
+    /// Whether the file's thumbnail is embedded too (`$image`).
+    image: bool,
     model: Option<String>,
 }
 
@@ -365,7 +378,8 @@ impl Index {
             IndexKind::Vector => IndexData::Vector(VectorIndex {
                 path: paths.into_iter().next().unwrap_or_default(),
                 store: crate::vector::VectorStore::with_quantization(def.metric.unwrap_or_default(), def.dimensions, def.quantization.unwrap_or_default()),
-                source: def.source.iter().map(|f| split(f)).collect(),
+                source: def.source.iter().filter(|f| *f != IMAGE_SOURCE).map(|f| split(f)).collect(),
+                image: def.source.iter().any(|f| f == IMAGE_SOURCE),
                 model: None,
             }),
         };
@@ -601,30 +615,41 @@ impl Index {
 
     /// True for a vector index that embeds source fields itself.
     pub(crate) fn embeds(&self) -> bool {
-        matches!(&self.data, IndexData::Vector(v) if !v.source.is_empty())
+        matches!(&self.data, IndexData::Vector(v) if !v.source.is_empty() || v.image)
     }
 
     /// For a vector index with source fields: the text to embed for this
     /// document and its fingerprint, if its stored embedding isn't of that
     /// text with the model in use. Vectors a client wrote are left alone.
-    pub(crate) fn needs_embedding(&self, doc: &Document) -> Option<(String, String)> {
+    pub(crate) fn needs_embedding(&self, doc: &Document) -> Option<EmbedJob> {
         let IndexData::Vector(v) = &self.data else { return None };
-        if v.source.is_empty() {
+        if v.source.is_empty() && !v.image {
             return None;
         }
         let json = doc.to_api_json();
         let text = source_text(&json, &v.source);
-        if text.trim().is_empty() {
+        // `$image`: the file's thumbnail (chunk and type), which every picture and video gets.
+        let image = if v.image {
+            json.get("thumbnail").and_then(|t| Some((t.get("chunk")?.as_str()?.to_string(), t.get("content_type").and_then(Value::as_str).unwrap_or("image/jpeg").to_string())))
+        } else {
+            None
+        };
+        if text.trim().is_empty() && image.is_none() {
             return None;
         }
-        let hash = blake3::hash(text.as_bytes()).to_hex()[..32].to_string();
+        let mut fingerprint = text.clone();
+        if let Some((chunk, _)) = &image {
+            fingerprint.push('\0');
+            fingerprint.push_str(chunk);
+        }
+        let hash = blake3::hash(fingerprint.as_bytes()).to_hex()[..32].to_string();
         let current = resolve(&json, &v.path).first().map(|v| (*v).clone()).unwrap_or(Value::Null);
         let done = match &current {
             Value::Array(_) => true,
             Value::Object(map) => map.get("source_hash").and_then(Value::as_str) == Some(hash.as_str()) && map.get("model").and_then(Value::as_str) == v.model.as_deref(),
             _ => false,
         };
-        (!done).then_some((text, hash))
+        (!done).then_some(EmbedJob { text, hash, image })
     }
 
     /// The nearest documents to a query vector, best first, with scores.
@@ -633,6 +658,20 @@ impl Index {
         let IndexData::Vector(v) = &self.data else { return None };
         let query = v.store.prepare(query)?;
         Some(v.store.search(&query, limit, ef))
+    }
+
+    /// The nearest documents among `allowed` (see `VectorStore::search_allowed`).
+    pub(crate) fn nearest_allowed(&self, query: Vec<f32>, limit: usize, ef: usize, allowed: &std::collections::HashSet<Ulid>) -> Option<Vec<(Ulid, f32)>> {
+        let IndexData::Vector(v) = &self.data else { return None };
+        let query = v.store.prepare(query)?;
+        Some(v.store.search_allowed(&query, limit, ef, allowed))
+    }
+
+    /// These documents ranked by their vectors, best first (see `VectorStore::rank`).
+    pub(crate) fn rank_ids(&self, query: Vec<f32>, ids: &[Ulid]) -> Option<Vec<(Ulid, f32)>> {
+        let IndexData::Vector(v) = &self.data else { return None };
+        let query = v.store.prepare(query)?;
+        Some(v.store.rank(&query, ids))
     }
 
     /// For a quantized vector index: the exact score of a prepared query

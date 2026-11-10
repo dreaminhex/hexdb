@@ -57,6 +57,9 @@ impl HexDBEngine {
         if !self.tessellation_exists(tess) {
             return Err(EngineError::NotFound(format!("Tessellation '{}' not found.", tess)).into());
         }
+        if def.source.iter().any(|f| f == crate::index::IMAGE_SOURCE) && !self.tessellation_info(tess).is_some_and(|i| i.is_files()) {
+            return Err(invalid("The $image source embeds a file's picture: it's for files tessellations."));
+        }
         {
             let mut indexes = self.indexes.write().unwrap();
             let list = indexes.by_tessellation.entry(tess.to_string()).or_default();

@@ -14,6 +14,12 @@
 // Removed vectors stay in the graph as waypoints but are never returned; the
 // graph is rebuilt once they outnumber the live ones.
 //
+// A search restricted to some documents (a filter an index answers) either
+// scores just those (`rank`, exact; for a few thousand), or walks the graph
+// as usual while only the allowed documents count toward the results
+// (`search_allowed`): the others are still followed as waypoints, so the
+// walk reaches the allowed ones near the query instead of stopping early.
+//
 // With int8 quantization a vector is kept as one signed byte per dimension
 // and a scale (its largest magnitude / 127), a quarter of the memory; scores
 // are computed against the dequantized values, so rankings are approximate
@@ -382,6 +388,65 @@ impl VectorStore {
     }
 }
 
+impl VectorStore {
+    /// Exact scores of these documents' vectors (those the store holds), best first.
+    pub fn rank(&self, query: &[f32], ids: &[Ulid]) -> Vec<(Ulid, f32)> {
+        let mut scored: Vec<Scored> = ids.iter().filter_map(|id| self.slot.get(id)).map(|&s| Scored(self.score(query, s), s)).collect();
+        scored.sort_by(|a, b| b.cmp(a));
+        scored.into_iter().map(|s| (self.ids[s.1 as usize], s.0)).collect()
+    }
+
+    /// [`search`](Self::search) among the documents in `allowed` only.
+    pub fn search_allowed(&self, query: &[f32], limit: usize, ef: usize, allowed: &HashSet<Ulid>) -> Vec<(Ulid, f32)> {
+        let Some(mut entry) = self.entry else { return Vec::new() };
+        if self.slot.len() <= EXACT_LIMIT || allowed.len() <= limit.max(ef) {
+            let ids: Vec<Ulid> = allowed.iter().copied().collect();
+            return self.rank(query, &ids).into_iter().take(limit).collect();
+        }
+        for layer in (1..=self.top).rev() {
+            entry = self.greedy(query, entry, layer);
+        }
+        let ef = ef.max(limit);
+        let ok = |slot: u32| !self.deleted[slot as usize] && allowed.contains(&self.ids[slot as usize]);
+        let mut visited: HashSet<u32> = HashSet::from([entry]);
+        let mut candidates: BinaryHeap<Scored> = BinaryHeap::from([Scored(self.score(query, entry), entry)]);
+        // The best `ef` allowed documents found so far, worst on top.
+        let mut found: BinaryHeap<std::cmp::Reverse<Scored>> = BinaryHeap::new();
+        if ok(entry) {
+            found.push(std::cmp::Reverse(candidates.peek().copied().expect("the entry")));
+        }
+        // A bound on the walk, for filters that allow few documents far apart.
+        let budget = (ef * 64).max(4096);
+        while let Some(current) = candidates.pop() {
+            if found.len() >= ef && found.peek().is_some_and(|w| current.0 < w.0 .0) {
+                break;
+            }
+            if visited.len() > budget {
+                break;
+            }
+            for &n in self.links[current.1 as usize].first().into_iter().flatten() {
+                if !visited.insert(n) {
+                    continue;
+                }
+                let s = Scored(self.score(query, n), n);
+                // Everything near enough is followed; only allowed documents are kept.
+                if found.len() < ef || found.peek().is_some_and(|w| s.0 > w.0 .0) {
+                    candidates.push(s);
+                    if ok(n) {
+                        found.push(std::cmp::Reverse(s));
+                        if found.len() > ef {
+                            found.pop();
+                        }
+                    }
+                }
+            }
+        }
+        let mut out: Vec<Scored> = found.into_iter().map(|r| r.0).collect();
+        out.sort_by(|a, b| b.cmp(a));
+        out.into_iter().take(limit).map(|s| (self.ids[s.1 as usize], s.0)).collect()
+    }
+}
+
 fn random_level() -> usize {
     let r: f64 = rand::rng().random_range(f64::MIN_POSITIVE..1.0);
     ((-r.ln() / (M as f64).ln()) as usize).min(MAX_LEVEL)
@@ -395,6 +460,38 @@ mod tests {
     fn random_vector(dims: usize) -> Vec<f32> {
         let mut rng = rand::rng();
         (0..dims).map(|_| rng.random_range(-1.0..1.0)).collect()
+    }
+
+    #[test]
+    fn restricted_searches_find_the_nearest_allowed_documents() {
+        let mut store = VectorStore::new(Metric::Cosine, Some(16));
+        let ids: Vec<Ulid> = (0..6000).map(|_| Ulid::generate()).collect();
+        let mut vectors = Vec::new();
+        for id in &ids {
+            let v = random_vector(16);
+            store.insert(*id, v.clone());
+            vectors.push(store.prepare(v).unwrap());
+        }
+        // Every third document is allowed (a wide filter), then a few dozen (a narrow one).
+        for allowed in [ids.iter().step_by(3).copied().collect::<HashSet<Ulid>>(), ids.iter().step_by(150).copied().collect()] {
+            let mut recall = 0;
+            for _ in 0..20 {
+                let query = store.prepare(random_vector(16)).unwrap();
+                let mut exact: Vec<(Ulid, f32)> = ids.iter().zip(&vectors).filter(|(id, _)| allowed.contains(id)).map(|(id, v)| (*id, dot(&query, v))).collect();
+                exact.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let truth: HashSet<Ulid> = exact.iter().take(10).map(|(id, _)| *id).collect();
+                let found = store.search_allowed(&query, 10, 100, &allowed);
+                assert!(found.iter().all(|(id, _)| allowed.contains(id)), "only allowed documents come back");
+                assert!(found.windows(2).all(|w| w[0].1 >= w[1].1), "best first");
+                recall += found.iter().filter(|(id, _)| truth.contains(id)).count();
+            }
+            assert!(recall >= 180, "recall {}/200 with {} allowed", recall, allowed.len());
+        }
+        // Ranking a few documents is exact.
+        let some: Vec<Ulid> = ids[..5].to_vec();
+        let ranked = store.rank(&vectors[0], &some);
+        assert_eq!(ranked[0].0, ids[0]);
+        assert_eq!(ranked.len(), 5);
     }
 
     #[test]

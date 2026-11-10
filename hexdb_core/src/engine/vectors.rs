@@ -3,7 +3,11 @@
 // Similarity queries (`similar_documents`) walk a vector index's nearest
 // neighbors best first and keep those that pass the query's filter, narrowed
 // to what the caller may read, until enough are found; they're returned with
-// their `_score`. A query by text is embedded first, within the asking user's
+// their `_score`. When other indexes answer the filter, only their candidates
+// are searched: up to `PREFILTER_EXACT` are ranked exactly by their vectors,
+// and more are searched in the graph with only them counting as results, so
+// a narrow filter doesn't read its way through everything nearer that it
+// excludes. A query by text is embedded first, within the asking user's
 // daily allowance (`ai.embeddings.user_daily_tokens`) and the monthly budget.
 //
 // Vector indexes with source fields fill their field themselves: writes whose
@@ -14,6 +18,11 @@
 // Changing `ai.embeddings.model` rebuilds those indexes and re-embeds.
 
 use super::{writes::BatchItem, HexDBEngine};
+use ulid::Ulid;
+
+/// Up to this many candidates from a filter's indexes are ranked exactly by
+/// their vectors; more are searched in the graph, restricted to them.
+const PREFILTER_EXACT: usize = 20_000;
 use crate::{
     ai::EmbedPurpose,
     auth::Action,
@@ -173,16 +182,27 @@ impl HexDBEngine {
             let (Some(doc), seq) = self.read_latest(key).await? else { continue };
             let indexes = self.indexes.read().unwrap();
             for index in indexes.by_tessellation.get(&key.tessellation).into_iter().flatten() {
-                if let Some((text, hash)) = index.needs_embedding(&doc) {
-                    work.push((key.clone(), seq, doc.clone(), index.def.fields[0].clone(), text, hash));
+                if let Some(job) = index.needs_embedding(&doc) {
+                    work.push((key.clone(), seq, doc.clone(), index.def.fields[0].clone(), job));
                 }
             }
         }
         if work.is_empty() {
             return Ok(true);
         }
-        let texts: Vec<String> = work.iter().map(|w| w.4.clone()).collect();
-        let embedded = match self.ai_embed(&texts, EmbedPurpose::Document, "embeddings").await {
+        let mut inputs = Vec::with_capacity(work.len());
+        for w in &work {
+            // A thumbnail that can't be read now is left out: the hash still names it, so it's tried again.
+            let image = match &w.4.image {
+                Some((chunk, content_type)) => match crate::blobs::parse_chunk_id(chunk) {
+                    Some(id) => self.read_file_chunk(id).await.ok().map(|bytes| (content_type.clone(), bytes.to_vec())),
+                    None => None,
+                },
+                None => None,
+            };
+            inputs.push(crate::ai::EmbedInput { text: w.4.text.clone(), image });
+        }
+        let embedded = match self.ai_embed_inputs(&inputs, EmbedPurpose::Document, "embeddings").await {
             Ok(embedded) => embedded,
             Err(e) => {
                 // Try again later.
@@ -195,7 +215,8 @@ impl HexDBEngine {
         };
         // One write per document, with every embedding it got.
         let mut by_doc: HashMap<DocKey, (u64, Document)> = HashMap::new();
-        for ((key, seq, doc, field, _, hash), vector) in work.into_iter().zip(embedded.vectors) {
+        for ((key, seq, doc, field, job), vector) in work.into_iter().zip(embedded.vectors) {
+            let hash = job.hash;
             let entry = by_doc.entry(key).or_insert((seq, doc));
             let mut json = entry.1.data_json();
             set_path(&mut json, &field, json!({ "vector": vector, "model": embedded.model, "source_hash": hash }));
@@ -235,7 +256,9 @@ impl HexDBEngine {
         let scope = self.caller_scope(tess, Action::Read);
         let filter = query.filter.clone().unwrap_or_else(Filter::all);
         self.check_scope_fields(tess, &scope, &filter, &[query.field.as_str()])?;
-        let filter = self.prepare_filter(tess, &scope.narrow(&filter)).0;
+        let (filter, plan) = self.prepare_filter(tess, &scope.narrow(&filter));
+        // The filter's candidates, when indexes answer it (a superset of the matches).
+        let allowed: Option<std::collections::HashSet<Ulid>> = plan.map(|p| p.candidates.into_iter().collect());
         let index_name = {
             let indexes = self.indexes.read().unwrap();
             let found = indexes
@@ -267,7 +290,16 @@ impl HexDBEngine {
                 let indexes = self.indexes.read().unwrap();
                 let index = indexes.by_tessellation.get(tess).and_then(|l| l.iter().find(|i| i.def.name == index_name));
                 let Some(index) = index else { break };
-                let ranked = index.nearest(vector.clone(), want, want).ok_or_else(|| invalid("The vector doesn't fit the index (wrong number of dimensions, or all zeros)."))?;
+                let ranked = match &allowed {
+                    // Few candidates: every one ranked exactly, once.
+                    Some(allowed) if allowed.len() <= PREFILTER_EXACT => {
+                        let ids: Vec<Ulid> = allowed.iter().copied().collect();
+                        index.rank_ids(vector.clone(), &ids)
+                    }
+                    Some(allowed) => index.nearest_allowed(vector.clone(), want, want, allowed),
+                    None => index.nearest(vector.clone(), want, want),
+                }
+                .ok_or_else(|| invalid("The vector doesn't fit the index (wrong number of dimensions, or all zeros)."))?;
                 (ranked, index.vector_count())
             };
             let mut below = false;
@@ -297,7 +329,8 @@ impl HexDBEngine {
                     break;
                 }
             }
-            if documents.len() == query.k || below || ranked.len() < want || want >= held {
+            let exact_all = allowed.as_ref().is_some_and(|a| a.len() <= PREFILTER_EXACT);
+            if documents.len() == query.k || below || exact_all || ranked.len() < want || want >= held {
                 break;
             }
             want = (want * 4).min(held);

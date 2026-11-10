@@ -209,6 +209,19 @@ pub enum EmbedPurpose {
     Query,
 }
 
+/// What one embedding is made of: text, and a picture for multimodal models.
+#[derive(Debug, Clone, Default)]
+pub struct EmbedInput {
+    pub text: String,
+    /// The picture's content type and bytes (a thumbnail).
+    pub image: Option<(String, Vec<u8>)>,
+}
+
+/// True for an embeddings model that takes pictures (Voyage AI's multimodal models).
+pub fn takes_images(kind: &str, model: &str) -> bool {
+    kind == "voyage" && model.starts_with("voyage-multimodal")
+}
+
 /// Vectors for texts, in their order.
 #[derive(Debug, Clone)]
 pub struct Embeddings {
@@ -325,13 +338,34 @@ impl HexDBEngine {
     /// Embed texts with the embeddings provider, within the monthly budget;
     /// the tokens are recorded under `feature`.
     pub async fn ai_embed(&self, texts: &[String], purpose: EmbedPurpose, feature: &str) -> Result<Embeddings> {
+        let inputs: Vec<EmbedInput> = texts.iter().map(|t| EmbedInput { text: t.clone(), image: None }).collect();
+        self.ai_embed_inputs(&inputs, purpose, feature).await
+    }
+
+    /// [`ai_embed`](Self::ai_embed) for inputs that may have pictures: a
+    /// multimodal model embeds each picture with its text, in the same space
+    /// as text queries; other models refuse pictures.
+    pub async fn ai_embed_inputs(&self, inputs: &[EmbedInput], purpose: EmbedPurpose, feature: &str) -> Result<Embeddings> {
         let provider = self.embedding_provider()?;
-        if texts.is_empty() {
+        if inputs.is_empty() {
             return Ok(Embeddings { vectors: Vec::new(), model: provider.model, tokens: 0 });
+        }
+        let multimodal = takes_images(&provider.kind, &provider.model);
+        if !multimodal && inputs.iter().any(|i| i.image.is_some()) {
+            bail!(
+                "The embeddings model {} doesn't take pictures. To embed files' pictures ($image), use a multimodal model: ai.embeddings.provider voyage with ai.embeddings.model voyage-multimodal-3.",
+                provider.model
+            );
         }
         self.check_ai_budget().await?;
         let _slot = self.ai_slot().await?;
-        match post_embeddings(&provider, texts, purpose).await {
+        let posted = if multimodal {
+            post_multimodal_embeddings(&provider, inputs, purpose).await
+        } else {
+            let texts: Vec<String> = inputs.iter().map(|i| i.text.clone()).collect();
+            post_embeddings(&provider, &texts, purpose).await
+        };
+        match posted {
             Ok((vectors, tokens)) => {
                 self.record_ai_usage(feature, tokens, 0, true).await;
                 Ok(Embeddings { vectors, model: provider.model, tokens })
@@ -757,6 +791,47 @@ async fn call_anthropic(provider: &Provider, request: &AiRequest, max_tokens: u6
 
 /// POST texts to an embeddings API (OpenAI's shape, which Voyage, Azure,
 /// GitHub Models and OpenAI-compatible servers share); vectors in order, and tokens.
+/// Voyage AI's multimodal embeddings: each input's text and picture as one
+/// embedding (`POST /multimodalembeddings`).
+async fn post_multimodal_embeddings(provider: &Provider, inputs: &[EmbedInput], purpose: EmbedPurpose) -> Result<(Vec<Vec<f32>>, u64)> {
+    use base64::Engine as _;
+    let items: Vec<Value> = inputs
+        .iter()
+        .map(|input| {
+            let mut content = Vec::new();
+            if !input.text.trim().is_empty() {
+                content.push(json!({ "type": "text", "text": input.text }));
+            }
+            if let Some((content_type, bytes)) = &input.image {
+                content.push(json!({ "type": "image_base64", "image_base64": format!("data:{};base64,{}", content_type, base64::engine::general_purpose::STANDARD.encode(bytes)) }));
+            }
+            json!({ "content": content })
+        })
+        .collect();
+    let body = json!({ "model": provider.model, "inputs": items, "input_type": if purpose == EmbedPurpose::Query { "query" } else { "document" } });
+    let key = provider.key.as_ref().map(|k| k.expose().to_string()).unwrap_or_default();
+    let response = client()?.post(format!("{}/multimodalembeddings", provider.base_url)).bearer_auth(&key).json(&body).send().await.context("calling the Voyage AI multimodal embeddings API")?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(provider_error("Voyage AI", status, &text, Some(&key)));
+    }
+    let reply: Value = serde_json::from_str(&text).context("the Voyage AI multimodal embeddings API's answer wasn't JSON")?;
+    let mut items: Vec<(usize, Vec<f32>)> = reply["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(i, item)| crate::vector::extract(&item["embedding"]).map(|v| (item["index"].as_u64().map(|n| n as usize).unwrap_or(i), v)))
+        .collect();
+    items.sort_by_key(|(i, _)| *i);
+    if items.len() != inputs.len() {
+        bail!("the Voyage AI multimodal embeddings API returned {} vectors for {} inputs", items.len(), inputs.len());
+    }
+    let tokens = reply["usage"]["total_tokens"].as_u64().unwrap_or(0);
+    Ok((items.into_iter().map(|(_, v)| v).collect(), tokens))
+}
+
 async fn post_embeddings(provider: &Provider, texts: &[String], purpose: EmbedPurpose) -> Result<(Vec<Vec<f32>>, u64)> {
     let mut body = json!({ "model": provider.model, "input": texts });
     if provider.kind == "voyage" {
@@ -1088,6 +1163,52 @@ mod tests {
         // 0: no limit.
         let many: Vec<_> = futures::future::join_all((0..5).map(|_| gate.slot(0, Duration::ZERO))).await;
         assert!(many.iter().all(Result::is_ok));
+    }
+
+    #[tokio::test]
+    async fn pictures_are_embedded_with_their_text_by_multimodal_models() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = vec![0u8; 64 * 1024];
+            // Headers, then the body by its length.
+            loop {
+                let n = socket.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..n]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length: usize = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let _ = seen_tx.send(String::from_utf8_lossy(&request).to_string());
+            let body = json!({ "data": [{ "embedding": [0.1, 0.2], "index": 1 }, { "embedding": [0.3, 0.4], "index": 0 }], "usage": { "total_tokens": 1200 } }).to_string();
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        });
+        let provider = Provider { kind: "voyage".into(), model: "voyage-multimodal-3".into(), base_url: format!("http://{}", address), key: None, legacy: false };
+        assert!(takes_images(&provider.kind, &provider.model) && !takes_images("voyage", "voyage-3.5") && !takes_images("openai", "voyage-multimodal-3"));
+        let inputs = vec![
+            EmbedInput { text: "sunset.jpg".into(), image: Some(("image/jpeg".into(), vec![0xFF, 0xD8, 0xFF])) },
+            EmbedInput { text: String::new(), image: Some(("image/webp".into(), vec![1, 2, 3])) },
+        ];
+        let (vectors, tokens) = post_multimodal_embeddings(&provider, &inputs, EmbedPurpose::Document).await.unwrap();
+        assert_eq!(vectors, vec![vec![0.3, 0.4], vec![0.1, 0.2]], "in the inputs' order");
+        assert_eq!(tokens, 1200);
+        let request = seen_rx.await.unwrap();
+        assert!(request.starts_with("POST /multimodalembeddings "), "{}", &request[..60]);
+        let body: Value = serde_json::from_str(&request[request.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(body["model"], "voyage-multimodal-3");
+        assert_eq!(body["input_type"], "document");
+        assert_eq!(body["inputs"][0]["content"], json!([{ "type": "text", "text": "sunset.jpg" }, { "type": "image_base64", "image_base64": "data:image/jpeg;base64,/9j/" }]));
+        assert_eq!(body["inputs"][1]["content"], json!([{ "type": "image_base64", "image_base64": "data:image/webp;base64,AQID" }]), "no empty text part");
     }
 
     #[test]
