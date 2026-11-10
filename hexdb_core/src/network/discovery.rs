@@ -398,6 +398,19 @@ async fn answer_identity(engine: &HexDBEngine) -> PeerHex {
     match cached {
         Some(mut identity) => {
             identity.role = engine.role();
+            // How far along this hex is, as of now: an election run on this
+            // answer (a failover) must see the writes applied since the last round.
+            if engine.is_writable() {
+                identity.applied_seq = engine.changes.published_seq();
+                identity.replication_state = "leading".into();
+            } else if let Ok(status) = engine.replication.try_lock() {
+                identity.applied_seq = status.applied_seq;
+                identity.replication_state = status.state.clone();
+                identity.slices_held = status.slices_held;
+                if let Some(history) = &status.history {
+                    identity.replication_source = history.clone();
+                }
+            }
             if crate::updates::withdrawn() {
                 identity.preference = "replicant".into();
             }
@@ -701,6 +714,13 @@ pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
     // (`updates::hand_over_to_preferred`). Among several sitting Overseers (two
     // sides of a healed partition), a preferred one, then the best-ranked, wins.
     let sitting: Vec<&PeerHex> = candidates.iter().copied().filter(|h| h.role == ROLE_OVERSEER).collect();
+    // With no sitting Overseer, the data decides first: only the hexes furthest
+    // along the history most of them follow can take over without losing writes
+    // a replica already has. A preference to lead, then hardware, only choose
+    // among those.
+    if sitting.is_empty() {
+        candidates = most_current(candidates);
+    }
     if sitting.is_empty() && candidates.iter().any(|h| h.preference == "overseer") {
         candidates.retain(|h| h.preference == "overseer");
     }
@@ -726,6 +746,34 @@ pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
         _ if local.preference == "replicant" => ROLE_REPLICANT.into(),
         _ if local.preference == "oracle" => ROLE_ORACLE.into(),
         _ => ROLE_HARVESTER.into(),
+    }
+}
+
+/// The candidates that hold the most of the lattice's history: those following
+/// the history most of them follow (a hex that never followed one counts only
+/// if none has), furthest along it, and among those, the ones fully copied
+/// rather than still in a full sync. Positions in different histories aren't
+/// compared: they count different things.
+fn most_current(candidates: Vec<&PeerHex>) -> Vec<&PeerHex> {
+    let mut by_source: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for c in candidates.iter().filter(|c| !c.replication_source.is_empty()) {
+        *by_source.entry(c.replication_source.as_str()).or_default() += 1;
+    }
+    let source = by_source.iter().max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(s, _)| s.to_string());
+    let mut eligible: Vec<&PeerHex> = match &source {
+        Some(source) => candidates.iter().copied().filter(|c| &c.replication_source == source).collect(),
+        None => candidates.clone(),
+    };
+    if let Some(newest) = eligible.iter().map(|c| c.applied_seq).max() {
+        eligible.retain(|c| c.applied_seq == newest);
+    }
+    if eligible.iter().any(|c| c.replication_state != "syncing") {
+        eligible.retain(|c| c.replication_state != "syncing");
+    }
+    if eligible.is_empty() {
+        candidates
+    } else {
+        eligible
     }
 }
 
@@ -946,8 +994,16 @@ mod tests {
         let mut b = hex("b", ROLE_HARVESTER, "auto", 1000);
         a.applied_seq = 10;
         b.applied_seq = 50;
-        // Without slicing, RAM decides; with it, the furthest replica leads.
-        assert_eq!(elect(&a, std::slice::from_ref(&b)), ROLE_OVERSEER);
+        // With or without slicing, the furthest replica leads, whatever its RAM (HDB-07).
+        assert_eq!(elect(&a, std::slice::from_ref(&b)), ROLE_HARVESTER);
+        assert_eq!(elect(&b, std::slice::from_ref(&a)), ROLE_OVERSEER);
+        // A replica of another (older) history doesn't count against them.
+        let mut stray = hex("s", ROLE_HARVESTER, "auto", 9000);
+        stray.applied_seq = 900;
+        stray.replication_source = "old-history".into();
+        a.replication_source = "current".into();
+        b.replication_source = "current".into();
+        assert_eq!(elect(&b, &[a.clone(), stray]), ROLE_OVERSEER);
         a.slicing = true;
         assert_eq!(elect(&a, std::slice::from_ref(&b)), ROLE_HARVESTER);
         // A sitting Overseer keeps the role regardless.
