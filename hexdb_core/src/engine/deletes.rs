@@ -1127,6 +1127,17 @@ impl HexDBEngine {
                     existing.push(json!({ "tessellation": doc.tessellation, "id": doc.id.to_string() }));
                     continue;
                 }
+                // A vault value that's gone can't come back: refuse rather than restore a token nothing opens.
+                let missing = self.missing_vault_values(&doc).await?;
+                if !missing.is_empty() {
+                    return Err(EngineError::Conflict(format!(
+                        "Document {} in '{}' can't be restored: the vault no longer holds the values behind {} of its tokens.",
+                        doc.id,
+                        doc.tessellation,
+                        missing.len()
+                    ))
+                    .into());
+                }
                 *summary.restored.entry(doc.tessellation.clone()).or_default() += 1;
                 items.push(BatchItem { key: DocKey::new(TRASH_TESSELLATION, entry.id), op: WalOp::Delete { tessellation: TRASH_TESSELLATION.into(), id: entry.id }, expected_seq: Some(entry_seq) });
                 items.push(BatchItem { key, op: WalOp::Put(doc), expected_seq: Some(seq) });

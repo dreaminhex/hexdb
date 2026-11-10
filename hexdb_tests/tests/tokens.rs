@@ -135,8 +135,14 @@ fn vault_entries_are_per_tessellation_and_unused_ones_are_deleted() -> Result<()
     assert_eq!(detokenize("payments", &token)?, CARD);
     assert_eq!(compact()?, 0, "every entry is in use");
 
-    // Deleting the account leaves its entry unused; the payment's stays.
+    // A deleted account's entry stays while the account can be restored from
+    // the trash (code review HDB-11); purging it leaves the entry unused. The payment's stays.
     let res = server.request(Method::DELETE, &format!("/accounts/{}", account), None, &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    let batch = res.headers.get("x-hexdb-delete-batch").unwrap().to_str()?.to_string();
+    assert_eq!(compact()?, 0, "the trashed account still holds it");
+    assert_eq!(detokenize("accounts", &token)?, CARD);
+    let res = server.request(Method::DELETE, &format!("/deletes/{}", batch), None, &[])?;
     assert!(res.status.is_success(), "{}", res.body);
     assert_eq!(compact()?, 1);
     assert!(detokenize("accounts", &token)?.is_null());
