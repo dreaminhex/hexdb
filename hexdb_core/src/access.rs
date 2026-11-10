@@ -86,6 +86,16 @@ pub async fn as_caller<F: Future>(principal: Arc<Principal>, f: F) -> F::Output 
 }
 
 /// The caller of the current request, if any (none: internal work).
+///
+/// This fails open: work with no caller sees everything. The API's
+/// authentication middleware runs every request's handler inside
+/// `as_caller` (REST, gRPC, GraphQL, SQL and MCP all go through it), but a
+/// task-local doesn't follow `tokio::spawn` or a response body polled after
+/// the handler returns. So request work that spawns a task wraps it in
+/// `as_caller` (A2A tasks, shares, triggers, functions), and live feeds and
+/// streamed bodies check the principal they captured (`changes::render`,
+/// stream subscriptions) or serve only what was authorized up front (file
+/// chunks). Audited 2026-11-09.
 pub fn caller() -> Option<Arc<Principal>> {
     CALLER.try_with(|p| p.clone()).ok()
 }
