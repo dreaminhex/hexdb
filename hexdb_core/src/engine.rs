@@ -309,6 +309,8 @@ pub struct HexDBEngine {
     pub(crate) ai_gate: crate::ai::AiGate,
     /// Active peers as last counted (`check_quorum` falls back on it when the peer list is busy).
     pub(crate) active_peers_seen: std::sync::atomic::AtomicUsize,
+    /// A role change committed but its seal-policy refresh not yet run (its request went away).
+    pub(crate) seal_refresh_pending: std::sync::atomic::AtomicBool,
     /// The next policy refresh also seals what WAL replay put in the hex.
     seal_pending: std::sync::atomic::AtomicBool,
     /// Documents waiting to be embedded for vector indexes (see `vectors`).
@@ -594,6 +596,7 @@ impl HexDBEngine {
             seal_policy: Default::default(),
             ai_gate: Default::default(),
             active_peers_seen: std::sync::atomic::AtomicUsize::new(0),
+            seal_refresh_pending: std::sync::atomic::AtomicBool::new(false),
             seal_pending: std::sync::atomic::AtomicBool::new(true),
             embeddings: Default::default(),
             token_key,
