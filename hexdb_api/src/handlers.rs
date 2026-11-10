@@ -984,7 +984,9 @@ pub struct DetokenizeRequest {
 /// `POST /tessellations/{name}/detokenize`: `{"tokens": [...]}` gives
 /// `{"values": {token: value | null}}` for vault tokens of this tessellation.
 /// Needs the detokenize permission there, and a role that neither hides nor
-/// masks the tokenized fields. Audited (the count, never the values).
+/// masks the tokenized fields (nor a field around them). With a row filter,
+/// a token gives its value only if a document the caller may read holds it.
+/// Audited (the count, never the values).
 pub async fn detokenize(Path(name): Path<String>, State(engine): Engine, Auth(principal): Auth, body: Result<Json<DetokenizeRequest>, JsonRejection>) -> ApiResult {
     principal.require(Permission::Detokenize, &name)?;
     existing_tessellation(&engine, &name)?;
@@ -998,10 +1000,10 @@ pub async fn detokenize(Path(name): Path<String>, State(engine): Engine, Auth(pr
         .last()
         .map(|v| v.fields.iter().filter(|(_, r)| r.tokenize == Some(hexdb_core::schema::Tokenize::Vault)).map(|(p, _)| p).collect())
         .unwrap_or_default();
-    if vault_fields.iter().any(|f| scope.hidden.iter().any(|h| h == *f) || scope.mask_of(f).is_some()) {
+    if vault_fields.iter().any(|f| scope.protects(f)) {
         return Err(ApiError::forbidden("Your role hides or masks a tokenized field here, so it can't read the values behind its tokens."));
     }
-    let values = engine.detokenize(&name, &request.tokens).await?;
+    let values = engine.detokenize_for(&name, &request.tokens, &scope).await?;
     let found = values.iter().filter(|v| v.is_some()).count();
     engine
         .audit(&principal.login, "token.detokenize", &name, json!({ "tokens": request.tokens.len(), "found": found }))

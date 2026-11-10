@@ -117,21 +117,23 @@ impl HexDBEngine {
     pub(crate) fn tokenize_json(&self, tess: &str, json: &mut Value, fields: &[(String, Tokenize)]) -> Vec<VaultEntry> {
         let mut vault = Vec::new();
         for (path, kind) in fields {
-            let Some(slot) = path.split('.').try_fold(&mut *json, |current, part| current.get_mut(part)) else { continue };
-            let Value::String(value) = slot else { continue };
-            if is_token(value) {
-                if *kind == Tokenize::Vault {
-                    vault.push(VaultEntry::Existing(vault_id(tess, value)));
+            // Every value at the path, through arrays: a tokenized field inside a list is tokenized in each element.
+            crate::access::for_each_at(json, path, &mut |slot| {
+                let Value::String(value) = slot else { return };
+                if is_token(value) {
+                    if *kind == Tokenize::Vault {
+                        vault.push(VaultEntry::Existing(vault_id(tess, value)));
+                    }
+                    return;
                 }
-                continue;
-            }
-            let plain = Zeroizing::new(std::mem::take(value));
-            let token = self.token_key.token(&plain);
-            if *kind == Tokenize::Vault {
-                let sealed = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, self.lattice_keys.seal(plain.as_bytes(), aad(&token).as_bytes()));
-                vault.push(VaultEntry::New(vault_id(tess, &token), json!({ "token": token, "tessellation": tess, "field": path, "value": sealed })));
-            }
-            *slot = Value::String(token);
+                let plain = Zeroizing::new(std::mem::take(value));
+                let token = self.token_key.token(&plain);
+                if *kind == Tokenize::Vault {
+                    let sealed = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, self.lattice_keys.seal(plain.as_bytes(), aad(&token).as_bytes()));
+                    vault.push(VaultEntry::New(vault_id(tess, &token), json!({ "token": token, "tessellation": tess, "field": path, "value": sealed })));
+                }
+                *slot = Value::String(token);
+            });
         }
         vault
     }
@@ -142,6 +144,44 @@ impl HexDBEngine {
             Value::String(s) if !is_token(s) => Some(Value::String(self.token_key.token(s))),
             _ => None,
         }
+    }
+
+    /// The values behind vault tokens of `tess` for a caller with this read
+    /// scope: only tokens whose field (and every field around it) the caller
+    /// may see unmasked, and, when the caller's rows are filtered, only tokens
+    /// held at that field by a document the caller may read. Others give None,
+    /// like tokens that aren't vault tokens of the tessellation, so a token from
+    /// a hidden row or field reveals nothing, not even that it exists.
+    pub async fn detokenize_for(&self, tess: &str, tokens: &[String], scope: &crate::access::Scope) -> Result<Vec<Option<String>>> {
+        if scope.is_full() {
+            return self.detokenize(tess, tokens).await;
+        }
+        let mut allowed = Vec::with_capacity(tokens.len());
+        for token in tokens {
+            let entry = match is_token(token) {
+                true => self.get_system_document(VAULT_TESSELLATION, vault_id(tess, token)).await?,
+                false => None,
+            };
+            let Some(field) = entry.as_ref().and_then(|d| d.data_json()["field"].as_str().map(String::from)) else {
+                allowed.push(false);
+                continue;
+            };
+            if scope.protects(&field) {
+                allowed.push(false);
+                continue;
+            }
+            let ok = match &scope.filter {
+                None => true,
+                // A readable document holding this token at that field (through arrays, as queries match).
+                Some(_) => {
+                    let holds = crate::filter::Filter::parse(&json!({ field.clone(): token }))?;
+                    !self.matching_documents(tess, &scope.narrow(&holds)).await?.is_empty()
+                }
+            };
+            allowed.push(ok);
+        }
+        let opened = self.detokenize(tess, tokens).await?;
+        Ok(opened.into_iter().zip(allowed).map(|(value, ok)| value.filter(|_| ok)).collect())
     }
 
     /// The values behind vault tokens of `tess` (None for tokens that aren't

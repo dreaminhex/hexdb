@@ -126,14 +126,15 @@ impl Sealer {
     pub fn seal_json(&self, tess: &str, id: &str, json: &mut Value, paths: &[String]) -> bool {
         let mut sealed = false;
         for path in paths {
-            if let Some(value) = get_path_mut(json, path) {
+            // Through arrays too: each element's value is sealed under the same path.
+            crate::access::for_each_at(json, path, &mut |value| {
                 if !value.is_null() && !is_envelope(value) {
                     let plain = std::mem::take(value);
                     *value = self.seal(tess, id, path, &plain);
                     wipe(plain);
                     sealed = true;
                 }
-            }
+            });
         }
         sealed
     }
@@ -198,6 +199,20 @@ pub fn covers(field: &str, path: &str) -> bool {
 /// are. True if the document held any.
 pub fn unseal_json(tess: &str, id: &str, json: &mut Value) -> bool {
     fn walk(tess: &str, id: &str, value: &mut Value, path: &mut String, found: &mut bool) {
+        // An array's elements share its path (as sealing does).
+        if let Value::Array(items) = value {
+            for item in items.iter_mut() {
+                if is_envelope(item) {
+                    *found = true;
+                    if let Some(plain) = item.get(MARK).and_then(Value::as_str).and_then(|e| open(tess, id, path, e)) {
+                        *item = plain;
+                    }
+                } else {
+                    walk(tess, id, item, path, found);
+                }
+            }
+            return;
+        }
         let Value::Object(map) = value else { return };
         for (key, child) in map.iter_mut() {
             let len = path.len();
@@ -314,10 +329,6 @@ pub fn wipe(mut value: Value) {
         }
     }
     walk(&mut value);
-}
-
-fn get_path_mut<'a>(json: &'a mut Value, path: &str) -> Option<&'a mut Value> {
-    path.split('.').try_fold(json, |current, part| current.get_mut(part))
 }
 
 /// Which fields are sealed: every path some role masks.
@@ -443,6 +454,18 @@ mod tests {
         let mut other = Document { id: doc.id, tessellation: "wipe_other".into(), data, ttl: None };
         wipe_dropped(&mut other);
         assert_eq!(other.data_json()["card"]["number"], "5");
+    }
+
+    /// HDB-02: a sealed path reaches into arrays, and the values open again where they were sealed.
+    #[test]
+    fn values_inside_arrays_are_sealed_and_opened() {
+        let s = sealer();
+        let mut json = json!({ "contacts": [{ "ssn": "111", "name": "Ada" }, { "ssn": "222" }], "n": 1 });
+        assert!(s.seal_json("people", "d1", &mut json, &["contacts.ssn".to_string()]));
+        assert!(is_envelope(&json["contacts"][0]["ssn"]) && is_envelope(&json["contacts"][1]["ssn"]), "{}", json);
+        assert_eq!(json["contacts"][0]["name"], "Ada");
+        assert!(unseal_json("people", "d1", &mut json));
+        assert_eq!(json, json!({ "contacts": [{ "ssn": "111", "name": "Ada" }, { "ssn": "222" }], "n": 1 }));
     }
 
     #[test]
