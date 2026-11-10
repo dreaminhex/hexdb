@@ -452,7 +452,7 @@ async fn run_task(
     p: &Prepared,
     progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<Value, ApiError> {
-    let (state, text, metadata) = match agent::answer(engine, principal, client, &p.question, &p.history, "a2a.message", progress).await {
+    let (state, text, metadata) = match agent::answer(engine, principal, client, &p.question, &p.history, "a2a.message", agent::Listeners { progress, ..Default::default() }).await {
         Ok(answer) => {
             let mut store = store().lock().unwrap();
             let context = store.contexts.entry(p.context_id.clone()).or_insert_with(|| Context { owner: principal.user_id.clone(), history: Vec::new(), at: Instant::now() });

@@ -45,6 +45,61 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 const enc = encodeURIComponent
 
+/** What a streamed chat answer sends as it goes (`POST /ai/chat` with `stream`). */
+export type ChatEvent = { kind: "text"; text: string } | { kind: "lookup"; tool: string; tessellation: string | null }
+
+/**
+ * `POST /ai/chat` as server-sent events: `onEvent` hears the model's text as it's written and each
+ * lookup (the text before a lookup wasn't the answer); resolves with the whole answer.
+ */
+async function streamChat(question: string, history: { role: "user" | "assistant"; content: string }[], onEvent: (event: ChatEvent) => void): Promise<ChatAnswer> {
+  let response: Response
+  try {
+    response = await fetch("/ai/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ question, history, stream: true }),
+    })
+  } catch (e) {
+    throw new ApiError(0, "unreachable", `Could not reach HexDB: ${e instanceof Error ? e.message : String(e)}`)
+  }
+  if (!response.ok || !response.body) {
+    if (response.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+    const text = await response.text()
+    let error: { code?: string; message?: string } | undefined
+    try {
+      error = (JSON.parse(text) as { error?: { code?: string; message?: string } }).error
+    } catch {
+      // Not JSON.
+    }
+    throw new ApiError(response.status, error?.code ?? "error", error?.message ?? (text || response.statusText))
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
+  let buffer = ""
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += value
+    let end: number
+    while ((end = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, end)
+      buffer = buffer.slice(end + 2)
+      const event = /^event:\s*(.*)$/m.exec(block)?.[1]?.trim()
+      const data = /^data:\s*(.*)$/m.exec(block)?.[1]
+      if (!event || data === undefined) continue
+      const payload = JSON.parse(data) as Record<string, unknown>
+      if (event === "text") onEvent({ kind: "text", text: String(payload.text ?? "") })
+      else if (event === "lookup") onEvent({ kind: "lookup", tool: String(payload.tool ?? ""), tessellation: (payload.tessellation as string | null) ?? null })
+      else if (event === "answer") return payload as unknown as ChatAnswer
+      else if (event === "error") {
+        const error = payload.error as { code?: string; message?: string } | undefined
+        throw new ApiError(502, error?.code ?? "error", error?.message ?? "The answer failed.")
+      }
+    }
+  }
+  throw new ApiError(502, "error", "The answer ended before it was complete.")
+}
+
 /** Fired when any request comes back 401. */
 export const UNAUTHORIZED_EVENT = "hexdb:unauthorized"
 
@@ -1128,6 +1183,7 @@ export const api = {
   deleteQuarantined: (id: string) => request<void>("DELETE", `/quarantine/${encodeURIComponent(id)}`),
   rescan: () => request<{ rescan: string }>("POST", "/quarantine/rescan"),
   chat: (question: string, history: { role: "user" | "assistant"; content: string }[]) => request<ChatAnswer>("POST", "/ai/chat", { question, history }),
+  chatStream: streamChat,
   login: (login: string, password: string, code?: string) =>
     request<{ user: Me; expires_at: number }>("POST", "/auth/login", code ? { login, password, code } : { login, password }),
   mfa: () => request<MfaStatus>("GET", "/auth/mfa"),

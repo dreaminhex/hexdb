@@ -27,7 +27,7 @@
 use crate::auth::Auth;
 use crate::handlers::{docs_json, existing_tessellation, parse_sort_text, ApiError, ApiResult, Engine};
 use axum::{extract::rejection::JsonRejection, response::IntoResponse, Json};
-use hexdb_core::ai::{AiTool, ChatRequest, ToolCall, ToolResult, Turn};
+use hexdb_core::ai::{AiTool, ChatRequest, ChatStream, ToolCall, ToolResult, Turn};
 use hexdb_core::{engine::HexDBEngine, filter::Filter, Action, Permission, Principal};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -497,10 +497,17 @@ pub struct ChatInput {
     pub question: String,
     #[serde(default)]
     pub history: Vec<ChatHistoryItem>,
+    /// Answer as server-sent events: the text as it's written (see `chat`).
+    #[serde(default)]
+    pub stream: bool,
 }
 
-/// `POST /ai/chat`: `{"question", "history"?: [{"role": "user"|"assistant", "content"}]}`.
+/// `POST /ai/chat`: `{"question", "history"?: [{"role": "user"|"assistant", "content"}], "stream"?}`.
 /// Returns `{"answer", "steps": [{"tool", "input", "ok"}], "model", "tokens", "left"}`.
+/// With `"stream": true`, server-sent events instead: `text` (`{"text"}`, a
+/// piece of the model's writing), `lookup` (`{"tool", "tessellation"}`: the
+/// text since the last lookup was the model thinking aloud, not the answer),
+/// then `answer` (the JSON above) or `error` (`{"error": {"code", "message"}}`).
 pub async fn chat(
     axum::extract::State(engine): Engine,
     Auth(principal): Auth,
@@ -512,15 +519,60 @@ pub async fn chat(
         return Err(ApiError::forbidden("The AI chat is off. An administrator can turn it on (ai.chat.enabled)."));
     }
     let Json(input) = body?;
-    let reply = answer(&engine, &principal, &client, &input.question, &input.history, "ai.chat", None).await?;
-    Ok(Json(json!({
+    if input.stream {
+        return Ok(stream_chat(engine, principal, client, input));
+    }
+    let reply = answer(&engine, &principal, &client, &input.question, &input.history, "ai.chat", Listeners::default()).await?;
+    Ok(Json(answer_json(&reply)).into_response())
+}
+
+fn answer_json(reply: &ChatAnswer) -> Value {
+    json!({
         "answer": reply.answer,
         "steps": reply.steps,
         "model": reply.model,
         "tokens": { "input": reply.input_tokens, "output": reply.output_tokens },
         "left": { "user_today": reply.user_left, "client_today": reply.client_left },
-    }))
-    .into_response())
+    })
+}
+
+/// The chat as server-sent events (see `chat`). The answer runs in a task of
+/// its own, as the caller (row filters and masks apply there too), and runs to
+/// the end even if the client goes away, so its tokens are always counted.
+fn stream_chat(engine: Arc<HexDBEngine>, principal: Principal, client: String, input: ChatInput) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<ChatStream>();
+    let (done, outcome) = tokio::sync::oneshot::channel::<Result<ChatAnswer, ApiError>>();
+    let caller = Arc::new(principal.clone());
+    tokio::spawn(hexdb_core::access::as_caller(caller, async move {
+        let result = answer(&engine, &principal, &client, &input.question, &input.history, "ai.chat", Listeners { stream: Some(&sender), ..Default::default() }).await;
+        drop(sender);
+        let _ = done.send(result);
+    }));
+    enum State {
+        Streaming(tokio::sync::mpsc::UnboundedReceiver<ChatStream>, tokio::sync::oneshot::Receiver<Result<ChatAnswer, ApiError>>),
+        Done,
+    }
+    let events = futures::stream::unfold(State::Streaming(receiver, outcome), |state| async move {
+        let State::Streaming(mut receiver, outcome) = state else { return None };
+        match receiver.recv().await {
+            Some(ChatStream::Text(text)) => Some((Event::default().event("text").data(json!({ "text": text }).to_string()), State::Streaming(receiver, outcome))),
+            Some(ChatStream::Lookup { tool, tessellation }) => {
+                Some((Event::default().event("lookup").data(json!({ "tool": tool, "tessellation": tessellation }).to_string()), State::Streaming(receiver, outcome)))
+            }
+            None => {
+                let event = match outcome.await {
+                    Ok(Ok(reply)) => Event::default().event("answer").data(answer_json(&reply).to_string()),
+                    Ok(Err(e)) => Event::default().event("error").data(json!({ "error": { "code": e.code(), "message": e.message() } }).to_string()),
+                    Err(_) => Event::default().event("error").data(json!({ "error": { "code": "internal", "message": "The answer stopped unexpectedly." } }).to_string()),
+                };
+                Some((event, State::Done))
+            }
+        }
+    })
+    .map(Ok::<_, std::convert::Infallible>);
+    Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
 /// A chat answer and what it cost.
@@ -534,10 +586,18 @@ pub struct ChatAnswer {
     pub client_left: Option<u64>,
 }
 
+/// Who hears of an answer as it's worked out.
+#[derive(Default, Clone, Copy)]
+pub struct Listeners<'a> {
+    /// Each lookup as it starts, as a sentence (A2A streaming).
+    pub progress: Option<&'a tokio::sync::mpsc::UnboundedSender<String>>,
+    /// The model's text as it's written, and each lookup (the chat's stream).
+    pub stream: Option<&'a tokio::sync::mpsc::UnboundedSender<ChatStream>>,
+}
+
 /// Answer a question about the lattice's data as `principal`, within the
 /// chat's limits, and audit it as `action`. Callers check the chat permission
 /// and that the chat is on. Used by `POST /ai/chat` and A2A (`crate::a2a`).
-/// `progress` hears of each lookup as it starts (A2A streaming).
 pub async fn answer(
     engine: &Arc<HexDBEngine>,
     principal: &Principal,
@@ -545,8 +605,9 @@ pub async fn answer(
     question: &str,
     history: &[ChatHistoryItem],
     action: &str,
-    progress: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
+    listeners: Listeners<'_>,
 ) -> Result<ChatAnswer, ApiError> {
+    let Listeners { progress, stream } = listeners;
     let input_history = history;
     let limits = limits(engine);
     let client = hexdb_core::auth::client_bucket(client);
@@ -628,6 +689,7 @@ No more lookups are available for this question. Answer now from what the lookup
                 tools: offered,
                 max_tokens: limits.max_tokens,
                 model: limits.model.clone(),
+                deltas: stream.cloned(),
             })
             .await
             .map_err(chat_error)?;
@@ -641,9 +703,13 @@ No more lookups are available for this question. Answer now from what the lookup
         let mut results = Vec::new();
         for ToolCall { id, name, input } in &reply.calls {
             calls_made += 1;
+            let tessellation = input.get("tessellation").and_then(Value::as_str);
             if let Some(progress) = progress {
-                let on = input.get("tessellation").and_then(Value::as_str).map(|t| format!(" in '{}'", t)).unwrap_or_default();
+                let on = tessellation.map(|t| format!(" in '{}'", t)).unwrap_or_default();
                 let _ = progress.send(format!("Looking things up: {}{}", name, on));
+            }
+            if let Some(stream) = stream {
+                let _ = stream.send(ChatStream::Lookup { tool: name.clone(), tessellation: tessellation.map(String::from) });
             }
             let outcome = if calls_made > limits.max_tool_calls {
                 Err("No more lookups are allowed for this question; answer with what you have.".to_string())

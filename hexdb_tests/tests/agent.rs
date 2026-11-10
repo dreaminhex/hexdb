@@ -133,12 +133,53 @@ fn mock_claude() -> Result<(u16, Seen)> {
             } else {
                 json!({ "content": [{ "type": "text", "text": "No tools left." }], "stop_reason": "end_turn", "usage": { "input_tokens": 5, "output_tokens": 3 } })
             };
-            let text = reply.to_string();
+            let (text, kind) = if body["stream"] == true { (as_events(&reply), "text/event-stream") } else { (reply.to_string(), "application/json") };
             let mut stream = stream;
-            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", text.len(), text);
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", kind, text.len(), text);
         }
     });
     Ok((port, seen))
+}
+
+/// A Messages API reply as the server-sent events of a streamed one, each
+/// text and tool input split in two pieces.
+fn as_events(reply: &Value) -> String {
+    let mut out = String::new();
+    let mut event = |value: Value| out.push_str(&format!("event: {}\ndata: {}\n\n", value["type"].as_str().unwrap(), value));
+    event(json!({ "type": "message_start", "message": { "usage": { "input_tokens": reply["usage"]["input_tokens"], "output_tokens": 1 } } }));
+    for (index, block) in reply["content"].as_array().unwrap().iter().enumerate() {
+        let (start, piece, kind) = if block["type"] == "text" {
+            (json!({ "type": "text", "text": "" }), block["text"].as_str().unwrap().to_string(), "text_delta")
+        } else {
+            (json!({ "type": "tool_use", "id": block["id"], "name": block["name"], "input": {} }), block["input"].to_string(), "input_json_delta")
+        };
+        event(json!({ "type": "content_block_start", "index": index, "content_block": start }));
+        let half = piece.char_indices().nth(piece.chars().count() / 2).map_or(0, |(i, _)| i);
+        for part in [&piece[..half], &piece[half..]] {
+            let delta = if kind == "text_delta" { json!({ "type": kind, "text": part }) } else { json!({ "type": kind, "partial_json": part }) };
+            event(json!({ "type": "content_block_delta", "index": index, "delta": delta }));
+        }
+        event(json!({ "type": "content_block_stop", "index": index }));
+    }
+    event(json!({ "type": "message_delta", "delta": { "stop_reason": reply["stop_reason"] }, "usage": { "output_tokens": reply["usage"]["output_tokens"] } }));
+    event(json!({ "type": "message_stop" }));
+    out
+}
+
+/// The events of a streamed answer, as (event, data).
+fn streamed(server: &TestServer, key: &str, question: &str) -> Result<Vec<(String, Value)>> {
+    let response = hexdb_tests::http().build()?.post(server.url("/ai/chat")).bearer_auth(key).json(&json!({ "question": question, "stream": true })).send()?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers()["content-type"].to_str()?.starts_with("text/event-stream"));
+    let text = response.text()?;
+    Ok(text
+        .split("\n\n")
+        .filter_map(|block| {
+            let event = block.lines().find_map(|l| l.strip_prefix("event:"))?.trim().to_string();
+            let data = block.lines().find_map(|l| l.strip_prefix("data:"))?.trim();
+            Some((event, serde_json::from_str(data).ok()?))
+        })
+        .collect())
 }
 
 fn configure(server: &TestServer, changes: Value) -> Result<()> {
@@ -198,11 +239,28 @@ fn the_chat_answers_from_the_users_data_within_its_limits() -> Result<()> {
     assert_eq!(seen.lock().unwrap().len(), sent, "nothing reached the provider");
     configure(&server, json!({ "ai.chat.max_tokens_per_question": 20000 }))?;
 
+    // Streamed: the model's text as it's written, the lookup between (the text
+    // before it wasn't the answer), then the whole answer, counted like any other.
+    let events = streamed(&server, &key, "How many orders, streamed?")?;
+    let kinds: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
+    let lookup = kinds.iter().position(|k| *k == "lookup").expect("a lookup event");
+    assert!(kinds[..lookup].iter().all(|k| *k == "text") && lookup >= 2, "{:?}", kinds);
+    let before: String = events[..lookup].iter().filter_map(|(_, d)| d["text"].as_str()).collect();
+    assert_eq!(before, "Let me count.");
+    assert_eq!(events[lookup].1, json!({ "tool": "count", "tessellation": "orders" }));
+    let after: String = events[lookup + 1..].iter().filter(|(e, _)| e == "text").filter_map(|(_, d)| d["text"].as_str()).collect();
+    let (last, answer) = events.last().unwrap();
+    assert_eq!(last, "answer", "{:?}", kinds);
+    assert_eq!(answer["answer"].as_str(), Some(after.as_str()), "the streamed text is the answer");
+    assert!(after.contains("\"count\":3"), "{}", after);
+    assert_eq!(answer["tokens"], json!({ "input": 70, "output": 18 }));
+    assert!(seen.lock().unwrap().iter().rev().take(2).all(|call| call["stream"] == true));
+
     // Usage is counted as the chat feature, and each question is audited.
     let usage = server.request(Method::GET, "/ai", None, &[])?.body;
     assert!(usage["usage"]["features"]["chat"]["calls"].as_u64().unwrap() >= 6, "{}", usage);
     let audit = server.request(Method::GET, "/audit?action=ai.chat", None, &[])?.body;
-    assert_eq!(audit["events"].as_array().unwrap().len(), 3, "{}", audit);
+    assert_eq!(audit["events"].as_array().unwrap().len(), 4, "{}", audit);
     Ok(())
 }
 

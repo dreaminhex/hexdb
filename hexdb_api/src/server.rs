@@ -199,6 +199,8 @@ pub(crate) fn is_long_running(path: &str) -> bool {
     matches!(path, "/changes" | "/changes/stream" | "/lattice/changes")
         // A2A answers (and their event streams) take as long as the chat's lookups; the chat bounds them.
         || path == "/a2a"
+        // So are chat answers, streamed or not.
+        || path == "/ai/chat"
         // File uploads and downloads take as long as the file needs.
         || path.contains("/_files/")
         || path.contains("/_uploads/")

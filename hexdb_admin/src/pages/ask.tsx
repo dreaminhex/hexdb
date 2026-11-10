@@ -13,6 +13,8 @@ interface Message {
   content: string
   steps?: ChatAnswer["steps"]
   failed?: boolean
+  /** Still being written: the answer streams in. */
+  streaming?: boolean
 }
 
 const EXAMPLES = ["What's in this database?", "Which five orders have the highest total?", "How many customers are there per country?"]
@@ -94,6 +96,8 @@ export function AskPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [question, setQuestion] = useState("")
   const [busy, setBusy] = useState(false)
+  // The lookup the AI is making now, while it streams.
+  const [lookup, setLookup] = useState<string | null>(null)
   const end = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -108,17 +112,30 @@ export function AskPage() {
     const q = text.trim()
     if (!q || busy) return
     const history = messages.filter((m) => !m.failed).map((m) => ({ role: m.role, content: m.content }))
-    setMessages((m) => [...m, { role: "user", content: q }])
+    setMessages((m) => [...m, { role: "user", content: q }, { role: "assistant", content: "", streaming: true }])
     setQuestion("")
     setBusy(true)
+    setLookup(null)
+    // The answer in progress is always the last message.
+    const update = (change: (last: Message) => Message) => setMessages((m) => [...m.slice(0, -1), change(m[m.length - 1])])
     try {
-      const answer = await api.chat(q, history)
-      setMessages((m) => [...m, { role: "assistant", content: answer.answer || "(no answer)", steps: answer.steps }])
+      const answer = await api.chatStream(q, history, (event) => {
+        if (event.kind === "text") {
+          setLookup(null)
+          update((last) => ({ ...last, content: last.content + event.text }))
+        } else {
+          // What came before a lookup was the AI thinking aloud, not the answer.
+          setLookup(event.tessellation ? `${event.tool} in ${event.tessellation}` : event.tool)
+          update((last) => ({ ...last, content: "" }))
+        }
+      })
+      update(() => ({ role: "assistant", content: answer.answer || "(no answer)", steps: answer.steps }))
       setStatus((s) => (s ? { ...s, left: answer.left } : s))
     } catch (e) {
-      setMessages((m) => [...m, { role: "assistant", content: errorMessage(e), failed: true }])
+      update(() => ({ role: "assistant", content: errorMessage(e), failed: true }))
     } finally {
       setBusy(false)
+      setLookup(null)
     }
   }
 
@@ -153,38 +170,40 @@ export function AskPage() {
             </div>
           </div>
         )}
-        {messages.map((m, i) => (
-          <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
-            <div
-              className={cn(
-                "max-w-[85%] rounded-lg px-3 py-2",
-                m.role === "user" ? "bg-primary text-primary-foreground text-sm" : "bg-muted",
-                m.failed && "border-destructive/40 bg-destructive/10 text-destructive border text-sm",
-              )}
-            >
-              {m.role === "user" || m.failed ? <span className="whitespace-pre-wrap">{m.content}</span> : <Answer text={m.content} />}
-              {m.steps && m.steps.length > 0 && (
-                <details className="text-muted-foreground mt-2 text-xs">
-                  <summary className="cursor-pointer">
-                    <IconTool className="mr-1 inline size-3" />
-                    {m.steps.length} lookup{m.steps.length === 1 ? "" : "s"}
-                  </summary>
-                  <ul className="mt-1 space-y-1">
-                    {m.steps.map((s, k) => (
-                      <li key={k} className="font-mono break-all">
-                        {s.ok ? "" : "✗ "}
-                        {s.tool} {JSON.stringify(s.input)}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
+        {messages
+          .filter((m) => !(m.streaming && !m.content))
+          .map((m, i) => (
+            <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
+              <div
+                className={cn(
+                  "max-w-[85%] rounded-lg px-3 py-2",
+                  m.role === "user" ? "bg-primary text-primary-foreground text-sm" : "bg-muted",
+                  m.failed && "border-destructive/40 bg-destructive/10 text-destructive border text-sm",
+                )}
+              >
+                {m.role === "user" || m.failed ? <span className="whitespace-pre-wrap">{m.content}</span> : <Answer text={m.content} />}
+                {m.steps && m.steps.length > 0 && (
+                  <details className="text-muted-foreground mt-2 text-xs">
+                    <summary className="cursor-pointer">
+                      <IconTool className="mr-1 inline size-3" />
+                      {m.steps.length} lookup{m.steps.length === 1 ? "" : "s"}
+                    </summary>
+                    <ul className="mt-1 space-y-1">
+                      {m.steps.map((s, k) => (
+                        <li key={k} className="font-mono break-all">
+                          {s.ok ? "" : "✗ "}
+                          {s.tool} {JSON.stringify(s.input)}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
         {busy && (
-          <div className="text-muted-foreground flex items-center gap-2 text-sm">
-            <IconLoader2 className="size-4 animate-spin" /> Looking it up…
+          <div className="text-muted-foreground flex items-center gap-2 text-sm" role="status">
+            <IconLoader2 className="size-4 animate-spin" /> {lookup ? `Looking things up: ${lookup}…` : messages[messages.length - 1]?.content ? "Writing…" : "Thinking…"}
           </div>
         )}
         <div ref={end} />

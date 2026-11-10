@@ -125,6 +125,18 @@ pub struct ChatRequest {
     pub max_tokens: u64,
     /// A model to use instead of `ai.model` (e.g. a smaller one for chat).
     pub model: Option<String>,
+    /// Set to stream: the reply's text is sent here piece by piece as the
+    /// provider produces it (the whole reply is still returned at the end).
+    pub deltas: Option<tokio::sync::mpsc::UnboundedSender<ChatStream>>,
+}
+
+/// What a streamed chat sends as it goes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChatStream {
+    /// A piece of the model's text.
+    Text(String),
+    /// A lookup the model asked for (the text before it wasn't the answer).
+    Lookup { tool: String, tessellation: Option<String> },
 }
 
 /// The model's next step: text, tool calls, or both.
@@ -502,6 +514,112 @@ async fn post_anthropic(provider: &Provider, mut body: Value) -> Result<(Value, 
     Ok((reply, input, output))
 }
 
+/// Lines of a server-sent event stream as they arrive: each `data:` line's
+/// payload is handed to `on_data` (which returns false to stop early).
+async fn read_sse(mut response: reqwest::Response, mut on_data: impl FnMut(&str) -> Result<bool>) -> Result<()> {
+    let mut buffer: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await.context("reading the streamed answer")? {
+        buffer.extend_from_slice(&chunk);
+        while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = buffer.drain(..=end).collect();
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim_end_matches(['\r', '\n']);
+            if let Some(data) = line.strip_prefix("data:") {
+                if !on_data(data.trim_start())? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`post_anthropic`], streamed (`"stream": true`): text is sent to `deltas`
+/// as it arrives, and the events are put back together into the reply the
+/// unstreamed call returns (content blocks, stop reason, usage).
+async fn post_anthropic_streamed(provider: &Provider, body: Value, deltas: &tokio::sync::mpsc::UnboundedSender<ChatStream>) -> Result<(Value, u64, u64)> {
+    let key = provider.key.as_ref().map(|k| k.expose().to_string()).unwrap_or_default();
+    let response = client()?
+        .post(format!("{}/v1/messages", provider.base_url))
+        .header("x-api-key", &key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&body)
+        .send()
+        .await
+        .context("calling the Claude API")?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(provider_error("Claude", status, &text, Some(&key)));
+    }
+    let mut blocks: Vec<Value> = Vec::new();
+    // Tool inputs arrive as pieces of JSON text, parsed once the block ends.
+    let mut partial: Vec<String> = Vec::new();
+    let (mut input, mut output, mut stop_reason, mut stop_details) = (0u64, 0u64, Value::Null, Value::Null);
+    read_sse(response, |data| {
+        let Ok(event) = serde_json::from_str::<Value>(data) else { return Ok(true) };
+        match event["type"].as_str().unwrap_or_default() {
+            "message_start" => {
+                let usage = &event["message"]["usage"];
+                input = usage["input_tokens"].as_u64().unwrap_or(0)
+                    + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+                    + usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                output = usage["output_tokens"].as_u64().unwrap_or(0);
+            }
+            "content_block_start" => {
+                let index = event["index"].as_u64().unwrap_or(blocks.len() as u64) as usize;
+                while blocks.len() <= index {
+                    blocks.push(Value::Null);
+                    partial.push(String::new());
+                }
+                blocks[index] = event["content_block"].clone();
+            }
+            "content_block_delta" => {
+                let index = event["index"].as_u64().unwrap_or(0) as usize;
+                let delta = &event["delta"];
+                match delta["type"].as_str().unwrap_or_default() {
+                    "text_delta" => {
+                        let text = delta["text"].as_str().unwrap_or_default();
+                        if let Some(block) = blocks.get_mut(index) {
+                            let joined = format!("{}{}", block["text"].as_str().unwrap_or_default(), text);
+                            block["text"] = json!(joined);
+                        }
+                        let _ = deltas.send(ChatStream::Text(text.to_string()));
+                    }
+                    "input_json_delta" => {
+                        if let Some(piece) = partial.get_mut(index) {
+                            piece.push_str(delta["partial_json"].as_str().unwrap_or_default());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                let index = event["index"].as_u64().unwrap_or(0) as usize;
+                if let (Some(block), Some(piece)) = (blocks.get_mut(index), partial.get(index)) {
+                    if block["type"] == "tool_use" {
+                        block["input"] = if piece.trim().is_empty() { json!({}) } else { serde_json::from_str(piece).unwrap_or_else(|_| json!({})) };
+                    }
+                }
+            }
+            "message_delta" => {
+                stop_reason = event["delta"]["stop_reason"].clone();
+                stop_details = event["delta"]["stop_details"].clone();
+                if let Some(n) = event["usage"]["output_tokens"].as_u64() {
+                    output = n;
+                }
+            }
+            "message_stop" => return Ok(false),
+            "error" => bail!("The Claude API stopped with an error: {}", event["error"]["message"].as_str().unwrap_or("unknown")),
+            _ => {}
+        }
+        Ok(true)
+    })
+    .await?;
+    let reply = json!({ "content": blocks.into_iter().filter(|b| !b.is_null()).collect::<Vec<_>>(), "stop_reason": stop_reason, "stop_details": stop_details });
+    Ok((reply, input, output))
+}
+
 /// A conversation with tools through the Messages API.
 async fn chat_anthropic(provider: &Provider, request: &ChatRequest, max_tokens: u64) -> Result<(String, Vec<ToolCall>, u64, u64)> {
     let messages: Vec<Value> = request
@@ -528,7 +646,13 @@ async fn chat_anthropic(provider: &Provider, request: &ChatRequest, max_tokens: 
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
-    let (reply, input, output) = post_anthropic(provider, body).await?;
+    let (reply, input, output) = match &request.deltas {
+        Some(deltas) => {
+            body["stream"] = json!(true);
+            post_anthropic_streamed(provider, body, deltas).await?
+        }
+        None => post_anthropic(provider, body).await?,
+    };
     match reply["stop_reason"].as_str() {
         Some("refusal") => bail!("The model declined the request ({}).", reply["stop_details"]["category"].as_str().unwrap_or("no category")),
         Some("max_tokens") => bail!("The answer didn't fit in {} tokens.", max_tokens),
@@ -643,6 +767,84 @@ async fn post_chat_completions(provider: &Provider, mut body: Map<String, Value>
     Ok((reply, input, output))
 }
 
+/// [`post_chat_completions`], streamed: text is sent to `deltas` as it
+/// arrives, and the chunks are put back together into the reply the
+/// unstreamed call returns (message with content and tool calls, finish
+/// reason, usage).
+async fn post_chat_completions_streamed(provider: &Provider, mut body: Map<String, Value>, max_tokens: u64, deltas: &tokio::sync::mpsc::UnboundedSender<ChatStream>) -> Result<(Value, u64, u64)> {
+    let limit_name = if matches!(provider.kind.as_str(), "openai" | "azure_openai") { "max_completion_tokens" } else { "max_tokens" };
+    body.insert(limit_name.into(), json!(max_tokens));
+    body.insert("stream".into(), json!(true));
+    // OpenAI's own APIs report usage at the end of a stream only when asked.
+    if matches!(provider.kind.as_str(), "openai" | "azure_openai") {
+        body.insert("stream_options".into(), json!({ "include_usage": true }));
+    }
+    let key = provider.key.as_ref().map(|k| k.expose().to_string()).unwrap_or_default();
+    let mut call = client()?.post(format!("{}/chat/completions", provider.base_url)).json(&Value::Object(body));
+    if !key.is_empty() {
+        call = if provider.kind == "azure_openai" { call.header("api-key", &key) } else { call.bearer_auth(&key) };
+    }
+    let name = provider_name(&provider.kind);
+    let response = call.send().await.with_context(|| format!("calling the {} API", name))?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(provider_error(name, status, &text, Some(&key)));
+    }
+    let mut content = String::new();
+    // Tool calls arrive in pieces, by index: an id and name first, then argument text.
+    let mut calls: Vec<(String, String, String)> = Vec::new();
+    let (mut finish, mut input, mut output) = (Value::Null, 0u64, 0u64);
+    read_sse(response, |data| {
+        if data == "[DONE]" {
+            return Ok(false);
+        }
+        let Ok(chunk) = serde_json::from_str::<Value>(data) else { return Ok(true) };
+        if let Some(message) = chunk["error"]["message"].as_str() {
+            bail!("The {} API stopped with an error: {}", name, message);
+        }
+        if let Some(n) = chunk["usage"]["prompt_tokens"].as_u64() {
+            input = n;
+        }
+        if let Some(n) = chunk["usage"]["completion_tokens"].as_u64() {
+            output = n;
+        }
+        let choice = &chunk["choices"][0];
+        if !choice["finish_reason"].is_null() {
+            finish = choice["finish_reason"].clone();
+        }
+        let delta = &choice["delta"];
+        if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
+            content.push_str(text);
+            let _ = deltas.send(ChatStream::Text(text.to_string()));
+        }
+        for call in delta["tool_calls"].as_array().into_iter().flatten() {
+            let index = call["index"].as_u64().unwrap_or(calls.len() as u64) as usize;
+            while calls.len() <= index {
+                calls.push(Default::default());
+            }
+            let slot = &mut calls[index];
+            if let Some(id) = call["id"].as_str() {
+                slot.0 = id.to_string();
+            }
+            if let Some(name) = call["function"]["name"].as_str() {
+                slot.1.push_str(name);
+            }
+            if let Some(arguments) = call["function"]["arguments"].as_str() {
+                slot.2.push_str(arguments);
+            }
+        }
+        Ok(true)
+    })
+    .await?;
+    let tool_calls: Vec<Value> = calls.into_iter().map(|(id, name, arguments)| json!({ "id": id, "type": "function", "function": { "name": name, "arguments": arguments } })).collect();
+    let mut message = json!({ "role": "assistant", "content": content });
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = json!(tool_calls);
+    }
+    Ok((json!({ "choices": [{ "message": message, "finish_reason": finish }] }), input, output))
+}
+
 /// A conversation with tools through chat completions (function calling).
 async fn chat_completions_with_tools(provider: &Provider, request: &ChatRequest, max_tokens: u64) -> Result<(String, Vec<ToolCall>, u64, u64)> {
     let mut messages = vec![json!({ "role": "system", "content": request.system })];
@@ -674,7 +876,10 @@ async fn chat_completions_with_tools(provider: &Provider, request: &ChatRequest,
         let tools: Vec<Value> = request.tools.iter().map(|t| json!({ "type": "function", "function": { "name": t.name, "description": t.description, "parameters": t.input_schema } })).collect();
         body.insert("tools".into(), json!(tools));
     }
-    let (reply, input, output) = post_chat_completions(provider, body, max_tokens).await?;
+    let (reply, input, output) = match &request.deltas {
+        Some(deltas) => post_chat_completions_streamed(provider, body, max_tokens, deltas).await?,
+        None => post_chat_completions(provider, body, max_tokens).await?,
+    };
     let choice = &reply["choices"][0];
     match choice["finish_reason"].as_str() {
         Some("content_filter") => bail!("The provider's content filter declined the request."),
@@ -755,6 +960,50 @@ mod tests {
         assert_eq!(month_key(a), month_key(b));
         assert_ne!(month_key(a).0, month_key(c).0);
         assert_eq!(month_key(a).1, "2026-10");
+    }
+
+    /// A chat completions server that streams one reply: text in two chunks,
+    /// a tool call whose arguments come in pieces, and usage at the end.
+    async fn streaming_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 64 * 1024];
+            let _ = socket.read(&mut request).await;
+            let chunks = [
+                json!({ "choices": [{ "delta": { "role": "assistant", "content": "Let me " } }] }),
+                json!({ "choices": [{ "delta": { "content": "count." } }] }),
+                json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "call_9", "type": "function", "function": { "name": "count", "arguments": "{\"tessel" } }] } }] }),
+                json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "lation\":\"orders\"}" } }] }, "finish_reason": "tool_calls" }] }),
+                json!({ "choices": [], "usage": { "prompt_tokens": 21, "completion_tokens": 9 } }),
+            ];
+            let mut body: String = chunks.iter().map(|c| format!("data: {}\r\n\r\n", c)).collect();
+            body.push_str("data: [DONE]\r\n\r\n");
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+        });
+        format!("http://{}", address)
+    }
+
+    #[tokio::test]
+    async fn streamed_chat_completions_put_text_and_tool_calls_back_together() {
+        let provider = Provider { kind: "openai_compatible".into(), model: "m".into(), base_url: streaming_server().await, key: None, legacy: false };
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let request = ChatRequest { feature: "chat".into(), system: "s".into(), turns: vec![Turn::User("How many?".into())], tools: Vec::new(), max_tokens: 100, model: None, deltas: Some(sender) };
+        let (text, calls, input, output) = chat_completions_with_tools(&provider, &request, 100).await.unwrap();
+        assert_eq!(text, "Let me count.");
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].id.as_str(), calls[0].name.as_str(), &calls[0].input), ("call_9", "count", &json!({ "tessellation": "orders" })));
+        assert_eq!((input, output), (21, 9));
+        drop(request);
+        let mut pieces = Vec::new();
+        while let Some(piece) = receiver.recv().await {
+            pieces.push(piece);
+        }
+        assert_eq!(pieces, vec![ChatStream::Text("Let me ".into()), ChatStream::Text("count.".into())]);
     }
 
     #[test]
