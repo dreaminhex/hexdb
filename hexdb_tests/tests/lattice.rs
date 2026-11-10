@@ -565,3 +565,37 @@ fn hexes_started_together_start_with_one_overseer() -> Result<()> {
     assert_eq!(roles.iter().filter(|r| r.as_str() == "Overseer").count(), 1, "roles right after a simultaneous start: {:?}", roles);
     Ok(())
 }
+
+/// HDB-07 (code review, 2026-11-10): with full copies, a replica that missed
+/// the last writes doesn't take over from the one that has them, however much
+/// more RAM it has, and every acknowledged write survives the failover.
+#[test]
+fn failover_goes_to_the_replica_with_the_newest_writes() -> Result<()> {
+    let cluster = Cluster::new(3)?;
+    let full = |options: TestOptions| TestOptions { extra_toml: format!("{}\n[replication]\nslicing = false\n", options.extra_toml), ..options };
+    let mut overseer = TestServer::start_with(full(cluster.options(0, 8192, "auto")))?;
+    assert_eq!(role(&overseer)?, "Overseer");
+    overseer.insert("notes", &json!({ "n": -1 }))?;
+    let mut big = TestServer::start_with(full(cluster.options(1, 4096, "auto")))?;
+    let small = TestServer::start_with(full(cluster.options(2, 1024, "auto")))?;
+    for replica in [&big, &small] {
+        wait_until(Duration::from_secs(30), "the replicas to copy the data", || Ok(replication(replica)?["state"] == "streaming" && count_on(replica, "notes")? == 1))?;
+    }
+
+    // The big replica stops; the writes that follow reach only the small one.
+    big.stop()?;
+    for i in 0..20 {
+        overseer.insert("notes", &json!({ "n": i }))?;
+    }
+    wait_until(Duration::from_secs(30), "the small replica to have every write", || Ok(count_on(&small, "notes")? == 21))?;
+
+    // The Overseer is lost and the big, stale replica comes back.
+    overseer.kill();
+    big.launch()?;
+    wait_until(Duration::from_secs(60), "a new Overseer", || Ok(role(&small)? == "Overseer" || role(&big)? == "Overseer"))?;
+    assert_eq!(role(&small)?, "Overseer", "the replica with the newest writes leads");
+    assert_eq!(role(&big)?, "Harvester");
+    assert_eq!(count_on(&small, "notes")?, 21, "nothing acknowledged was lost");
+    wait_until(Duration::from_secs(60), "the big replica to catch up", || Ok(count_on(&big, "notes")? == 21))?;
+    Ok(())
+}
