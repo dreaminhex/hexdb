@@ -200,6 +200,7 @@ async fn server() -> anyhow::Result<()> {
         knows: Vec::new(),
         lag_ms: None,
         listening_since: 0,
+        listening_since_ns: 0,
     };
     let role = elect(&provisional, &peers);
     match peers.iter().find(|p| p.role == ROLE_OVERSEER) {
