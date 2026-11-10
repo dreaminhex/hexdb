@@ -27,6 +27,9 @@ pub const REPLICATION_TESSELLATION: &str = "_replication";
 pub struct Progress {
     pub applied_seq: u64,
     pub seen: std::time::Instant,
+    /// How far the replica holds the content of the files it applied (see
+    /// `files::content`); none from a replica that doesn't report it.
+    pub content_seq: Option<u64>,
 }
 
 /// Replicas that haven't polled for this long don't count as acknowledging.
@@ -117,7 +120,8 @@ impl HexDBEngine {
         if progress.len() > 1000 && !progress.contains_key(hex) {
             progress.retain(|_, p| p.seen.elapsed() < PROGRESS_STALE);
         }
-        progress.insert(hex.to_string(), Progress { applied_seq, seen: std::time::Instant::now() });
+        let content_seq = progress.get(hex).and_then(|p| p.content_seq);
+        progress.insert(hex.to_string(), Progress { applied_seq, seen: std::time::Instant::now(), content_seq });
         drop(progress);
         self.progress_notify.notify_waiters();
     }
@@ -142,9 +146,15 @@ impl HexDBEngine {
         self.changes_after(after, 1).await.ok()?.first().map(|c| c.timestamp)
     }
 
-    /// Replicas (polled recently) that have applied `seq`.
-    fn acks_for(&self, seq: u64) -> usize {
-        self.replica_progress.lock().unwrap().values().filter(|p| p.seen.elapsed() < PROGRESS_STALE && p.applied_seq >= seq).count()
+    /// Replicas (polled recently) that have applied `seq`, and with `content`,
+    /// hold the content of the files it brought too (see `files::content`).
+    fn acks_for(&self, seq: u64, content: bool) -> usize {
+        self.replica_progress
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.seen.elapsed() < PROGRESS_STALE && p.applied_seq >= seq && (!content || p.content_seq.is_none_or(|c| c >= seq)))
+            .count()
     }
 
     /// With `replication.min_acks`, wait until that many replicas have applied
@@ -155,17 +165,19 @@ impl HexDBEngine {
         if wanted == 0 || tessellations.iter().all(|t| NO_ACK_TESSELLATIONS.contains(t)) || SKIP_ACKS.try_with(|skip| *skip).unwrap_or(false) {
             return Ok(());
         }
+        // A write to a files tessellation counts a replica once it has the files' content too.
+        let content = tessellations.iter().any(|t| self.holds_files(t));
         let timeout = std::time::Duration::from_millis(live.ack_timeout_ms.max(1));
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             // Register before checking so a report in between isn't missed.
             let notified = self.progress_notify.notified();
-            let acks = self.acks_for(seq);
+            let acks = self.acks_for(seq, content);
             if acks >= wanted {
                 return Ok(());
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                let acks = self.acks_for(seq);
+                let acks = self.acks_for(seq, content);
                 if acks >= wanted {
                     return Ok(());
                 }
@@ -301,7 +313,11 @@ impl HexDBEngine {
                 whole,
             ));
         }
-        // Fetch the content of the files that arrived.
+        // Fetch the content of the files that arrived; until it's here, the
+        // content position stays before this batch.
+        if let Some(cursor) = cursor {
+            self.track_content(&cursor.source_id, cursor.applied_seq, &manifests);
+        }
         for manifest in manifests {
             self.queue_chunk_sync(manifest);
         }

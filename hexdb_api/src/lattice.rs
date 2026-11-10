@@ -367,6 +367,19 @@ pub async fn ai_usage(method: Method, uri: Uri, headers: HeaderMap, axum::extrac
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// A replica's content position (see `hexdb_core::engine::files::content`):
+/// it holds the content of every file up to `seq` of this hex's history.
+pub async fn content(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let body: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let (hex, source, seq) = (body["hex"].as_str(), body["source_id"].as_str(), body["seq"].as_u64());
+    let (Some(hex), Some(source), Some(seq)) = (hex, source, seq) else {
+        return Err(ApiError::invalid("hex, source_id and seq are required."));
+    };
+    engine.record_content_progress(hex, source, seq);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 /// Re-hash an API key with the current lattice key, asked by a replica that
 /// verified it with a previous one (see hexdb_core::auth::authenticate).
 pub async fn rehash_key(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {

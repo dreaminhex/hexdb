@@ -210,8 +210,10 @@ pub fn spawn_extraction_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Recei
     supervise_background("extraction", shutdown_rx.clone(), move || e.clone().run_extraction(rx.clone()));
     let (e, rx) = (engine.clone(), shutdown_rx.clone());
     supervise_background("AI files", shutdown_rx.clone(), move || e.clone().run_ai_files(rx.clone()));
+    let (e, rx) = (engine.clone(), shutdown_rx.clone());
+    supervise_background("file sync", shutdown_rx.clone(), move || e.clone().run_file_sync(rx.clone()));
     let rx = shutdown_rx.clone();
-    supervise_background("file sync", shutdown_rx, move || engine.clone().run_file_sync(rx.clone()));
+    supervise_background("content reports", shutdown_rx, move || engine.clone().run_content_reports(rx.clone()));
 }
 
 /// Verify every shard in the chunk store and repair bad ones every `interval`.
