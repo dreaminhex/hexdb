@@ -1304,20 +1304,36 @@ impl HexDBEngine {
         };
         let (ack, first, (changes, count)) = (ack, first, changes);
 
-        // Publish once durable. A failed write still consumes its sequence
-        // numbers, so the feed is told about the range either way.
-        if let Err(e) = ack.wait().await {
-            self.changes.complete(first, count, Vec::new());
-            return Err(e);
-        }
         for change in &changes {
             if let Some(doc) = &change.document {
                 self.note_for_embedding(&change.tessellation, doc);
             }
         }
-        self.changes.complete(first, count, changes);
-        self.writes_total.fetch_add(user_writes, std::sync::atomic::Ordering::Relaxed);
         if roles_changed {
+            // Done by the next commit if this request goes away before the refresh below.
+            self.seal_refresh_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        // Publish once durable, in a task of its own: the commit is accepted (it's
+        // in the hex and queued to the WAL), so its sequence numbers must reach the
+        // feed even if this request is dropped meanwhile (a timeout, a client gone),
+        // or every later change would wait behind the gap. A failed write still
+        // consumes its numbers, so the feed is told about the range either way.
+        let completer = self.changes.completer();
+        let completion = tokio::spawn(async move {
+            match ack.wait().await {
+                Ok(()) => {
+                    completer.complete(first, count, changes);
+                    Ok(())
+                }
+                Err(e) => {
+                    completer.complete(first, count, Vec::new());
+                    Err(e)
+                }
+            }
+        });
+        completion.await.map_err(|e| anyhow!("The commit's completion stopped: {}", e))??;
+        self.writes_total.fetch_add(user_writes, std::sync::atomic::Ordering::Relaxed);
+        if self.seal_refresh_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
             self.refresh_seal_policy().await;
         }
         if !replicated {

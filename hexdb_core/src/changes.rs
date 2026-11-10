@@ -105,7 +105,14 @@ pub struct HistoryExpired {
 pub type FollowResult = Result<(Vec<Arc<Change>>, broadcast::Receiver<Arc<Change>>), HistoryExpired>;
 
 pub struct ChangeFeed {
-    inner: Mutex<FeedInner>,
+    inner: Arc<Mutex<FeedInner>>,
+    sender: broadcast::Sender<Arc<Change>>,
+}
+
+/// A handle that completes commits on the feed, held by a commit's completion
+/// task so the feed advances even if the request that made the commit is gone.
+pub(crate) struct FeedCompleter {
+    inner: Arc<Mutex<FeedInner>>,
     sender: broadcast::Sender<Arc<Change>>,
 }
 
@@ -125,38 +132,26 @@ impl ChangeFeed {
     pub fn new(next_seq: u64, capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(4096);
         ChangeFeed {
-            inner: Mutex::new(FeedInner {
+            inner: Arc::new(Mutex::new(FeedInner {
                 ring: VecDeque::new(),
                 capacity: capacity.max(1),
                 pending: BTreeMap::new(),
                 next: next_seq,
                 floor: next_seq.saturating_sub(1),
-            }),
+            })),
             sender,
         }
+    }
+
+    /// A handle for completing commits from a task of their own.
+    pub(crate) fn completer(&self) -> FeedCompleter {
+        FeedCompleter { inner: self.inner.clone(), sender: self.sender.clone() }
     }
 
     /// Record that sequence numbers `first..first+count` have committed,
     /// producing `changes` (possibly fewer, e.g. none after a failed write).
     pub(crate) fn complete(&self, first: u64, count: u64, changes: Vec<Change>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.pending.insert(first, (count, changes));
-        loop {
-            let next = inner.next;
-            let Some((count, changes)) = inner.pending.remove(&next) else { break };
-            inner.next = next + count.max(1);
-            for change in changes {
-                let change = Arc::new(change);
-                if inner.ring.len() == inner.capacity {
-                    if let Some(evicted) = inner.ring.pop_front() {
-                        inner.floor = evicted.seq;
-                    }
-                }
-                inner.ring.push_back(change.clone());
-                // No receivers is fine.
-                let _ = self.sender.send(change);
-            }
-        }
+        self.completer().complete(first, count, changes)
     }
 
     /// Live changes from now on. Combine with `since` to catch up first.
@@ -212,6 +207,30 @@ impl ChangeFeed {
     /// Changes after this sequence number can be read with `since`.
     pub fn available_after(&self) -> u64 {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).floor
+    }
+}
+
+impl FeedCompleter {
+    /// See [`ChangeFeed::complete`].
+    pub(crate) fn complete(&self, first: u64, count: u64, changes: Vec<Change>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.pending.insert(first, (count, changes));
+        loop {
+            let next = inner.next;
+            let Some((count, changes)) = inner.pending.remove(&next) else { break };
+            inner.next = next + count.max(1);
+            for change in changes {
+                let change = Arc::new(change);
+                if inner.ring.len() == inner.capacity {
+                    if let Some(evicted) = inner.ring.pop_front() {
+                        inner.floor = evicted.seq;
+                    }
+                }
+                inner.ring.push_back(change.clone());
+                // No receivers is fine.
+                let _ = self.sender.send(change);
+            }
+        }
     }
 }
 
