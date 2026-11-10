@@ -199,6 +199,7 @@ async fn server() -> anyhow::Result<()> {
         region: config.identity.effective_region(),
         knows: Vec::new(),
         lag_ms: None,
+        listening_since: 0,
     };
     let role = elect(&provisional, &peers);
     match peers.iter().find(|p| p.role == ROLE_OVERSEER) {
@@ -260,7 +261,9 @@ async fn server() -> anyhow::Result<()> {
     // back instead of handing it to a replica that would have to rebuild.
     {
         let local = hexdb_core::network::discovery::local_identity(&engine).await;
-        let role = elect(&local, &peers);
+        // Of hexes started together, only the first to listen keeps an Overseer claim.
+        let (local, settled) = hexdb_core::network::discovery::settle_start(local, peers.clone());
+        let role = elect(&local, &settled);
         if role != engine.role() {
             info!("🎖️ With its data loaded, this hex starts as {} (not {}).", role, engine.role());
             engine.set_role(&role);
