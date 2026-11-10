@@ -552,9 +552,11 @@ function LatticeCard({ status }: { status: Status }) {
           </p>
         ) : (
           <p className="text-muted-foreground pt-1 text-xs">
-            {lattice.hexes.some((h) => h.role !== "Overseer" && h.slices_held !== undefined && h.slices_held < 64)
+            {lattice.hexes.some((h) => h.role !== "Overseer" && h.role !== "Oracle" && h.slices_held !== undefined && h.slices_held < 64)
               ? "The Overseer takes writes and keeps every slice; the replicas share the slices (each kept by at least one) and pass queries to the Overseer. Replicants never become Overseer."
               : "The Overseer takes writes; Harvesters and Replicants keep full copies and serve reads. Replicants never become Overseer."}
+            {lattice.hexes.some((h) => h.role === "Oracle" && h.status === "active") &&
+              " The Oracle answers the lattice's AI questions (MCP, chat, A2A) and keeps no data: it reads what it needs from the other hexes."}
           </p>
         )}
       </CardContent>
@@ -564,6 +566,7 @@ function LatticeCard({ status }: { status: Status }) {
 
 function replicationLabel(hex: Status["network"]["lattice"]["hexes"][number]): string {
   const label = replicationState(hex)
+  if (hex.role === "Oracle") return "AI questions · no data"
   // A sliced replica keeps part of the data.
   if (hex.role !== "Overseer" && hex.slices_held !== undefined && hex.slices_held < 64) return `${label} · ${hex.slices_held}/64 slices`
   return label
@@ -708,6 +711,24 @@ function ReplicaBanner({ status }: { status: Status }) {
   }
   if (!r || r.state === "leading") return null
   const overseer = status.network.lattice.hexes.find((h) => h.role === "Overseer" && h.status === "active")
+  if (status.hex_type === "Oracle") {
+    return (
+      <div className="bg-muted/50 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-4 py-3 text-sm">
+        <Badge variant="secondary">Oracle</Badge>
+        <span>
+          This hex is the lattice's Oracle: it answers AI questions (MCP, chat, A2A) and keeps no data. Other requests are answered by
+          {overseer ? (
+            <>
+              {" "}
+              the Overseer <span className="font-medium">{overseer.name}</span>.
+            </>
+          ) : (
+            <> the Overseer, and none is reachable right now.</>
+          )}
+        </span>
+      </div>
+    )
+  }
   return (
     <div className="bg-muted/50 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-4 py-3 text-sm">
       <Badge variant="secondary">{status.hex_type}</Badge>

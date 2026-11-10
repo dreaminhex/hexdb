@@ -848,11 +848,11 @@ impl HexDBEngine {
         let overseer = self.overseer_endpoint.read().unwrap().clone();
         Err(EngineError::ReadOnly(match overseer {
             Some(endpoint) => format!(
-                "This hex is a {} (a read-only replica). Send writes to the Overseer at http://{}.",
-                self.role(),
+                "This hex is {} (a read-only replica). Send writes to the Overseer at http://{}.",
+                crate::network::discovery::a_role(&self.role()),
                 endpoint
             ),
-            None => format!("This hex is a {} (a read-only replica) and no Overseer is reachable right now; try again shortly.", self.role()),
+            None => format!("This hex is {} (a read-only replica) and no Overseer is reachable right now; try again shortly.", crate::network::discovery::a_role(&self.role())),
         })
         .into())
     }

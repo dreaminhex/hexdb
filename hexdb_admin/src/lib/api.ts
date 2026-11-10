@@ -222,7 +222,7 @@ export interface LatticeHex {
   status: string
   ip: string
   api_endpoint: string
-  /** Configured role preference: auto, overseer, harvester, or replicant. */
+  /** Configured role preference: auto, overseer, harvester, replicant or oracle. */
   preference: string
   last_seq: number
   last_seen: string | null

@@ -82,7 +82,7 @@ fn still_overseer(engine: &HexDBEngine) -> Result<(), ApiError> {
     if engine.is_writable() {
         return Ok(());
     }
-    Err(ApiError::new(StatusCode::CONFLICT, "not_overseer", format!("This hex is a {} now; replicate from the Overseer.", engine.role())))
+    Err(ApiError::new(StatusCode::CONFLICT, "not_overseer", format!("This hex is {} now; replicate from the Overseer.", hexdb_core::network::discovery::a_role(&engine.role()))))
 }
 
 /// A signed request to an endpoint only the Overseer serves.
@@ -92,7 +92,7 @@ pub(crate) fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Meth
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "not_overseer",
-            format!("This hex is a {}; replicate from the Overseer.", engine.role()),
+            format!("This hex is {}; replicate from the Overseer.", hexdb_core::network::discovery::a_role(&engine.role())),
         ));
     }
     Ok(())

@@ -50,6 +50,12 @@ pub const ROLE_REPLICANT: &str = "Replicant";
 /// data, so AI traffic and its waiting stay off them (see `hexdb_api::oracle`).
 pub const ROLE_ORACLE: &str = "Oracle";
 
+/// A role with its article, for messages: "an Overseer", "a Harvester".
+pub fn a_role(role: &str) -> String {
+    let article = if role.starts_with(['A', 'E', 'I', 'O', 'U']) { "an" } else { "a" };
+    format!("{} {}", article, role)
+}
+
 const LOCAL_PORTS: std::ops::Range<u16> = 7702..7710;
 /// How long to wait for one peer to connect and identify itself. Generous: a
 /// hex on a throttled shared CPU is slow, not gone, and probes run in parallel.

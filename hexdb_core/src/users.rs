@@ -992,7 +992,7 @@ pub async fn bootstrap(engine: &HexDBEngine, security: &SecurityConfig) -> Resul
 async fn bootstrap_inner(engine: &HexDBEngine, security: &SecurityConfig) -> Result<()> {
     // Replicas receive users and roles from the Overseer.
     if !engine.is_writable() {
-        info!("🔐 This hex is a {}; users and roles are replicated from the Overseer.", engine.role());
+        info!("🔐 This hex is {}; users and roles are replicated from the Overseer.", crate::network::discovery::a_role(&engine.role()));
         return Ok(());
     }
     let login = security.admin_login.trim();

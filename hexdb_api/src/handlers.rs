@@ -1834,6 +1834,7 @@ pub async fn join_info(
         "Put the first snippet in the new hex's hexdb.toml and the second in hexdb.local.toml (keep that file private).".to_string(),
         "The new hex finds the lattice through the seed addresses, takes a full copy of the data, and then follows the Overseer.".to_string(),
         "To try a second hex on this machine: hexdb lattice spawn --count 1 (from the folder with this hex's hexdb.toml).".to_string(),
+        "To make it the lattice's Oracle (it answers the AI questions and keeps no data), add [identity] role = \"oracle\".".to_string(),
     ];
     if loopback {
         notes.push(format!(
