@@ -81,6 +81,7 @@ What it doesn't do (yet):
 | Overseer | The one hex that takes writes. It publishes the change feed and runs plugins, stream sources and destinations, and schedules |
 | Harvester | A read replica that follows the Overseer and can be elected Overseer if it fails |
 | Replicant | A standby copy that follows the Overseer but is never elected; for backups and rebuilding Harvesters |
+| Oracle | The lattice's AI hex: it answers the AI questions (MCP, the chat, A2A), keeps no user data and is never elected. See [The Oracle](#the-oracle) |
 
 **System tessellation.** A tessellation HexDB manages itself, such as `users`, `roles`, `_audit`, `_streams` or `_functions`. The generic document routes refuse them. They're stored, encrypted and replicated like user data.
 
@@ -2268,7 +2269,7 @@ Every hex runs the same election over the same view, so they agree without a con
 1. Candidates are live hexes whose `identity.role` is `auto` or `overseer`.
 2. A hex that is already Overseer keeps the role while it's alive, whatever the others prefer, so leadership doesn't flap when a larger hex joins and no hex takes the role without the writes the sitting Overseer accepted. If two claim it (after a partition heals), one that prefers `overseer` wins, then the better-ranked one.
 3. Otherwise, if any candidates prefer `overseer`, only those count. Then, in a sliced lattice, the hex furthest along the change history wins, and among those equally far along, the one holding the most slices, so a hex with every slice is preferred to one that would have to collect them first. Then (and in a lattice without slicing) candidates are ranked by RAM, then disk, then ID.
-4. Every other hex is a Harvester, or a Replicant if it prefers that. `harvester` and `replicant` hexes never lead.
+4. Every other hex is a Harvester, or a Replicant or [Oracle](#the-oracle) if it prefers that. `harvester`, `replicant` and `oracle` hexes never lead.
 
 **A hex that prefers to lead gets the role back by handover.** When a hex with `identity.role = "overseer"` comes back while another hex leads (it was away, or handed over when it stopped), it follows like any replica. Once it has every change, the sitting Overseer hands the role to it, the same way an Overseer hands over before stopping (writes are held for a moment; one caught mid-commit gets 503 with a retry hint), and carries on as a replica. If the handover can't finish, the sitting Overseer keeps the role and tries again five minutes later.
 
@@ -2669,7 +2670,7 @@ Limits, so a public deployment's users can't spend its owner's tokens:
 | `ai.chat.client_daily_tokens` | 50,000 | Per client address per day; separates visitors who share a login |
 | `ai.chat.client_questions_per_minute` | 6 | Per client address; 429 with `Retry-After` |
 
-All of it is also bounded by `ai.monthly_token_budget`. Chat requests sent to a replica run on the Overseer, which keeps the counters in memory (they restart with it; the monthly budget doesn't). When a limit is reached, the 429 says when it resets: the daily allowances at midnight UTC (with `Retry-After`), the monthly budget on the first of next month. A question stops offering lookups once half its allowance is spent, so the model always has room to answer with what it found.
+All of it is also bounded by `ai.monthly_token_budget`. Chat requests sent to a replica run on the Overseer (on the [Oracle](#the-oracle), when the lattice has one), which keeps the counters in memory (they restart with it; the monthly budget doesn't). When a limit is reached, the 429 says when it resets: the daily allowances at midnight UTC (with `Retry-After`), the monthly budget on the first of next month. A question stops offering lookups once half its allowance is spent, so the model always has room to answer with what it found.
 
 ### MCP server
 
@@ -2679,7 +2680,7 @@ All of it is also bounded by `ai.monthly_token_budget`. Chat requests sent to a 
 claude mcp add --transport http hexdb https://hexdb.example.com/mcp --header "Authorization: Bearer hxk_..."
 ```
 
-The tools are the same as the chat's, and all read-only: `list_tessellations`, `describe_tessellation` (schema, indexes, text-search fields, sample field names), `query` (filter, sort, fields), `get_document`, `search` (full text), `count`, `aggregate`, and `sql` (a `SELECT` on one tessellation). An [OAuth access token](#oauth-access-tokens) works in place of the key. They run with the key's permissions, row filters and field masks, return at most 25 documents and about 24 KB, and shorten long strings. The MCP server doesn't call an AI provider (the client brings its own model) and costs no tokens here. Any hex answers; `GET /mcp` (an event stream) returns 405.
+The tools are the same as the chat's, and all read-only: `list_tessellations`, `describe_tessellation` (schema, indexes, text-search fields, sample field names), `query` (filter, sort, fields), `get_document`, `search` (full text), `count`, `aggregate`, and `sql` (a `SELECT` on one tessellation). An [OAuth access token](#oauth-access-tokens) works in place of the key. They run with the key's permissions, row filters and field masks, return at most 25 documents and about 24 KB, and shorten long strings. The MCP server doesn't call an AI provider (the client brings its own model) and costs no tokens here. Any hex answers (the [Oracle](#the-oracle), when the lattice has one); `GET /mcp` (an event stream) returns 405.
 
 ### A2A (Agent2Agent)
 
@@ -2699,7 +2700,22 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 - **`GetTask`**, **`ListTasks`** (optionally by `contextId`) and **`CancelTask`** see only the caller's own tasks. Tasks are kept for an hour (at most 2,000), and cancelling a finished task gives -32002. `SubscribeToTask` gives -32004 (tasks finish with their answer).
 - **Push notifications.** A task can have up to 10 webhooks, and HexDB POSTs the task to each when it finishes: `{"task": ...}` as `application/a2a+json`, with the config's `token` in `X-A2A-Notification-Token` and its `authentication` as `Authorization: <scheme> <credentials>`, so the receiver can check the call. Give one with the question (`"configuration": {"taskPushNotificationConfig": {"url", "token", "authentication": {"scheme": "Bearer", "credentials"}}}`), adding `"returnImmediately": true` to get the working task back at once and the answer at the webhook; or add one to an existing task with `CreateTaskPushNotificationConfig` (`{"taskId", "url", ...}`; a task that has already finished is sent right away). `GetTaskPushNotificationConfig` and `DeleteTaskPushNotificationConfig` take `{"taskId", "id"}`, and `ListTaskPushNotificationConfigs` takes `{"taskId"}`; answers never show the credentials. Webhooks must be `https` and resolve only to public addresses, checked when the config is made and again when sending (connecting to the checked address, without following redirects), so they can't be pointed at services inside your network; `a2a.push_private_networks` allows `http` and private addresses for agents on the same network. A delivery times out after 15 seconds and is tried three times (after 1 and 4 seconds) on network errors, 429 and 5xx; failures are logged. Like tasks, configs live in memory on the Overseer for an hour.
 - **A2A 0.3 clients** work too: `message/send`, `message/stream`, `tasks/get`, `tasks/cancel` and `tasks/pushNotificationConfig/set`, `get`, `list` and `delete` get 0.3-shaped answers (and 0.3 webhooks receive the bare 0.3 task; `"blocking": false` works like `returnImmediately`) (`kind` fields, lowercase states and roles; stream events are `task`, `status-update` with `final`, and `artifact-update`). Other `A2A-Version` values get -32009.
-- Requests to `/a2a` are forwarded to the Overseer like the chat, where tasks, contexts and the chat's counters live, in memory. They aren't cut off by `limits.request_timeout_seconds`: the chat's limits bound how long an answer takes.
+- Requests to `/a2a` are forwarded to the Overseer like the chat (to the [Oracle](#the-oracle), when the lattice has one), where tasks, contexts and the chat's counters live, in memory. They aren't cut off by `limits.request_timeout_seconds`: the chat's limits bound how long an answer takes.
+
+### The Oracle
+
+An Oracle is a hex that does the lattice's AI work: give one hex `identity.role = "oracle"` and, while it's live, the other hexes pass it every AI question (`POST /mcp`, `/ai/chat` and `/a2a` with its tasks). The model calls, the waiting on the provider, the tool-use loop and the chat's per-user and per-address counters then stay off the hexes that hold the data, and AI traffic can be sized and scaled on its own machine.
+
+- **It keeps no data.** An Oracle never becomes Overseer and holds none of the slices: only the system tessellations (users, roles, the configuration) replicate to it, so it can check credentials and knows the AI settings. Each lookup the model makes (`query`, `count`, `sql` and the other tools) runs on a hex that holds every slice, a replica if there is one, otherwise the Overseer, through a signed `POST /lattice/ai-tool` that names the user. That hex runs the tool as the user with their roles as they stand there (read permissions, row filters, field masks; a locked or deleted user gets nothing), and the Oracle cuts the result to size as usual. Other requests sent to an Oracle are passed to the Overseer, as a sliced replica does.
+- **It doesn't count as a replica.** It isn't one of the `replication.min_acks` replicas a write waits for, a handover doesn't wait for it, and other hexes don't fetch files from it.
+- **Without it, nothing stops.** When no Oracle is live, or it can't be reached, every hex answers AI questions itself, as before. A caller the Oracle doesn't know yet (a user or key created a moment ago, not replicated to it) is answered by the hex they asked.
+- **Answers** carry `X-HexDB-Forwarded-To` with the Oracle's name. The dashboard's lattice card shows it as Oracle, "AI questions, no data". A2A tasks and the chat's counters live on the Oracle (in memory); the monthly budget is recorded on the Overseer as before.
+- **One per lattice is the usual setup.** With more than one, every hex sends AI questions to the same one (the lowest ID), and the others take over if it's lost. Embeddings for vector indexes and AI file tagging stay on the Overseer, on the write path.
+
+```toml
+[identity]
+role = "oracle"
+```
 
 `POST /ai/complete` lets plugins and scripts use the lattice's provider without a key of their own; it needs the `ai` permission (the built-in `ai` role) and its usage is recorded as `api:<login>`. A plugin gets it with `ai = true` in its manifest's `[access]` section. The Configuration page has a "Test" button and shows the month's usage; the CLI has `hexdb config ai-test` and `hexdb config ai-usage`.
 
@@ -2717,7 +2733,7 @@ curl https://hexdb.example.com/a2a -H "Authorization: Bearer hxk_..." -H "A2A-Ve
 | `network.lattice_secret` | derived | The shared key that authenticates hexes |
 | `network.previous_lattice_secrets` | `[]` | Old secrets still accepted, for rotation |
 | `network.trusted_proxies` | `[]` | Proxies whose `X-Forwarded-For` is trusted |
-| `identity.role` | `auto` | `auto`, `overseer`, `harvester` or `replicant` |
+| `identity.role` | `auto` | `auto`, `overseer`, `harvester`, `replicant` or `oracle` |
 | `identity.name` | generated | The hex's name (1-64 characters); drawn and saved on the first start when empty |
 | `identity.region` | `FLY_REGION`, else empty | Where the hex runs (a region code such as `iad`), shown on the dashboard; see [Regions](#regions) |
 | `storage.path` | `./.hexdb` | Data directory |
