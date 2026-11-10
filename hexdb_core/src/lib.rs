@@ -86,5 +86,5 @@ pub use aggregate::{parse_aggregates, AggregateOp, AggregateResult, AggregateSpe
 pub use tasks::{spawn_vertex_monitoring_task, spawn_ttl_sweep_task, spawn_flush_task, spawn_compaction_task, spawn_metrics_task, spawn_scrub_task, spawn_extraction_task};
 pub use network::discovery::{
     discover_peers, discovery_round, elect, local_identity, parse_preference, resolve_hex_identity, spawn_discovery_task, start_discovery_listener, bind_discovery, NameSource,
-    LatticeMember, PeerHex, ROLE_HARVESTER, ROLE_OVERSEER, ROLE_REPLICANT,
+    LatticeMember, PeerHex, ROLE_HARVESTER, ROLE_ORACLE, ROLE_OVERSEER, ROLE_REPLICANT,
 };

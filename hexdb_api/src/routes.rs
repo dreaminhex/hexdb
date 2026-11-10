@@ -144,6 +144,7 @@ pub fn app_router(
         .route("/lattice/revoke", post(crate::lattice::revoke))
         .route("/lattice/audit", post(crate::lattice::audit))
         .route("/lattice/ai-usage", post(crate::lattice::ai_usage))
+        .route(crate::oracle::TOOL_PATH, post(crate::oracle::ai_tool))
         .route("/lattice/rehash-key", post(crate::lattice::rehash_key))
         .route("/lattice/share-download", post(crate::lattice::share_download))
         .route("/lattice/throttle", post(crate::lattice::throttle))
@@ -257,16 +258,18 @@ pub fn app_router(
 
     // Layers run outside-in from the last one added: security headers, then
     // the client address, then request logging, then the IP blocklist, then CORS (preflights end
-    // there), then the request timeout, then authentication, then forwarding
-    // writes to the Overseer (on replicas), then the route.
+    // there), then the request timeout, then signing answers for other hexes,
+    // then authentication, then forwarding (AI questions to the Oracle, and
+    // writes to the Overseer on replicas), then the route.
     // Validated at startup (see main).
     let proxies = Arc::new(crate::client::TrustedProxies::parse(&engine.config.network.trusted_proxies).unwrap_or_default());
     let timeout = std::time::Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1));
     let blocklist = crate::blocklist::Blocklist::start(engine.clone());
     let rest = router
-        .layer(middleware::from_fn_with_state(engine.clone(), crate::lattice::sign_responses))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::forward::forward_writes))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::authenticate))
+        // Outside authentication, so a forwarded request's refusal (401, 403) is signed too.
+        .layer(middleware::from_fn_with_state(engine.clone(), crate::lattice::sign_responses))
         .layer(middleware::from_fn_with_state(timeout, crate::server::request_timeout))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::cors::cors))
         .layer(middleware::from_fn_with_state(blocklist.clone(), crate::blocklist::check))

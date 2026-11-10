@@ -887,7 +887,8 @@ impl HexDBEngine {
         let peers: Vec<crate::network::discovery::PeerHex> = {
             let peers = self.peers.lock().await;
             let me = self.id.to_string();
-            let mut list: Vec<_> = peers.iter().filter(|p| p.status == "active" && p.hex.id != me).map(|p| p.hex.clone()).collect();
+            // The Oracle holds no files.
+            let mut list: Vec<_> = peers.iter().filter(|p| p.status == "active" && p.hex.id != me && p.hex.role != crate::network::discovery::ROLE_ORACLE).map(|p| p.hex.clone()).collect();
             list.sort_by_key(|p| p.role != crate::network::discovery::ROLE_OVERSEER);
             list
         };

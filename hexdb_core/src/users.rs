@@ -20,7 +20,7 @@ use crate::{
     engine::{EngineError, IdempotencyKey, Outcome},
     Document, HexDBEngine,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -361,6 +361,19 @@ pub(crate) async fn record_login(engine: &HexDBEngine, id: Ulid, client: &str) -
 
 /// Change your own password: the current one must be given. All other
 /// sessions are signed out.
+/// A user as a principal with their current roles, for work done on their
+/// behalf without their credential (`key_id` labels it, e.g. "oracle").
+/// Refused if the user is gone or locked.
+pub async fn principal_for(engine: &HexDBEngine, user_id: &str, key_id: &str) -> Result<crate::auth::Principal> {
+    let (_, user) = find_by_id(engine, user_id).await?.ok_or_else(|| anyhow!("The user no longer exists."))?;
+    if user.is_locked {
+        bail!("The user '{}' is locked.", user.login);
+    }
+    let definitions = role_definitions(engine).await?;
+    let credential = crate::auth::Credential::ApiKey { key_id: key_id.to_string() };
+    Ok(crate::auth::Principal::new(user_id.to_string(), user.login, user.email_address, user.roles, credential, &definitions).with_attributes(user.attributes))
+}
+
 pub async fn change_own_password(engine: &HexDBEngine, user_id: &str, current: &str, new: &str) -> Result<()> {
     let _lock = engine.users_lock.lock().await;
     let (id, mut user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;

@@ -44,6 +44,11 @@ use tracing::{debug, error, info, warn};
 pub const ROLE_OVERSEER: &str = "Overseer";
 pub const ROLE_HARVESTER: &str = "Harvester";
 pub const ROLE_REPLICANT: &str = "Replicant";
+/// The lattice's AI hex (`identity.role = "oracle"`): it never leads and keeps
+/// no user data. It answers the AI questions (MCP, the chat, A2A) the other
+/// hexes pass to it and reads what they need from the hexes that hold the
+/// data, so AI traffic and its waiting stay off them (see `hexdb_api::oracle`).
+pub const ROLE_ORACLE: &str = "Oracle";
 
 const LOCAL_PORTS: std::ops::Range<u16> = 7702..7710;
 /// How long to wait for one peer to connect and identify itself. Generous: a
@@ -161,8 +166,8 @@ pub struct LatticeMember {
 pub fn parse_preference(value: &str) -> anyhow::Result<String> {
     let lower = value.trim().to_ascii_lowercase();
     match lower.as_str() {
-        "auto" | "overseer" | "harvester" | "replicant" => Ok(lower),
-        _ => anyhow::bail!("identity.role must be auto, overseer, harvester or replicant (got '{}')", value),
+        "auto" | "overseer" | "harvester" | "replicant" | "oracle" => Ok(lower),
+        _ => anyhow::bail!("identity.role must be auto, overseer, harvester, replicant or oracle (got '{}')", value),
     }
 }
 
@@ -677,6 +682,7 @@ pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
     match leader {
         Some(leader) if leader.id == local.id => ROLE_OVERSEER.into(),
         _ if local.preference == "replicant" => ROLE_REPLICANT.into(),
+        _ if local.preference == "oracle" => ROLE_ORACLE.into(),
         _ => ROLE_HARVESTER.into(),
     }
 }
@@ -1037,6 +1043,13 @@ mod tests {
         assert_eq!(elect(&replicant, &[]), ROLE_REPLICANT, "a replicant never leads, even alone");
         let harvester = hex("h", "", "harvester", 8192);
         assert_eq!(elect(&harvester, &[]), ROLE_HARVESTER);
+
+        // The Oracle never leads, even as the biggest hex or one that led before.
+        let oracle = hex("o", ROLE_OVERSEER, "oracle", 65536);
+        let small = hex("s", "", "auto", 512);
+        assert_eq!(elect(&oracle, std::slice::from_ref(&small)), ROLE_ORACLE);
+        assert_eq!(elect(&small, std::slice::from_ref(&oracle)), ROLE_OVERSEER);
+        assert_eq!(parse_preference("Oracle").unwrap(), "oracle");
     }
 
     #[test]

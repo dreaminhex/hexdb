@@ -86,7 +86,7 @@ fn still_overseer(engine: &HexDBEngine) -> Result<(), ApiError> {
 }
 
 /// A signed request to an endpoint only the Overseer serves.
-fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &Uri, body: &[u8]) -> Result<(), ApiError> {
+pub(crate) fn authorize(engine: &HexDBEngine, headers: &HeaderMap, method: &Method, uri: &Uri, body: &[u8]) -> Result<(), ApiError> {
     verify_signature(engine, headers, method, uri, body)?;
     if !engine.is_writable() {
         return Err(ApiError::new(

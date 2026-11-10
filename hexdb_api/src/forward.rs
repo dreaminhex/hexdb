@@ -269,9 +269,83 @@ async fn forward_upload(engine: &Arc<HexDBEngine>, overseer: hexdb_core::network
     out
 }
 
+/// Pass an AI question to the Oracle and its answer back (streamed: A2A answers
+/// with server-sent events). Err: the Oracle couldn't be reached, so the request
+/// is handed back to be answered here.
+async fn forward_to_oracle(engine: &Arc<HexDBEngine>, oracle: &hexdb_core::network::discovery::PeerHex, request: Request) -> Result<Response, Box<Request>> {
+    let Some(http) = forward_client(engine) else { return Err(Box::new(request)) };
+    let (parts, body) = request.into_parts();
+    let bytes: Bytes = match axum::body::to_bytes(body, crate::routes::bulk_body_limit(engine)).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(crate::handlers::ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "The request body is too large.").into_response()),
+    };
+    let client = crate::auth::client_address(&parts.extensions);
+    let path_and_query = parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| parts.uri.path().to_string());
+    let mut headers = HeaderMap::new();
+    copy_headers(&parts.headers, &mut headers);
+    let signature = engine.lattice_keys.sign_request(parts.method.as_str(), &signed_target(&path_and_query, &client), b"");
+    if let (Ok(c), Ok(s)) = (HeaderValue::from_str(&client), HeaderValue::from_str(&signature)) {
+        headers.insert(HeaderName::from_static(FORWARDED_FOR_HEADER), c);
+        headers.insert(HeaderName::from_static(FORWARD_SIGNATURE_HEADER), s);
+    }
+    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
+    let timeout = if crate::server::is_long_running(parts.uri.path()) { Duration::from_secs(3600) } else { Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1)) };
+    let url = format!("{}{}", hexdb_core::replication::peer_base_url(oracle), path_and_query);
+    debug!("🔮 Passing {} {} to the Oracle '{}'.", parts.method, parts.uri.path(), oracle.name);
+    let response = match http.request(method, &url).timeout(timeout).headers(headers).body(bytes.clone()).send().await {
+        Ok(response) => response,
+        // Never reached the Oracle: answering here is safe. Anything else may have run there.
+        Err(e) if e.is_connect() => {
+            warn!("⚠️ The Oracle '{}' couldn't be reached ({}); answering here.", oracle.name, e);
+            return Err(Box::new(Request::from_parts(parts, Body::from(bytes))));
+        }
+        Err(e) => {
+            return Ok(crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "oracle_unreachable", format!("The Oracle '{}' didn't answer: {}", oracle.name, e)).into_response());
+        }
+    };
+    // The Oracle doesn't know a caller this hex just authenticated (a new user or
+    // key it hasn't replicated yet): answer here this time.
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        debug!("🔮 The Oracle '{}' doesn't know this caller yet; answering here.", oracle.name);
+        return Err(Box::new(Request::from_parts(parts, Body::from(bytes))));
+    }
+    let (status, out_headers, answer) = match checked_answer(engine, oracle, &signature, response, None).await {
+        Ok(answer) => answer,
+        Err(refused) => return Ok(refused.into_response()),
+    };
+    let body = match answer {
+        Answer::Checked(body) => Body::from(body),
+        Answer::Unchecked(response) => Body::from_stream(response.bytes_stream()),
+    };
+    let mut out = Response::new(body);
+    *out.status_mut() = status;
+    *out.headers_mut() = out_headers;
+    if let Ok(name) = HeaderValue::from_str(&oracle.name) {
+        out.headers_mut().insert(HeaderName::from_static(FORWARDED_TO_HEADER), name);
+    }
+    out.headers_mut().remove(header::CONTENT_LENGTH);
+    Ok(out)
+}
+
 /// Forward writes to the Overseer when this hex is a replica.
 pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
+    // AI questions go to the lattice's Oracle while one is live; the Oracle
+    // answers them itself (see crate::oracle). One already passed on isn't passed again.
+    if crate::oracle::is_ai_question(request.method(), &path) {
+        if engine.is_oracle() {
+            return next.run(request).await;
+        }
+        if request.extensions().get::<ForwardSignature>().is_none() {
+            if let Some(oracle) = crate::oracle::live_oracle(&engine).await {
+                return match forward_to_oracle(&engine, &oracle, request).await {
+                    Ok(response) => response,
+                    // It couldn't be reached: answer here, as without an Oracle.
+                    Err(request) => next.run(*request).await,
+                };
+            }
+        }
+    }
     if let Some(note) = engine.rebuilding() {
         if !answers_without_data(&path) {
             return crate::handlers::ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "rebuilding", note).with_retry_after(5).into_response();

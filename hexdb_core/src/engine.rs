@@ -825,6 +825,11 @@ impl HexDBEngine {
         !tess.starts_with('_') && !self.is_system_tessellation(tess)
     }
 
+    /// True for the lattice's AI hex (`identity.role = "oracle"`), which keeps no user data.
+    pub fn is_oracle(&self) -> bool {
+        self.role() == crate::network::discovery::ROLE_ORACLE
+    }
+
     pub fn is_writable(&self) -> bool {
         self.role() == crate::network::discovery::ROLE_OVERSEER
     }

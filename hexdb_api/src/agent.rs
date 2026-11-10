@@ -187,8 +187,20 @@ pub async fn call_tool(engine: &HexDBEngine, principal: &Principal, name: &str, 
 async fn call_tool_capped(engine: &HexDBEngine, principal: &Principal, name: &str, input: &Value, cap: usize) -> Result<String, String> {
     // The request's caller scope is already set; this makes it explicit, so row
     // filters and field masks apply wherever this runs.
+    // The Oracle holds no user data: a hex that does runs the tool (see `crate::oracle`).
+    if engine.is_oracle() {
+        return crate::oracle::remote_tool(engine, principal, name, input).await.map(|result| finish(result, cap));
+    }
+    run_tool_as(engine, principal, name, input).await.map(|result| finish(result, cap))
+}
+
+/// Run a tool here as `principal`, its result not yet cut to size (the Oracle cuts it).
+pub async fn run_tool_as(engine: &HexDBEngine, principal: &Principal, name: &str, input: &Value) -> Result<Value, String> {
+    if !tools().iter().any(|t| t.name == name) {
+        return Err(format!("There's no tool '{}'.", name));
+    }
     let caller = Arc::new(principal.clone());
-    hexdb_core::access::as_caller(caller, run_tool(engine, principal, name, input)).await.map(|result| finish(result, cap))
+    hexdb_core::access::as_caller(caller, run_tool(engine, principal, name, input)).await
 }
 
 async fn run_tool(engine: &HexDBEngine, principal: &Principal, name: &str, input: &Value) -> Result<Value, String> {

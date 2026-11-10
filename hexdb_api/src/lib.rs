@@ -16,6 +16,7 @@ pub mod sql;
 pub mod files;
 pub mod config;
 pub mod agent;
+pub mod oracle;
 pub mod mcp;
 pub mod a2a;
 pub mod a2a_push;

@@ -190,7 +190,8 @@ pub async fn hand_over_before_stopping(engine: &HexDBEngine, limit: Duration) {
     }
     let (candidates, replicas) = {
         let peers = engine.peers.lock().await;
-        let active: Vec<_> = peers.iter().filter(|p| p.status == "active").collect();
+        // The Oracle holds no data: it's neither a candidate nor a replica here.
+        let active: Vec<_> = peers.iter().filter(|p| p.status == "active" && p.hex.role != crate::network::discovery::ROLE_ORACLE).collect();
         (active.iter().filter(|p| matches!(p.hex.preference.as_str(), "auto" | "overseer")).count(), active.len())
     };
     // Sliced replicas each lack most of the data, which a new Overseer would collect.
@@ -495,7 +496,9 @@ async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
         // The hexes discovery lists, and any replica polling for changes that it
         // hasn't listed yet (one that just started): either could be elected or
         // must resume, so each must be at the head.
-        let mut replicas: Vec<String> = engine.peers.lock().await.iter().filter(|p| p.status == "active").map(|p| p.hex.id.clone()).collect();
+        // The Oracle isn't among them: it can't be elected and holds no user data.
+        let mut replicas: Vec<String> =
+            engine.peers.lock().await.iter().filter(|p| p.status == "active" && p.hex.role != crate::network::discovery::ROLE_ORACLE).map(|p| p.hex.id.clone()).collect();
         for id in engine.polling_replicas(Duration::from_secs(10)) {
             if !replicas.contains(&id) {
                 replicas.push(id);

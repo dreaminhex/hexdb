@@ -145,9 +145,14 @@ pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_jso
 
 /// POST a JSON body to a hex's lattice API, signed with the lattice key.
 pub async fn post_to_peer(engine: &HexDBEngine, peer: &crate::network::discovery::PeerHex, path: &str, body: &serde_json::Value) -> Result<()> {
+    post_to_peer_for(engine, peer, path, body, Duration::from_secs(10)).await.map(|_| ())
+}
+
+/// [`post_to_peer`], returning the answer's body (its lattice signature checked).
+pub async fn post_to_peer_for(engine: &HexDBEngine, peer: &crate::network::discovery::PeerHex, path: &str, body: &serde_json::Value, timeout: Duration) -> Result<Vec<u8>> {
     let url = format!("{}{}", peer_base_url(peer), path);
     let bytes = serde_json::to_vec(body)?;
-    let client = lattice_client(&engine.config, Duration::from_secs(10))?;
+    let client = lattice_client(&engine.config, timeout)?;
     // A hex that hasn't been given a new lattice secret yet accepts a previous one.
     for index in 0..engine.lattice_keys.len() {
         let signature = engine.lattice_keys.sign_request_with(index, "POST", path, &bytes);
@@ -166,10 +171,9 @@ pub async fn post_to_peer(engine: &HexDBEngine, peer: &crate::network::discovery
         if !status.is_success() {
             bail!("POST {} returned {}", url, status);
         }
-        verified_body(engine, &url, &signature, response).await?;
-        return Ok(());
+        return verified_body(engine, &url, &signature, response).await;
     }
-    Ok(())
+    bail!("POST {}: no lattice key to sign with", url)
 }
 
 /// What replication is doing on this hex, for `/status` and the dashboard.
@@ -827,7 +831,13 @@ impl Follower {
         if catalog_due {
             self.sync_catalog(&base).await?;
         }
-        let url = format!("{}/lattice/changes?after={}&wait={}&limit=1000&hex={}", base, cursor, POLL_SECONDS, self.engine.id);
+        // The Oracle doesn't say who it is: it holds no user data, so its position
+        // must not count as a replica acknowledging a write (replication.min_acks).
+        let url = if self.engine.is_oracle() {
+            format!("{}/lattice/changes?after={}&wait={}&limit=1000", base, cursor, POLL_SECONDS)
+        } else {
+            format!("{}/lattice/changes?after={}&wait={}&limit=1000&hex={}", base, cursor, POLL_SECONDS, self.engine.id)
+        };
         let batch: ChangeBatch = match self.get(&url).await? {
             Ok(batch) => batch,
             Err(status) if status == reqwest::StatusCode::GONE => {
@@ -930,13 +940,21 @@ impl Follower {
     /// The slices this hex should keep: its share of the Overseer's placement,
     /// or all of them (no slicing, or fewer than two replicas).
     async fn wanted_slices(&self, overseer: &LatticeMember) -> SliceMask {
+        // The Oracle keeps no user data (only the system tessellations).
+        if self.engine.is_oracle() {
+            return 0;
+        }
         if !overseer.hex.slicing {
             return ALL_SLICES;
         }
         let me = self.engine.id.to_string();
         let mut replicas: Vec<String> = {
             let peers = self.engine.peers.lock().await;
-            peers.iter().filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.id != me).map(|p| p.hex.id.clone()).collect()
+            peers
+                .iter()
+                .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.role != crate::network::discovery::ROLE_ORACLE && p.hex.id != me)
+                .map(|p| p.hex.id.clone())
+                .collect()
         };
         replicas.push(me.clone());
         if replicas.len() < 2 {
