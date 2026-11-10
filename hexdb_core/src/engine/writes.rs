@@ -794,10 +794,13 @@ impl HexDBEngine {
         self.apply_schemas(&mut items).await?;
         // Answers (and idempotency records) show tokens, as stored, never the values.
         self.tokenize_items(&mut items).await?;
+        // The caller's documents only: the vault entries tokenizing added are
+        // committed with them, under internal rules, but aren't the caller's to
+        // be checked against their row filter or returned (HDB-13).
         let docs = items
             .iter()
             .filter_map(|item| match &item.op {
-                WalOp::Put(doc) => Some(doc.clone()),
+                WalOp::Put(doc) if doc.tessellation != crate::tokens::VAULT_TESSELLATION => Some(doc.clone()),
                 _ => None,
             })
             .collect();

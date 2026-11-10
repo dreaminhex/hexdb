@@ -107,3 +107,27 @@ fn a_replay_after_row_access_is_revoked_is_refused() -> Result<()> {
     assert_eq!(all["documents"].as_array().map(Vec::len), Some(1), "written once: {}", all);
     Ok(())
 }
+
+/// HDB-13: vault entries are committed with a write but aren't the caller's:
+/// they're not checked against the caller's row filter, counted or returned,
+/// in transactions and updates by filter either.
+#[test]
+fn vault_entries_stay_out_of_what_writes_check_and_return() -> Result<()> {
+    let server = TestServer::start()?;
+    tessellation_with_schema(&server, json!({ "card": { "type": "string", "tokenize": "vault" } }))?;
+    let writer = user(&server, "tenant-a", json!(["read", "write"]), json!({ "filter": { "tenant": "A" } }))?;
+    let tx = json!({ "operations": [
+        { "op": "insert", "tessellation": "accounts", "data": { "tenant": "A", "card": "4111111111111111" } },
+        { "op": "insert", "tessellation": "accounts", "data": { "tenant": "A", "card": "5500005555555559" } },
+    ] });
+    let r = server.request_as(Some(&writer), Method::POST, "/transactions", Some(&tx), &[])?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["results"].as_array().map(Vec::len), Some(2), "{}", r.body);
+    assert!(r.body["results"].as_array().unwrap().iter().all(|x| x["tessellation"] == "accounts"), "{}", r.body);
+    let r = server.request_as(Some(&writer), Method::POST, "/accounts/_update", Some(&json!({ "filter": { "tenant": "A" }, "update": { "card": "6011000990139424" } })), &[])?;
+    assert!(r.status.is_success(), "{}", r.body);
+    assert_eq!((r.body["matched"].as_u64(), r.body["modified"].as_u64()), (Some(2), Some(2)), "{}", r.body);
+    let r = server.request_as(Some(&writer), Method::POST, "/accounts/_bulk", Some(&json!([{ "tenant": "A", "card": "378282246310005" }, { "tenant": "A", "card": "371449635398431" }])), &[])?;
+    assert_eq!((r.status, r.body["count"].as_u64()), (StatusCode::CREATED, Some(2)), "{}", r.body);
+    Ok(())
+}
