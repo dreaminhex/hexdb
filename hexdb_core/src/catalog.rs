@@ -105,6 +105,11 @@ pub struct Catalog {
     /// the lattice so every hex names a chunk the same way.
     #[serde(default)]
     pub content_key: String,
+    /// The tokenization key (hex; see `crate::tokens`). Fixed when the data
+    /// is created and shared by the lattice, so a rotated lattice or storage
+    /// key leaves every token, and lookups by value, as they were.
+    #[serde(default)]
+    pub token_key: String,
 }
 
 impl Catalog {
