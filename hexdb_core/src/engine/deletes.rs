@@ -1042,7 +1042,8 @@ impl HexDBEngine {
 
     /// Create the trash and the delete history, with their indexes.
     async fn ensure_trash(&self) -> Result<()> {
-        if self.tessellation_exists(TRASH_TESSELLATION) && self.tessellation_exists(DELETES_TESSELLATION) {
+        // Ready once the last of its indexes is (another delete may be making them right now).
+        if self.tessellation_exists(DELETES_TESSELLATION) && !self.list_indexes(DELETES_TESSELLATION).is_empty() {
             return Ok(());
         }
         self.ensure_system_tessellation(TRASH_TESSELLATION)?;

@@ -44,6 +44,11 @@ impl HexDBEngine {
     /// Create an index HexDB itself relies on, on any tessellation, if it
     /// doesn't exist yet (e.g. the users' login index).
     pub(crate) async fn ensure_internal_index(&self, tess: &str, def: IndexDef) -> Result<()> {
+        // Two requests needing it at once (the first deletes on a new lattice) mustn't both create it.
+        static CREATING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _creating = CREATING.lock().await;
+        // Validated first: that names an unnamed definition (after its field), as the index it would make.
+        let def = def.validated()?;
         let exists = self.list_indexes(tess).iter().any(|i| i.def.name == def.name);
         if !exists {
             self.create_index_internal(tess, def).await?;

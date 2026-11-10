@@ -145,6 +145,40 @@ pub struct PeerHex {
     /// every hex can show every replica's (2.3.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lag_ms: Option<u64>,
+    /// When this hex's discovery listener started (epoch ms; 0 from hexes
+    /// before 2.5, which count as listening since long ago). Hexes started
+    /// together settle on the one that listened first (see `settle_start`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub listening_since: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
+/// When this process's discovery listener started (0 until it has).
+static LISTENING_SINCE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// For a hex taking its second look at startup: of the hexes claiming the
+/// Overseer role (itself included), only the one whose discovery listener
+/// started first keeps the claim, so every hex settles on the same one. A
+/// later starter always sees it (it looks after starting its own listener,
+/// so after that one's); the first may not see the later ones, and doesn't
+/// need to. Returns `local` and `peers` with the other claims dropped.
+pub fn settle_start(mut local: PeerHex, mut peers: Vec<PeerHex>) -> (PeerHex, Vec<PeerHex>) {
+    let first = std::iter::once(&local)
+        .chain(peers.iter())
+        .filter(|h| h.role == ROLE_OVERSEER)
+        .min_by(|a, b| a.listening_since.cmp(&b.listening_since).then(a.id.cmp(&b.id)))
+        .map(|h| h.id.clone());
+    let Some(first) = first else { return (local, peers) };
+    if local.role == ROLE_OVERSEER && local.id != first {
+        local.role = String::new();
+    }
+    for peer in peers.iter_mut().filter(|p| p.role == ROLE_OVERSEER && p.id != first) {
+        peer.role = String::new();
+    }
+    (local, peers)
 }
 
 fn all_slices() -> crate::slicing::SliceMask {
@@ -248,6 +282,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         region: config.identity.effective_region(),
         knows: sees(&engine.peers.lock().await),
         lag_ms: replication.2,
+        listening_since: LISTENING_SINCE.load(std::sync::atomic::Ordering::Relaxed),
     }
 }
 
@@ -394,6 +429,7 @@ pub fn spawn_discovery_lifeline(engine: Arc<HexDBEngine>, listener: std::net::Tc
         }
     });
     listener.set_nonblocking(true)?;
+    LISTENING_SINCE.store(Utc::now().timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
     std::thread::Builder::new().name("hexdb-lifeline".into()).spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
@@ -897,6 +933,7 @@ mod tests {
             region: String::new(),
             knows: Vec::new(),
             lag_ms: None,
+            listening_since: 0,
         }
     }
 
@@ -1056,6 +1093,28 @@ mod tests {
         assert_eq!(elect(&oracle, std::slice::from_ref(&small)), ROLE_ORACLE);
         assert_eq!(elect(&small, std::slice::from_ref(&oracle)), ROLE_OVERSEER);
         assert_eq!(parse_preference("Oracle").unwrap(), "oracle");
+    }
+
+    #[test]
+    fn hexes_started_together_settle_on_the_first_to_listen() {
+        let claim = |id: &str, since: i64| PeerHex { listening_since: since, ..hex(id, ROLE_OVERSEER, "auto", 1024) };
+        // The later starter sees the earlier one's claim and drops its own, whatever their sizes.
+        let early = claim("a", 1_000);
+        let late = PeerHex { ram_mb: 65536, ..claim("b", 2_000) };
+        let (local, peers) = settle_start(late.clone(), vec![early.clone()]);
+        assert_eq!(elect(&local, &peers), ROLE_HARVESTER);
+        // The earlier one, if it sees the later, keeps the role.
+        let (local, peers) = settle_start(early.clone(), vec![late.clone()]);
+        assert_eq!(elect(&local, &peers), ROLE_OVERSEER);
+        // An Overseer from before 2.5 (no time) counts as listening first; same times fall to the ID.
+        let old = claim("z", 0);
+        let (local, peers) = settle_start(early.clone(), vec![old]);
+        assert_eq!(elect(&local, &peers), ROLE_HARVESTER);
+        let (local, peers) = settle_start(claim("b", 1_000), vec![claim("a", 1_000)]);
+        assert_eq!(elect(&local, &peers), ROLE_HARVESTER);
+        // Nobody claiming: nothing changes.
+        let (local, peers) = settle_start(hex("c", "", "auto", 1), vec![hex("d", ROLE_HARVESTER, "auto", 1)]);
+        assert_eq!((local.role.as_str(), peers[0].role.as_str()), ("", ROLE_HARVESTER));
     }
 
     #[test]
