@@ -150,6 +150,7 @@ pub fn app_router(
         .route(hexdb_core::review::STORE_PATH, post(crate::reviews::store))
         .route("/security/reviews", get(crate::reviews::list).post(crate::reviews::run))
         .route("/security/email-test", post(crate::reviews::email_test))
+        .route("/security/alert-test", post(crate::reviews::alert_test))
         .route("/lattice/rehash-key", post(crate::lattice::rehash_key))
         .route("/lattice/share-download", post(crate::lattice::share_download))
         .route("/lattice/throttle", post(crate::lattice::throttle))

@@ -278,6 +278,107 @@ fn the_ai_reviews_the_audit_trail_and_emails_what_it_finds() -> Result<()> {
     Ok(())
 }
 
+/// A receiver keeping each request's path, headers (lowercase names) and raw body.
+type RawReceived = Arc<Mutex<Vec<(String, std::collections::HashMap<String, String>, String)>>>;
+
+fn raw_receiver() -> Result<(u16, RawReceived)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let received: RawReceived = Arc::default();
+    let record = received.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or_default().to_string();
+            let mut headers = std::collections::HashMap::new();
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap_or(0);
+                let h = h.trim_end().to_string();
+                if h.is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':') {
+                    headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+                }
+            }
+            let length = headers.get("content-length").and_then(|l| l.parse().ok()).unwrap_or(0);
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).ok();
+            record.lock().unwrap().push((path, headers, String::from_utf8_lossy(&body).into_owned()));
+            let mut stream = stream;
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        }
+    });
+    Ok((port, received))
+}
+
+#[test]
+fn flagged_reviews_go_to_the_alert_channels() -> Result<()> {
+    let server = TestServer::start()?;
+    let (ai, _seen) = mock_claude()?;
+    let (port, received) = raw_receiver()?;
+    configure(&server, json!({ "ai.provider": "anthropic", "ai.base_url": format!("http://127.0.0.1:{}", ai), "ai.api_key": "sk-test-review-02", "ai.model": "claude-test" }))?;
+    assert_eq!(server.request(Method::POST, "/security/alert-test", None, &[])?.status, StatusCode::BAD_REQUEST, "nothing set up yet");
+    configure(
+        &server,
+        json!({
+            "alerts.webhook.url": format!("http://127.0.0.1:{}/hook", port),
+            "alerts.webhook.signing_secret": "whsec-test",
+            "alerts.chat.webhook_urls": format!("http://127.0.0.1:{}/chat", port),
+        }),
+    )?;
+    let listed = server.request(Method::GET, "/security/reviews", None, &[])?.body;
+    assert_eq!(listed["alert_channels"], json!(["chat", "webhook"]), "{}", listed);
+    assert_eq!(server.request(Method::POST, "/security/alert-test", Some(&json!({ "channel": "pigeon" })), &[])?.status, StatusCode::BAD_REQUEST);
+
+    // A test alert reaches both.
+    let test = server.request(Method::POST, "/security/alert-test", None, &[])?;
+    assert_eq!(test.status, StatusCode::OK, "{}", test.body);
+    assert_eq!(test.body["deliveries"], json!([{ "channel": "chat", "ok": true }, { "channel": "webhook", "ok": true }]), "{}", test.body);
+    let got = received.lock().unwrap().clone();
+    assert_eq!(got.len(), 2);
+    let chat: Value = serde_json::from_str(&got[0].2)?;
+    assert_eq!(got[0].0, "/chat");
+    assert!(chat["text"].as_str().unwrap().contains("test alert"), "Slack's format for an unknown host: {}", chat);
+    let (path, headers, body) = &got[1];
+    assert_eq!(path, "/hook");
+    assert_eq!(headers["x-hexdb-event"], "alert.test");
+    let timestamp: i64 = headers["x-hexdb-timestamp"].parse()?;
+    assert_eq!(headers["x-hexdb-signature"], format!("sha256={}", hexdb_core::alerts::sign("whsec-test", timestamp, body)), "signed over the bytes sent");
+
+    // A medium review goes to both, and says so.
+    let review = server.request(Method::POST, "/security/reviews", None, &[])?;
+    assert_eq!(review.body["severity"], "medium", "{}", review.body);
+    assert_eq!(review.body["alerts"], json!([{ "channel": "chat", "ok": true }, { "channel": "webhook", "ok": true }]), "{}", review.body);
+    assert!(review.body.get("email_error").is_none(), "no email warning when alerts went out: {}", review.body);
+    let got = received.lock().unwrap().clone();
+    assert_eq!(got.len(), 4);
+    assert!(serde_json::from_str::<Value>(&got[2].2)?["text"].as_str().unwrap().contains("Password guessing"));
+    let hook: Value = serde_json::from_str(&got[3].2)?;
+    assert_eq!((hook["event"].as_str(), hook["review"]["severity"].as_str()), (Some("security.review"), Some("medium")), "{}", hook);
+    assert_eq!(hook["review"]["findings"][0]["title"], "Password guessing");
+
+    // Above the threshold only.
+    configure(&server, json!({ "security.review.notify_severity": "high" }))?;
+    let review = server.request(Method::POST, "/security/reviews", None, &[])?;
+    assert_eq!(review.body["alerts"], json!([]), "{}", review.body);
+    assert_eq!(received.lock().unwrap().len(), 4);
+
+    // A channel set up wrong fails on its own, without sending anything or showing its credentials.
+    configure(&server, json!({ "alerts.twilio.account_sid": "not-a-sid", "alerts.twilio.auth_token": "twilio-token-secret", "alerts.twilio.to": "+15551230001" }))?;
+    let sms = server.request(Method::POST, "/security/alert-test", Some(&json!({ "channel": "sms" })), &[])?;
+    assert_eq!(sms.body["deliveries"][0]["ok"], false, "{}", sms.body);
+    assert!(sms.body["deliveries"][0]["error"].as_str().unwrap().contains("account_sid") && !sms.body.to_string().contains("twilio-token-secret"), "{}", sms.body);
+    let audit = server.request(Method::GET, "/audit?action=alert.test", None, &[])?.body;
+    assert_eq!(audit["events"].as_array().unwrap().len(), 2, "{}", audit);
+    Ok(())
+}
+
 fn configure(server: &TestServer, changes: Value) -> Result<()> {
     let res = server.request(Method::PUT, "/config", Some(&json!({ "changes": changes })), &[])?;
     assert!(res.status.is_success(), "{}", res.body);

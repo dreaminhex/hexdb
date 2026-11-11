@@ -3,6 +3,7 @@
 //   GET  /security/reviews       the newest reviews (administrators)
 //   POST /security/reviews       review the last security.review.interval_hours now
 //   POST /security/email-test    send a test email ({"to"?}; default: your own address)
+//   POST /security/alert-test    send a test alert ({"channel"?}; default: every channel set up)
 //   POST /lattice/security-review   an Oracle's review, kept on the Overseer
 
 use crate::auth::Auth;
@@ -33,6 +34,7 @@ pub async fn list(axum::extract::State(engine): Engine, Auth(principal): Auth, Q
         "enabled": enabled,
         "interval_hours": interval,
         "email": hexdb_core::email::configured(&engine),
+        "alert_channels": engine.alert_channels(),
         "ai": engine.ai_summary()["configured"],
         "next_due": next,
         "reviews": reviews,
@@ -68,6 +70,31 @@ pub async fn email_test(axum::extract::State(engine): Engine, Auth(principal): A
     }
     engine.audit(&principal.login, "email.test", &to, json!({})).await;
     Ok(Json(json!({ "sent_to": to })).into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertTest {
+    #[serde(default)]
+    channel: Option<String>,
+}
+
+/// `POST /security/alert-test`: send a test alert and say what each channel did (200 even if some failed).
+pub async fn alert_test(axum::extract::State(engine): Engine, Auth(principal): Auth, body: Result<Json<AlertTest>, JsonRejection>) -> ApiResult {
+    principal.require_admin()?;
+    let input = body.map(|Json(b)| b).unwrap_or_default();
+    let channel = input.channel.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    if let Some(c) = &channel {
+        if !hexdb_core::alerts::CHANNELS.contains(&c.as_str()) {
+            return Err(ApiError::invalid(format!("Unknown channel '{}' (one of {}).", c, hexdb_core::alerts::CHANNELS.join(", "))));
+        }
+    } else if engine.alert_channels().is_empty() {
+        return Err(ApiError::invalid("No alert channel is set up (alerts.* on this page or the Configuration page)."));
+    }
+    let deliveries = engine.send_alert(&hexdb_core::alerts::Alert::test(&engine, &principal.login), channel.as_deref()).await;
+    let summary: Vec<_> = deliveries.iter().map(|d| json!({ "channel": d.channel, "ok": d.ok })).collect();
+    engine.audit(&principal.login, "alert.test", channel.as_deref().unwrap_or("all"), json!({ "channels": summary })).await;
+    Ok(Json(json!({ "deliveries": deliveries })).into_response())
 }
 
 /// `POST /lattice/security-review`: keep a review an Oracle made.

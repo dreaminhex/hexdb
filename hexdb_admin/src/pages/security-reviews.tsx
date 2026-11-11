@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { IconAlertTriangle, IconLoader2, IconMail, IconPlayerPlay, IconShieldCheck } from "@tabler/icons-react"
 import { toast } from "sonner"
 
+import { AlertChannelsCard } from "@/components/alert-channels-card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -100,7 +101,8 @@ export function SecurityReviewsPage() {
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
       <p className="text-muted-foreground max-w-3xl text-sm">
         The AI reads a summary of the audit trail (failed sign-ins, refused requests, users on new addresses, activity by hour, administrative changes) and
-        says what looks like an attack or misuse, with the evidence. Findings of medium severity or worse are emailed. It sees counts, logins and addresses,
+        says what looks like an attack or misuse, with the evidence. Findings of medium severity or worse (adjustable below) are emailed and sent to the alert
+        channels. It sees counts, logins and addresses,
         never your documents, and the review runs on the Oracle when the lattice has one.
       </p>
 
@@ -109,7 +111,8 @@ export function SecurityReviewsPage() {
           <CardTitle>Settings</CardTitle>
           <CardDescription>
             {data && !data.ai && "Set up an AI provider on the Configuration page first. "}
-            {data && !data.email && "Email isn't set up (email.smtp_url and email.from on the Configuration page): reviews are kept here but not sent."}
+            {data && !data.email && data.alert_channels.length === 0 && "Neither email (email.smtp_url and email.from on the Configuration page) nor an alert channel is set up: reviews are kept here but not sent."}
+            {data && !data.email && data.alert_channels.length > 0 && "Email isn't set up (email.smtp_url and email.from on the Configuration page); flagged reviews go to the alert channels."}
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -158,6 +161,8 @@ export function SecurityReviewsPage() {
         </CardContent>
       </Card>
 
+      <AlertChannelsCard configured={data?.alert_channels ?? []} onSaved={() => void reviews.refresh()} />
+
       {reviews.error && <p className="text-destructive text-sm">{reviews.error.message}</p>}
       {data?.reviews.length === 0 && (
         <p className="text-muted-foreground inline-flex items-center gap-2 text-sm">
@@ -176,6 +181,7 @@ export function SecurityReviewsPage() {
               <span className="text-muted-foreground text-xs">
                 {r.events} events since {when(r.window_from)} · {r.findings.length} finding{r.findings.length === 1 ? "" : "s"} · {r.trigger === "schedule" ? "scheduled" : `by ${r.trigger}`} · on {r.hex}
                 {r.emailed_to.length > 0 && ` · emailed to ${r.emailed_to.length}`}
+                {(r.alerts ?? []).some((a) => a.ok) && ` · sent to ${(r.alerts ?? []).filter((a) => a.ok).map((a) => a.channel).join(", ")}`}
               </span>
             </button>
             {open === r.id && (
@@ -195,6 +201,13 @@ export function SecurityReviewsPage() {
                   </div>
                 ))}
                 {r.email_error && <p className="text-status-warning text-xs">Not emailed: {r.email_error}</p>}
+                {(r.alerts ?? [])
+                  .filter((a) => !a.ok)
+                  .map((a) => (
+                    <p key={a.channel} className="text-status-warning text-xs">
+                      Not sent to {a.channel}: {a.error}
+                    </p>
+                  ))}
                 <p className="text-muted-foreground text-xs">
                   {r.model && `${r.model} · ${r.tokens} tokens · `}Check the evidence in the Audit Trail before acting on it.
                 </p>

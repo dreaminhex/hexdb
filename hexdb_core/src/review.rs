@@ -13,10 +13,12 @@
 //
 // Every review is kept for 90 days (`_security_reviews`; an Oracle sends its
 // review to the Overseer to store), listed on the admin UI's Security
-// reviews page, and audited as `security.review`. One of medium severity or
-// worse is emailed to `security.review.recipients` (empty: every
-// administrator with an email address), when outbound email is set up
-// (`crate::email`). Usage counts as the `security.review` feature, within
+// reviews page, and audited as `security.review`. One of
+// `security.review.notify_severity` (default medium) or worse is emailed to
+// `security.review.recipients` (empty: every administrator with an email
+// address), when outbound email is set up (`crate::email`), and sent to every
+// alert channel set up (`crate::alerts`: PagerDuty, SMS, chat, a webhook,
+// Opsgenie). Usage counts as the `security.review` feature, within
 // the monthly budget.
 
 use crate::ai::{AiRequest, Part};
@@ -93,6 +95,9 @@ pub struct Review {
     pub emailed_to: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email_error: Option<String>,
+    /// What each alert channel (`crate::alerts`) did with it.
+    #[serde(default)]
+    pub alerts: Vec<crate::alerts::Delivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -108,6 +113,14 @@ pub fn severity_rank(severity: &str) -> u8 {
 }
 
 impl HexDBEngine {
+    /// `security.review.notify_severity` as a rank (default medium).
+    fn notify_rank(&self) -> u8 {
+        match severity_rank(self.config_value("security.review.notify_severity").as_str().unwrap_or("medium")) {
+            0 => 2,
+            rank => rank,
+        }
+    }
+
     fn review_interval_hours(&self) -> i64 {
         self.config_value("security.review.interval_hours").as_i64().unwrap_or(24).clamp(1, 24)
     }
@@ -176,6 +189,7 @@ impl HexDBEngine {
             hex: self.name.clone(),
             emailed_to: Vec::new(),
             email_error: None,
+            alerts: Vec::new(),
             error: None,
         };
         match self.review_window(from, now).await {
@@ -192,21 +206,29 @@ impl HexDBEngine {
                 review.error = Some(format!("{:#}", e));
             }
         }
-        if severity_rank(&review.severity) >= 2 {
-            match self.review_recipients().await {
+        if severity_rank(&review.severity) >= self.notify_rank() {
+            if !crate::email::configured(self) {
+                if self.alert_channels().is_empty() {
+                    review.email_error = Some("Neither email (email.smtp_url and email.from) nor an alert channel (alerts.*) is set up.".into());
+                }
+            } else {
+                match self.review_recipients().await {
                 Ok(to) if to.is_empty() => review.email_error = Some("No one to email: set security.review.recipients, or give an administrator an email address.".into()),
                 Ok(to) => match crate::email::send(self, &to, &email_subject(&review), &email_text(&review)).await {
                     Ok(()) => review.emailed_to = to,
                     Err(e) => review.email_error = Some(format!("{:#}", e)),
                 },
-                Err(e) => review.email_error = Some(format!("{:#}", e)),
+                    Err(e) => review.email_error = Some(format!("{:#}", e)),
+                }
             }
+            review.alerts = self.send_alert(&crate::alerts::Alert::from_review(self, &review), None).await;
         }
         review.finished = Utc::now().timestamp_millis();
         if let Err(e) = self.store_review(&review).await {
             warn!("⚠️ Couldn't keep the security review: {:#}", e);
         }
-        let details = json!({ "severity": review.severity, "findings": review.findings.len(), "events": review.events, "emailed": review.emailed_to.len(), "error": review.error });
+        let alerted: Vec<&str> = review.alerts.iter().filter(|a| a.ok).map(|a| a.channel.as_str()).collect();
+        let details = json!({ "severity": review.severity, "findings": review.findings.len(), "events": review.events, "emailed": review.emailed_to.len(), "alerted": alerted, "error": review.error });
         self.audit(trigger, "security.review", &review.severity, details).await;
         Ok(review)
     }

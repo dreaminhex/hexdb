@@ -496,6 +496,15 @@ export interface SecurityReview {
   hex: string
   emailed_to: string[]
   email_error?: string
+  /** What each alert channel did with it (absent on reviews made before 2.5). */
+  alerts?: AlertDelivery[]
+  error?: string
+}
+
+/** What one alert channel did. */
+export interface AlertDelivery {
+  channel: "pagerduty" | "sms" | "chat" | "webhook" | "opsgenie"
+  ok: boolean
   error?: string
 }
 
@@ -503,6 +512,8 @@ export interface SecurityReviews {
   enabled: boolean
   interval_hours: number
   email: boolean
+  /** The alert channels set up. */
+  alert_channels: string[]
   ai: boolean
   next_due: number | null
   reviews: SecurityReview[]
@@ -1211,6 +1222,7 @@ export const api = {
   securityReviews: () => request<SecurityReviews>("GET", "/security/reviews"),
   runSecurityReview: () => request<SecurityReview>("POST", "/security/reviews"),
   testEmail: (to?: string) => request<{ sent_to: string }>("POST", "/security/email-test", to ? { to } : {}),
+  testAlert: (channel?: string) => request<{ deliveries: AlertDelivery[] }>("POST", "/security/alert-test", channel ? { channel } : {}),
   addBlock: (input: { address: string; note?: string; expires_in_hours?: number }) => request<BlockEntry>("POST", "/blocklist", input),
   removeBlock: (id: string) => request<void>("DELETE", `/blocklist/${encodeURIComponent(id)}`),
   releaseQuarantined: (id: string) => request<{ document: Record<string, unknown>; created: boolean }>("POST", `/quarantine/${encodeURIComponent(id)}/release`),

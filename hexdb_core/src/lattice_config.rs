@@ -147,9 +147,20 @@ pub const CONFIG: &[ConfigDef] = &[
     def("ai.embeddings.user_daily_tokens", ConfigKind::Integer { min: 0, max: 1_000_000_000 }, "200000", "Most tokens one user's similarity searches by text may use per day (0: no limit beyond the monthly budget)."),
     secret("email.smtp_url", "SMTP server for outbound email, with its credentials: smtps://user:password@smtp.example.com:465 (TLS), or smtp://user:password@host:587?tls=required (STARTTLS). Empty: no email."),
     text("email.from", "Sender of outbound email, e.g. HexDB <hexdb@example.com>."),
-    def("security.review.enabled", ConfigKind::Boolean, "false", "Have the AI review the audit trail for signs of attack or misuse every security.review.interval_hours, and email administrators what it finds of medium severity or worse."),
+    def("security.review.enabled", ConfigKind::Boolean, "false", "Have the AI review the audit trail for signs of attack or misuse every security.review.interval_hours, and email administrators (and send the alert channels) what it finds of security.review.notify_severity or worse."),
     def("security.review.interval_hours", ConfigKind::Integer { min: 1, max: 24 }, "24", "Hours between security reviews; each covers the time since the last."),
     text("security.review.recipients", "Addresses security reviews are emailed to, separated by commas. Empty: every administrator with an email address."),
+    def("security.review.notify_severity", ConfigKind::Choice { choices: &["low", "medium", "high"] }, "\"medium\"", "Least severity of a security review that's emailed and sent to the alert channels (alerts.*)."),
+    secret("alerts.pagerduty.routing_key", "PagerDuty Events API v2 integration key: flagged security reviews trigger an incident. Empty: no PagerDuty."),
+    text("alerts.twilio.account_sid", "Twilio account SID (AC...) for SMS alerts."),
+    secret("alerts.twilio.auth_token", "Twilio auth token (or an API key secret) for SMS alerts. Empty: no SMS."),
+    text("alerts.twilio.from", "Number SMS alerts come from (a Twilio number in international format, e.g. +15551234567), or a messaging service SID (MG...)."),
+    text("alerts.twilio.to", "Numbers SMS alerts go to, in international format (e.g. +15551234567), separated by commas."),
+    secret("alerts.chat.webhook_urls", "Incoming webhook URLs flagged security reviews are posted to, separated by spaces or lines: Slack, Microsoft Teams (Workflows), Discord, or anything that accepts Slack's format (Mattermost, Rocket.Chat). Empty: no chat."),
+    def("alerts.webhook.url", ConfigKind::Url, "\"\"", "URL flagged security reviews are POSTed to as JSON (the review, its severity and a summary). Empty: no webhook."),
+    secret("alerts.webhook.signing_secret", "Secret the webhook's body is signed with: X-HexDB-Signature is sha256= and the hex HMAC-SHA256 of the X-HexDB-Timestamp header, a dot, and the body. Empty: unsigned."),
+    secret("alerts.opsgenie.api_key", "Opsgenie API integration key: flagged security reviews create an alert. Empty: no Opsgenie."),
+    def("alerts.opsgenie.region", ConfigKind::Choice { choices: &["us", "eu"] }, "\"us\"", "Opsgenie region of the account (us: api.opsgenie.com, eu: api.eu.opsgenie.com)."),
     def("ai.chat.enabled", ConfigKind::Boolean, "false", "Let users with the chat permission ask the AI about the data they can read (the admin UI's Ask page and POST /ai/chat)."),
     text("ai.chat.model", "Model for the chat (empty: ai.model). A smaller, cheaper model is usually enough, e.g. claude-haiku-5-5."),
     def("ai.chat.max_tokens_per_answer", ConfigKind::Integer { min: 64, max: 16_000 }, "1024", "Most tokens one chat answer may use."),
@@ -291,7 +302,7 @@ pub fn normalize_origin(item: &str) -> Option<String> {
 /// credentials, and a provider's error text could echo them back). A name that
 /// merely resolves to one isn't caught; this is defense in depth for settings
 /// only administrators can change.
-fn is_metadata_host(url: &str) -> bool {
+pub(crate) fn is_metadata_host(url: &str) -> bool {
     let after = url.split("://").nth(1).unwrap_or_default();
     let authority = after.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit('@').next().unwrap_or_default();

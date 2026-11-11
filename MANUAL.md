@@ -2209,7 +2209,7 @@ curl -X DELETE http://localhost:7700/blocklist/01J...
 
 ### AI security reviews
 
-HexDB can have the lattice's AI provider read the audit trail for signs of attack or misuse, on a schedule, and email administrators what it finds. It's off until an administrator turns it on, on the admin UI's **Security Reviews** page (under Security) or with the settings below.
+HexDB can have the lattice's AI provider read the audit trail for signs of attack or misuse, on a schedule, and tell administrators what it finds: by email, PagerDuty, SMS, chat (Slack, Microsoft Teams, Discord), a signed webhook, or Opsgenie. It's off until an administrator turns it on, on the admin UI's **Security Reviews** page (under Security) or with the settings below.
 
 ```bash
 hexdb config set email.smtp_url        # prompts: smtps://user:password@smtp.example.com:465
@@ -2220,11 +2220,35 @@ hexdb config set security.review.interval_hours 6      # 1 to 24; 24 by default
 
 - **What it reads.** HexDB sums up the audit trail since the last review itself: failed sign-ins by client address (with the logins tried) and by login (with the addresses), refused requests by user, addresses a user hadn't used in the week before, activity by hour (UTC), and the recent administrative and security-relevant events (users, roles, keys, configuration, deletes and purges, detokenization, the blocklist, functions and triggers). The AI gets that summary, at most 5,000 events' worth: counts, logins, addresses and actions, never documents.
 - **What comes back.** A severity (none, low, medium or high), a short summary, and findings, each with its evidence and what to do. The overall severity is at least that of the worst finding. Treat it as a lead, not a verdict: check the evidence in the audit trail before acting.
-- **Who's told.** A review of medium severity or worse is emailed to `security.review.recipients` (addresses separated by commas), or, if that's empty, to every administrator with an email address. Every review, quiet or not, is kept for 90 days and listed on the Security Reviews page, with whom it was emailed to or why it wasn't. Each is audited as `security.review`.
+- **Who's told.** A review of `security.review.notify_severity` or worse (medium by default; low or high also) is emailed to `security.review.recipients` (addresses separated by commas), or, if that's empty, to every administrator with an email address, and sent to every [alert channel](#alert-channels) that's set up. Every review, quiet or not, is kept for 90 days and listed on the Security Reviews page, with whom it was emailed to, what each channel did, and why anything wasn't sent. Each is audited as `security.review`.
 - **Where it runs.** On the lattice's [Oracle](#the-oracle) when one is live (the audit trail replicates to it, and it sends the finished review to the Overseer to keep), otherwise on the Overseer. Usage counts as the `security.review` feature, within `ai.monthly_token_budget`; a review takes a few thousand tokens.
 - **By hand.** **Review now** on the page, or `POST /security/reviews`, reviews the last `security.review.interval_hours` at once and returns the review; `GET /security/reviews` lists them (administrators).
 
 **Outbound email.** `email.smtp_url` names the SMTP server with its credentials; it's a secret, so it's write-only. `smtps://` uses TLS from the start (usually port 465); `smtp://host:587?tls=required` upgrades with STARTTLS; plain `smtp://` sends unencrypted and is only for a relay on the same machine or network. Any provider with SMTP works (Amazon SES, Postmark, Resend, SendGrid, Microsoft 365, Gmail with an app password). `email.from` is the sender. **Send me a test email** on the Security Reviews page, or `POST /security/email-test` (`{"to"?}`, your own address by default), checks the settings; errors never show the URL.
+
+#### Alert channels
+
+Besides email, flagged reviews can go to any of these, each set up on the Security Reviews page (**Alert channels**) or with `hexdb config set`. Credentials are secrets: write-only, and never shown in errors. The hex that ran the review sends to each channel in turn (15 seconds each); one that fails doesn't stop the others, and the review records what each did.
+
+| Channel | Settings | What arrives |
+|---|---|---|
+| PagerDuty | `alerts.pagerduty.routing_key` (secret): an Events API v2 integration key | An incident: high is `critical`, medium `warning`, low `info`; deduplicated per review, with a link to the page |
+| SMS (Twilio) | `alerts.twilio.account_sid`, `alerts.twilio.auth_token` (secret), `alerts.twilio.from` (a Twilio number or messaging service SID), `alerts.twilio.to` (numbers in international format, separated by commas) | A text of at most 300 characters to each number: severity, summary, link |
+| Chat | `alerts.chat.webhook_urls` (secret): one or more incoming webhook URLs, separated by spaces or lines | The summary and findings, in the format the URL's host expects: Slack; Microsoft Teams (a Workflows webhook, or an older connector URL on `webhook.office.com`) as an Adaptive Card; Discord (mentions disabled). Any other host gets Slack's format, which Mattermost and Rocket.Chat accept |
+| Webhook | `alerts.webhook.url`, `alerts.webhook.signing_secret` (secret, optional) | A JSON POST: `event` (`security.review`, or `alert.test`), `lattice`, `hex`, `severity`, `title`, `text`, `link` and the whole `review` |
+| Opsgenie | `alerts.opsgenie.api_key` (secret): an API integration key; `alerts.opsgenie.region` (`us` or `eu`) | An alert: high is P1, medium P3, low P5; deduplicated per review. Atlassian ends Opsgenie support on April 5, 2027; its alerting moves to Jira Service Management |
+
+Links point at `<oauth.resource>/ui/security-reviews` when `oauth.resource` names the lattice's public URL; without it, alerts carry no link.
+
+**Verifying the webhook.** With a signing secret, each request has `X-HexDB-Timestamp` (Unix seconds) and `X-HexDB-Signature: sha256=<hex>`, the HMAC-SHA256 of the timestamp, a dot, and the raw body, keyed with the secret. Compute it over the bytes received (before parsing), compare in constant time, and refuse old timestamps (say, more than five minutes) to stop replays:
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto"
+const expected = "sha256=" + createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex")
+const ok = expected.length === signature.length && timingSafeEqual(Buffer.from(expected), Buffer.from(signature))
+```
+
+**Send a test alert** on the page, or `POST /security/alert-test` (`{"channel"?}`: `pagerduty`, `sms`, `chat`, `webhook` or `opsgenie`; every channel set up by default), sends a low-severity test and answers with what each channel did (`{"deliveries": [{"channel", "ok", "error"?}]}`); it's audited as `alert.test`. `GET /security/reviews` lists the channels set up in `alert_channels`.
 
 ### Browsers
 
@@ -2681,7 +2705,13 @@ hexdb config rollback 3 -m "bad key"
 | `email.smtp_url`, `email.from` | empty | Outbound email: the SMTP server (a secret) and the sender; see [AI security reviews](#ai-security-reviews) |
 | `security.review.enabled` | false | Have the AI review the audit trail on a schedule |
 | `security.review.interval_hours` | 24 | Hours between reviews (1 to 24) |
-| `security.review.recipients` | empty | Who medium-or-worse reviews are emailed to (empty: administrators with an email address) |
+| `security.review.recipients` | empty | Who flagged reviews are emailed to (empty: administrators with an email address) |
+| `security.review.notify_severity` | medium | Least severity that's emailed and sent to the alert channels (low, medium, high) |
+| `alerts.pagerduty.routing_key` | empty | PagerDuty Events API v2 key (a secret); see [Alert channels](#alert-channels) |
+| `alerts.twilio.account_sid`, `.auth_token`, `.from`, `.to` | empty | SMS through Twilio (the token is a secret) |
+| `alerts.chat.webhook_urls` | empty | Slack, Teams or Discord incoming webhooks (a secret) |
+| `alerts.webhook.url`, `alerts.webhook.signing_secret` | empty | A JSON webhook, signed with HMAC-SHA256 when the secret is set |
+| `alerts.opsgenie.api_key`, `alerts.opsgenie.region` | empty, us | Opsgenie alerts (the key is a secret) |
 | `ai.max_tokens_per_file` | 4,000 | Tokens one file may use |
 | `ai.tagging.enabled` | false | AI tags and descriptions for uploaded files |
 | `ai.tagging.tessellations` | empty (all) | Files tessellations whose new files are tagged, comma-separated |
