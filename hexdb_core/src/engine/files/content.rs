@@ -121,8 +121,7 @@ impl HexDBEngine {
                 _ = self.file_sync.content.changed.notified() => {}
                 _ = tokio::time::sleep(REPORT_EVERY) => {}
             }
-            // The Oracle holds no data and isn't counted as a replica (see `crate::replication`).
-            if self.is_writable() || self.is_oracle() {
+            if self.is_writable() {
                 sent = None;
                 continue;
             }
