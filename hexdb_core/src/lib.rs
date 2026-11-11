@@ -56,6 +56,7 @@ pub mod extract;
 pub mod network {
     pub mod discovery;
     pub mod lattice_auth;
+    pub mod multicast;
 }
 
 pub use config::{load_config, load_config_from, user_config_dir, HexConfig, CONFIG_FILE_NAME, LOCAL_CONFIG_FILE_NAME};

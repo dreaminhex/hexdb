@@ -376,26 +376,56 @@ pub async fn start_discovery_listener(engine: Arc<HexDBEngine>, listener: Arc<Tc
 /// prober's own (`from` is where it connected from: a loopback or wildcard
 /// host is reached there), or one a peer knows.
 fn learn(engine: &HexDBEngine, addr: &str, from: Option<std::net::SocketAddr>) {
-    let mut addr = addr.to_string();
-    if is_local_or_wildcard(host_of(&addr)) {
-        let Some(from) = from else {
-            // A loopback address a peer knows is on its machine, which may be this one.
-            if !matches!(host_of(&addr), "0.0.0.0" | "[::]") {
-                remember(engine, addr);
-            }
-            return;
-        };
-        if !from.ip().is_loopback() {
-            let ip = match from.ip() {
-                std::net::IpAddr::V4(v4) => v4.to_string(),
-                std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or_else(|| format!("[{}]", v6)),
-            };
-            addr = with_host(&addr, &ip);
-        } else if matches!(host_of(&addr), "0.0.0.0" | "[::]") {
-            addr = with_host(&addr, "127.0.0.1");
-        }
+    // A wildcard address a peer knows (no `from`) says nothing about where the hex is.
+    if from.is_none() && matches!(host_of(addr), "0.0.0.0" | "[::]") {
+        return;
     }
-    remember(engine, addr);
+    remember(engine, reachable_at(addr, from));
+}
+
+/// Remember a discovery address a multicast announcement gave, heard from
+/// `from`. Only a wildcard host is replaced, by the sender's address: a
+/// datagram comes from a network address even between hexes on one machine,
+/// so a loopback host stays as it is (that hex is only reached on its machine).
+pub(crate) fn learn_announced(engine: &HexDBEngine, addr: &str, from: std::net::SocketAddr) {
+    remember(engine, announced_at(addr, from));
+}
+
+/// See `learn_announced`.
+pub(crate) fn announced_at(addr: &str, from: std::net::SocketAddr) -> String {
+    if matches!(host_of(addr), "0.0.0.0" | "[::]") {
+        reachable_at(addr, Some(from))
+    } else {
+        addr.to_string()
+    }
+}
+
+/// Where a hex that gives `addr` as its discovery address is reached, heard
+/// from `from`: a wildcard or loopback host is replaced by `from`'s address
+/// (or 127.0.0.1 for a wildcard heard from this machine). A loopback address
+/// heard second-hand (no `from`) is kept: it's on the machine of the peer
+/// that knows it, which may be this one.
+fn reachable_at(addr: &str, from: Option<std::net::SocketAddr>) -> String {
+    if !is_local_or_wildcard(host_of(addr)) {
+        return addr.to_string();
+    }
+    let Some(from) = from else { return addr.to_string() };
+    if !from.ip().is_loopback() {
+        let ip = match from.ip() {
+            std::net::IpAddr::V4(v4) => v4.to_string(),
+            std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().map(|v4| v4.to_string()).unwrap_or_else(|| format!("[{}]", v6)),
+        };
+        with_host(addr, &ip)
+    } else if matches!(host_of(addr), "0.0.0.0" | "[::]") {
+        with_host(addr, "127.0.0.1")
+    } else {
+        addr.to_string()
+    }
+}
+
+/// This hex's discovery address as other hexes should see it.
+pub(crate) fn advertised_discovery(config: &HexConfig) -> String {
+    advertised(config, &config.network.discovery_endpoint)
 }
 
 fn remember(engine: &HexDBEngine, addr: String) {
@@ -609,7 +639,9 @@ fn fix_endpoint(addr: &str, peer: &mut PeerHex) -> PeerHex {
 
 /// Probe every target once and return the hexes in our lattice (excluding ourselves).
 pub async fn discover_peers(config: &HexConfig, local_id: &str, local_name: &str) -> Vec<PeerHex> {
-    discover_peers_with(config, local_id, local_name, Vec::new()).await
+    // With `network.multicast`, the hexes on the LAN answer a query at once.
+    let heard = super::multicast::query(config, local_id).await;
+    discover_peers_with(config, local_id, local_name, heard).await
 }
 
 /// `discover_peers`, also probing `learned` addresses (hexes that probed this one).
@@ -800,6 +832,7 @@ fn most_current(candidates: Vec<&PeerHex>) -> Vec<&PeerHex> {
 
 /// Re-probe peers every `interval`, track their liveness, and re-run the election.
 pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, shutdown_rx: watch::Receiver<()>) {
+    super::multicast::spawn(engine.clone(), interval, shutdown_rx.clone());
     crate::tasks::supervise("discovery", shutdown_rx.clone(), move || {
         let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
         async move {

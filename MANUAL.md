@@ -2294,11 +2294,19 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 Every hex runs a TCP discovery listener (`network.discovery_endpoint`, default port 7702). A hex that can't open it (another program has the port) stops at startup with `Failed to bind the discovery endpoint`, as it does for the API port, since an unreachable hex can't replicate, vote or fail over. Every `discovery_interval_seconds` (5), it probes:
 - the seed addresses in `network.peers` (other hexes' discovery endpoints);
 - the local ports 7702-7709, unless `scan_local_ports = false`;
+- with `network.multicast = true`, the hexes that announce themselves on the local network (see below);
 - hexes it learned of (2.3.3 and later): any hex that probes it, and the hexes each peer sees.
 
 A hex that probes another tells it its own discovery address, and each hex's answer lists the hexes it sees. So one seed address is enough: a new hex that lists any one member finds the rest, and every member finds it, without changing their `peers`. A learned address is dropped once no hex has mentioned it for 30 rounds, and a hex keeps at most 64. Only hexes holding the lattice key can be learned. Hexes before 2.3.3 still see only the hexes in their own `peers`.
 
 A peer given by name is probed at every address the name resolves to, so one name can stand for a group of hexes: Fly.io's `<app>.internal`, a Kubernetes headless service, or round-robin DNS.
+
+**Multicast on a LAN.** With `network.multicast = true`, hexes on the same local network find each other with no `peers` at all:
+- Every discovery round, each hex announces its discovery address to a multicast group (`network.multicast_group`, `239.255.70.2:7702` by default: UDP, administratively scoped, one router hop at most).
+- A starting hex asks the group first, and the others answer at once, so it joins without waiting for their next round. That adds up to 1.5 seconds to its start.
+- An announcement only says where to probe. The hex is probed with the usual authenticated handshake before it counts, like any learned address. Announcements are signed with a key derived from the lattice key and expire after a minute, so other lattices' announcements and replays are ignored.
+- A hex whose discovery endpoint binds `0.0.0.0` is reached at the address its announcement came from. Set `advertise_host` if that address isn't the right one.
+- Cloud networks (Fly.io, most VPCs) don't carry multicast; use `peers` there. Every hex in a lattice needs the same group.
 
 Probes run concurrently with a 3-second timeout. A peer that doesn't answer three consecutive rounds is "lost", and it's forgotten after 30. But while another hex that answered this round still sees it, it isn't lost yet: a hex cut off from the Overseer on its own (a starved CPU, a broken link) can't elect itself and split the lattice. When the Overseer really is gone, the other hexes stop seeing it within a round, so a replica takes over in about 15 to 20 seconds with the default interval. A round that starts well after it was due (this hex was short of CPU) counts against no one, since the peers may simply not have been asked in time; the log says so.
 
@@ -2774,6 +2782,7 @@ role = "oracle"
 | `network.lattice_name` | generated | Hexes with the same name form a lattice |
 | `network.peers` | `[]` | Other hexes' discovery endpoints |
 | `network.scan_local_ports` | `true` | Also probe local ports 7702-7709 |
+| `network.multicast`, `multicast_group` | `false`, `239.255.70.2:7702` | Find hexes on the local network by multicast (see [Discovery and election](#discovery-and-election)) |
 | `network.discovery_interval_seconds` | 5 | Seconds between discovery rounds; failover takes three to four of them |
 | `network.advertise_host` | none | The host other hexes should use, when binding 0.0.0.0 |
 | `network.lattice_secret` | derived | The shared key that authenticates hexes |

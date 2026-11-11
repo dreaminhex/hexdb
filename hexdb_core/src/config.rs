@@ -79,6 +79,13 @@ pub struct NetworkConfig {
     /// Seconds between discovery rounds.
     #[serde(default = "default_discovery_interval")]
     pub discovery_interval_seconds: u64,
+    /// Find hexes on the local network by multicast, without listing them in
+    /// `peers` (see `network::multicast`). Cloud networks usually don't carry it.
+    #[serde(default)]
+    pub multicast: bool,
+    /// The IPv4 multicast group and UDP port `multicast` uses.
+    #[serde(default = "default_multicast_group")]
+    pub multicast_group: String,
     /// Shared secret (`base64:<32 bytes>`) that authenticates hexes to each
     /// other (discovery and replication). Every hex in a lattice needs the same
     /// value. When empty, it is derived from `storage.encryption_key`.
@@ -595,6 +602,10 @@ pub struct UiConfig {
     pub notice: String,
 }
 
+fn default_multicast_group() -> String {
+    "239.255.70.2:7702".into()
+}
+
 fn default_discovery_interval() -> u64 {
     5
 }
@@ -701,6 +712,8 @@ impl Default for HexConfig {
                 peers: Vec::new(),
                 scan_local_ports: true,
                 discovery_interval_seconds: default_discovery_interval(),
+                multicast: false,
+                multicast_group: default_multicast_group(),
                 lattice_secret: String::new(),
                 previous_lattice_secrets: Vec::new(),
                 trusted_proxies: Vec::new(),

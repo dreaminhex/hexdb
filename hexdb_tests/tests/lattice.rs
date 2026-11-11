@@ -599,3 +599,49 @@ fn failover_goes_to_the_replica_with_the_newest_writes() -> Result<()> {
     wait_until(Duration::from_secs(60), "the big replica to catch up", || Ok(count_on(&big, "notes")? == 21))?;
     Ok(())
 }
+
+/// True if a multicast datagram sent from this machine comes back to it on
+/// `port` (some CI networks and containers carry no multicast at all).
+fn multicast_loops_back(group: std::net::Ipv4Addr, port: u16) -> bool {
+    let Ok(socket) = std::net::UdpSocket::bind(("0.0.0.0", port)) else { return false };
+    let joined = socket.join_multicast_v4(&group, &std::net::Ipv4Addr::UNSPECIFIED).is_ok()
+        && socket.set_multicast_loop_v4(true).is_ok()
+        && socket.set_read_timeout(Some(Duration::from_secs(1))).is_ok();
+    if !joined || socket.send_to(b"hexdb-test", (group, port)).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 32];
+    matches!(socket.recv_from(&mut buf), Ok((10, _)))
+}
+
+/// With `network.multicast`, hexes find each other with no peers listed and
+/// no port scan: a starting hex asks the group, and every hex announces itself.
+#[test]
+fn hexes_find_each_other_by_multicast() -> Result<()> {
+    let group = std::net::Ipv4Addr::new(239, 255, 70, 2);
+    let port = TestServer::free_port()?;
+    if !multicast_loops_back(group, port) {
+        eprintln!("skipped: multicast doesn't loop back on this machine");
+        return Ok(());
+    }
+    let lattice = format!("multicast-{}", port);
+    let options = |ram_mb: u64| -> Result<TestOptions> {
+        Ok(TestOptions {
+            lattice: Some(lattice.clone()),
+            discovery_port: Some(TestServer::free_port()?),
+            ram_mb: Some(ram_mb),
+            discovery_interval_seconds: Some(1),
+            network_toml: format!("multicast = true\nmulticast_group = \"{}:{}\"\n", group, port),
+            ..Default::default()
+        })
+    };
+    let first = TestServer::start_with(options(4096)?)?;
+    let second = TestServer::start_with(options(1024)?)?;
+    wait_until(Duration::from_secs(30), "the hexes to find each other", || {
+        let roles = [role(&first)?, role(&second)?];
+        Ok(roles.iter().filter(|r| r.as_str() == "Overseer").count() == 1 && roles.iter().any(|r| r.as_str() == "Harvester"))
+    })?;
+    let hexes = first.request(Method::GET, "/status", None, &[])?.body["network"]["lattice"]["hexes"].as_array().map(Vec::len);
+    assert_eq!(hexes, Some(2), "the first hex sees the second");
+    Ok(())
+}
