@@ -42,10 +42,16 @@
 //
 // Isolation: a process plugin runs with a clean environment (only PATH and the
 // basic variables a runtime needs, its manifest's `env`, the server variables
-// named in `pass_env`, and HEXDB_*), in its own folder. On Unix, HexDB refuses a registry or manifest that other users
-// can write. Plugins still run with the server's privileges, so only install
-// plugins you trust, and keep the registry writable by administrators only.
-// Webhooks must be http(s) URLs and redirects aren't followed.
+// named in `pass_env`, and HEXDB_*), in its own folder, and in the process
+// sandbox (`crate::sandbox`): it can read its folder and write its data folder
+// (HEXDB_PLUGIN_DATA, also its TMPDIR and HOME), and use more only as its
+// manifest's `[sandbox]` declares (`network`, `read`, `write`, `memory_mb`;
+// `[access]` implies `network`). Paths that hold HexDB's data, configuration
+// or TLS key are refused. The registry can set `"sandbox": false` for a
+// plugin that needs the server's full privileges. On Unix, HexDB refuses a
+// registry or manifest that other users can write; keep the registry writable
+// by administrators only. Webhooks must be http(s) URLs and redirects aren't
+// followed.
 
 mod access;
 mod feeds;
@@ -85,6 +91,9 @@ pub struct RegistryEntry {
     pub kind: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Run a process plugin in the sandbox (default). False runs it with the server's privileges.
+    #[serde(default = "default_true")]
+    pub sandbox: bool,
 }
 
 fn default_true() -> bool {
@@ -150,7 +159,34 @@ pub struct Manifest {
     /// API access for a process plugin.
     #[serde(default)]
     pub access: Option<AccessConfig>,
+    /// What a process plugin may use in the sandbox.
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+    /// From the registry: run in the sandbox.
+    #[serde(skip)]
+    pub sandboxed: bool,
 }
+
+/// `[sandbox]` in plugin.toml. Paths are relative to the plugin's folder.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Outbound network connections (implied by `[access]`, which needs the HexDB API).
+    #[serde(default)]
+    pub network: bool,
+    /// More folders to read (the plugin's own folder always is).
+    #[serde(default)]
+    pub read: Vec<String>,
+    /// Folders to write (created if missing); HEXDB_PLUGIN_DATA always is.
+    #[serde(default)]
+    pub write: Vec<String>,
+    /// Memory limit in MB (default 1024; 0: none).
+    #[serde(default)]
+    pub memory_mb: Option<u64>,
+}
+
+/// Memory limit of a sandboxed plugin when its manifest doesn't set one.
+const DEFAULT_MEMORY_MB: u64 = 1024;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LogsConfig {
@@ -218,6 +254,8 @@ pub struct PluginStatus {
     pub restarts: u64,
     pub last_error: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
+    /// A process plugin that runs in the sandbox.
+    pub sandboxed: bool,
 }
 
 /// All plugins' statuses.
@@ -377,10 +415,18 @@ pub fn spawn_plugins(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>)
             restarts: 0,
             last_error: None,
             started_at: None,
+            sandboxed: false,
         };
-        let manifest = load_manifest(&dir).and_then(|m| {
+        let manifest = load_manifest(&dir).and_then(|mut m| {
             if m.id != id {
                 bail!("the manifest's id '{}' doesn't match the registry key '{}'", m.id, id);
+            }
+            m.sandboxed = entry.sandbox && m.command.is_some();
+            if m.sandboxed {
+                // Checked now, so a manifest asking for HexDB's own files is invalid rather than failing later.
+                sandbox_policy(&engine, &m, &dir)?;
+            } else if m.command.is_some() {
+                warn!("⚠️ Plugin '{}' runs outside the sandbox (\"sandbox\": false in the registry), with the server's privileges.", id);
             }
             Ok(m)
         });
@@ -391,6 +437,7 @@ pub fn spawn_plugins(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>)
                 status.version = m.version.clone();
                 status.description = m.description.clone();
                 status.runtime = m.runtime().into();
+                status.sandboxed = m.sandboxed && crate::sandbox::launcher().is_some();
                 status.state = if entry.enabled { "standby".into() } else { "disabled".into() };
                 engine.plugins.plugins.lock().unwrap().push(status);
                 if entry.enabled {
@@ -451,6 +498,55 @@ async fn run_plugin(engine: Arc<HexDBEngine>, manifest: Manifest, dir: PathBuf, 
     }
 }
 
+/// Paths a plugin may never be given: HexDB's data, configuration and TLS key.
+fn protected_paths(engine: &HexDBEngine) -> Vec<PathBuf> {
+    let mut paths = vec![engine.config.storage_dir()];
+    if let Some(source) = &engine.config.source {
+        paths.extend(crate::config::local_config_path(source));
+        paths.push(source.clone());
+    }
+    if !engine.config.tls.key_file.is_empty() {
+        paths.push(PathBuf::from(&engine.config.tls.key_file));
+    }
+    paths
+}
+
+/// The plugin's data folder (HEXDB_PLUGIN_DATA): writable, kept across restarts.
+fn data_dir(engine: &HexDBEngine, manifest: &Manifest) -> PathBuf {
+    engine.config.storage_dir().join("plugin-data").join(crate::sandbox::sandbox_name("Plugin", &manifest.id))
+}
+
+/// What the plugin may use in the sandbox, from its manifest.
+fn sandbox_policy(engine: &HexDBEngine, manifest: &Manifest, dir: &Path) -> Result<crate::sandbox::Policy> {
+    let resolve = |p: &String| {
+        let path = Path::new(p);
+        let path = if path.is_absolute() { path.to_path_buf() } else { dir.join(path) };
+        std::path::absolute(&path).unwrap_or(path)
+    };
+    let deny = protected_paths(engine);
+    let mut read: Vec<PathBuf> = vec![std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())];
+    read.extend(manifest.sandbox.read.iter().map(resolve));
+    let write: Vec<PathBuf> = manifest.sandbox.write.iter().map(resolve).collect();
+    for path in read.iter().chain(&write) {
+        if let Some(protected) = deny.iter().find(|d| crate::sandbox::is_within(path, d) || crate::sandbox::is_within(d, path)) {
+            bail!("[sandbox] can't grant {}: it holds HexDB's own files ({})", path.display(), protected.display());
+        }
+    }
+    if !engine.config.tls.ca_file.is_empty() {
+        read.push(PathBuf::from(&engine.config.tls.ca_file));
+    }
+    Ok(crate::sandbox::Policy {
+        name: crate::sandbox::sandbox_name("Plugin", &manifest.id),
+        read,
+        write: write.into_iter().chain([data_dir(engine, manifest)]).collect(),
+        deny,
+        network: manifest.sandbox.network || manifest.access.is_some(),
+        memory_mb: manifest.sandbox.memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
+        cpu_seconds: 0,
+        max_processes: 0,
+    })
+}
+
 /// Start the plugin's process (if it has a command) with its environment.
 async fn start_process(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path, command: &Command) -> Result<tokio::process::Child> {
     let id = &manifest.id;
@@ -459,12 +555,44 @@ async fn start_process(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Pat
         Command::Line(line) => line.split_whitespace().map(String::from).collect(),
     };
     let (program, rest) = args.split_first().ok_or_else(|| anyhow!("command is empty"))?;
-    let mut process = tokio::process::Command::new(program);
-    process.args(rest).current_dir(dir).env_clear();
+    let launcher = crate::sandbox::launcher().filter(|_| manifest.sandboxed);
+    let mut process = match launcher {
+        Some(launcher) => {
+            let policy = sandbox_policy(engine, manifest, dir)?;
+            for folder in &policy.write {
+                std::fs::create_dir_all(folder).with_context(|| format!("can't create {}", folder.display()))?;
+            }
+            let (exe, wrapped) = crate::sandbox::wrap(launcher, &policy, program, rest);
+            let mut process = tokio::process::Command::new(exe);
+            process.args(wrapped);
+            process
+        }
+        None => {
+            if manifest.sandboxed {
+                warn!(plugin = %id, "⚠️ Plugin '{}' runs unsandboxed: this process has no sandbox launcher (library use).", id);
+            }
+            let mut process = tokio::process::Command::new(program);
+            process.args(rest);
+            process
+        }
+    };
+    process.current_dir(dir).env_clear();
     for name in PASSED_ENV {
         if let Some(value) = std::env::var_os(name) {
             process.env(name, value);
         }
+    }
+    let data = data_dir(engine, manifest);
+    std::fs::create_dir_all(&data).with_context(|| format!("can't create {}", data.display()))?;
+    process.env("HEXDB_PLUGIN_DATA", &data);
+    if launcher.is_some() {
+        // Its own temporary folder and home, since the sandbox keeps it out of the server's.
+        let temp = data.join("tmp");
+        std::fs::create_dir_all(&temp).with_context(|| format!("can't create {}", temp.display()))?;
+        for name in ["TMPDIR", "TEMP", "TMP"] {
+            process.env(name, &temp);
+        }
+        process.env(if cfg!(windows) { "USERPROFILE" } else { "HOME" }, &data);
     }
     let scheme = if engine.config.tls.enabled() { "https" } else { "http" };
     let api_host = engine.config.network.api_endpoint.replace("0.0.0.0", "127.0.0.1");

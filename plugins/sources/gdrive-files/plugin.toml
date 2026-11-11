@@ -2,7 +2,7 @@
 # tessellation, keeping the folder structure. Each file is imported once per
 # content checksum (a changed file comes in as a new version); Google Docs,
 # Sheets and Slides aren't files and are skipped. Progress is kept in
-# gdrive-import-state.json here.
+# gdrive-import-state.json in the plugin data folder.
 #
 # Setup (no npm install needed):
 #   1. In Google Cloud, create an OAuth client of type "Desktop app" and enable
@@ -29,3 +29,7 @@ GDRIVE_FOLDER_ID = "the-folder-id"        # from the folder's URL: drive.google.
 TARGET = "media"
 TARGET_FOLDER = "/imported/drive/"
 POLL_SECONDS = "600"                      # 0: import once
+
+[sandbox]
+network = true            # reaches Google Drive and the HexDB API
+read = ["../../sdk"]      # the shared plugin helpers

@@ -33,6 +33,11 @@ fn main() -> anyhow::Result<()> {
     if std::env::args().nth(1).as_deref() == Some(hexdb_core::extract::sandbox::WORKER_ARG) {
         hexdb_core::extract::sandbox::worker_main();
     }
+    // The sandbox launcher for plugins (and, on Windows, the parser worker):
+    // single-threaded until it restricts itself and runs the program.
+    if std::env::args().nth(1).as_deref() == Some(hexdb_core::sandbox::EXEC_ARG) {
+        hexdb_core::sandbox::launcher_main();
+    }
     #[cfg(windows)]
     if std::env::args().any(|a| a == service::SERVICE_ARG) {
         return service::run();
@@ -218,6 +223,10 @@ async fn server() -> anyhow::Result<()> {
         name: name.clone(),
         hex_type: role.clone(),
     };
+    match std::env::current_exe() {
+        Ok(exe) => hexdb_core::sandbox::set_launcher(exe),
+        Err(e) => warn!("⚠️ Plugins run unsandboxed: the sandbox launcher can't find this executable ({}).", e),
+    }
     if config.files.sandbox {
         match std::env::current_exe() {
             Ok(exe) => hexdb_core::extract::sandbox::set_worker(exe, config.files.sandbox_memory_mb),

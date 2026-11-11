@@ -1,6 +1,6 @@
 # Imports files from an Azure Blob Storage container into a files
 # tessellation, keeping their folders (blob names with "/"). Each blob is
-# imported once per ETag; progress is kept in azure-import-state.json here.
+# imported once per ETag; progress is kept in azure-import-state.json in the plugin data folder.
 #
 # Setup: `npm install` in this folder. The credentials come from the server's
 # environment (pass_env below), never from this file: set
@@ -25,3 +25,7 @@ AZURE_PREFIX = ""                         # only blobs under this prefix
 TARGET = "media"
 TARGET_FOLDER = "/imported/azure/"
 POLL_SECONDS = "300"                      # 0: import once
+
+[sandbox]
+network = true            # reaches Azure Blob Storage and the HexDB API
+read = ["../../sdk"]      # the shared plugin helpers

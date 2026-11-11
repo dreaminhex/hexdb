@@ -1,7 +1,7 @@
 # Imports JSON documents from an S3 bucket (or any S3-compatible store: MinIO,
 # Cloudflare R2, Backblaze B2). Each object under PREFIX holding a JSON array,
 # a JSON object or JSON lines is imported once; imported keys are remembered in
-# s3-state.json in this folder. With KEY_FIELD set, documents are upserted by
+# s3-state.json in the plugin data folder. With KEY_FIELD set, documents are upserted by
 # that field; otherwise they are inserted.
 #
 # Setup: `npm install` in this folder; credentials from the usual AWS sources.
@@ -24,3 +24,7 @@ S3_PREFIX = "exports/"
 TARGET = "imports"
 KEY_FIELD = ""                            # e.g. "id" in the source data
 POLL_SECONDS = "60"
+
+[sandbox]
+network = true            # reaches Amazon S3 and the HexDB API
+read = ["../../sdk"]      # the shared plugin helpers

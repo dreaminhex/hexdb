@@ -1,10 +1,9 @@
 // SQL Server -> HexDB sync. A rowversion column increases on every insert and
 // update, so "rows with a rowversion above the last one copied" are exactly
-// the changes. The position is kept in sync-state.json in this folder.
-import { readFileSync, writeFileSync } from "node:fs"
+// the changes. The position is kept in sync-state.json in the plugin's data folder (HEXDB_PLUGIN_DATA).
 import sql from "mssql"
 
-import { api, log, main } from "../../sdk/hexdb-plugin.mjs"
+import { api, log, main, readState, saveState } from "../../sdk/hexdb-plugin.mjs"
 
 const env = process.env
 const table = env.MSSQL_TABLE
@@ -15,13 +14,7 @@ const pollMs = Number(env.POLL_SECONDS || 10) * 1000
 const STATE = "sync-state.json"
 
 const quote = (name) => name.split(".").map((part) => `[${part.replaceAll("]", "]]")}]`).join(".")
-const loadState = () => {
-  try {
-    return JSON.parse(readFileSync(STATE, "utf8"))
-  } catch {
-    return { since: "0x0000000000000000" }
-  }
-}
+const loadState = () => readState(STATE, { since: "0x0000000000000000" })
 
 await main(async () => {
   if (!table) throw new Error("Set MSSQL_TABLE in plugin.toml")
@@ -47,7 +40,7 @@ await main(async () => {
       })
       const written = await hexdb.upsert(target, ["source_id"], docs)
       state.since = rows.at(-1).__rv
-      writeFileSync(STATE, JSON.stringify(state))
+      saveState(STATE, state)
       log(`${table}: ${written.inserted} inserted, ${written.replaced} updated (through ${state.since})`)
       if (rows.length < 500) break
     }

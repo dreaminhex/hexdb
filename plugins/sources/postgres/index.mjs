@@ -1,12 +1,11 @@
 // PostgreSQL -> HexDB sync. Rows changed since the last run are read in
 // (updated_at, key) order, 500 at a time, and upserted by their primary key.
-// The position is kept in sync-state.json in this folder, so a restart
+// The position is kept in sync-state.json in the plugin's data folder (HEXDB_PLUGIN_DATA), so a restart
 // continues where it stopped. Deleted rows aren't detected (use soft deletes,
 // or a change-data-capture tool for Postgres, for that).
-import { readFileSync, writeFileSync } from "node:fs"
 import pg from "pg"
 
-import { api, log, main } from "../../sdk/hexdb-plugin.mjs"
+import { api, log, main, readState, saveState } from "../../sdk/hexdb-plugin.mjs"
 
 const env = process.env
 const table = env.PG_TABLE
@@ -17,13 +16,7 @@ const pollMs = Number(env.POLL_SECONDS || 10) * 1000
 const STATE = "sync-state.json"
 
 const ident = (name) => `"${String(name).replaceAll('"', '""')}"`
-const loadState = () => {
-  try {
-    return JSON.parse(readFileSync(STATE, "utf8"))
-  } catch {
-    return { since: "1970-01-01T00:00:00Z", lastKey: null }
-  }
-}
+const loadState = () => readState(STATE, { since: "1970-01-01T00:00:00Z", lastKey: null })
 
 await main(async () => {
   if (!table) throw new Error("Set PG_TABLE in plugin.toml")
@@ -53,7 +46,7 @@ await main(async () => {
       const last = rows.at(-1)
       state.since = new Date(last[updatedAt]).toISOString()
       state.lastKey = String(last[key])
-      writeFileSync(STATE, JSON.stringify(state))
+      saveState(STATE, state)
       log(`${table}: ${result.inserted} inserted, ${result.replaced} updated (through ${state.since})`)
       if (rows.length < 500) break
     }

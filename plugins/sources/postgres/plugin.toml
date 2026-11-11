@@ -24,3 +24,7 @@ PG_KEY = "id"                    # primary key column -> source_id
 PG_UPDATED_AT = "updated_at"     # timestamp column used to find changes
 TARGET = "customers"
 POLL_SECONDS = "10"
+
+[sandbox]
+network = true            # reaches PostgreSQL and the HexDB API
+read = ["../../sdk"]      # the shared plugin helpers

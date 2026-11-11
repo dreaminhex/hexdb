@@ -447,6 +447,8 @@ export interface PluginStatus {
   restarts: number
   last_error: string | null
   started_at: string | null
+  /** A process plugin that runs in the sandbox. */
+  sandboxed: boolean
 }
 
 export interface MetricsSample {

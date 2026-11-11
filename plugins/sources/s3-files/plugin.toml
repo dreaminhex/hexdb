@@ -2,7 +2,7 @@
 # Backblaze B2, Wasabi, MinIO) into a files tessellation, keeping their
 # folders: s3://BUCKET/PREFIX/photos/a.jpg becomes TARGET/TARGET_FOLDER/photos/a.jpg.
 # Each object is imported once per ETag (a changed object comes in as a new
-# version); progress is kept in s3-import-state.json in this folder.
+# version); progress is kept in s3-import-state.json in the plugin data folder.
 #
 # Setup: `npm install` in this folder. Credentials come from the server's
 # environment (pass_env below), never from this file: set AWS_ACCESS_KEY_ID
@@ -29,3 +29,7 @@ AWS_REGION = "us-east-1"                  # "auto" for Cloudflare R2
 TARGET = "media"
 TARGET_FOLDER = "/imported/s3/"
 POLL_SECONDS = "300"                      # 0: import once
+
+[sandbox]
+network = true            # reaches Amazon S3 and the HexDB API
+read = ["../../sdk"]      # the shared plugin helpers

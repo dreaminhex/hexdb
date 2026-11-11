@@ -15,3 +15,7 @@ level = "info"        # error, warn, info, debug or trace
 [env]
 LOG_DIR = "./logs"
 LOG_RETAIN_DAYS = "14"
+
+[sandbox]
+read = ["../../sdk"]      # the shared plugin helpers
+write = ["./logs"]        # where the files go; change it with LOG_DIR

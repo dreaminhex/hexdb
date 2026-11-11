@@ -2,10 +2,9 @@
 // (JSON array, JSON object, or JSON lines), in pages of 1000 documents, with
 // an idempotency key per page so a retry after a crash doesn't duplicate.
 import { createHash } from "node:crypto"
-import { readFileSync, writeFileSync } from "node:fs"
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3"
 
-import { api, log, main, warn } from "../../sdk/hexdb-plugin.mjs"
+import { api, log, main, warn, readState, saveState } from "../../sdk/hexdb-plugin.mjs"
 
 const env = process.env
 const bucket = env.S3_BUCKET
@@ -16,13 +15,7 @@ const pollMs = Number(env.POLL_SECONDS || 60) * 1000
 const STATE = "s3-state.json"
 const s3 = new S3Client(env.S3_ENDPOINT ? { endpoint: env.S3_ENDPOINT, forcePathStyle: true } : {})
 
-const loadState = () => {
-  try {
-    return JSON.parse(readFileSync(STATE, "utf8"))
-  } catch {
-    return { imported: {} }
-  }
-}
+const loadState = () => readState(STATE, { imported: {} })
 
 function parse(text) {
   const trimmed = text.trim()
@@ -55,7 +48,7 @@ await main(async () => {
             else await hexdb.insertMany(target, chunk, idem)
           }
           state.imported[id] = new Date().toISOString()
-          writeFileSync(STATE, JSON.stringify(state))
+          saveState(STATE, state)
           log(`imported ${docs.length} document(s) from ${object.Key}`)
         } catch (e) {
           warn(`couldn't import ${object.Key}: ${e.message}`)

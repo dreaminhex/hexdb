@@ -1435,7 +1435,7 @@ After each upload, new version or version restore, the Overseer reads the file i
 
 **Limits.** Extraction reads at most `files.extract_max_mb` (64) of a file and stops after `files.extract_timeout_seconds` (30). Each extractor runs on its own: one that fails or panics adds a line to `extract.errors` and the others still run. Strings are cut at 4,096 bytes, arrays and objects at 500 items; `meta.text` is at most `files.text_kb` (64) KB. A `meta` larger than 256 KB loses its largest tag families first (listed in `meta.dropped`). Binary data (embedded thumbnails, maker notes, cover art) is left out.
 
-**The parser sandbox.** Files come from users, and file parsers are where a hostile file does harm, so extraction, thumbnails and video frames are made in a separate worker process (`files.sandbox`, on by default): the server's own executable, started for one file at a time. The worker never sees the store, the keys or the network. It asks the hex for byte ranges of the file over a pipe, and the hex reads them from the encrypted store, enforcing the read budget and deadline itself. The worker gets an empty environment and no handles but its pipes, and is killed at the deadline or if the hex exits. On Linux it also runs under resource limits (`files.sandbox_memory_mb`, 1024, of memory, CPU seconds, no file writes, few descriptors) and a seccomp filter that allows only memory, thread, clock and pipe system calls: opening files, sockets and starting programs fail. On macOS the resource limits apply (macOS doesn't enforce the memory one). On Windows the worker runs in its own job object with a memory limit, a CPU-time limit, no child processes and UI restrictions. `/status` shows `storage.files.parser_sandbox` (runs, failures, workers stopped at the deadline). Turning the sandbox off parses files in the server process, as before 2.0.
+**The parser sandbox.** Files come from users, and file parsers are where a hostile file does harm, so extraction, thumbnails and video frames are made in a separate worker process (`files.sandbox`, on by default): the server's own executable, started for one file at a time. The worker never sees the store, the keys or the network. It asks the hex for byte ranges of the file over a pipe, and the hex reads them from the encrypted store, enforcing the read budget and deadline itself. The worker gets an empty environment and no handles but its pipes, and is killed at the deadline or if the hex exits. On Linux it also runs under resource limits (`files.sandbox_memory_mb`, 1024, of memory, CPU seconds, no file writes, few descriptors) and a seccomp filter that allows only memory, thread, clock and pipe system calls: opening files, sockets and starting programs fail. On macOS the resource limits apply (macOS doesn't enforce the memory one). On Windows (since 2.5) the worker runs in the `HexDB.Parser` AppContainer, which can read only the worker's executable and has no network. It also runs in a job object with a memory limit, a CPU-time limit, no child processes and UI restrictions. `/status` shows `storage.files.parser_sandbox` (runs, failures, workers stopped at the deadline). Turning the sandbox off parses files in the server process, as before 2.0.
 
 Not read yet: text in scanned PDFs and images (no OCR; the AI can read them, see [AI](#ai)), frames of video that isn't H.264.
 
@@ -1820,7 +1820,36 @@ A process plugin runs in its own folder with a clean environment. It gets only:
 
 The server's own `HEXDB_*` variables (which may hold keys) are never passed. When the lattice uses a private CA, `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` point at it.
 
-On Unix, HexDB refuses a registry or manifest that other users can write. Plugins still run with the server's privileges: install only plugins you trust, and keep the registry writable by administrators only.
+**The sandbox.** Since 2.5, every process plugin runs in a sandbox. HexDB starts it through its own executable (`hexdb --sandbox-exec`), which restricts itself and then runs the plugin's command. A sandboxed plugin can:
+- read its own folder, the system folders a runtime needs, and the private CA file;
+- read and write its data folder, `HEXDB_PLUGIN_DATA`. This is `<data directory>/plugin-data/HexDB.Plugin.<id>`, it survives restarts, and it is also the plugin's `HOME` (`USERPROFILE` on Windows). Its `tmp` subfolder is `TMPDIR`/`TEMP`/`TMP`;
+- use nothing else unless its manifest asks for it:
+
+```toml
+[sandbox]
+network = true            # outbound connections (implied by [access], which needs the API)
+read = ["../../sdk"]      # more folders to read, relative to the plugin's folder
+write = ["./logs"]        # folders to write (created if missing)
+memory_mb = 1024          # the default; 0 for no limit
+```
+
+The memory limit covers everything the plugin maps, not just its heap. Node.js needs headroom for its compiled code, so keep Node plugins at 512 MB or more: at 256 MB, V8 can stop with "out of memory" while compiling.
+
+A manifest that asks to read or write HexDB's data directory, its config files or its TLS key (or a folder containing them) is invalid. To run a plugin with the server's full privileges instead, set `"sandbox": false` on its registry entry. HexDB logs a warning when it starts one. The Plugins page and `GET /plugins` show `sandboxed` for each plugin.
+
+What the sandbox enforces depends on the platform:
+- **Linux.** Landlock confines the file system: `/usr`, `/lib`, `/bin`, `/etc`, `/proc`, `/sys` and `/dev` are readable, but HexDB's own config files and data stay out even when they're inside those folders. The command's folder and the folders granted above are also allowed. A seccomp filter refuses sockets without `network`; with it, only IPv4, IPv6 and netlink are allowed, never Unix sockets. The filter also refuses signals to other processes (so a plugin can't stop its own child processes either), ptrace, io_uring, mounts, namespaces, BPF, keyrings and kernel modules. The memory limit is an rlimit, and the plugin can't gain privileges. Kernels older than 5.13 have no Landlock: the plugin gets everything else, and its log says file access isn't restricted. Linux 6.12 and later also scope signals and abstract sockets through Landlock.
+- **Windows.** The plugin runs in an AppContainer named `HexDB.Plugin.<id>`. It can read only what every AppContainer can (Windows, Program Files) plus the folders HexDB grants it. HexDB grants them by adding the container to their ACLs the first time. With `network` it gets the internet and private-network capabilities. Windows keeps AppContainers off localhost, which includes the HexDB API, until an administrator exempts them. HexDB does this itself when it runs as an administrator or as the service. Otherwise the plugin's log gives the command: `CheckNetIsolation.exe LoopbackExempt -a -n=HexDB.Plugin.<id>`. A job object holds the memory limit. The command must be an `.exe` (`node`, `python`), not a `.cmd` or `.bat` script.
+- **macOS.** Only the memory limit.
+
+Things that change for plugins written before 2.5:
+- Keep state in `HEXDB_PLUGIN_DATA`, not the plugin's folder. The SDK's `readState`/`saveState` do this, and they still read a state file left in the folder by an older version.
+- Credentials files in your home folder (`~/.aws`) aren't readable. Pass keys through `pass_env`, or grant the folder with `read`.
+- A plugin that imports the shared SDK needs `read = ["../../sdk"]`.
+
+All the bundled plugins declare what they need.
+
+On Unix, HexDB refuses a registry or manifest that other users can write. Keep the registry and plugin folders writable by administrators only: the manifest decides what the sandbox allows.
 
 ### Writing a plugin
 
@@ -1836,7 +1865,7 @@ for await (const change of payloads()) {          // stream, logs and metrics pl
 await api().post("/orders", { total: 12 })         // plugins with [access]
 ```
 
-Any language works: read JSON lines from stdin, and use `HEXDB_API` and `HEXDB_API_KEY` for the API. Variables a plugin gets: `HEXDB_PLUGIN_ID`, `HEXDB_PLUGIN_TYPE`, `HEXDB_API`, `HEXDB_API_KEY` (with `[access]`), plus its `[env]`.
+Any language works: read JSON lines from stdin, and use `HEXDB_API` and `HEXDB_API_KEY` for the API. Variables a plugin gets: `HEXDB_PLUGIN_ID`, `HEXDB_PLUGIN_TYPE`, `HEXDB_API`, `HEXDB_API_KEY` (with `[access]`), `HEXDB_PLUGIN_DATA` (its writable folder), plus its `[env]`. The SDK's `dataFile(name)`, `readState(name, fallback)` and `saveState(name, state)` keep JSON state there.
 
 ### Example plugins
 
@@ -1861,7 +1890,7 @@ All of these are listed, disabled, in [plugins.json](plugins.json).
 
 ### Importing files
 
-The four `*-files` source plugins copy files you already have elsewhere into a files tessellation, where they're read, thumbnailed, tagged and searchable like any upload. Folders are kept: an object `photos/2024/a.jpg` under the source's prefix or folder becomes `TARGET/TARGET_FOLDER/photos/2024/a.jpg`. Each file is copied once per version at the source (an S3 or Azure ETag, a Drive checksum, a Dropbox revision); a file that changes there comes in as a new version. What's been copied is remembered in a state file in the plugin's folder, so restarts don't copy again. `POLL_SECONDS` sets how often each looks for new files (0: once).
+The four `*-files` source plugins copy files you already have elsewhere into a files tessellation, where they're read, thumbnailed, tagged and searchable like any upload. Folders are kept: an object `photos/2024/a.jpg` under the source's prefix or folder becomes `TARGET/TARGET_FOLDER/photos/2024/a.jpg`. Each file is copied once per version at the source (an S3 or Azure ETag, a Drive checksum, a Dropbox revision); a file that changes there comes in as a new version. What's been copied is remembered in a state file in the plugin's data folder (`HEXDB_PLUGIN_DATA`), so restarts don't copy again. `POLL_SECONDS` sets how often each looks for new files (0: once).
 
 Setting one up:
 
@@ -2277,7 +2306,8 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 - `hexdb.pid` (the shutdown token) and `initial-admin-password.txt` are readable by the owner only: mode 0600 on Unix, and on Windows inherited permissions are removed, leaving the current user and SYSTEM.
 - Secrets belong in `hexdb.local.toml` or environment variables, never in a committed `hexdb.toml`.
 - `GET /settings` hides secrets in the effective configuration.
-- Uploaded files are parsed in a sandboxed worker process that has no keys, no store and (on Linux) no file or network access; see [the parser sandbox](#metadata-extraction).
+- Uploaded files are parsed in a sandboxed worker process that has no keys, no store and (on Linux and Windows) no file or network access; see [the parser sandbox](#metadata-extraction).
+- Process plugins run in a sandbox (Landlock and seccomp on Linux, an AppContainer on Windows). They can't read HexDB's data, config or TLS key, and get only the network and folders their manifest declares; see [Isolation](#isolation).
 
 ### Configuration, AI and storage
 

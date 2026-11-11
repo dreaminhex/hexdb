@@ -1,7 +1,7 @@
 # Imports files from a Dropbox folder (and its subfolders) into a files
 # tessellation, keeping the folder structure. Each file is imported once per
 # revision (a changed file comes in as a new version); progress is kept in
-# dropbox-import-state.json here.
+# dropbox-import-state.json in the plugin data folder.
 #
 # Setup (no npm install needed):
 #   1. In the Dropbox App Console, create an app with the files.metadata.read
@@ -27,3 +27,7 @@ DROPBOX_FOLDER = "/Photos"                # "" for the whole Dropbox (or app fol
 TARGET = "media"
 TARGET_FOLDER = "/imported/dropbox/"
 POLL_SECONDS = "600"                      # 0: import once
+
+[sandbox]
+network = true            # reaches Dropbox and the HexDB API
+read = ["../../sdk"]      # the shared plugin helpers

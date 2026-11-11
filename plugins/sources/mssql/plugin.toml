@@ -22,3 +22,7 @@ MSSQL_KEY = "OrderId"
 MSSQL_ROWVERSION = "RowVer"     # a rowversion (timestamp) column
 TARGET = "orders"
 POLL_SECONDS = "10"
+
+[sandbox]
+network = true            # reaches SQL Server and the HexDB API
+read = ["../../sdk"]      # the shared plugin helpers

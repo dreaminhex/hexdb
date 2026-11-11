@@ -78,6 +78,14 @@ function PluginRow({ plugin: p }: { plugin: PluginStatus }) {
       </TableCell>
       <TableCell className="hidden sm:table-cell">
         {p.runtime ? <Badge variant="outline">{p.runtime}</Badge> : <span className="text-muted-foreground">—</span>}
+        {p.runtime === "process" && (
+          <div
+            className={cn("mt-1 text-xs", p.sandboxed ? "text-muted-foreground" : "text-amber-600 dark:text-amber-500")}
+            title={p.sandboxed ? "Runs in the sandbox, with only what its plugin.toml declares" : "Runs with the server's privileges (\"sandbox\": false in the registry)"}
+          >
+            {p.sandboxed ? "sandboxed" : "not sandboxed"}
+          </div>
+        )}
         {p.type && <div className="text-muted-foreground mt-1 text-xs">{p.type}</div>}
       </TableCell>
       <TableCell>

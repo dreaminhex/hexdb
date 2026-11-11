@@ -17,14 +17,13 @@
 //   POLL_SECONDS   look again this often; 0: import once, then stay idle
 //
 // What's been imported is remembered in <name>-import-state.json in the
-// plugin's folder (key -> version), so a restart doesn't copy anything twice.
+// plugin's data folder (HEXDB_PLUGIN_DATA; key -> version), so a restart doesn't copy anything twice.
 // Uploads send their size, so a user's quota refuses them before any bytes
 // move; a refused or failed file is logged and tried again on the next pass.
 
-import { readFileSync, renameSync, writeFileSync } from "node:fs"
 import { Readable } from "node:stream"
 
-import { log, warn } from "./hexdb-plugin.mjs"
+import { log, readState, saveState, warn } from "./hexdb-plugin.mjs"
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -68,17 +67,8 @@ export async function importFiles({ name, list, open }) {
   const folder = (process.env.TARGET_FOLDER || "/").replace(/^\/+|\/+$/g, "")
   const pollMs = Number(process.env.POLL_SECONDS ?? 300) * 1000
   const stateFile = `${name}-import-state.json`
-  let state
-  try {
-    state = JSON.parse(readFileSync(stateFile, "utf8"))
-  } catch {
-    state = { imported: {} }
-  }
-  const save = () => {
-    // Write then rename, so a crash never leaves a half-written state.
-    writeFileSync(`${stateFile}.tmp`, JSON.stringify(state))
-    renameSync(`${stateFile}.tmp`, stateFile)
-  }
+  const state = readState(stateFile, { imported: {} })
+  const save = () => saveState(stateFile, state)
   log(`importing ${name} -> ${target}/${folder}`)
 
   for (;;) {

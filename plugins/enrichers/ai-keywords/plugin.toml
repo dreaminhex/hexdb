@@ -30,3 +30,7 @@ ai = true
 TEXT_FIELDS = "title,body"       # fields to read
 KEYWORDS_FIELD = "keywords"      # field to write
 MAX_KEYWORDS = "12"
+
+[sandbox]
+network = true            # reaches the HexDB API and the AI provider
+read = ["../../sdk"]      # the shared plugin helpers

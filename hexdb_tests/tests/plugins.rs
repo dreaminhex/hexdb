@@ -64,17 +64,38 @@ fn write(path: &Path, text: &str) -> Result<()> {
 fn plugins_receive_committed_changes() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let root = dir.path();
-    let echo_out = root.join("echo.ndjson");
+    let echo_out = root.join("out/echo.ndjson");
+    let secret = root.join("secret.txt");
+    std::fs::write(&secret, "not for plugins")?;
     let (hook_url, received) = webhook_server()?;
     let toml_path = |p: &Path| p.display().to_string().replace('\\', "/");
+    let echo = toml_path(Path::new(env!("CARGO_BIN_EXE_plugin_echo")));
 
+    // In the sandbox: it may write ../out (declared), but not read the secret beside it.
     write(
         &root.join("echo/plugin.toml"),
         &format!(
-            "id = \"@test/echo\"\nname = \"Echo\"\nversion = \"1.0.0\"\ncommand = ['{}']\ntessellations = [\"orders\"]\n[env]\nECHO_OUT = '{}'\n",
-            toml_path(Path::new(env!("CARGO_BIN_EXE_plugin_echo"))),
-            toml_path(&echo_out)
+            "id = \"@test/echo\"\nname = \"Echo\"\nversion = \"1.0.0\"\ncommand = ['{}']\ntessellations = [\"orders\"]\n[env]\nECHO_OUT = '{}'\nECHO_PROBE = '{}'\n[sandbox]\nwrite = ['../out']\n",
+            echo,
+            toml_path(&echo_out),
+            toml_path(&secret)
         ),
+    )?;
+    // Outside the sandbox (the registry says so), the same probe reads it.
+    write(
+        &root.join("trusted/plugin.toml"),
+        &format!(
+            "id = \"@test/trusted\"\nname = \"Trusted\"\ncommand = ['{}']\ntessellations = [\"none\"]\n[env]\nECHO_OUT = '{}'\nECHO_PROBE = '{}'\n",
+            echo,
+            toml_path(&root.join("trusted.ndjson")),
+            toml_path(&secret)
+        ),
+    )?;
+    // Asking for a folder that holds the server's data makes the manifest invalid.
+    let servers = std::env::var_os("HEXDB_TEST_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    write(
+        &root.join("greedy/plugin.toml"),
+        &format!("id = \"@test/greedy\"\nname = \"Greedy\"\ncommand = \"anything\"\n[sandbox]\nread = ['{}']\n", toml_path(&servers)),
     )?;
     write(
         &root.join("hook/plugin.toml"),
@@ -86,6 +107,8 @@ fn plugins_receive_committed_changes() -> Result<()> {
         &root.join("plugins.json"),
         &json!({
             "@test/echo": { "path": "./echo" },
+            "@test/trusted": { "path": "./trusted", "sandbox": false },
+            "@test/greedy": { "path": "./greedy" },
             "@test/hook": { "path": "./hook" },
             "@test/broken": { "path": "./broken" },
             "@test/off": { "path": "./off", "enabled": false },
@@ -111,6 +134,10 @@ fn plugins_receive_committed_changes() -> Result<()> {
     assert_eq!(state("@test/off")?["state"], "disabled");
     assert_eq!(state("@test/missing")?["state"], "invalid");
     assert_eq!(state("@test/echo")?["runtime"], "process");
+    assert_eq!(state("@test/echo")?["sandboxed"], true);
+    assert_eq!(state("@test/trusted")?["sandboxed"], false);
+    assert_eq!(state("@test/greedy")?["state"], "invalid");
+    assert!(state("@test/greedy")?["last_error"].as_str().unwrap().contains("HexDB's own files"), "{}", state("@test/greedy")?);
     assert_eq!(state("@test/hook")?["runtime"], "webhook");
 
     let order = server.insert("orders", &json!({ "total": 12 }))?;
@@ -137,6 +164,11 @@ fn plugins_receive_committed_changes() -> Result<()> {
     wait_until(Duration::from_secs(5), "delivery counts", || Ok(state("@test/echo")?["delivered"] == 3))?;
     let logs = server.request(Method::GET, "/logs?target=hexdb_core::plugins&limit=50", None, &[])?;
     assert!(logs.body.to_string().contains("echo plugin ready for @test/echo"), "{}", logs.body);
+    // The sandbox kept the echo plugin from reading the secret; the trusted plugin could.
+    wait_until(Duration::from_secs(10), "the probes", || {
+        let text = server.request(Method::GET, "/logs?q=probe&limit=20", None, &[])?.body.to_string();
+        Ok(text.contains("[@test/echo] probe denied") && text.contains("[@test/trusted] probe read"))
+    })?;
     Ok(())
 }
 
@@ -270,13 +302,13 @@ fn logs_metrics_otlp_and_source_plugins() -> Result<()> {
     let root = dir.path();
     let toml_path = |p: &Path| p.display().to_string().replace('\\', "/");
     let (otlp_url, otlp) = recording_server()?;
-    let log_out = root.join("logs.ndjson");
+    let log_out = root.join("out/logs.ndjson");
     write(&root.join("otlp-metrics/plugin.toml"), &format!("id = \"@test/otlp-metrics\"\nname = \"OTLP metrics\"\ntype = \"metrics\"\nbuiltin = \"otlp\"\n[otlp]\nendpoint = \"{}\"\nheaders = {{ \"x-api-key\" = \"k\" }}\n", otlp_url))?;
     write(&root.join("otlp-logs/plugin.toml"), &format!("id = \"@test/otlp-logs\"\nname = \"OTLP logs\"\ntype = \"logs\"\nbuiltin = \"otlp\"\n[logs]\nlevel = \"info\"\n[otlp]\nendpoint = \"{}\"\n", otlp_url))?;
     write(
         &root.join("log-file/plugin.toml"),
         &format!(
-            "id = \"@test/log-file\"\nname = \"Log file\"\ntype = \"logs\"\ncommand = ['{}']\n[logs]\nlevel = \"info\"\n[env]\nECHO_OUT = '{}'\n",
+            "id = \"@test/log-file\"\nname = \"Log file\"\ntype = \"logs\"\ncommand = ['{}']\n[logs]\nlevel = \"info\"\n[env]\nECHO_OUT = '{}'\n[sandbox]\nwrite = ['../out']\n",
             toml_path(Path::new(env!("CARGO_BIN_EXE_plugin_echo"))),
             toml_path(&log_out)
         ),
@@ -295,7 +327,9 @@ fn logs_metrics_otlp_and_source_plugins() -> Result<()> {
             "@test/otlp-metrics": { "path": "./otlp-metrics" },
             "@test/otlp-logs": { "path": "./otlp-logs" },
             "@test/log-file": { "path": "./log-file" },
-            "@test/source": { "path": "./source" },
+            // Windows keeps sandboxed plugins off localhost (where the API is) until
+            // an administrator exempts them, which a test run can't count on.
+            "@test/source": { "path": "./source", "sandbox": !cfg!(windows) },
             "@test/bad": { "path": "./bad" },
         })
         .to_string(),

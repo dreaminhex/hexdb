@@ -39,6 +39,7 @@ pub mod blocklist;
 pub mod queues;
 pub mod scan;
 pub mod process;
+pub mod sandbox;
 pub mod analysis;
 pub mod advisor;
 pub mod schema;

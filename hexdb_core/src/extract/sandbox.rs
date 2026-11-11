@@ -19,9 +19,11 @@
 //     and a seccomp filter that allows only memory, thread, clock, signal and
 //     pipe I/O system calls; opening files, sockets and exec fail with EPERM;
 //   * macOS: the same rlimits (macOS doesn't enforce the memory one);
-//   * Windows: its own job object with a memory limit, a CPU-time limit, one
-//     process (it can't start others) and UI restrictions, killed when the
-//     hex's handle closes.
+//   * Windows: started through the sandbox launcher (`crate::sandbox`) in the
+//     HexDB.Parser AppContainer, which can read only the worker's executable
+//     and has no network; a job object with a memory limit, a CPU-time limit,
+//     one process (it can't start others) and UI restrictions; killed when
+//     the hex's handle to the launcher's job closes.
 //
 // Without a worker binary (library use, unit tests) or with
 // `files.sandbox = false`, extraction runs in-process as before.
@@ -76,6 +78,8 @@ pub struct SandboxStats {
     pub stopped: u64,
     /// Workers run under a seccomp system-call filter (Linux on x86_64, aarch64 and riscv64).
     pub seccomp: bool,
+    /// Workers run in an AppContainer (Windows).
+    pub appcontainer: bool,
 }
 
 pub fn stats() -> SandboxStats {
@@ -86,6 +90,7 @@ pub fn stats() -> SandboxStats {
         failed: FAILED.load(Ordering::Relaxed),
         stopped: STOPPED.load(Ordering::Relaxed),
         seccomp: cfg!(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))),
+        appcontainer: cfg!(windows),
     }
 }
 
@@ -274,9 +279,38 @@ fn in_process(inner: Box<dyn ByteSource>, name: &str, content_type: &str, limits
 }
 
 /// Run one job in a new worker, answering its reads from `inner`.
+/// Unix: the worker itself (it restricts itself). Windows: the worker through
+/// the sandbox launcher, in an AppContainer that can read only its own
+/// executable and has no network, one process, and the memory and CPU limits.
+fn worker_command(worker: &Worker, cpu_seconds: u64) -> Command {
+    #[cfg(windows)]
+    {
+        let policy = crate::sandbox::Policy {
+            name: "HexDB.Parser".into(),
+            read: vec![worker.exe.clone()],
+            memory_mb: worker.memory_mb,
+            cpu_seconds,
+            max_processes: 1,
+            ..Default::default()
+        };
+        let (exe, args) = crate::sandbox::wrap(&worker.exe, &policy, &worker.exe.to_string_lossy(), &[WORKER_ARG.to_string()]);
+        let mut command = Command::new(exe);
+        command.args(args);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cpu_seconds;
+        let mut command = Command::new(&worker.exe);
+        command.arg(WORKER_ARG);
+        command
+    }
+}
+
 fn run(worker: &Worker, inner: Box<dyn ByteSource>, job: &Job, limits: &Limits) -> Result<Output> {
-    let mut command = Command::new(&worker.exe);
-    command.arg(WORKER_ARG).env_clear().stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let cpu_seconds = limits.timeout.as_secs() * 2 + 5;
+    let mut command = worker_command(worker, cpu_seconds);
+    command.env_clear().stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     // Some platforms need these to start a process at all.
     for name in ["SYSTEMROOT", "WINDIR"] {
         if let Some(value) = std::env::var_os(name) {
@@ -284,7 +318,6 @@ fn run(worker: &Worker, inner: Box<dyn ByteSource>, job: &Job, limits: &Limits) 
         }
     }
     RUNS.fetch_add(1, Ordering::Relaxed);
-    let cpu_seconds = limits.timeout.as_secs() * 2 + 5;
     restrict::before_spawn(&mut command, worker.memory_mb, cpu_seconds);
     let mut child = command.spawn().with_context(|| format!("starting the parser sandbox ({})", worker.exe.display()))?;
     // Held until the run ends (on Windows, closing it kills the worker).
@@ -597,12 +630,8 @@ mod restrict {
 mod restrict {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
-        JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
-        JOB_OBJECT_LIMIT_PROCESS_TIME, JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
-        JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
-        JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
     pub fn before_spawn(command: &mut std::process::Command, _memory_mb: u64, _cpu_seconds: u64) {
@@ -611,7 +640,9 @@ mod restrict {
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    /// The worker's job: closing it (when the run ends, or the hex dies) kills the worker.
+    /// The launcher's job: closing it (when the run ends, or the hex dies)
+    /// kills the launcher and the worker. The worker's limits (memory, CPU,
+    /// one process, UI) are on the job the launcher puts it in, inside this one.
     pub struct Job(HANDLE);
 
     impl Drop for Job {
@@ -623,7 +654,7 @@ mod restrict {
         }
     }
 
-    pub fn after_spawn(child: &std::process::Child, memory_mb: u64, cpu_seconds: u64) -> anyhow::Result<Job> {
+    pub fn after_spawn(child: &std::process::Child, _memory_mb: u64, _cpu_seconds: u64) -> anyhow::Result<Job> {
         use std::os::windows::io::AsRawHandle;
         // SAFETY: plain Win32 calls on handles that stay valid for the call.
         unsafe {
@@ -632,30 +663,11 @@ mod restrict {
                 anyhow::bail!("couldn't create the sandbox's job object");
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
-                | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
-                | JOB_OBJECT_LIMIT_PROCESS_MEMORY
-                | JOB_OBJECT_LIMIT_PROCESS_TIME;
-            info.BasicLimitInformation.ActiveProcessLimit = 1;
-            // In 100-nanosecond units.
-            info.BasicLimitInformation.PerProcessUserTimeLimit = (cpu_seconds as i64) * 10_000_000;
-            info.ProcessMemoryLimit = (memory_mb as usize) * 1024 * 1024;
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             if SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const core::ffi::c_void, std::mem::size_of_val(&info) as u32) == 0 {
                 CloseHandle(job);
-                anyhow::bail!("couldn't set the sandbox's limits");
+                anyhow::bail!("couldn't set up the sandbox's job");
             }
-            let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
-                UIRestrictionsClass: JOB_OBJECT_UILIMIT_DESKTOP
-                    | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
-                    | JOB_OBJECT_UILIMIT_EXITWINDOWS
-                    | JOB_OBJECT_UILIMIT_GLOBALATOMS
-                    | JOB_OBJECT_UILIMIT_HANDLES
-                    | JOB_OBJECT_UILIMIT_READCLIPBOARD
-                    | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
-                    | JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
-            };
-            SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui as *const _ as *const core::ffi::c_void, std::mem::size_of_val(&ui) as u32);
             if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
                 CloseHandle(job);
                 anyhow::bail!("couldn't put the parser in its sandbox");

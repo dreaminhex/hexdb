@@ -16,3 +16,7 @@ AWS_REGION = "us-east-1"
 KINESIS_STREAM = "hexdb-changes"
 # AWS_ACCESS_KEY_ID = ""
 # AWS_SECRET_ACCESS_KEY = ""
+
+[sandbox]
+network = true            # reaches Amazon Kinesis
+read = ["../../sdk"]      # the shared plugin helpers

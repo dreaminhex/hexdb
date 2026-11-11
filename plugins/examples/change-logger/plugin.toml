@@ -4,6 +4,14 @@ id = "@examples/change-logger"
 name = "Change logger"
 type = "stream"
 version = "2.4.7"
-description = "Prints a one-line summary of each change and appends the full change to changes.ndjson."
+description = "Prints a one-line summary of each change and appends the full change to changes.ndjson in its data folder."
 command = ["node", "change-logger.mjs"]
 # tessellations = ["orders"]   # only these tessellations (default: all user tessellations)
+
+# Process plugins run in a sandbox: they can read their own folder and write
+# their data folder (HEXDB_PLUGIN_DATA), and nothing else unless granted here.
+# [sandbox]
+# network = true          # outbound connections (implied by [access])
+# read = ["../shared"]    # more folders to read, relative to this one
+# write = ["./out"]       # folders to write (created if missing)
+# memory_mb = 1024        # 0: no limit

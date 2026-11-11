@@ -10,10 +10,39 @@
 //   HEXDB_PLUGIN_TYPE   stream, logs, metrics or source
 //   HEXDB_API           the server's base URL
 //   HEXDB_API_KEY       an API key for the plugin's own user (only with [access])
+//   HEXDB_PLUGIN_DATA   a folder the plugin can write and that survives restarts
+//                       (the sandbox lets it write nowhere else unless plugin.toml
+//                       grants it); TMPDIR is inside it
 //   NODE_EXTRA_CA_CERTS the server's CA file, when the lattice uses private certificates
 // plus whatever the manifest's [env] sets. Anything printed goes to the HexDB log.
 
+import { readFileSync, renameSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { createInterface } from "node:readline"
+
+/** The path of a file in the plugin's data folder (HEXDB_PLUGIN_DATA, else its own folder). */
+export function dataFile(name) {
+  return join(process.env.HEXDB_PLUGIN_DATA || ".", name)
+}
+
+/** Read a JSON state file from the data folder; one left in the plugin's folder by HexDB 2.4 or earlier is read too. */
+export function readState(name, fallback) {
+  for (const path of [dataFile(name), name]) {
+    try {
+      return JSON.parse(readFileSync(path, "utf8"))
+    } catch {
+      // Missing or unreadable: try the next place.
+    }
+  }
+  return fallback
+}
+
+/** Save a JSON state file in the data folder (written, then renamed, so a crash never leaves half of it). */
+export function saveState(name, state) {
+  const path = dataFile(name)
+  writeFileSync(`${path}.tmp`, JSON.stringify(state))
+  renameSync(`${path}.tmp`, path)
+}
 
 /** Each payload HexDB sends on stdin (one JSON object per line), in order. */
 export async function* payloads() {
