@@ -18,9 +18,6 @@
 //               HMAC-SHA256 when alerts.webhook.signing_secret is set
 //               (`X-HexDB-Signature: sha256=<hex>` over
 //               "<X-HexDB-Timestamp>.<body>").
-//   Opsgenie    alerts.opsgenie.api_key (an API integration key) and
-//               alerts.opsgenie.region (us or eu): an alert, deduplicated
-//               per review.
 //
 // The hex that ran the review sends them (the Oracle, or the Overseer), one
 // channel at a time, each with its own timeout; a channel that fails doesn't
@@ -47,12 +44,12 @@ const SMS_CHARS: usize = 300;
 const DISCORD_CHARS: usize = 2000;
 /// Slack and Teams take more, but an alert should be short.
 const CHAT_CHARS: usize = 3500;
-pub const CHANNELS: &[&str] = &["pagerduty", "sms", "chat", "webhook", "opsgenie"];
+pub const CHANNELS: &[&str] = &["pagerduty", "sms", "chat", "webhook"];
 
 /// What one channel did with an alert.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Delivery {
-    /// pagerduty, sms, chat, webhook or opsgenie.
+    /// pagerduty, sms, chat or webhook.
     pub channel: String,
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,7 +59,7 @@ pub struct Delivery {
 /// An alert, in the words every channel uses.
 #[derive(Debug, Clone)]
 pub struct Alert {
-    /// Deduplicates retries in PagerDuty and Opsgenie.
+    /// Deduplicates retries in PagerDuty.
     pub key: String,
     /// low, medium or high.
     pub severity: String,
@@ -272,32 +269,6 @@ pub fn sign(secret: &str, timestamp: i64, body: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-pub fn opsgenie(alert: &Alert, api_key: &str, region: &str) -> Request {
-    let priority = match alert.severity.as_str() {
-        "high" => "P1",
-        "medium" => "P3",
-        _ => "P5",
-    };
-    let host = if region == "eu" { "api.eu.opsgenie.com" } else { "api.opsgenie.com" };
-    let mut details = json!({ "lattice": alert.lattice, "hex": alert.hex, "severity": alert.severity });
-    if let Some(link) = &alert.link {
-        details["link"] = json!(link);
-    }
-    Request {
-        url: format!("https://{}/v2/alerts", host),
-        headers: vec![("authorization".into(), format!("GenieKey {}", api_key))],
-        body: Body::Json(json!({
-            "message": cut(&alert.title, 130),
-            "alias": cut(&alert.key, 512),
-            "description": cut(&alert.text, 15_000),
-            "priority": priority,
-            "source": "HexDB",
-            "tags": ["hexdb", "security-review"],
-            "details": details,
-        })),
-    }
-}
-
 /// Every number in a list, checked as E.164 (+ and 8 to 15 digits).
 pub fn phone_numbers(list: &str) -> Result<Vec<String>> {
     let mut out = Vec::new();
@@ -347,9 +318,6 @@ impl HexDBEngine {
         if !self.alert_text("alerts.webhook.url").is_empty() {
             out.push("webhook");
         }
-        if has("alerts.opsgenie.api_key") {
-            out.push("opsgenie");
-        }
         out
     }
 
@@ -378,10 +346,6 @@ impl HexDBEngine {
             "webhook" => {
                 let url = self.alert_text("alerts.webhook.url");
                 vec![webhook(alert, &url, secret("alerts.webhook.signing_secret").as_deref(), Utc::now().timestamp())]
-            }
-            "opsgenie" => {
-                let key = secret("alerts.opsgenie.api_key").ok_or_else(|| anyhow!("alerts.opsgenie.api_key isn't set"))?;
-                vec![opsgenie(alert, &key, self.config_value("alerts.opsgenie.region").as_str().unwrap_or("us"))]
             }
             other => bail!("unknown alert channel '{}' (one of {})", other, CHANNELS.join(", ")),
         })
@@ -520,17 +484,6 @@ mod tests {
         });
         let unsigned = webhook(&alert(false), "https://h", None, 1);
         assert!(!unsigned.headers.iter().any(|(k, _)| k == "x-hexdb-signature"));
-    }
-
-    #[test]
-    fn opsgenie_by_region_with_priority() {
-        let r = opsgenie(&alert(true), "gk", "eu");
-        assert_eq!(r.url, "https://api.eu.opsgenie.com/v2/alerts");
-        assert_eq!(r.headers[0].1, "GenieKey gk");
-        let Body::Json(b) = r.body else { panic!() };
-        assert_eq!((b["priority"].as_str(), b["alias"].as_str()), (Some("P1"), Some("hexdb-security-review-01J")));
-        assert!(b["message"].as_str().unwrap().chars().count() <= 130);
-        assert_eq!(opsgenie(&alert(false), "gk", "us").url, "https://api.opsgenie.com/v2/alerts");
     }
 
     #[test]

@@ -2209,7 +2209,7 @@ curl -X DELETE http://localhost:7700/blocklist/01J...
 
 ### AI security reviews
 
-HexDB can have the lattice's AI provider read the audit trail for signs of attack or misuse, on a schedule, and tell administrators what it finds: by email, PagerDuty, SMS, chat (Slack, Microsoft Teams, Discord), a signed webhook, or Opsgenie. It's off until an administrator turns it on, on the admin UI's **Security Reviews** page (under Security) or with the settings below.
+HexDB can have the lattice's AI provider read the audit trail for signs of attack or misuse, on a schedule, and tell administrators what it finds: by email, PagerDuty, SMS, chat (Slack, Microsoft Teams, Discord), or a signed webhook. It's off until an administrator turns it on, on the admin UI's **Security Reviews** page (under Security) or with the settings below.
 
 ```bash
 hexdb config set email.smtp_url        # prompts: smtps://user:password@smtp.example.com:465
@@ -2236,7 +2236,6 @@ Besides email, flagged reviews can go to any of these, each set up on the Securi
 | SMS (Twilio) | `alerts.twilio.account_sid`, `alerts.twilio.auth_token` (secret), `alerts.twilio.from` (a Twilio number or messaging service SID), `alerts.twilio.to` (numbers in international format, separated by commas) | A text of at most 300 characters to each number: severity, summary, link |
 | Chat | `alerts.chat.webhook_urls` (secret): one or more incoming webhook URLs, separated by spaces or lines | The summary and findings, in the format the URL's host expects: Slack; Microsoft Teams (a Workflows webhook, or an older connector URL on `webhook.office.com`) as an Adaptive Card; Discord (mentions disabled). Any other host gets Slack's format, which Mattermost and Rocket.Chat accept |
 | Webhook | `alerts.webhook.url`, `alerts.webhook.signing_secret` (secret, optional) | A JSON POST: `event` (`security.review`, or `alert.test`), `lattice`, `hex`, `severity`, `title`, `text`, `link` and the whole `review` |
-| Opsgenie | `alerts.opsgenie.api_key` (secret): an API integration key; `alerts.opsgenie.region` (`us` or `eu`) | An alert: high is P1, medium P3, low P5; deduplicated per review. Atlassian ends Opsgenie support on April 5, 2027; its alerting moves to Jira Service Management |
 
 Links point at `<oauth.resource>/ui/security-reviews` when `oauth.resource` names the lattice's public URL; without it, alerts carry no link.
 
@@ -2248,7 +2247,7 @@ const expected = "sha256=" + createHmac("sha256", secret).update(`${timestamp}.$
 const ok = expected.length === signature.length && timingSafeEqual(Buffer.from(expected), Buffer.from(signature))
 ```
 
-**Send a test alert** on the page, or `POST /security/alert-test` (`{"channel"?}`: `pagerduty`, `sms`, `chat`, `webhook` or `opsgenie`; every channel set up by default), sends a low-severity test and answers with what each channel did (`{"deliveries": [{"channel", "ok", "error"?}]}`); it's audited as `alert.test`. `GET /security/reviews` lists the channels set up in `alert_channels`.
+**Send a test alert** on the page, or `POST /security/alert-test` (`{"channel"?}`: `pagerduty`, `sms`, `chat` or `webhook`; every channel set up by default), sends a low-severity test and answers with what each channel did (`{"deliveries": [{"channel", "ok", "error"?}]}`); it's audited as `alert.test`. `GET /security/reviews` lists the channels set up in `alert_channels`.
 
 ### Browsers
 
@@ -2711,7 +2710,6 @@ hexdb config rollback 3 -m "bad key"
 | `alerts.twilio.account_sid`, `.auth_token`, `.from`, `.to` | empty | SMS through Twilio (the token is a secret) |
 | `alerts.chat.webhook_urls` | empty | Slack, Teams or Discord incoming webhooks (a secret) |
 | `alerts.webhook.url`, `alerts.webhook.signing_secret` | empty | A JSON webhook, signed with HMAC-SHA256 when the secret is set |
-| `alerts.opsgenie.api_key`, `alerts.opsgenie.region` | empty, us | Opsgenie alerts (the key is a secret) |
 | `ai.max_tokens_per_file` | 4,000 | Tokens one file may use |
 | `ai.tagging.enabled` | false | AI tags and descriptions for uploaded files |
 | `ai.tagging.tessellations` | empty (all) | Files tessellations whose new files are tagged, comma-separated |

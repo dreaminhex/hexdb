@@ -503,7 +503,7 @@ export interface SecurityReview {
 
 /** What one alert channel did. */
 export interface AlertDelivery {
-  channel: "pagerduty" | "sms" | "chat" | "webhook" | "opsgenie"
+  channel: "pagerduty" | "sms" | "chat" | "webhook"
   ok: boolean
   error?: string
 }

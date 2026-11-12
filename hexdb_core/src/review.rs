@@ -17,8 +17,8 @@
 // `security.review.notify_severity` (default medium) or worse is emailed to
 // `security.review.recipients` (empty: every administrator with an email
 // address), when outbound email is set up (`crate::email`), and sent to every
-// alert channel set up (`crate::alerts`: PagerDuty, SMS, chat, a webhook,
-// Opsgenie). Usage counts as the `security.review` feature, within
+// alert channel set up (`crate::alerts`: PagerDuty, SMS, chat, a webhook).
+// Usage counts as the `security.review` feature, within
 // the monthly budget.
 
 use crate::ai::{AiRequest, Part};

@@ -159,8 +159,6 @@ pub const CONFIG: &[ConfigDef] = &[
     secret("alerts.chat.webhook_urls", "Incoming webhook URLs flagged security reviews are posted to, separated by spaces or lines: Slack, Microsoft Teams (Workflows), Discord, or anything that accepts Slack's format (Mattermost, Rocket.Chat). Empty: no chat."),
     def("alerts.webhook.url", ConfigKind::Url, "\"\"", "URL flagged security reviews are POSTed to as JSON (the review, its severity and a summary). Empty: no webhook."),
     secret("alerts.webhook.signing_secret", "Secret the webhook's body is signed with: X-HexDB-Signature is sha256= and the hex HMAC-SHA256 of the X-HexDB-Timestamp header, a dot, and the body. Empty: unsigned."),
-    secret("alerts.opsgenie.api_key", "Opsgenie API integration key: flagged security reviews create an alert. Empty: no Opsgenie."),
-    def("alerts.opsgenie.region", ConfigKind::Choice { choices: &["us", "eu"] }, "\"us\"", "Opsgenie region of the account (us: api.opsgenie.com, eu: api.eu.opsgenie.com)."),
     def("ai.chat.enabled", ConfigKind::Boolean, "false", "Let users with the chat permission ask the AI about the data they can read (the admin UI's Ask page and POST /ai/chat)."),
     text("ai.chat.model", "Model for the chat (empty: ai.model). A smaller, cheaper model is usually enough, e.g. claude-haiku-5-5."),
     def("ai.chat.max_tokens_per_answer", ConfigKind::Integer { min: 64, max: 16_000 }, "1024", "Most tokens one chat answer may use."),

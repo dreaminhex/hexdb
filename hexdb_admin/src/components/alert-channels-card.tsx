@@ -47,12 +47,6 @@ const CHANNELS: Channel[] = [
       { key: "alerts.webhook.signing_secret", label: "Signing secret", secret: true },
     ],
   },
-  {
-    id: "opsgenie",
-    name: "Opsgenie",
-    help: "An API integration key. Atlassian ends Opsgenie support on April 5, 2027.",
-    fields: [{ key: "alerts.opsgenie.api_key", label: "API key", secret: true }],
-  },
 ]
 
 const SEVERITIES = [
@@ -208,20 +202,6 @@ export function AlertChannelsCard({ configured, onSaved }: { configured: string[
                   </div>
                 </div>
               ))}
-              {channel.id === "opsgenie" && (
-                <div className="flex flex-col gap-1">
-                  <Label className="text-xs">Region</Label>
-                  <Select value={text("alerts.opsgenie.region", "us")} onValueChange={(v) => set("alerts.opsgenie.region", v)} disabled={!loaded}>
-                    <SelectTrigger className="h-8 w-32" aria-label="Opsgenie region">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="us">US</SelectItem>
-                      <SelectItem value="eu">EU</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
             </div>
           </div>
         ))}
