@@ -2487,7 +2487,7 @@ The lattice name is `network.lattice_name`. When it's left empty on the first he
 Before removing a hex for good (moving a lattice to other regions or machines, or making it smaller), retire it, so nothing it holds is lost and it isn't the Overseer when it goes:
 
 ```bash
-curl -X POST http://localhost:7700/retire/hex-2 -H "Authorization: Bearer $HEXDB_API_KEY"     # by name or ID; 202
+curl -X POST http://localhost:7700/retire/hex-2 -H "Authorization: Bearer $HEXDB_API_KEY"     # by name, ID or Fly.io machine ID; 202
 curl http://localhost:7700/retire -H "Authorization: Bearer $HEXDB_API_KEY"
 # => { "hexes": [{ "id": "...", "name": "hex-2", "role": "Replicant", "status": "active", "removable": false,
 #                  "waiting_for": "12 of its slices aren't kept by enough other replicas yet" }] }

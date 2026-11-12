@@ -163,6 +163,9 @@ pub struct LatticeHex {
     pub version: String,
     /// Where it runs (`identity.region`, or Fly.io's region); empty when unknown.
     pub region: String,
+    /// The Fly.io Machine it runs on, if it does.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub machine_id: String,
     /// Retiring (`crate::retire`): leaving the lattice once its data is kept elsewhere.
     pub retiring: bool,
     /// For a retiring hex: its machine and disk can go now.
@@ -238,6 +241,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         slices_held: crate::slicing::count(me.slices_held),
         version: me.version,
         region: me.region,
+        machine_id: me.machine_id,
         retiring: false,
         removable: None,
     }];
@@ -261,6 +265,7 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             slices_held: crate::slicing::count(member.hex.slices_held),
             version: member.hex.version.clone(),
             region: member.hex.region.clone(),
+            machine_id: member.hex.machine_id.clone(),
             retiring: false,
             removable: None,
         });

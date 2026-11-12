@@ -1,7 +1,7 @@
 // HexDB Core Retire: taking hexes out of a lattice for good, without losing data
 //
 // An administrator marks a hex as retiring (`POST /retire/{hex}`, on the
-// Overseer) before its machine is removed: a hosted lattice moving to another
+// Overseer; by ID, name or Fly.io machine ID) before its machine is removed: a hosted lattice moving to another
 // region or size adds new hexes, then retires the old ones. The set is kept in
 // the `_retiring_hexes` system tessellation, so every hex sees it, and each
 // hex mirrors it in memory once per discovery round.
@@ -153,7 +153,7 @@ impl HexDBEngine {
         let hexes = members(self).await;
         let (hex, _) = hexes
             .iter()
-            .find(|(h, _)| h.id == which || h.name == which)
+            .find(|(h, _)| h.id == which || h.name == which || (!h.machine_id.is_empty() && h.machine_id == which))
             .ok_or_else(|| crate::engine::EngineError::NotFound(format!("No hex '{}' in this lattice.", which)))?;
         let id = Ulid::from_string(&hex.id).map_err(|_| anyhow!("hex '{}' has no valid ID", hex.name))?;
         let mut retiring = RETIRING.read().unwrap().clone();
@@ -180,7 +180,7 @@ impl HexDBEngine {
     pub async fn unretire_hex(&self, which: &str, by: &str) -> Result<()> {
         self.ensure_writable()?;
         let hexes = members(self).await;
-        let id = hexes.iter().find(|(h, _)| h.name == which).map(|(h, _)| h.id.clone()).unwrap_or_else(|| which.to_string());
+        let id = hexes.iter().find(|(h, _)| h.name == which || (!h.machine_id.is_empty() && h.machine_id == which)).map(|(h, _)| h.id.clone()).unwrap_or_else(|| which.to_string());
         if !RETIRING.read().unwrap().contains(&id) {
             bail!(crate::engine::EngineError::NotFound(format!("Hex '{}' isn't retiring.", which)));
         }
