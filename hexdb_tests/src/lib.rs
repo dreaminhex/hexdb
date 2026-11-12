@@ -62,13 +62,12 @@ fn build_server() -> Result<PathBuf> {
 
 fn build_bin(package: &str, name: &str) -> Result<PathBuf> {
 
-    // Test binaries live in <target>/<profile>/deps; the server goes in <target>/<profile>.
+    // A release test binary builds a release server. Where Cargo puts test binaries changed
+    // (`<target>/<profile>/deps`, then `<target>/<profile>/build/<crate>/<hash>` with the new
+    // build-dir layout), so the profile is any component of the path, and the binary's path
+    // comes from Cargo itself.
     let exe = std::env::current_exe()?;
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| anyhow!("Unexpected test binary location: {}", exe.display()))?;
-    let release = profile_dir.file_name().is_some_and(|n| n == "release");
+    let release = exe.components().any(|c| c.as_os_str() == "release");
 
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -76,16 +75,21 @@ fn build_bin(package: &str, name: &str) -> Result<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
 
     let mut cmd = Command::new(cargo);
-    cmd.args(["build", "--quiet", "-p", package]).current_dir(workspace);
+    cmd.args(["build", "--quiet", "--message-format=json-render-diagnostics", "-p", package]).current_dir(workspace);
     if release {
         cmd.arg("--release");
     }
-    let status = cmd.status().with_context(|| format!("Failed to run `cargo build -p {}`", package))?;
-    if !status.success() {
-        bail!("`cargo build -p {}` failed ({})", package, status);
+    cmd.stdout(std::process::Stdio::piped());
+    let output = cmd.output().with_context(|| format!("Failed to run `cargo build -p {}`", package))?;
+    if !output.status.success() {
+        bail!("`cargo build -p {}` failed ({})", package, output.status);
     }
-
-    let bin = profile_dir.join(format!("{}{}", name, std::env::consts::EXE_SUFFIX));
+    let bin = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == name)
+        .find_map(|m| m["executable"].as_str().map(PathBuf::from))
+        .ok_or_else(|| anyhow!("`cargo build -p {}` named no executable {}", package, name))?;
     if !bin.is_file() {
         bail!("Server binary not found at {}", bin.display());
     }
