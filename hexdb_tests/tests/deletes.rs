@@ -282,6 +282,16 @@ fn the_cli_previews_confirms_and_restores() -> Result<()> {
     let (ok, text) = cli(&["deletes", "purge", &batch])?;
     assert!(!ok && text.contains("--yes"), "{}", text);
 
+    // SQL: a dry run, then exactly what it showed.
+    let (ok, text) = cli(&["sql", "DELETE FROM orders WHERE status = ?", "-p", "old", "--dry-run"])?;
+    assert!(ok && text.contains("Would delete 2 document(s) from orders") && text.contains("--expect 2"), "{}", text);
+    assert_eq!(server.count("orders")?, 3);
+    let (ok, text) = cli(&["sql", "DELETE FROM orders WHERE status = ?", "-p", "old", "--expect", "2"])?;
+    assert!(ok && text.contains("Deleted 2 document(s) from orders") && text.contains("Delete batch"), "{}", text);
+    assert_eq!(server.count("orders")?, 1);
+    let (ok, text) = cli(&["sql", "DELETE FROM orders"])?;
+    assert!(!ok && text.contains("all"), "{}", text);
+
     // Documents: an insert sent twice with the same key is written once.
     let (ok, text) = cli(&["doc", "insert", "notes", r#"{"text": "once"}"#, "--idempotency-key", "note-1", "--json"])?;
     assert!(ok, "{}", text);
@@ -325,5 +335,21 @@ fn the_cli_previews_confirms_and_restores() -> Result<()> {
     assert!(ok && text.contains("Committed 1"), "{}", text);
     let (ok, text) = cli(&["doc", "insert", "lines", r#"{"order_id": "01J00000000000000000000000"}"#])?;
     assert!(!ok && text.contains("doesn't exist"), "{}", text);
+    Ok(())
+}
+
+#[test]
+fn a_retried_delete_by_filter_replays_its_answer() -> Result<()> {
+    let server = TestServer::start()?;
+    for n in 0..3 {
+        server.insert("jobs", &json!({ "n": n }))?;
+    }
+    let key = [("Idempotency-Key", "delete-retry-1")];
+    let body = json!({ "filter": { "n": { "$lt": 2 } } });
+    let first = server.request(Method::POST, "/jobs/_delete", Some(&body), &key)?;
+    let again = server.request(Method::POST, "/jobs/_delete", Some(&body), &key)?;
+    assert_eq!(first.status.as_u16(), 200, "{}", first.body);
+    assert_eq!(again.status.as_u16(), 200, "a summary without blocked or sample reads back: {}", again.body);
+    assert_eq!((first.body["total"].as_u64(), again.body["batch"].clone()), (Some(2), first.body["batch"].clone()));
     Ok(())
 }

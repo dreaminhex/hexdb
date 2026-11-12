@@ -36,7 +36,7 @@ Examples use `curl` against `http://localhost:7700` and leave out credentials. A
 
 ## 1. Overview
 
-HexDB stores JSON documents in named collections (tessellations) and serves them over HTTP: a REST API, a GraphQL endpoint, a read-only SQL endpoint, and an admin UI, all from one server binary (`hexdb_api`). A command-line tool (`hexdb`) starts, stops and inspects servers.
+HexDB stores JSON documents in named collections (tessellations) and serves them over HTTP: a REST API, a GraphQL endpoint, a SQL endpoint (queries and deletes), and an admin UI, all from one server binary (`hexdb_api`). A command-line tool (`hexdb`) starts, stops and inspects servers.
 
 What it provides:
 
@@ -56,7 +56,7 @@ What it provides:
 
 What it doesn't do (yet):
 
-- Write through SQL. SQL is read-only; writes go through REST, GraphQL, gRPC and the drivers.
+- Insert or update through SQL. SQL reads, and deletes by condition (`DELETE ... WHERE`); other writes go through REST, GraphQL, gRPC and the drivers.
 
 ## 2. Terminology
 
@@ -319,7 +319,7 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 
 **Files.** Browse a files tessellation by folder, as a grid with thumbnails or as a list, or pick a type (audio, images, video, documents, archives) to list those files from every folder below. Upload by dropping files or with the Upload button (large files resume after a dropped connection), and search names, tags and metadata. Audio files have a play button in the grid and the list; they play in a bar at the bottom of the page (one at a time, streamed with Range requests, so long WAV masters start at once and can be seeked). When a search finds nothing, the page looks for close matches instead, so a typo such as "tatoo" still finds "tattooed". Videos without a server thumbnail show a frame the browser decodes itself. Open a file to preview it (images, audio, video), read its metadata, edit its name, folder, tags and description, download or restore earlier versions, or move it to the trash. Delete folder deletes a folder and everything below it, after showing what would go. The Trash view restores or deletes trashed files.
 
-**Queries.** A console for GraphQL and SQL, switched at the top left. GraphQL has schema-aware completion and validation, and variables; SQL has table and column completion, `?` or `$1` parameters (a JSON array), and runs read-only `SELECT`s (see [SQL](#10-sql)). Both have examples written against the tessellations the hex has, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
+**Queries.** A console for GraphQL and SQL, switched at the top left. GraphQL has schema-aware completion and validation, and variables; SQL has table and column completion, `?` or `$1` parameters (a JSON array), and runs `SELECT`s and `DELETE ... WHERE` (see [SQL](#10-sql); a delete is restorable from the Deletes page, and deleting a whole table needs the API's `all`). Both have examples written against the tessellations the hex has, history, and JSON or table results. Ctrl+Enter (Cmd+Enter on macOS) runs the query.
 
 **Tessellations**
 - Create and delete tessellations and see their sizes.
@@ -824,7 +824,7 @@ GraphQL: `aggregate(tessellation: "orders", groupBy: ["status"], aggregates: { n
 
 ## 10. SQL
 
-`POST /sql` runs a read-only SQL `SELECT`: joins, subqueries, `UNION`, `WITH`, expressions and functions included. Each table is read through the same query path as the REST API, so indexes, permissions, row filters and field masks apply the same way. BI tools and the [ODBC driver](#odbc) use it; the `hexdb sql` command prints its results as a table.
+`POST /sql` runs a SQL `SELECT` (joins, subqueries, `UNION`, `WITH`, expressions and functions included), or a [`DELETE ... WHERE`](#deleting-with-sql). Each table is read through the same query path as the REST API, so indexes, permissions, row filters and field masks apply the same way. BI tools and the [ODBC driver](#odbc) use it; the `hexdb sql` command prints its results as a table.
 
 ```bash
 curl -X POST http://localhost:7700/sql -H "Authorization: Bearer $HEXDB_API_KEY" -H "Content-Type: application/json" -d '{
@@ -905,6 +905,25 @@ Notes:
   - Filtering, grouping or sorting by a hidden field is refused with 403, as in the REST API.
 - **Replicas.** `POST /sql` is a read, so a replica answers it itself instead of forwarding it to the Overseer.
 
+### Deleting with SQL
+
+`DELETE FROM orders WHERE status = ? AND placed_at < ?` runs as [`POST /orders/_delete`](#deleting) would: one atomic delete batch, with what [cascades](#parent-links-and-cascading-deletes) from it, audited as `data.delete.filter` (with `"sql": true`) and restorable from the Deletes page or `POST /deletes/{batch}/restore`. It needs the same permission (`write`, or `delete` on a files tessellation), and the caller's row filters apply.
+
+```bash
+curl -X POST http://localhost:7700/sql -H "Authorization: Bearer $HEXDB_API_KEY" -H "Content-Type: application/json" -d '{
+  "sql": "DELETE FROM orders WHERE status = ? AND total < ?", "params": ["void", 5], "dry_run": true }'
+# => { "columns": [], "rows": [], "next": null, "rows_affected": 0,
+#      "delete": { "dry_run": true, "matched": 3, "deleted": { "orders": 3, "order_items": 7 }, "total": 10, ... },
+#      "translated": { "delete": "orders", "filter": { "$and": [ ... ] } } }
+```
+
+- **The WHERE** is translated like a single-query `SELECT`'s, with the same NULL rules, parameters and table alias (`DELETE FROM orders o WHERE o.status = 'void'`). It must be expressible as a filter: comparisons of fields with values, `AND`, `OR`, `NOT`, `IN`, `BETWEEN`, `LIKE`, `IS NULL`. Subqueries, joins (`USING`) and expressions over fields are refused with a message, never guessed.
+- **Every document** (no `WHERE`, or one that's always true such as `1 = 1`) needs `"all": true` in the request, as `_delete` does. The admin UI's console doesn't send it.
+- **Request options**, as for `_delete`: `dry_run` (say what would go: `delete.matched`, the cascade per tessellation, a sample, children that would refuse it), and `expect` (refuse unless exactly that many documents and files would go, cascade included, so a preview-then-delete can't remove more than it showed). An `Idempotency-Key` header makes a retry answer the first delete again. `page_size` and `cursor` are for `SELECT`s.
+- **Response:** no columns or rows; `rows_affected` is how many of the table's documents went (0 for a dry run), `delete` is `_delete`'s summary (the `batch`, `deleted` and `detached` per tessellation, `total`), and `translated` is the table and filter.
+- **From the command line:** `hexdb sql "DELETE FROM orders WHERE status = ?" -p void --dry-run` says what would go; `--expect N` deletes only if exactly N would, and `--all` allows a delete without `WHERE`. It prints the batch to restore.
+- `RETURNING`, `ORDER BY` and `LIMIT` in a `DELETE`, and deleting from several tables, aren't supported. The AI's tools and MCP stay read-only: their `sql` tool refuses `DELETE`.
+
 ### Joins, subqueries and expressions
 
 ```sql
@@ -950,7 +969,7 @@ WHERE (SELECT MAX(total) FROM orders o WHERE o.customer = c.code)
 
 **Not supported.** These are refused with a message naming the part:
 - window functions (`OVER`), `WITH RECURSIVE`, `NATURAL` joins, `LATERAL`;
-- statements other than `SELECT` (SQL is read-only; write through the REST API or transactions).
+- statements other than `SELECT` and [`DELETE`](#deleting-with-sql) (`INSERT`, `UPDATE`, DDL: write through the REST API or transactions).
 
 ## 11. Transactions
 

@@ -36,7 +36,16 @@
 // Statements this translation can't express (joins, subqueries, UNION /
 // INTERSECT / EXCEPT, WITH, expressions over fields such as `total * 2` or
 // `UPPER(name)`, comparing two fields, CASE, CAST and functions) run in the
-// general executor (`exec.rs`). Statements other than SELECT aren't supported.
+// general executor (`exec.rs`).
+//
+// DELETE FROM t [AS a] [WHERE ...] runs as `POST /{t}/_delete`
+// (`HexDBEngine::delete_where`): one atomic delete batch, with the cascade,
+// that can be restored. Its WHERE is translated like a SELECT's, so it must be
+// a filter (no subqueries, joins, expressions over fields); without a WHERE,
+// or with one that's always true, the request must say `all`. USING,
+// RETURNING, ORDER BY and LIMIT aren't supported. `SqlStatement::parse` accepts
+// it; `SqlQuery::parse` (the read-only paths, such as the AI's tools) doesn't.
+// Other statements (INSERT, UPDATE, DDL) aren't supported.
 
 mod exec;
 pub use exec::DEFAULT_SQL_MAX_ROWS;
@@ -272,20 +281,69 @@ impl<'a> Params<'a> {
 // Translation
 // ---------------------------------------------------------------------------
 
+/// A translated DELETE: the delete by filter it runs as.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SqlDelete {
+    pub tessellation: String,
+    /// `{}` when there's no WHERE (or it's always true): the request must then say `all`.
+    pub filter: Value,
+}
+
+impl SqlDelete {
+    /// What it translated to, for the response.
+    pub fn describe(&self) -> Value {
+        json!({ "delete": self.tessellation, "filter": self.filter })
+    }
+}
+
+/// A statement `POST /sql` runs: a query, or a delete.
+#[derive(Debug, Clone)]
+pub enum SqlStatement {
+    Query(SqlQuery),
+    Delete(SqlDelete),
+}
+
+impl SqlStatement {
+    /// Parse and translate one SELECT or DELETE statement.
+    pub fn parse(text: &str, params: &[Value]) -> Result<SqlStatement> {
+        match parse_one(text)? {
+            Statement::Delete(delete) => {
+                let mut translator = Translator { params: Params::new(text, params)?, table: None, alias: None };
+                let translated = translator.delete(&delete)?;
+                translator.params.check_all_used()?;
+                Ok(SqlStatement::Delete(translated))
+            }
+            statement => SqlQuery::translate(&statement, text, params).map(SqlStatement::Query),
+        }
+    }
+}
+
+/// The one statement in `text`.
+fn parse_one(text: &str) -> Result<Statement> {
+    if text.len() > MAX_SQL_LENGTH {
+        return Err(invalid(format!("the statement is longer than {} bytes.", MAX_SQL_LENGTH)));
+    }
+    let mut statements = Parser::parse_sql(&GenericDialect {}, text).map_err(|e| invalid(e.to_string()))?;
+    match statements.len() {
+        1 => Ok(statements.remove(0)),
+        0 => Err(invalid("no statement given.")),
+        _ => Err(invalid("send one statement at a time.")),
+    }
+}
+
 impl SqlQuery {
     /// Parse and translate one SELECT statement. `params` fill its `?` / `$n` placeholders.
     pub fn parse(text: &str, params: &[Value]) -> Result<SqlQuery> {
-        if text.len() > MAX_SQL_LENGTH {
-            return Err(invalid(format!("the statement is longer than {} bytes.", MAX_SQL_LENGTH)));
+        let statement = parse_one(text)?;
+        if matches!(statement, Statement::Delete(_)) {
+            return Err(invalid("only SELECT statements are supported here; DELETE runs through POST /sql."));
         }
-        let statements = Parser::parse_sql(&GenericDialect {}, text).map_err(|e| invalid(e.to_string()))?;
-        let statement = match statements.as_slice() {
-            [one] => one,
-            [] => return Err(invalid("no statement given.")),
-            _ => return Err(invalid("send one statement at a time.")),
-        };
+        Self::translate(&statement, text, params)
+    }
+
+    fn translate(statement: &Statement, text: &str, params: &[Value]) -> Result<SqlQuery> {
         let Statement::Query(query) = statement else {
-            return Err(invalid("only SELECT statements are supported; HexDB's SQL is read-only."));
+            return Err(invalid("only SELECT and DELETE statements are supported."));
         };
         let mut translator = Translator { params: Params::new(text, params)?, table: None, alias: None };
         let translated = translator.query(query).and_then(|q| translator.params.check_all_used().map(|_| q));
@@ -384,6 +442,60 @@ struct Translator<'a> {
 }
 
 impl<'a> Translator<'a> {
+    /// The one table of a FROM, and its alias.
+    fn set_table(&mut self, from: &ast::TableWithJoins) -> Result<()> {
+        if !from.joins.is_empty() {
+            return Err(unsupported("JOIN"));
+        }
+        let TableFactor::Table { name, alias, args, .. } = &from.relation else {
+            return Err(unsupported("a subquery or table function in FROM"));
+        };
+        if args.is_some() {
+            return Err(unsupported("a table function in FROM"));
+        }
+        self.table = Some(single_name(name)?);
+        if let Some(alias) = alias {
+            if !alias.columns.is_empty() {
+                return Err(unsupported("column aliases on a table"));
+            }
+            self.alias = Some(alias.name.value.clone());
+        }
+        Ok(())
+    }
+
+    fn delete(&mut self, delete: &ast::Delete) -> Result<SqlDelete> {
+        if !delete.tables.is_empty() {
+            return Err(unsupported("deleting from several tables"));
+        }
+        if delete.using.is_some() {
+            return Err(unsupported("DELETE ... USING (joins)"));
+        }
+        if delete.returning.is_some() || delete.output.is_some() {
+            return Err(unsupported("RETURNING"));
+        }
+        if !delete.order_by.is_empty() || delete.limit.is_some() {
+            return Err(unsupported("ORDER BY or LIMIT in DELETE"));
+        }
+        if !delete.optimizer_hints.is_empty() {
+            return Err(unsupported("optimizer hints"));
+        }
+        let (ast::FromTable::WithFromKeyword(from) | ast::FromTable::WithoutKeyword(from)) = &delete.from;
+        match from.as_slice() {
+            [one] => self.set_table(one)?,
+            _ => return Err(unsupported("deleting from several tables")),
+        }
+        let tessellation = self.table.clone().ok_or_else(|| invalid("DELETE needs a table."))?;
+        let filter = match &delete.selection {
+            Some(expr) => self
+                .cond(expr, false)
+                .map_err(|e| invalid(format!("DELETE's WHERE must compare fields with values, as a filter can ({:#}).", e)))?
+                .into_json(),
+            None => json!({}),
+        };
+        Filter::parse(&filter)?;
+        Ok(SqlDelete { tessellation, filter })
+    }
+
     fn query(&mut self, query: &ast::Query) -> Result<SqlQuery> {
         if query.with.is_some() {
             return Err(unsupported("WITH"));
@@ -421,24 +533,7 @@ impl<'a> Translator<'a> {
         // FROM
         match select.from.as_slice() {
             [] => {}
-            [from] => {
-                if !from.joins.is_empty() {
-                    return Err(unsupported("JOIN"));
-                }
-                let TableFactor::Table { name, alias, args, .. } = &from.relation else {
-                    return Err(unsupported("a subquery or table function in FROM"));
-                };
-                if args.is_some() {
-                    return Err(unsupported("a table function in FROM"));
-                }
-                self.table = Some(single_name(name)?);
-                if let Some(alias) = alias {
-                    if !alias.columns.is_empty() {
-                        return Err(unsupported("column aliases on a table"));
-                    }
-                    self.alias = Some(alias.name.value.clone());
-                }
-            }
+            [from] => self.set_table(from)?,
             _ => return Err(unsupported("more than one table in FROM (joins)")),
         }
 
@@ -1875,6 +1970,39 @@ mod tests {
         format!("{:#}", SqlQuery::parse(sql, &[]).expect_err(sql))
     }
 
+    fn delete(sql: &str, params: &[Value]) -> Result<SqlDelete> {
+        match SqlStatement::parse(sql, params)? {
+            SqlStatement::Delete(d) => Ok(d),
+            SqlStatement::Query(_) => panic!("{} isn't a delete", sql),
+        }
+    }
+
+    #[test]
+    fn deletes_become_deletes_by_filter() {
+        let d = delete("DELETE FROM orders WHERE status = 'void' AND total < ?", &[json!(5)]).unwrap();
+        assert_eq!(d, SqlDelete { tessellation: "orders".into(), filter: json!({ "$and": [{ "status": { "$eq": "void" } }, { "total": { "$lt": 5 } }] }) });
+        assert_eq!(delete("DELETE FROM orders o WHERE o.status IN ('a', 'b')", &[]).unwrap().filter, json!({ "status": { "$in": ["a", "b"] } }));
+        assert_eq!(delete("DELETE FROM orders", &[]).unwrap().filter, json!({}), "no WHERE: everything (the request must say all)");
+        assert_eq!(delete("DELETE FROM orders WHERE 1 = 1", &[]).unwrap().filter, json!({}));
+        assert_eq!(delete("DELETE FROM orders WHERE 1 = 0", &[]).unwrap().filter, json!({ "$or": [] }));
+        // SQL's NULL rules, as in a SELECT.
+        assert_eq!(delete("DELETE FROM t WHERE a <> 'x'", &[]).unwrap().filter, json!({ "a": { "$nin": ["x", null] } }));
+        assert_eq!(delete("DELETE FROM t WHERE a = $1", &[json!("k")]).unwrap().describe(), json!({ "delete": "t", "filter": { "a": { "$eq": "k" } } }));
+
+        let refused = |sql: &str| format!("{:#}", delete(sql, &[]).expect_err(sql));
+        assert!(refused("DELETE FROM t WHERE a IN (SELECT b FROM u)").contains("DELETE's WHERE"));
+        assert!(refused("DELETE FROM t WHERE a * 2 > 3").contains("DELETE's WHERE"));
+        assert!(refused("DELETE FROM t WHERE a = 1 RETURNING *").contains("RETURNING"));
+        assert!(refused("DELETE FROM t USING u WHERE t.k = u.k").contains("USING"));
+        assert!(refused("DELETE FROM t, u").contains("several tables"));
+        assert!(format!("{:#}", delete("DELETE FROM t", &[json!(1)]).unwrap_err()).contains("isn't used"));
+        // The read-only parse refuses it.
+        assert!(error("DELETE FROM t WHERE a = 1").contains("only SELECT"));
+        assert!(error("UPDATE t SET a = 1").contains("only SELECT"));
+        assert!(matches!(SqlStatement::parse("SELECT * FROM t", &[]).unwrap(), SqlStatement::Query(_)));
+        assert!(format!("{:#}", SqlStatement::parse("INSERT INTO t VALUES (1)", &[]).unwrap_err()).contains("SELECT and DELETE"));
+    }
+
     #[test]
     fn where_clauses_become_filters() {
         assert_eq!(filter("SELECT * FROM t WHERE a = 1"), json!({ "a": { "$eq": 1 } }));
@@ -1958,7 +2086,7 @@ mod tests {
 
     #[test]
     fn unsupported_sql_is_refused_with_a_reason() {
-        assert!(error("DELETE FROM t").contains("read-only"));
+        assert!(error("DELETE FROM t").contains("only SELECT"));
         assert!(error("SELECT name, COUNT(*) FROM t").contains("GROUP BY"));
         assert!(error("SELECT 1; SELECT 2").contains("one statement"));
         assert!(error("WITH RECURSIVE r AS (SELECT 1) SELECT * FROM r").contains("WITH RECURSIVE"));

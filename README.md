@@ -2,7 +2,7 @@
 
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/hexdb)](https://artifacthub.io/packages/search?repo=hexdb)
 
-HexDB is a document database written in Rust. Documents are JSON, grouped into collections called tessellations, and served over REST, GraphQL, gRPC and read-only SQL from a single binary that also hosts an admin UI. It also stores files of any kind, with their metadata indexed for search. Several HexDB servers (hexes) form a lattice: one Overseer takes writes, and the others replicate its data, serve reads, and take over if it fails.
+HexDB is a document database written in Rust. Documents are JSON, grouped into collections called tessellations, and served over REST, GraphQL, gRPC and SQL (queries and deletes) from a single binary that also hosts an admin UI. It also stores files of any kind, with their metadata indexed for search. Several HexDB servers (hexes) form a lattice: one Overseer takes writes, and the others replicate its data, serve reads, and take over if it fails.
 
 The [technical manual](MANUAL.md) covers every feature in depth, including how the storage engine, encryption, replication and indexes work.
 
@@ -368,7 +368,7 @@ The end-to-end tests in `hexdb_tests` start real servers on free ports in tempor
 ## Limitations
 
 - Slicing (`replication.slicing`) splits the data across replicas, but the Overseer still keeps every slice, so a lattice can't hold more than one machine can, and replicas holding slices pass queries to the Overseer.
-- SQL is read-only. Statements with joins, subqueries or expressions run in memory over table reads of at most `limits.sql_max_rows` documents each (100,000), and window functions and recursive `WITH` aren't supported. The ODBC driver is tested with pyodbc (unixODBC and the Windows driver manager) and the JDBC driver with JUnit, not yet with desktop tools such as Excel, Power BI or DBeaver.
+- SQL runs `SELECT` and `DELETE ... WHERE` (a restorable delete batch); `INSERT`, `UPDATE` and DDL aren't supported. Statements with joins, subqueries or expressions run in memory over table reads of at most `limits.sql_max_rows` documents each (100,000), and window functions and recursive `WITH` aren't supported. The ODBC driver is tested with pyodbc (unixODBC and the Windows driver manager) and the JDBC driver with JUnit, not yet with desktop tools such as Excel, Power BI or DBeaver.
 - The Entity Framework Core provider loads relationships with extra queries (no joins), so navigations can't be used inside server-side filters; many-to-many skip navigations, complex types and composite keys aren't supported (see [MANUAL.md](MANUAL.md#entity-framework-core)).
 
 ## License

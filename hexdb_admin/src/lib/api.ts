@@ -1186,6 +1186,10 @@ export interface SqlRequest {
   params?: unknown[]
   page_size?: number
   cursor?: string
+  /** DELETE: only say what would go. */
+  dry_run?: boolean
+  /** DELETE: refuse unless exactly this many documents and files would go. */
+  expect?: number
 }
 
 export interface SqlColumn {
@@ -1203,6 +1207,10 @@ export interface SqlResult {
   next: string | null
   /** The filter, sort and aggregation the statement was translated into. */
   translated: Record<string, unknown>
+  /** DELETE: documents of the table that went (0 for a dry run). */
+  rows_affected?: number
+  /** DELETE: the delete's summary (its batch, to restore it, and the cascade). */
+  delete?: { batch?: string; dry_run: boolean; matched: number; total: number; deleted: Record<string, number> }
 }
 
 // ---------------------------------------------------------------------------

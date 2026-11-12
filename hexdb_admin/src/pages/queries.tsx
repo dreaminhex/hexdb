@@ -37,7 +37,7 @@ import { executeGraphQL, fetchSchema, GRAPHQL_ENDPOINT, type GraphQLResult } fro
 import { QUERY_EXAMPLES, queryExamples, SQL_EXAMPLES, sqlExamples } from "@/lib/query-examples"
 import { api, ApiError, type SqlResult } from "@/lib/api"
 
-/** The two languages the console speaks. SQL is read-only; GraphQL also writes. */
+/** The two languages the console speaks. SQL reads and deletes; GraphQL also writes. */
 type Lang = "graphql" | "sql"
 
 interface Doc {
@@ -387,8 +387,8 @@ export function QueriesPage() {
 
         <div className="ml-auto flex items-center gap-3">
           {lang === "sql" ? (
-            <span className="text-muted-foreground hidden text-xs md:inline" title="SQL is read-only: SELECT over one tessellation, translated onto the same queries REST runs.">
-              Read-only SELECT
+            <span className="text-muted-foreground hidden text-xs md:inline" title="SELECT, translated onto the same queries REST runs; DELETE ... WHERE runs as a restorable delete batch (Deletes page).">
+              SELECT, or DELETE ... WHERE
             </span>
           ) : (
             <>
@@ -516,7 +516,7 @@ export function QueriesPage() {
                 </p>
                 <p className="text-xs">
                   {lang === "sql"
-                    ? "SQL is one read-only SELECT over one tessellation, with ? or $1 placeholders filled from the Parameters tab."
+                    ? "SQL is one SELECT, or a DELETE ... WHERE (restorable from the Deletes page), with ? or $1 placeholders filled from the Parameters tab."
                     : "GraphQL reads and writes, with variables from the Variables tab."}
                 </p>
               </div>

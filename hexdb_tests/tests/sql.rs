@@ -149,7 +149,7 @@ fn errors_and_permissions() -> Result<()> {
         assert_eq!(res.status.as_u16(), status, "{}", res.body);
         Ok(res.body["error"]["message"].as_str().unwrap_or_default().to_string())
     };
-    assert!(error(json!({ "sql": "UPDATE orders SET n = 1" }), 400)?.contains("read-only"));
+    assert!(error(json!({ "sql": "UPDATE orders SET n = 1" }), 400)?.contains("SELECT and DELETE"));
     // System tessellations stay out of reach, joined or not.
     assert!(error(json!({ "sql": "SELECT * FROM orders o JOIN users u ON o.n = u.n" }), 403)?.contains("system tessellation"));
     assert!(error(json!({ "sql": "SELECT * FROM orders WHERE" }), 400)?.contains("sql:"));
@@ -184,6 +184,85 @@ fn errors_and_permissions() -> Result<()> {
     let names: Vec<&str> = columns.body["columns"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["id", "n", "region"], "{}", columns.body);
     assert_eq!(server.request_as(Some(&reader), Method::GET, "/sql/columns?table=orders", None, &[])?.status.as_u16(), 403);
+    Ok(())
+}
+
+fn count(server: &TestServer, text: &str) -> Result<i64> {
+    let res = sql(server, json!({ "sql": text }))?;
+    Ok(rows(&res)[0][0].as_i64().unwrap_or(-1))
+}
+
+#[test]
+fn delete_runs_as_a_restorable_delete_by_filter() -> Result<()> {
+    let server = TestServer::start()?;
+    seed(&server)?;
+    // Refunded orders are n = 0, 4, 8, ..., 24: seven, three of them with total < 100.
+    let text = "DELETE FROM orders o WHERE o.status = ? AND total < ?";
+    let params = json!(["refunded", 100]);
+
+    // A dry run says what would go and deletes nothing.
+    let preview = sql(&server, json!({ "sql": text, "params": params, "dry_run": true }))?;
+    assert_eq!(preview.status.as_u16(), 200, "{}", preview.body);
+    assert_eq!((preview.body["rows_affected"].as_u64(), preview.body["delete"]["matched"].as_u64()), (Some(0), Some(3)), "{}", preview.body);
+    assert_eq!(preview.body["translated"]["delete"], "orders");
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM orders")?, 25);
+
+    // `expect` guards against deleting more than the preview showed.
+    let res = sql(&server, json!({ "sql": text, "params": params, "expect": 2 }))?;
+    assert!(res.status.is_client_error(), "{}", res.body);
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM orders")?, 25);
+
+    let res = sql(&server, json!({ "sql": text, "params": params, "expect": 3 }))?;
+    assert_eq!(res.status.as_u16(), 200, "{}", res.body);
+    assert_eq!((res.body["rows_affected"].as_u64(), res.body["columns"].clone(), res.body["rows"].clone()), (Some(3), json!([]), json!([])));
+    let batch = res.body["delete"]["batch"].as_str().unwrap().to_string();
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM orders")?, 22);
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM orders WHERE status = 'refunded' AND total < 100")?, 0);
+    let audit = server.request(Method::GET, "/audit?action=data.delete.filter", None, &[])?.body;
+    assert_eq!(audit["events"][0]["details"]["sql"], true, "{}", audit);
+
+    // It's a delete batch like any other: restoring brings the three back.
+    let restored = server.request(Method::POST, &format!("/deletes/{}/restore", batch), None, &[])?;
+    assert!(restored.status.is_success(), "{}", restored.body);
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM orders")?, 25);
+
+    // Everything needs `all`, as _delete does; a WHERE that's always true counts as none.
+    for text in ["DELETE FROM orders", "DELETE FROM orders WHERE 1 = 1"] {
+        let res = sql(&server, json!({ "sql": text }))?;
+        assert_eq!(res.status.as_u16(), 400, "{}: {}", text, res.body);
+    }
+    assert_eq!(count(&server, "SELECT COUNT(*) FROM orders")?, 25);
+    let res = sql(&server, json!({ "sql": "DELETE FROM orders WHERE 1 = 0" }))?;
+    assert_eq!(res.body["rows_affected"], 0, "{}", res.body);
+
+    // What a filter can't say is refused, not guessed; options belong to DELETE.
+    let refused = |body: Value| -> Result<String> {
+        let res = sql(&server, body)?;
+        assert_eq!(res.status.as_u16(), 400, "{}", res.body);
+        Ok(res.body["error"]["message"].as_str().unwrap_or_default().to_string())
+    };
+    assert!(refused(json!({ "sql": "DELETE FROM orders WHERE n IN (SELECT n FROM orders WHERE rush)" }))?.contains("DELETE's WHERE"));
+    assert!(refused(json!({ "sql": "DELETE FROM orders WHERE n = 1 RETURNING *" }))?.contains("RETURNING"));
+    assert!(refused(json!({ "sql": "SELECT * FROM orders", "dry_run": true }))?.contains("for DELETE"));
+    assert!(refused(json!({ "sql": "DELETE FROM orders WHERE n = 1", "page_size": 5 }))?.contains("for SELECT"));
+    assert!(!sql(&server, json!({ "sql": "DELETE FROM _users WHERE login = 'x'" }))?.status.is_success());
+    assert!(!sql(&server, json!({ "sql": "DELETE FROM missing WHERE n = 1" }))?.status.is_success());
+
+    // Readers can SELECT but not DELETE; writers can.
+    let reader = server.user_with_roles("rita", json!([{ "name": "reader", "tessellations": ["orders"] }]))?;
+    let writer = server.user_with_roles("wes", json!([{ "name": "writer", "tessellations": ["orders"] }]))?;
+    let body = json!({ "sql": "DELETE FROM orders WHERE n = 1" });
+    assert_eq!(server.request_as(Some(&reader), Method::POST, "/sql", Some(&body), &[])?.status.as_u16(), 403);
+    let res = server.request_as(Some(&writer), Method::POST, "/sql", Some(&body), &[])?;
+    assert_eq!(res.body["rows_affected"], 1, "{}", res.body);
+
+    // With an Idempotency-Key, a retry answers the first delete again.
+    let key = [("Idempotency-Key", "sql-delete-retry-1")];
+    let body = json!({ "sql": "DELETE FROM orders WHERE n = 2" });
+    let first = server.request(Method::POST, "/sql", Some(&body), &key)?;
+    let again = server.request(Method::POST, "/sql", Some(&body), &key)?;
+    assert_eq!((first.body["rows_affected"].as_u64(), again.body["rows_affected"].as_u64()), (Some(1), Some(1)), "{} / {}", first.body, again.body);
+    assert_eq!(first.body["delete"]["batch"], again.body["delete"]["batch"]);
     Ok(())
 }
 

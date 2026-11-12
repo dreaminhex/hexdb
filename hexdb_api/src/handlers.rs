@@ -352,7 +352,7 @@ async fn run_query(
 
 /// Build an idempotency key from the request, if the client sent one. The
 /// fingerprint covers the method, path, query and canonical JSON body.
-fn idempotency(
+pub(crate) fn idempotency(
     principal: &hexdb_core::Principal,
     headers: &HeaderMap,
     method: &Method,

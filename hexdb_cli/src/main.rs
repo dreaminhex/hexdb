@@ -118,7 +118,7 @@ enum Commands {
     },
     /// Print a new random key for storage.encryption_key or network.lattice_secret
     Secret,
-    /// Run a SQL SELECT and print the rows as a table (needs a token with read access)
+    /// Run a SQL SELECT and print the rows as a table, or a DELETE ... WHERE (needs a token with read access; write to delete)
     Sql {
         /// The statement, e.g. "SELECT customer, COUNT(*) FROM orders GROUP BY customer"
         statement: String,
@@ -128,6 +128,15 @@ enum Commands {
         /// Print the server's JSON answer (every page) instead of a table
         #[arg(long)]
         json: bool,
+        /// DELETE: only say what would go
+        #[arg(long)]
+        dry_run: bool,
+        /// DELETE: refuse unless exactly this many documents and files would go (the cascade included)
+        #[arg(long)]
+        expect: Option<usize>,
+        /// DELETE without a WHERE: yes, every document
+        #[arg(long)]
+        all: bool,
         /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
         #[arg(short, long)]
         url: Option<String>,
@@ -608,10 +617,10 @@ async fn run() -> Result<()> {
             println!("{}", lattice::new_secret());
             Ok(())
         }
-        Commands::Sql { statement, params, json, url } => {
+        Commands::Sql { statement, params, json, dry_run, expect, all, url } => {
             let (base, config) = base_url(config_path, url)?;
             if token.is_none() {
-                bail!("`hexdb sql` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key with read access.");
+                bail!("`hexdb sql` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key with read access (write access to delete).");
             }
             let params: Vec<serde_json::Value> =
                 params.iter().map(|p| serde_json::from_str(p).unwrap_or_else(|_| serde_json::Value::String(p.clone()))).collect();
@@ -619,9 +628,16 @@ async fn run() -> Result<()> {
             let mut columns: Vec<String> = Vec::new();
             let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
             loop {
-                let body = serde_json::json!({ "sql": statement, "params": params, "cursor": cursor });
+                let mut body = serde_json::json!({ "sql": statement, "params": params, "cursor": cursor });
+                if dry_run || all || expect.is_some() {
+                    body = serde_json::json!({ "sql": statement, "params": params, "dry_run": dry_run, "all": all, "expect": expect });
+                }
                 let text = request_text(&config, &base, reqwest::Method::POST, "/sql", token, Some(&body)).await?;
                 let page: serde_json::Value = serde_json::from_str(&text)?;
+                if !json && page.get("delete").is_some() {
+                    print_sql_delete(&page);
+                    return Ok(());
+                }
                 if json {
                     println!("{}", pretty(&text));
                 } else {
@@ -1322,6 +1338,22 @@ fn print_table(columns: &[String], rows: &[Vec<serde_json::Value>]) {
         line(row);
     }
     println!("({} row{})", rows.len(), if rows.len() == 1 { "" } else { "s" });
+}
+
+/// A DELETE's answer, in a sentence or two.
+fn print_sql_delete(page: &serde_json::Value) {
+    let summary = &page["delete"];
+    let table = page["translated"]["delete"].as_str().unwrap_or("the table");
+    let total = summary["total"].as_u64().unwrap_or(0);
+    let matched = summary["matched"].as_u64().unwrap_or(0);
+    let cascade = if total > matched { format!(" ({} in all, with what cascades)", total) } else { String::new() };
+    if summary["dry_run"] == true {
+        println!("Would delete {} document(s) from {}{}. Nothing was deleted; run it again with --expect {} to delete exactly these.", matched, table, cascade, total);
+    } else if let Some(batch) = summary["batch"].as_str() {
+        println!("Deleted {} document(s) from {}{}. Delete batch {}: restore it from the admin UI's Deletes page or POST /deletes/{}/restore.", matched, table, cascade, batch, batch);
+    } else {
+        println!("Nothing matched; nothing was deleted.");
+    }
 }
 
 fn pretty(body: &str) -> String {
