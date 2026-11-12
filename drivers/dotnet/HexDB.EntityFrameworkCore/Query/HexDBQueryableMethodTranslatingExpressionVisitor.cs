@@ -218,6 +218,10 @@ public class HexDBQueryableMethodTranslatingExpressionVisitor : QueryableMethodT
     protected override ShapedQueryExpression? TranslateJoin(ShapedQueryExpression outer, ShapedQueryExpression inner, LambdaExpression outerKeySelector, LambdaExpression innerKeySelector, LambdaExpression resultSelector) => null;
     protected override ShapedQueryExpression? TranslateLastOrDefault(ShapedQueryExpression source, LambdaExpression? predicate, Type returnType, bool returnDefault) => null;
     protected override ShapedQueryExpression? TranslateLeftJoin(ShapedQueryExpression outer, ShapedQueryExpression inner, LambdaExpression outerKeySelector, LambdaExpression innerKeySelector, LambdaExpression resultSelector) => null;
+#if NET10_0_OR_GREATER
+    // EF Core 10's RightJoin: like the other joins, not translated (HexDB queries one tessellation at a time).
+    protected override ShapedQueryExpression? TranslateRightJoin(ShapedQueryExpression outer, ShapedQueryExpression inner, LambdaExpression outerKeySelector, LambdaExpression innerKeySelector, LambdaExpression resultSelector) => null;
+#endif
     protected override ShapedQueryExpression? TranslateMax(ShapedQueryExpression source, LambdaExpression? selector, Type resultType) => null;
     protected override ShapedQueryExpression? TranslateMin(ShapedQueryExpression source, LambdaExpression? selector, Type resultType) => null;
     protected override ShapedQueryExpression? TranslateOfType(ShapedQueryExpression source, Type resultType)
@@ -447,6 +451,10 @@ internal sealed class FilterTranslator
 
         protected override Expression VisitExtension(Expression node)
         {
+#if NET10_0_OR_GREATER
+            // EF Core 10 passes captured variables as QueryParameterExpression: a value, not the entity.
+            if (node is QueryParameterExpression) return node;
+#endif
             // EF Core's own nodes (shapers, query roots) only appear when the entity is read.
             _found = true;
             return node;

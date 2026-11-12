@@ -26,4 +26,4 @@ The provider uses the URI's login (signing in on the first request), `apiKey`, `
 
 A query HexDB can't answer throws instead of quietly loading everything into memory. Many-to-many skip navigations, filtered includes, complex types and composite keys aren't supported yet. The [manual](https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md#entity-framework-core) covers the mapping, relationships, owned types, inheritance, the supported LINQ, transactions and concurrency tokens.
 
-Requires .NET 8 or later and EF Core 9. Licensed under the Apache License 2.0.
+Works with EF Core 10 on .NET 10, and EF Core 9 on .NET 8 (the package carries both). Licensed under the Apache License 2.0.

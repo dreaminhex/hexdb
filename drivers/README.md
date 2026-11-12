@@ -17,7 +17,7 @@ Client libraries for HexDB's REST API, plus an Entity Framework Core provider an
 | JavaScript / TypeScript | [node](node) | `@dreaminhex/hexdb` (npm) | Node.js 18+, Deno, Bun or a browser; no dependencies |
 | Python | [python](python) | `hexdb` (PyPI) | Python 3.9+; standard library only |
 | .NET (C#, F#) | [dotnet](dotnet) | `HexDB.Client` (NuGet) | .NET 8+ |
-| Entity Framework Core | [dotnet/HexDB.EntityFrameworkCore](dotnet/HexDB.EntityFrameworkCore) | `HexDB.EntityFrameworkCore` (NuGet) | .NET 8+, EF Core 9 |
+| Entity Framework Core | [dotnet/HexDB.EntityFrameworkCore](dotnet/HexDB.EntityFrameworkCore) | `HexDB.EntityFrameworkCore` (NuGet) | .NET 10 with EF Core 10, or .NET 8 with EF Core 9 |
 | ODBC | [odbc](odbc) | release archives (`odbc/`) | 64-bit Windows, Linux (unixODBC) |
 | JDBC | [java](java) | `com.dreaminhex:hexdb-jdbc` (Maven), release jar | Java 11+; no dependencies |
 
@@ -77,7 +77,7 @@ var page = await media.Documents.QueryAsync(new Query { Filter = new { path = "/
 
 ## Entity Framework Core
 
-`HexDB.EntityFrameworkCore` is an EF Core 9 provider over the .NET driver. Each entity type is a tessellation and each `SaveChanges` is one atomic transaction:
+`HexDB.EntityFrameworkCore` is an EF Core provider (EF Core 10 on .NET 10, EF Core 9 on .NET 8) over the .NET driver. Each entity type is a tessellation and each `SaveChanges` is one atomic transaction:
 
 ```csharp
 protected override void OnConfiguring(DbContextOptionsBuilder options) =>

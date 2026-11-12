@@ -53,7 +53,7 @@ public class HexDBShapedQueryCompilingExpressionVisitor : ShapedQueryCompilingEx
             if (includes.Count == 0) includes = null;
         }
         shaper = new OwnedLoader.Injector(t => Plan(t, query, plans), tracking).Visit(shaper);
-        shaper = InjectEntityMaterializers(shaper);
+        shaper = InjectMaterializers(shaper);
         shaper = new OwnedLoader.Lowering().Visit(shaper);
         shaper = new ValueBufferRewriter(valueBuffer).Visit(shaper);
         var lambda = Expression.Lambda(shaper, QueryCompilationContext.QueryContextParameter, valueBuffer);
@@ -96,11 +96,19 @@ public class HexDBShapedQueryCompilingExpressionVisitor : ShapedQueryCompilingEx
         Expression body = owners.Count == 0
             ? shaper
             : Expression.Condition(Expression.Constant(false), Expression.Block(typeof(object), owners.Append(Expression.Constant(null, typeof(object)))), shaper);
-        body = new ValueBufferRewriter(valueBuffer).Visit(InjectEntityMaterializers(body));
+        body = new ValueBufferRewriter(valueBuffer).Visit(InjectMaterializers(body));
         return Expression.Lambda<Func<QueryContext, ValueBuffer, object?>>(body, QueryCompilationContext.QueryContextParameter, valueBuffer).Compile();
     }
 
     /// <summary>Points the materializer's reads at our ValueBuffer: entity values by property index, scalars at 0.</summary>
+    /// <summary>EF Core 10 renamed InjectEntityMaterializers to InjectStructuralTypeMaterializers.</summary>
+    private Expression InjectMaterializers(Expression expression) =>
+#if NET10_0_OR_GREATER
+        InjectStructuralTypeMaterializers(expression);
+#else
+        InjectEntityMaterializers(expression);
+#endif
+
     private sealed class ValueBufferRewriter : ExpressionVisitor
     {
         private readonly ParameterExpression _valueBuffer;

@@ -36,19 +36,38 @@ public sealed class ValueSource
         if (expression is ConstantExpression constant) return new ValueSource(_ => constant.Value, constant.Value?.ToString() ?? "null");
         var body = new ParameterReplacer().Visit(expression);
         var lambda = Expression.Lambda<Func<QueryContext, object?>>(Expression.Convert(body, typeof(object)), QueryCompilationContext.QueryContextParameter);
-        return new ValueSource(lambda.Compile(), expression is ParameterExpression p ? "@" + p.Name : expression.ToString());
+        var name = expression switch
+        {
+            ParameterExpression p => p.Name,
+#if NET10_0_OR_GREATER
+            QueryParameterExpression q => q.Name,
+#endif
+            _ => null,
+        };
+        return new ValueSource(lambda.Compile(), name is null ? expression.ToString() : "@" + name);
     }
 
     private sealed class ParameterReplacer : ExpressionVisitor
     {
+#if NET10_0_OR_GREATER
+        // EF Core 10 renamed QueryContext.ParameterValues to Parameters.
+        private static readonly System.Reflection.PropertyInfo ParameterValues = typeof(QueryContext).GetProperty(nameof(QueryContext.Parameters))!;
+#else
         private static readonly System.Reflection.PropertyInfo ParameterValues = typeof(QueryContext).GetProperty(nameof(QueryContext.ParameterValues))!;
+#endif
 
         protected override Expression VisitParameter(ParameterExpression node) =>
-            node == QueryCompilationContext.QueryContextParameter
-                ? node
-                : Expression.Convert(
-                    Expression.Property(Expression.Property(QueryCompilationContext.QueryContextParameter, ParameterValues), "Item", Expression.Constant(node.Name)),
-                    node.Type);
+            node == QueryCompilationContext.QueryContextParameter ? node : Lookup(node.Name!, node.Type);
+
+#if NET10_0_OR_GREATER
+        // EF Core 10's query parameters are their own node type.
+        protected override Expression VisitExtension(Expression node) =>
+            node is QueryParameterExpression parameter ? Lookup(parameter.Name, parameter.Type) : base.VisitExtension(node);
+#endif
+
+        /// <summary>The parameter's value from the query context, at execution.</summary>
+        private static Expression Lookup(string name, Type type) =>
+            Expression.Convert(Expression.Property(Expression.Property(QueryCompilationContext.QueryContextParameter, ParameterValues), "Item", Expression.Constant(name)), type);
     }
 }
 

@@ -3026,7 +3026,7 @@ A hex that didn't shut down cleanly leaves its runtime file behind, and the next
 | JavaScript / TypeScript | [drivers/node](drivers/node) | `npm install @dreaminhex/hexdb` (Node.js 18+, Deno, Bun, browsers) |
 | Python | [drivers/python](drivers/python) | `pip install hexdb` (3.9+, no dependencies) |
 | .NET | [drivers/dotnet](drivers/dotnet) | `dotnet add package HexDB.Client` (.NET 8+) |
-| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 8+, EF Core 9) |
+| Entity Framework Core | [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore) | `dotnet add package HexDB.EntityFrameworkCore` (.NET 10 with EF Core 10, or .NET 8 with EF Core 9) |
 | ODBC | [drivers/odbc](drivers/odbc) | Release archives (`odbc/`), or `cargo build --release -p hexdb_odbc` |
 | JDBC | [drivers/java](drivers/java) | `com.dreaminhex:hexdb-jdbc` from Maven Central, or the release's `hexdb-jdbc-<version>.jar` (Java 11+, no dependencies) |
 
@@ -3085,7 +3085,7 @@ Keep credentials out of URIs that are logged or committed: give the URI without 
 
 ### Entity Framework Core
 
-`HexDB.EntityFrameworkCore` (in [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore)) is an EF Core 9 provider built on `HexDB.Client`. Install it with `dotnet add package HexDB.EntityFrameworkCore` and configure a context:
+`HexDB.EntityFrameworkCore` (in [drivers/dotnet/HexDB.EntityFrameworkCore](drivers/dotnet/HexDB.EntityFrameworkCore)) is an EF Core provider built on `HexDB.Client`: for EF Core 10 on .NET 10, and EF Core 9 on .NET 8 (both out of the one package). Install it with `dotnet add package HexDB.EntityFrameworkCore` and configure a context:
 
 ```csharp
 public class Order
