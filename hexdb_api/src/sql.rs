@@ -116,8 +116,9 @@ async fn run_delete(
     delete: SqlDelete,
 ) -> ApiResult {
     let tess = delete.tessellation.as_str();
-    if request.page_size.is_some() || request.cursor.is_some() {
-        return Err(ApiError::invalid("page_size and cursor are for SELECT statements."));
+    // page_size is ignored (drivers send it with every statement); a cursor only continues a SELECT.
+    if request.cursor.is_some() {
+        return Err(ApiError::invalid("cursor is for SELECT statements."));
     }
     let files = engine.tessellation_info(tess).is_some_and(|i| i.is_files());
     principal.require(if files { Permission::Delete } else { Permission::Write }, tess)?;

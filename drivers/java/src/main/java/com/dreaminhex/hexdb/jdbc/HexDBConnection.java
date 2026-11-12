@@ -122,7 +122,7 @@ public class HexDBConnection extends UnsupportedConnection {
     @Override
     public boolean isReadOnly() throws SQLException {
         check();
-        return true;
+        return false;
     }
 
     @Override

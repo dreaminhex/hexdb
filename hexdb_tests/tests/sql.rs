@@ -244,7 +244,8 @@ fn delete_runs_as_a_restorable_delete_by_filter() -> Result<()> {
     assert!(refused(json!({ "sql": "DELETE FROM orders WHERE n IN (SELECT n FROM orders WHERE rush)" }))?.contains("DELETE's WHERE"));
     assert!(refused(json!({ "sql": "DELETE FROM orders WHERE n = 1 RETURNING *" }))?.contains("RETURNING"));
     assert!(refused(json!({ "sql": "SELECT * FROM orders", "dry_run": true }))?.contains("for DELETE"));
-    assert!(refused(json!({ "sql": "DELETE FROM orders WHERE n = 1", "page_size": 5 }))?.contains("for SELECT"));
+    assert!(refused(json!({ "sql": "DELETE FROM orders WHERE n = 1", "cursor": "x" }))?.contains("for SELECT"));
+    assert_eq!(sql(&server, json!({ "sql": "DELETE FROM orders WHERE n = 3", "page_size": 1000 }))?.body["rows_affected"], 1, "drivers send page_size with everything");
     assert!(!sql(&server, json!({ "sql": "DELETE FROM _users WHERE login = 'x'" }))?.status.is_success());
     assert!(!sql(&server, json!({ "sql": "DELETE FROM missing WHERE n = 1" }))?.status.is_success());
 

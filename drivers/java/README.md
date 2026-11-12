@@ -1,6 +1,6 @@
 # HexDB JDBC driver
 
-A JDBC 4.2 driver for [HexDB](https://github.com/dreaminhex/hexdb)'s read-only SQL, for Java tools and applications: DBeaver, IntelliJ and DataGrip, Spark, Jupyter (via JayDeBeApi), reporting tools, and plain JDBC code. It sends SQL to `POST /sql` over HTTP or HTTPS, so joins, subqueries, `UNION`, `WITH` and expressions work as described in the [manual](../../MANUAL.md#10-sql), with the caller's permissions, row filters and hidden fields.
+A JDBC 4.2 driver for [HexDB](https://github.com/dreaminhex/hexdb)'s SQL (queries, and `DELETE ... WHERE`), for Java tools and applications: DBeaver, IntelliJ and DataGrip, Spark, Jupyter (via JayDeBeApi), reporting tools, and plain JDBC code. It sends SQL to `POST /sql` over HTTP or HTTPS, so joins, subqueries, `UNION`, `WITH` and expressions work as described in the [manual](../../MANUAL.md#10-sql), with the caller's permissions, row filters and hidden fields.
 
 It needs Java 11 or later and has no dependencies.
 
@@ -87,7 +87,7 @@ Connection db = DriverManager.getConnection("jdbc:hexdbs://db.example.com?apiKey
 
 ## Limits
 
-- **Read-only.** `executeUpdate` throws. There are no transactions: autocommit stays on, and `commit`, `rollback` and `setAutoCommit(false)` are accepted and do nothing, so tools that call them keep working.
+- **Deletes, not other writes.** `executeUpdate`, `executeLargeUpdate` and `execute` run a `DELETE ... WHERE` (one restorable delete batch on the server) and return the rows deleted, also from `getUpdateCount`; any other statement passed to `executeUpdate`, or a `DELETE` passed to `executeQuery`, is refused before it's sent (SQLSTATE 07000). Insert and update through the REST API or a client library. There are no transactions: autocommit stays on, and `commit`, `rollback` and `setAutoCommit(false)` are accepted and do nothing, so tools that call them keep working.
 - **Cursors.** No scrollable or updatable result sets, batches, generated keys, stored procedures or BLOBs.
 - **Cancelling.** Each page is one short request, so `cancel` has nothing to stop; the `timeout` property bounds every request.
 

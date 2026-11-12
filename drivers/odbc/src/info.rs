@@ -1,5 +1,5 @@
-// SQLGetInfo: what the driver and HexDB's SQL support. Read-only,
-// forward-only, one table per query, the five standard aggregates.
+// SQLGetInfo: what the driver and HexDB's SQL support. SELECT and
+// DELETE ... WHERE, forward-only, one table per query, the five standard aggregates.
 
 use crate::client::Client;
 
@@ -28,7 +28,7 @@ pub fn get(info_type: u16, client: Option<&Client>) -> Option<Info> {
         17 => return s("HexDB"),                           // SQL_DBMS_NAME
         18 => return s(&dbms_version(client)),             // SQL_DBMS_VER
         47 => return s(client.map(|c| c.login.as_str()).unwrap_or("")), // SQL_USER_NAME
-        25 => return s("Y"),                               // SQL_DATA_SOURCE_READ_ONLY
+        25 => return s("N"),                               // SQL_DATA_SOURCE_READ_ONLY (SQL deletes)
         19 => return s("Y"),                               // SQL_ACCESSIBLE_TABLES
         20 => return s("N"),                               // SQL_ACCESSIBLE_PROCEDURES
         21 => return s("N"),                               // SQL_PROCEDURES

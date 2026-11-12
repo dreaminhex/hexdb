@@ -1,6 +1,6 @@
 # HexDB ODBC driver
 
-An ODBC 3.8 driver for HexDB, written in Rust, for applications that read data through ODBC (BI and reporting tools, spreadsheets, Python's pyodbc, R's odbc, and others). The driver sends SQL to the server's [`POST /sql`](../../MANUAL.md#10-sql) endpoint over HTTP or HTTPS and reads table and column lists from `GET /sql/tables` and `GET /sql/columns`. It's read-only, like HexDB's SQL.
+An ODBC 3.8 driver for HexDB, written in Rust, for applications that read data through ODBC (BI and reporting tools, spreadsheets, Python's pyodbc, R's odbc, and others). The driver sends SQL to the server's [`POST /sql`](../../MANUAL.md#10-sql) endpoint over HTTP or HTTPS and reads table and column lists from `GET /sql/tables` and `GET /sql/columns`. It runs what HexDB's SQL runs: `SELECT`s, and `DELETE ... WHERE` (a restorable delete batch), with `SQLRowCount` reporting the rows deleted.
 
 It's tested with pyodbc through unixODBC on Linux and through the Windows driver manager (in CI). Desktop tools such as Excel, Power BI and Tableau haven't been tested with it yet.
 
@@ -128,7 +128,8 @@ hexdbs://...
 
 ## Limits
 
-- **Read-only.** There are no transactions to manage: `SQLEndTran` does nothing, and autocommit stays on.
+- **Deletes.** `DELETE ... WHERE` runs on `SQLExecDirect` or `SQLExecute` (never while a tool describes a prepared statement); `SQLRowCount` gives the rows deleted, -1 after a `SELECT`, and there's no result set to fetch. `INSERT`, `UPDATE` and DDL are refused by the server.
+- **No transactions.** There are none to manage: `SQLEndTran` does nothing, and autocommit stays on.
 - **Cursors.** No scrollable cursors, bookmarks, positioned updates, asynchronous execution or arrays of parameters.
 - **API surface.** Only the Unicode entry points are exported; driver managers convert ANSI calls. Explicit descriptor handles and descriptor functions aren't supported.
 - **Text encoding.** `SQL_C_CHAR` data is UTF-8. Applications that expect the Windows ANSI code page should ask for wide characters (`SQL_C_WCHAR`), which most do.

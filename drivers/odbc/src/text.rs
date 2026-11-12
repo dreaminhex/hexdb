@@ -168,6 +168,24 @@ fn scan(sql: &str, mut f: impl FnMut(usize, char)) {
     }
 }
 
+/// True for a DELETE statement (after leading spaces, comments and parentheses).
+pub fn is_delete(sql: &str) -> bool {
+    let mut rest = sql;
+    loop {
+        let trimmed = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
+        if let Some(after) = trimmed.strip_prefix("--") {
+            rest = after.split_once('\n').map(|(_, r)| r).unwrap_or("");
+        } else if let Some(after) = trimmed.strip_prefix("/*") {
+            rest = after.split_once("*/").map(|(_, r)| r).unwrap_or("");
+        } else {
+            rest = trimmed;
+            break;
+        }
+    }
+    let word: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    word.eq_ignore_ascii_case("delete")
+}
+
 /// Number of `?` parameter markers.
 pub fn count_parameters(sql: &str) -> usize {
     let mut n = 0;
@@ -251,6 +269,16 @@ pub fn pattern_matches(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletes_are_told_from_queries() {
+        assert!(is_delete("DELETE FROM t WHERE a = 1"));
+        assert!(is_delete("  -- clean up\n /* old */ ( delete from t"));
+        assert!(!is_delete("SELECT * FROM deleted"));
+        assert!(!is_delete("DELETED_ROWS"));
+        assert!(!is_delete("/* DELETE */ SELECT 1"));
+        assert!(!is_delete(""));
+    }
 
     #[test]
     fn connection_strings_parse() {

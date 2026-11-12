@@ -22,6 +22,17 @@ import org.junit.jupiter.api.Test;
 
 class UnitTest {
     @Test
+    void deletesAreToldFromQueries() {
+        assertTrue(HexDBStatement.isDelete("DELETE FROM t WHERE a = 1"));
+        assertTrue(HexDBStatement.isDelete("  -- clean up\n /* old */ delete from t"));
+        assertTrue(HexDBStatement.isDelete("DELETE"));
+        assertFalse(HexDBStatement.isDelete("SELECT * FROM deleted"));
+        assertFalse(HexDBStatement.isDelete("DELETED_ROWS"));
+        assertFalse(HexDBStatement.isDelete("/* DELETE */ SELECT 1"));
+        assertFalse(HexDBStatement.isDelete(""));
+    }
+
+    @Test
     void jsonRoundTrips() {
         Object parsed = Json.parse("{\"a\": [1, -2.5, 1e2, true, null, \"x\\\"\\u00e9\\n\"], \"big\": 123456789012345678901234567890, \"exact\": 0.1}");
         Map<?, ?> map = (Map<?, ?>) parsed;

@@ -60,7 +60,7 @@ api("POST", "/products/_bulk", [
 connection = f"Driver={{{LIB}}};Server={URL};ApiKey={KEY};PageSize=7"
 db = pyodbc.connect(connection, autocommit=True)
 check(db.getinfo(pyodbc.SQL_DBMS_NAME) == "HexDB", "SQLGetInfo: DBMS name")
-check(db.getinfo(pyodbc.SQL_DATA_SOURCE_READ_ONLY) in ("Y", True), "SQLGetInfo: read-only")  # pyodbc maps Y/N to bool
+check(db.getinfo(pyodbc.SQL_DATA_SOURCE_READ_ONLY) in ("N", False), "SQLGetInfo: not read-only (SQL deletes)")  # pyodbc maps Y/N to bool
 
 cursor = db.cursor()
 cursor.execute("SELECT sku, price, stock, active, added, dims FROM products WHERE price >= ? AND name LIKE ? ORDER BY stock", 3, "Product%")
@@ -102,9 +102,11 @@ check(keys == ["id"], "SQLPrimaryKeys")
 
 try:
     cursor.execute("UPDATE products SET price = 0")
-    check(False, "writes are refused")
+    check(False, "updates are refused")
 except pyodbc.Error as e:
-    check(e.args[0] == "42000" and "read-only" in str(e), f"writes are refused ({e.args[0]})")
+    check(e.args[0] == "42000" and "SELECT and DELETE" in str(e), f"updates are refused ({e.args[0]})")
+cursor.execute("DELETE FROM products WHERE stock < ?", 0)
+check(cursor.rowcount == 0, f"a DELETE reports its row count ({cursor.rowcount})")
 db.close()
 
 # A DSN registered with the driver manager (set up before the first connection).

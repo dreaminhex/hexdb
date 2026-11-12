@@ -62,18 +62,17 @@ public class HexDBPreparedStatement extends UnsupportedPreparedStatement {
 
     @Override
     public boolean execute() throws SQLException {
-        run(sql, values());
-        return true;
+        return any(sql, values());
     }
 
     @Override
     public int executeUpdate() throws SQLException {
-        throw Unsupported.readOnly();
+        return (int) Math.min(update(sql, values()), Integer.MAX_VALUE);
     }
 
     @Override
     public long executeLargeUpdate() throws SQLException {
-        throw Unsupported.readOnly();
+        return update(sql, values());
     }
 
     @Override
@@ -84,6 +83,16 @@ public class HexDBPreparedStatement extends UnsupportedPreparedStatement {
     @Override
     public boolean execute(String sql) throws SQLException {
         throw new SQLException("A prepared statement runs its own SQL: call execute() without arguments.", "HY000");
+    }
+
+    @Override
+    public int executeUpdate(String sql) throws SQLException {
+        throw new SQLException("A prepared statement runs its own SQL: call executeUpdate() without arguments.", "HY000");
+    }
+
+    @Override
+    public long executeLargeUpdate(String sql) throws SQLException {
+        throw new SQLException("A prepared statement runs its own SQL: call executeLargeUpdate() without arguments.", "HY000");
     }
 
     /** Not known before the statement runs; run it and use the result's metadata. */

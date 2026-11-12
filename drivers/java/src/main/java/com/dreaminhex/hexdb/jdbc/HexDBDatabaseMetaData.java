@@ -283,7 +283,8 @@ public class HexDBDatabaseMetaData extends UnsupportedDatabaseMetaData {
 
     @Override
     public boolean isReadOnly() {
-        return true;
+        // SQL deletes (DELETE ... WHERE); it inserts and updates nothing.
+        return false;
     }
 
     @Override

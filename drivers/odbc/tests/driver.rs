@@ -367,3 +367,45 @@ fn catalog_info_and_errors() -> Result<()> {
     assert!(refused.1.contains("pageSize"), "{:?}", refused);
     Ok(())
 }
+
+#[test]
+fn deletes_report_a_row_count_and_never_run_while_described() -> Result<()> {
+    let server = TestServer::start()?;
+    seed(&server)?;
+    let odbc = connect(&connection(&server, "")).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let stmt = odbc.stmt();
+    let text = wide("DELETE FROM orders WHERE customer = ?");
+    unsafe {
+        assert_eq!(SQLPrepareW(stmt, text.as_ptr(), SQL_NTS), SQL_SUCCESS);
+        let mut customer = wide("ada");
+        let mut customer_len: SqlLen = SQL_NTS as SqlLen;
+        assert_eq!(SQLBindParameter(stmt, 1, 1, SQL_C_WCHAR, SQL_WVARCHAR, 10, 0, customer.as_mut_ptr() as SqlPointer, 0, &mut customer_len), SQL_SUCCESS);
+        // Tools describe before executing: a DELETE has no columns and nothing is deleted yet.
+        let mut columns = -1i16;
+        assert_eq!(SQLNumResultCols(stmt, &mut columns), SQL_SUCCESS);
+        assert_eq!(columns, 0);
+        assert_eq!(server.count("orders")?, 10, "describing ran nothing");
+        check(SQLExecute(stmt), SQL_HANDLE_STMT, stmt, "execute")?;
+        let mut count: SqlLen = 0;
+        assert_eq!(SQLRowCount(stmt, &mut count), SQL_SUCCESS);
+        assert_eq!(count, 4, "ada has n = 0, 3, 6, 9");
+        assert_eq!(server.count("orders")?, 6);
+        assert_eq!(SQLFetch(stmt), SQL_ERROR, "no result set to fetch");
+        assert_eq!(diag(SQL_HANDLE_STMT, stmt).0, "24000");
+        let _ = &mut customer;
+    }
+    free(stmt);
+
+    // A SELECT reports -1; a DELETE without WHERE needs the API's "all", so it's refused.
+    let stmt = odbc.query("SELECT COUNT(*) FROM orders")?;
+    let mut count: SqlLen = 0;
+    unsafe { assert_eq!(SQLRowCount(stmt, &mut count), SQL_SUCCESS) };
+    assert_eq!(count, -1);
+    free(stmt);
+    let stmt = odbc.stmt();
+    let all = wide("DELETE FROM orders");
+    unsafe { assert_eq!(SQLExecDirectW(stmt, all.as_ptr(), SQL_NTS), SQL_ERROR) };
+    assert_eq!(server.count("orders")?, 6);
+    free(stmt);
+    Ok(())
+}

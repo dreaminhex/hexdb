@@ -254,7 +254,7 @@ pub unsafe extern "system" fn SQLSetConnectAttrW(dbc: SqlHandle, attribute: SqlI
             SQL_ATTR_LOGIN_TIMEOUT => state.login_timeout = value as usize as u64,
             SQL_ATTR_ACCESS_MODE | SQL_ATTR_TXN_ISOLATION | SQL_ATTR_CONNECTION_TIMEOUT | SQL_ATTR_CURRENT_CATALOG | SQL_ATTR_METADATA_ID => {}
             SQL_ATTR_AUTOCOMMIT if value as usize != SQL_AUTOCOMMIT_ON => {
-                warnings.push(OdbcError::new("01S02", "HexDB's SQL is read-only; autocommit stays on."));
+                warnings.push(OdbcError::new("01S02", "HexDB's SQL has no transactions; autocommit stays on."));
             }
             SQL_ATTR_AUTOCOMMIT => {}
             // Driver-manager and tracing attributes the driver doesn't need.
@@ -272,7 +272,7 @@ pub unsafe extern "system" fn SQLGetConnectAttrW(dbc: SqlHandle, attribute: SqlI
                 truncation(wide_out_bytes("", value as *mut SqlWChar, buffer_len as isize, out_len), warnings);
                 return Ok(Done::Ok);
             }
-            SQL_ATTR_ACCESS_MODE => SQL_MODE_READ_ONLY as u32,
+            SQL_ATTR_ACCESS_MODE => SQL_MODE_READ_WRITE as u32,
             SQL_ATTR_AUTOCOMMIT => SQL_AUTOCOMMIT_ON as u32,
             SQL_ATTR_LOGIN_TIMEOUT => state.login_timeout as u32,
             SQL_ATTR_CONNECTION_TIMEOUT | SQL_ATTR_METADATA_ID | SQL_ATTR_AUTO_IPD => 0,
@@ -292,7 +292,7 @@ pub unsafe extern "system" fn SQLGetConnectAttrW(dbc: SqlHandle, attribute: SqlI
 
 #[no_mangle]
 pub unsafe extern "system" fn SQLEndTran(handle_type: SqlSmallInt, handle: SqlHandle, _completion: SqlSmallInt) -> SqlReturn {
-    // Nothing to commit: HexDB's SQL is read-only.
+    // Nothing to commit: each statement commits on its own (autocommit).
     match handle_type {
         SQL_HANDLE_ENV => env_call(handle, |_, _, _| Ok(Done::Ok)),
         SQL_HANDLE_DBC => dbc_call(handle, |_, _, _| Ok(Done::Ok)),
@@ -529,10 +529,10 @@ pub unsafe extern "system" fn SQLGetData(stmt: SqlHandle, number: SqlUSmallInt, 
 
 #[no_mangle]
 pub unsafe extern "system" fn SQLRowCount(stmt: SqlHandle, count: *mut SqlLen) -> SqlReturn {
-    // SELECT doesn't report a row count.
-    stmt_call(stmt, |_, _, _| {
+    // A DELETE's deleted rows; -1 for a SELECT.
+    stmt_call(stmt, |_, s, _| {
         if !count.is_null() {
-            *count = -1;
+            *count = s.row_count;
         }
         Ok(Done::Ok)
     })

@@ -116,7 +116,7 @@ pub const SQL_ATTR_ANSI_APP: SqlInteger = 115;
 pub const SQL_ATTR_CONNECTION_DEAD: SqlInteger = 1209;
 pub const SQL_ATTR_AUTO_IPD: SqlInteger = 10001;
 pub const SQL_ATTR_METADATA_ID: SqlInteger = 10014;
-pub const SQL_MODE_READ_ONLY: usize = 1;
+pub const SQL_MODE_READ_WRITE: usize = 0;
 pub const SQL_AUTOCOMMIT_ON: usize = 1;
 
 // Statement attributes

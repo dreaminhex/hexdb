@@ -137,7 +137,7 @@ class ServerTest {
             DatabaseMetaData md = c.getMetaData();
             assertEquals("HexDB", md.getDatabaseProductName());
             assertFalse(md.getDatabaseProductVersion().isEmpty());
-            assertTrue(md.isReadOnly() && md.supportsOuterJoins() && md.supportsCorrelatedSubqueries() && md.supportsUnionAll());
+            assertTrue(!md.isReadOnly() && md.supportsOuterJoins() && md.supportsCorrelatedSubqueries() && md.supportsUnionAll());
             List<String> tables = new ArrayList<>();
             try (ResultSet r = md.getTables(null, null, "j%", new String[] {"TABLE"})) {
                 while (r.next()) {
@@ -177,7 +177,10 @@ class ServerTest {
         try (Connection c = connect(""); Statement s = c.createStatement()) {
             assertEquals("42S02", assertThrows(SQLException.class, () -> s.executeQuery("SELECT * FROM nothing_here")).getSQLState());
             assertEquals("42000", assertThrows(SQLException.class, () -> s.executeQuery("SELECT n, ROW_NUMBER() OVER () FROM jorders")).getSQLState());
+            // A DELETE without WHERE needs the API's "all"; the wrong method is refused before anything runs.
             assertEquals("42000", assertThrows(SQLException.class, () -> s.executeUpdate("DELETE FROM jorders")).getSQLState());
+            assertEquals("07000", assertThrows(SQLException.class, () -> s.executeQuery("DELETE FROM jorders WHERE n = 1")).getSQLState());
+            assertEquals("07000", assertThrows(SQLException.class, () -> s.executeUpdate("SELECT 1")).getSQLState());
             assertEquals("0A000", assertThrows(SQLException.class, () -> c.prepareCall("{call x()}")).getSQLState());
             PreparedStatement p = c.prepareStatement("SELECT n FROM jorders WHERE n = ?");
             assertEquals("07002", assertThrows(SQLException.class, p::executeQuery).getSQLState());
@@ -220,6 +223,32 @@ class ServerTest {
                 assertEquals(n++, r.getInt(1));
             }
             assertEquals(9, n);
+        }
+    }
+
+    @Test
+    void deletesReportTheirCount() throws Exception {
+        post("/jdeletes/_bulk", "[{\"n\":1,\"k\":\"a\"},{\"n\":2,\"k\":\"a\"},{\"n\":3,\"k\":\"b\"},{\"n\":4,\"k\":\"c\"}]");
+        try (Connection c = connect(""); Statement s = c.createStatement()) {
+            assertEquals(2, s.executeUpdate("DELETE FROM jdeletes WHERE k = 'a'"));
+            assertEquals(2, s.getUpdateCount());
+            assertNull(s.getResultSet());
+            assertFalse(s.execute("DELETE FROM jdeletes WHERE k = 'zzz'"));
+            assertEquals(0, s.getUpdateCount());
+            assertFalse(s.getMoreResults());
+            assertEquals(-1, s.getUpdateCount());
+            assertTrue(s.execute("SELECT COUNT(*) FROM jdeletes"));
+            assertEquals(-1, s.getUpdateCount());
+            try (ResultSet r = s.getResultSet()) {
+                assertTrue(r.next());
+                assertEquals(2, r.getLong(1));
+            }
+            try (PreparedStatement p = c.prepareStatement("DELETE FROM jdeletes WHERE n >= ?")) {
+                p.setInt(1, 4);
+                assertEquals(1L, p.executeLargeUpdate());
+                assertFalse(p.execute());
+                assertEquals(0, p.getUpdateCount());
+            }
         }
     }
 

@@ -5,7 +5,7 @@
 use crate::client::Client;
 use crate::convert::{param_value, put, ParamBinding, Put};
 use crate::ffi::*;
-use crate::text::{count_parameters, rewrite_escapes};
+use crate::text::{count_parameters, is_delete, rewrite_escapes};
 use crate::{Dbc, Done, OdbcError};
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -177,6 +177,8 @@ pub struct StmtState {
     pub result: Option<ResultSet>,
     /// SQLExecute ran (a result from describing a prepared statement isn't fetchable yet).
     pub executed: bool,
+    /// SQLRowCount: rows the last DELETE deleted; -1 otherwise.
+    pub row_count: SqlLen,
     described_with: Option<Vec<Value>>,
     pub row_array_size: usize,
     pub rows_fetched: *mut SqlULen,
@@ -199,6 +201,7 @@ impl StmtState {
             columns: BTreeMap::new(),
             result: None,
             executed: false,
+            row_count: -1,
             described_with: None,
             row_array_size: 1,
             rows_fetched: std::ptr::null_mut(),
@@ -224,6 +227,7 @@ impl StmtState {
     pub fn close_cursor(&mut self) {
         self.result = None;
         self.executed = false;
+        self.row_count = -1;
         self.described_with = None;
     }
 
@@ -256,7 +260,14 @@ impl StmtState {
         let sql = self.sql.clone().ok_or_else(|| OdbcError::new("HY010", "No statement has been prepared."))?;
         let client = self.client()?;
         let page = client.sql(&sql, &params, None)?;
-        self.result = Some(ResultSet::from_page(client, sql, params, page));
+        if page.get("rows_affected").is_some() {
+            // A DELETE: a count, and no result set.
+            self.row_count = page["rows_affected"].as_i64().unwrap_or(0) as SqlLen;
+            self.result = Some(ResultSet::local(Vec::new(), Vec::new()));
+        } else {
+            self.row_count = -1;
+            self.result = Some(ResultSet::from_page(client, sql, params, page));
+        }
         Ok(())
     }
 
@@ -274,8 +285,15 @@ impl StmtState {
     }
 
     /// Make sure there's result metadata: run a prepared statement (with
-    /// unbound parameters as NULL) to learn its columns.
+    /// unbound parameters as NULL) to learn its columns. A DELETE isn't run
+    /// (it has no columns): only SQLExecute runs it.
     pub fn describe(&mut self) -> Result<(), OdbcError> {
+        if self.result.is_none() && self.sql.as_deref().is_some_and(is_delete) {
+            self.result = Some(ResultSet::local(Vec::new(), Vec::new()));
+            self.described_with = None;
+            self.executed = false;
+            return Ok(());
+        }
         if self.result.is_none() && self.sql.is_some() {
             let params = self.parameter_values(true)?;
             self.run(params.clone())?;
@@ -308,7 +326,7 @@ impl StmtState {
 
     /// SQLFetch / SQLFetchScroll(SQL_FETCH_NEXT): the next row set into the bound columns.
     pub fn fetch(&mut self, warnings: &mut Vec<OdbcError>) -> Result<Done, OdbcError> {
-        if !self.executed || self.result.is_none() {
+        if !self.executed || self.result.as_ref().is_none_or(|r| r.columns.is_empty()) {
             return Err(OdbcError::new("24000", "Invalid cursor state: no result to fetch from."));
         }
         let size = self.row_array_size.max(1);
