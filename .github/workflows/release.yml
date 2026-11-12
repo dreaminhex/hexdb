@@ -274,12 +274,29 @@ jobs:
           body_path: release-notes.md
           generate_release_notes: true
 
+  ffmpeg:
+    # The image's small ffmpeg (docker/build-ffmpeg.sh), built natively on each architecture.
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        run: docker run --rm -v "$PWD/docker:/scripts:ro" -v "$PWD/out:/out" debian:trixie bash /scripts/build-ffmpeg.sh /out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-${{ matrix.arch }}
+          path: out/
+
   image:
     # From the Linux binaries built above, natively on each architecture: only
     # the base image's packages install under emulation, so this takes minutes,
     # not the two hours compiling arm64 under QEMU did. Not held back by another
     # platform's build: it needs only the Linux ones.
-    needs: binaries
+    needs: [binaries, ffmpeg]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -288,6 +305,10 @@ jobs:
         with:
           pattern: bin-*-linux-gnu
           path: artifacts
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: ffmpeg-*
+          path: artifacts
       - name: Unpack the binaries
         run: |
           for pair in amd64:x86_64 arm64:aarch64; do
@@ -295,7 +316,7 @@ jobs:
             name="hexdb-${GITHUB_REF_NAME}-${target}"
             tar xzf "artifacts/bin-${target}/${name}.tar.gz" -C artifacts
             mkdir -p "prebuilt/${arch}"
-            cp "artifacts/${name}/hexdb_api" "artifacts/${name}/hexdb" "prebuilt/${arch}/"
+            cp "artifacts/${name}/hexdb_api" "artifacts/${name}/hexdb" "artifacts/ffmpeg-${arch}/ffmpeg" "artifacts/ffmpeg-${arch}/COPYING.LGPLv2.1" "prebuilt/${arch}/"
             [ -d prebuilt/ui ] || cp -r "artifacts/${name}/ui" prebuilt/ui
           done
           file prebuilt/*/hexdb_api

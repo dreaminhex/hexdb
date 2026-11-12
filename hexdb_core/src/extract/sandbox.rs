@@ -110,8 +110,14 @@ pub fn enabled() -> bool {
 enum Job {
     Extract { name: String, content_type: String, len: u64, max_read_bytes: u64, timeout_ms: u64, max_text_bytes: usize, thumbnail_px: Option<u32> },
     VideoFrames { len: u64, max_read_bytes: u64, timeout_ms: u64, count: usize, px: u32 },
-    /// A keyframe of HEVC, AV1 or VP9 video, as a stream for ffmpeg.
-    VideoStream { len: u64, max_read_bytes: u64, timeout_ms: u64 },
+    /// A keyframe of HEVC, AV1 or VP9 video (or, with `heif`, a HEIC photo's tiles), as a stream for ffmpeg.
+    VideoStream {
+        len: u64,
+        max_read_bytes: u64,
+        timeout_ms: u64,
+        #[serde(default)]
+        heif: bool,
+    },
     /// A PDF's first pages, rendered for OCR.
     PdfPages { len: u64, max_read_bytes: u64, timeout_ms: u64, count: usize, px: u32 },
 }
@@ -121,6 +127,9 @@ struct StreamOut {
     format: String,
     data: String,
     rotation: u32,
+    /// cols, rows, width, height
+    #[serde(default)]
+    grid: Option<(u32, u32, u32, u32)>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -281,13 +290,13 @@ pub fn video_frames(inner: Box<dyn ByteSource>, count: usize, px: u32, limits: &
 }
 
 /// A keyframe of HEVC, AV1 or VP9 video for ffmpeg, in a worker when the sandbox is on.
-pub fn video_stream(inner: Box<dyn ByteSource>, limits: &Limits) -> Result<Option<super::video::CodedFrame>> {
+pub fn video_stream(inner: Box<dyn ByteSource>, limits: &Limits, heif: bool) -> Result<Option<super::video::CodedFrame>> {
     let Some(worker) = WORKER.get() else {
         let mut source = Source::new(inner, limits);
-        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::video::keyframe_stream(&mut source)))
+        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| coded(&mut source, heif)))
             .unwrap_or_else(|_| Err(anyhow!("the video parser failed on this file")));
     };
-    let job = Job::VideoStream { len: inner.len(), max_read_bytes: limits.max_read_bytes, timeout_ms: limits.timeout.as_millis() as u64 };
+    let job = Job::VideoStream { len: inner.len(), max_read_bytes: limits.max_read_bytes, timeout_ms: limits.timeout.as_millis() as u64, heif };
     let out = run(worker, inner, &job, limits)?;
     match out.stream {
         Some(Ok(Some(s))) => {
@@ -297,12 +306,14 @@ pub fn video_stream(inner: Box<dyn ByteSource>, limits: &Limits) -> Result<Optio
                 "ivf" => "ivf",
                 other => bail!("the worker returned a {} stream", other),
             };
-            // A keyframe is at most 16 MB, plus its parameter sets.
-            if s.data.len() > (17 * 1024 * 1024) * 4 / 3 || s.rotation > 3 {
+            // A keyframe is at most 16 MB and a photo's tiles 64 MB, plus their parameter sets.
+            let grid_ok = s.grid.is_none_or(|(c, r, w, h)| (1..=64).contains(&c) && (1..=64).contains(&r) && (1..=65_536).contains(&w) && (1..=65_536).contains(&h));
+            if s.data.len() > (65 * 1024 * 1024) * 4 / 3 || s.rotation > 3 || !grid_ok {
                 bail!("the worker returned an implausible keyframe");
             }
             let data = STANDARD.decode(s.data.as_bytes()).context("the worker's keyframe isn't base64")?;
-            Ok(Some(super::video::CodedFrame { format, data, rotation: s.rotation }))
+            let grid = s.grid.map(|(cols, rows, width, height)| super::video::Grid { cols, rows, width, height });
+            Ok(Some(super::video::CodedFrame { format, data, rotation: s.rotation, grid }))
         }
         Some(Ok(None)) => Ok(None),
         Some(Err(e)) => Err(anyhow!(e)),
@@ -324,6 +335,15 @@ pub fn pdf_pages(inner: Box<dyn ByteSource>, count: usize, px: u32, limits: &Lim
         Some(Ok(pages)) => pages.into_iter().map(thumb_in).collect(),
         Some(Err(e)) => Err(anyhow!(e)),
         None => bail!("the worker returned no pages"),
+    }
+}
+
+/// A HEIC photo's tiles, or a video's keyframe.
+fn coded(source: &mut Source, heif: bool) -> Result<Option<super::video::CodedFrame>> {
+    if heif {
+        super::heif::coded_image(source)
+    } else {
+        super::video::keyframe_stream(source)
     }
 }
 
@@ -562,12 +582,19 @@ fn worker_job() -> Result<()> {
                 .unwrap_or_else(|_| Err(anyhow!("the video decoder failed on this file")));
             Output { frames: Some(frames.map(|f| f.into_iter().map(thumb_out).collect()).map_err(|e| format!("{:#}", e))), ..Default::default() }
         }
-        Job::VideoStream { len, max_read_bytes, timeout_ms } => {
+        Job::VideoStream { len, max_read_bytes, timeout_ms, heif } => {
             let limits = limits_of(max_read_bytes, timeout_ms, 0);
             let mut source = Source::new(pipe(len), &limits);
-            let stream = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::video::keyframe_stream(&mut source)))
+            let stream = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| coded(&mut source, heif)))
                 .unwrap_or_else(|_| Err(anyhow!("the video parser failed on this file")));
-            let stream = stream.map(|s| s.map(|s| StreamOut { format: s.format.to_string(), data: STANDARD.encode(&s.data), rotation: s.rotation }));
+            let stream = stream.map(|s| {
+                s.map(|s| StreamOut {
+                    format: s.format.to_string(),
+                    data: STANDARD.encode(&s.data),
+                    rotation: s.rotation,
+                    grid: s.grid.map(|g| (g.cols, g.rows, g.width, g.height)),
+                })
+            });
             Output { stream: Some(stream.map_err(|e| format!("{:#}", e))), ..Default::default() }
         }
         Job::PdfPages { len, max_read_bytes, timeout_ms, count, px } => {

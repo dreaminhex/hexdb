@@ -788,5 +788,23 @@ fn ocr_and_ffmpeg_thumbnails_when_installed() -> Result<()> {
         let doc = extracted(&server, &id)?;
         assert_eq!((doc["thumbnail"]["width"].as_u64(), doc["thumbnail"]["height"].as_u64()), (Some(320), Some(180)), "{}: {}", file, doc);
     }
+
+    // HEIC and AVIF photos, when libheif's heif-enc is there to make them.
+    if std::process::Command::new("heif-enc").arg("--version").output().is_ok() {
+        let png_path = dir.path().join("photo.png");
+        image::RgbImage::from_fn(1280, 960, |x, y| image::Rgb([(x / 5) as u8, (y / 4) as u8, 200])).save(&png_path)?;
+        // Phones store photos as grids of tiles: the thumbnail is of the whole grid, not one tile.
+        for (file, flags) in [("photo.heic", vec![]), ("photo-tiled.heic", vec!["--cut-tiles", "512"]), ("photo.avif", vec!["--avif"])] {
+            let out = dir.path().join(file);
+            let mut args = flags.clone();
+            args.extend(["-o", out.to_str().unwrap(), png_path.to_str().unwrap()]);
+            assert!(std::process::Command::new("heif-enc").args(&args).status()?.success(), "making {}", file);
+            let id = upload(&server, &format!("photos/{}", file), &std::fs::read(&out)?)?["id"].as_str().unwrap().to_string();
+            let doc = extracted(&server, &id)?;
+            assert_eq!((doc["thumbnail"]["width"].as_u64(), doc["thumbnail"]["height"].as_u64()), (Some(320), Some(240)), "{}: {}", file, doc);
+        }
+    } else {
+        eprintln!("HEIC and AVIF skipped: needs heif-enc");
+    }
     Ok(())
 }

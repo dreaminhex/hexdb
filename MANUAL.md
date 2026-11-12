@@ -1456,15 +1456,38 @@ After each upload, new version or version restore, the Overseer reads the file i
 
 **The parser sandbox.** Files come from users, and file parsers are where a hostile file does harm, so extraction, thumbnails and video frames are made in a separate worker process (`files.sandbox`, on by default): the server's own executable, started for one file at a time. The worker never sees the store, the keys or the network. It asks the hex for byte ranges of the file over a pipe, and the hex reads them from the encrypted store, enforcing the read budget and deadline itself. The worker gets an empty environment and no handles but its pipes, and is killed at the deadline or if the hex exits. On Linux it also runs under resource limits (`files.sandbox_memory_mb`, 1024, of memory, CPU seconds, no file writes, few descriptors) and a seccomp filter that allows only memory, thread, clock and pipe system calls: opening files, sockets and starting programs fail. On macOS the resource limits apply (macOS doesn't enforce the memory one). On Windows (since 2.5) the worker runs in the `HexDB.Parser` AppContainer, which can read only the worker's executable and has no network. It also runs in a job object with a memory limit, a CPU-time limit, no child processes and UI restrictions. `/status` shows `storage.files.parser_sandbox` (runs, failures, workers stopped at the deadline). Turning the sandbox off parses files in the server process, as before 2.0.
 
-Not read yet: text in scanned PDFs and images (no OCR; the AI can read them, see [AI](#ai)), frames of video that isn't H.264.
+Text in images and scanned PDFs is read with OCR when Tesseract is installed (see [OCR and outside tools](#ocr-and-outside-tools)); the AI can also read them (see [AI](#ai)).
 
 Extractor version 3 (2.0) added PDF body text, ICC profiles and GoPro telemetry: files read by an older version are read again when a hex becomes the Overseer. AI results are kept, since the content hasn't changed.
 
 ### Thumbnails
 
-Images that the server can decode (JPEG, PNG, GIF, WebP, BMP, TIFF) and Photoshop files (their embedded preview) get a thumbnail during extraction: at most `files.thumbnail_px` (320) on the longest side, never enlarged, with EXIF orientation applied; JPEG, or PNG when the image has transparency. Turn them off with `files.thumbnails = false`.
+Images that the server can decode (JPEG, PNG, GIF, WebP, BMP, TIFF), Photoshop files (their embedded preview), SVG drawings (drawn with resvg; only images embedded in the file as `data:` URLs are drawn, a link to a file or URL never is), PDFs (their first page, rendered with hayro) and RAW camera files (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2, PEF, SRW and others, known by their extension: the JPEG preview the camera stored) get a thumbnail during extraction: at most `files.thumbnail_px` (320) on the longest side, never enlarged, with EXIF orientation applied; JPEG, or PNG when the image has transparency. Turn them off with `files.thumbnails = false`.
 
-So do H.264 videos in MP4, MOV, M4V and 3GP files, uploaded any way (API, CLI, drivers or the admin UI). HexDB reads the file's index, picks the keyframe about a third of the way in, past intros and fades from black, and decodes only that frame, within the same read budget and deadline as extraction; the video's rotation is applied. Fragmented MP4 (browser recordings, DASH) uses its first frame. The decoder is Cisco's OpenH264, built into the binary (see THIRD-PARTY-NOTICES.md); HEVC, VP9 and AV1 videos get no server thumbnail, and the admin UI shows a frame the browser decodes instead. Building with `cargo build --no-default-features` leaves the decoder out. Files read by an older version of the extractors, including videos uploaded before this, are read again when a hex becomes the Overseer.
+So do H.264 videos in MP4, MOV, M4V and 3GP files, uploaded any way (API, CLI, drivers or the admin UI). HexDB reads the file's index, picks the keyframe about a third of the way in, past intros and fades from black, and decodes only that frame, within the same read budget and deadline as extraction; the video's rotation is applied. Fragmented MP4 (browser recordings, DASH) uses its first frame. The decoder is Cisco's OpenH264, built into the binary (see THIRD-PARTY-NOTICES.md). HEVC, VP9 and AV1 video, other containers (WebM, Matroska, AVI, MPEG-TS and more) and HEIC and AVIF photos get thumbnails from ffmpeg when it's installed (see [OCR and outside tools](#ocr-and-outside-tools)); without it, the admin UI shows a frame the browser decodes instead. Building with `cargo build --no-default-features` leaves the decoder out. Files read by an older version of the extractors, including videos uploaded before this, are read again when a hex becomes the Overseer.
+
+### OCR and outside tools
+
+Two programs HexDB uses when they're installed, for what it doesn't do itself. The Docker image includes both (and HexDB Enterprise lattices run that image); elsewhere, install them and HexDB finds them at startup.
+
+| Program | For | Setting |
+|---|---|---|
+| [Tesseract](https://github.com/tesseract-ocr/tesseract) | OCR: the text of images and scanned PDFs | `files.tesseract` |
+| [ffmpeg](https://ffmpeg.org) | Thumbnails of HEIC and AVIF photos, HEVC, VP9 and AV1 video, and WebM, Matroska, AVI, MPEG-TS, MPEG-PS, FLV, Ogg and ASF/WMV files | `files.ffmpeg` |
+
+Each setting is `auto` (the default: the PATH, then the usual install folders, such as `C:\Program Files\Tesseract-OCR` on Windows and `/opt/homebrew/bin` on macOS), a path to the program, or `off`. HexDB asks each for its version at startup; `/status` lists what it found under `storage.files.tools`, and the log says `Using tesseract (...) at ...`.
+
+**OCR.** After a file's metadata is extracted, Tesseract reads:
+- images (JPEG, PNG, TIFF, BMP, GIF, WebP) up to 64 MB;
+- PDFs with less than 200 characters of text of their own (scans), up to `files.ocr_pages` pages (20), each rendered at about 200 dpi by the parser.
+
+The text goes in `meta.text`, so it's found by `$text` searches like any extracted text, up to `files.text_kb`. `meta.ocr` says how: `{"engine": "tesseract", "version", "languages", "pages", "chars"}`. Text that doesn't read like words (at least three words of three letters or more) isn't kept, so photos with no writing in them don't fill the index with stray marks. `files.ocr_languages` names Tesseract's languages, joined with `+` (`eng`, the default; `eng+deu` for English and German); each needs its traineddata installed (`apt install tesseract-ocr-deu`, for example). Files extracted before 2.5 are read again (extraction version 4).
+
+**ffmpeg thumbnails.** For HEIC photos and MP4/QuickTime video in HEVC, AV1 or VP9, HexDB's parser reads the file's index and hands ffmpeg only what it needs: the photo's tiles (phones store a photo as a grid of tiles, which ffmpeg puts back together) or one keyframe about a third of the way in, turned upright. Other video formats send ffmpeg their first 32 MB. The thumbnail follows `files.thumbnail_px`, as for images.
+
+**Isolation.** Neither program ever sees a file on disk: HexDB writes what it should read to its standard input and reads the result from its standard output, so decrypted uploads stay in memory. Each runs in the [process sandbox](#isolation) plugins use: no network, no folder it can write, HexDB's data, configuration and TLS key kept out, 1.5 GB of memory, a CPU-time limit, one process, a clean environment (`PATH` and `TESSDATA_PREFIX` pass through), and a 60-second deadline per page or thumbnail.
+
+**The image's ffmpeg** is a small build (about 8 MB, `docker/build-ffmpeg.sh`) with only the decoders, containers and filters above, from Debian's own source package; the full `ffmpeg` package would add over 500 MB of libraries HexDB doesn't use. The image carries Tesseract with English.
 
 ### Versions
 
@@ -2920,6 +2943,8 @@ role = "oracle"
 | `files.scan.rescan_hours` | 24 | Rescan stored files when signatures or rules change, at most this often (0: never) |
 | `files.text_kb` | 64 | Text kept per file for full-text search |
 | `files.thumbnails`, `thumbnail_px` | `true`, 320 | Image thumbnails and their size (32-2048) |
+| `files.tesseract`, `ffmpeg` | `auto`, `auto` | OCR and thumbnails of formats HexDB doesn't decode itself: `auto`, a path, or `off` (see [OCR and outside tools](#ocr-and-outside-tools)) |
+| `files.ocr_languages`, `ocr_pages` | `eng`, 20 | Tesseract's languages (joined with `+`), and the most pages of a scanned PDF read |
 | `memory.ram_mb` | 1024 | Memory budget for documents |
 | `memory.ttl_scan_frequency` | 600 | Seconds between expiry sweeps |
 | `memory.vertex_integrity_check_frequency` | 300 | Seconds between vertex checks |

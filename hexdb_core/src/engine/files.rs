@@ -1417,7 +1417,7 @@ impl HexDBEngine {
         if let (Some(px), Some(ffmpeg), false) = (thumbnail_px.or_else(|| self.config.files.thumbnails.then_some(self.config.files.thumbnail_px.clamp(32, 2048))), crate::tools::ffmpeg(), made) {
             if let Some(input) = job.ffmpeg_input().await {
                 match input {
-                    Ok((bytes, format, rotation)) => match crate::tools::ffmpeg_thumbnail(ffmpeg, bytes, format, rotation, px, TOOL_TIMEOUT).await {
+                    Ok((bytes, format, rotation, grid)) => match crate::tools::ffmpeg_thumbnail(ffmpeg, bytes, format, rotation, grid, px, TOOL_TIMEOUT).await {
                         Ok(Some(t)) => {
                             extracted.extractors.push("ffmpeg".into());
                             thumbnail = Some(Ok(Some(t)));
@@ -2020,6 +2020,9 @@ const STREAMED_VIDEO: &[&str] = &[
 ];
 const OCR_IMAGES: &[&str] = &["image/jpeg", "image/png", "image/tiff", "image/bmp", "image/x-ms-bmp", "image/gif", "image/webp"];
 
+/// What ffmpeg reads: the bytes, their format (when it can't tell), quarter turns, and a photo's grid.
+type FfmpegInput = (Vec<u8>, Option<&'static str>, u32, Option<crate::extract::video::Grid>);
+
 /// One file, for the external tools.
 struct ToolJob {
     store: Arc<blobs::BlobStore>,
@@ -2054,29 +2057,39 @@ impl ToolJob {
         self.chunks.iter().map(|(_, l)| *l as u64).sum()
     }
 
-    /// What ffmpeg should read for this file's thumbnail: (bytes, input format, quarter turns), if anything.
-    async fn ffmpeg_input(&self) -> Option<Result<(Vec<u8>, Option<&'static str>, u32)>> {
+    /// The coded picture the parser finds: a video keyframe, or (`heif`) a HEIC photo's tiles.
+    async fn coded(&self, heif: bool) -> Option<Result<FfmpegInput>> {
+        let source = self.source();
+        let limits = crate::extract::Limits { max_read_bytes: TOOL_INPUT_MAX, ..self.limits };
+        let found = tokio::task::spawn_blocking(move || crate::extract::sandbox::video_stream(Box::new(source), &limits, heif)).await;
+        match found {
+            Ok(Ok(Some(frame))) => Some(Ok((frame.data, Some(frame.format), frame.rotation, frame.grid))),
+            Ok(Ok(None)) => None,
+            Ok(Err(e)) => Some(Err(e)),
+            Err(e) => Some(Err(anyhow!("{}", e))),
+        }
+    }
+
+    /// What ffmpeg should read for this file's thumbnail, if anything.
+    async fn ffmpeg_input(&self) -> Option<Result<FfmpegInput>> {
         let t = self.content_type.as_str();
         if HEIF_TYPES.contains(&t) || matches!(self.ext().as_str(), "heic" | "heif" | "avif") {
+            // HEIC: its tiles, found by the parser (ffmpeg can't assemble a grid from a pipe).
+            // Otherwise (AVIF, an untiled HEIF the parser doesn't know) the whole file.
+            if let Some(found) = self.coded(true).await {
+                return Some(found);
+            }
             if self.len() > TOOL_INPUT_MAX {
                 return None;
             }
-            return Some(self.head(TOOL_INPUT_MAX as usize).await.map(|b| (b, None, 0)));
+            return Some(self.head(TOOL_INPUT_MAX as usize).await.map(|b| (b, None, 0, None)));
         }
         if crate::extract::video::TYPES.contains(&t) {
             // HEVC, AV1 and VP9 in MP4/QuickTime: one keyframe, found by the parser (H.264 is decoded there already).
-            let source = self.source();
-            let limits = self.limits;
-            let found = tokio::task::spawn_blocking(move || crate::extract::sandbox::video_stream(Box::new(source), &limits)).await;
-            return match found {
-                Ok(Ok(Some(frame))) => Some(Ok((frame.data, Some(frame.format), frame.rotation))),
-                Ok(Ok(None)) => None,
-                Ok(Err(e)) => Some(Err(e)),
-                Err(e) => Some(Err(anyhow!("{}", e))),
-            };
+            return self.coded(false).await;
         }
         if STREAMED_VIDEO.contains(&t) || matches!(self.ext().as_str(), "mkv" | "webm" | "avi" | "ts" | "m2ts" | "mpg" | "mpeg" | "flv" | "ogv" | "wmv") {
-            return Some(self.head(VIDEO_HEAD).await.map(|b| (b, None, 0)));
+            return Some(self.head(VIDEO_HEAD).await.map(|b| (b, None, 0, None)));
         }
         None
     }

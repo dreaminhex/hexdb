@@ -237,14 +237,24 @@ impl Tool {
 /// `input`: a whole picture (HEIC, AVIF), a keyframe stream (`format`: "hevc",
 /// "obu", "ivf"), or the start of a video it reads without seeking. Turned by
 /// `rotation` quarter turns clockwise; never enlarged.
-pub async fn ffmpeg_thumbnail(tool: &Tool, input: Vec<u8>, format: Option<&str>, rotation: u32, max_px: u32, timeout: Duration) -> Result<Option<crate::extract::thumbnail::Thumbnail>> {
+pub async fn ffmpeg_thumbnail(
+    tool: &Tool,
+    input: Vec<u8>,
+    format: Option<&str>,
+    rotation: u32,
+    grid: Option<crate::extract::video::Grid>,
+    max_px: u32,
+    timeout: Duration,
+) -> Result<Option<crate::extract::thumbnail::Thumbnail>> {
+    // A tiled photo's tiles arrive as frames: put them back together, then cut to the picture's size.
+    let assemble = grid.map_or(String::new(), |g| format!("tile={}x{},crop={}:{}:0:0,", g.cols, g.rows, g.width, g.height));
     let turn = match rotation {
         1 => "transpose=1,",
         2 => "transpose=1,transpose=1,",
         3 => "transpose=2,",
         _ => "",
     };
-    let filter = format!("{}scale='min(iw,{m})':'min(ih,{m})':force_original_aspect_ratio=decrease", turn, m = max_px.clamp(16, 2048));
+    let filter = format!("{}{}scale='min(iw,{m})':'min(ih,{m})':force_original_aspect_ratio=decrease", assemble, turn, m = max_px.clamp(16, 2048));
     let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error"].iter().map(|s| s.to_string()).collect();
     if let Some(format) = format {
         args.extend(["-f".to_string(), format.to_string()]);

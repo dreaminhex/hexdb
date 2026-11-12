@@ -26,6 +26,7 @@
 
 mod docs;
 mod gpmf;
+mod heif;
 mod icc;
 mod image;
 mod media;

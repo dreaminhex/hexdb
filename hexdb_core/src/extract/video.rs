@@ -395,6 +395,8 @@ pub fn keyframes(source: &mut Source, fractions: &[f64]) -> anyhow::Result<Vec<R
 /// as a stream ffmpeg reads from a pipe without seeking (`crate::tools`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodedFrame {
+    /// A photo stored as tiles (HEIC): the stream is every tile in order, to put back together.
+    pub grid: Option<Grid>,
     /// ffmpeg's input format: "hevc" (Annex B), "obu" (AV1 low-overhead OBUs) or "ivf" (VP9).
     pub format: &'static str,
     pub data: Vec<u8>,
@@ -402,8 +404,18 @@ pub struct CodedFrame {
     pub rotation: u32,
 }
 
+/// How a tiled photo's tiles go back together: columns and rows of tiles,
+/// then cropped to the picture's own size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Grid {
+    pub cols: u32,
+    pub rows: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// The HEVC parameter sets (VPS, SPS, PPS, SEI) and NAL length size from an `hvcC` box.
-fn hevc_config(hvcc: &[u8]) -> Option<(usize, Vec<Vec<u8>>)> {
+pub(crate) fn hevc_config(hvcc: &[u8]) -> Option<(usize, Vec<Vec<u8>>)> {
     let nal_length = (*hvcc.get(21)? & 0x03) as usize + 1;
     let arrays = *hvcc.get(22)? as usize;
     let mut at = 23;
@@ -421,7 +433,7 @@ fn hevc_config(hvcc: &[u8]) -> Option<(usize, Vec<Vec<u8>>)> {
 }
 
 /// Length-prefixed NAL units as Annex B (start codes), after `prefix` NALs.
-fn to_annex_b(prefix: &[Vec<u8>], nal_length: usize, sample: &[u8]) -> Vec<u8> {
+pub(crate) fn to_annex_b(prefix: &[Vec<u8>], nal_length: usize, sample: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(sample.len() + 512);
     for nal in prefix {
         out.extend_from_slice(&[0, 0, 0, 1]);
@@ -516,7 +528,7 @@ pub fn keyframe_stream(source: &mut Source) -> anyhow::Result<Option<CodedFrame>
             Coded::Av1(config) => ("obu", [config, sample].concat()),
             Coded::Vp9(w, h) => ("ivf", ivf(w, h, &sample)),
         };
-        return Ok(Some(CodedFrame { format, data, rotation: rotation(tkhd) }));
+        return Ok(Some(CodedFrame { format, data, rotation: rotation(tkhd), grid: None }));
     }
     Ok(None)
 }

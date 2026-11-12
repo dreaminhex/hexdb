@@ -34,6 +34,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # OCR and ffmpeg thumbnails are tested where the programs are installed.
+      - name: Tesseract and ffmpeg
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng ffmpeg
       - name: Build
         run: cargo build --locked --workspace --all-targets
       - name: Test
