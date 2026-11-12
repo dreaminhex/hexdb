@@ -1,6 +1,6 @@
 // Pictures of files that aren't pictures: an SVG drawn, a PDF page rendered,
 // and the JPEG preview a camera stores in its RAW files. For thumbnails and,
-// for PDF pages, OCR (`crate::ocr`). All pure Rust, run where the rest of
+// for PDF pages, OCR (`crate::tools`). All pure Rust, run where the rest of
 // parsing runs (the parser worker, when the sandbox is on).
 //
 //   SVG   resvg, with no system fonts and no external files: only images
@@ -103,6 +103,21 @@ impl Pdf {
         let rgb: Vec<u8> = pixmap.data_as_u8_slice().as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
         image::RgbImage::from_raw(pw, ph, rgb)
     }
+}
+
+/// A PDF's first `count` pages, each in greyscale with its longer side `px`,
+/// as PNGs (for OCR). Empty for a PDF hayro can't open.
+pub fn pdf_pages(source: &mut Source, count: usize, px: u32) -> anyhow::Result<Vec<super::thumbnail::Thumbnail>> {
+    let Some(pdf) = Pdf::open(source)? else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    for index in 0..pdf.pages().min(count) {
+        let Some(page) = pdf.render(index, px) else { continue };
+        let gray = image::DynamicImage::ImageRgb8(page).into_luma8();
+        let mut bytes = Vec::new();
+        gray.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)?;
+        out.push(super::thumbnail::Thumbnail { bytes, width: gray.width(), height: gray.height(), content_type: "image/png" });
+    }
+    Ok(out)
 }
 
 /// The largest JPEG preview a RAW camera file embeds.

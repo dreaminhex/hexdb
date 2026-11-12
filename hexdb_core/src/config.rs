@@ -350,6 +350,21 @@ pub struct FilesConfig {
     /// Memory a parser worker may use, in MB.
     #[serde(default = "default_sandbox_memory_mb")]
     pub sandbox_memory_mb: u64,
+    /// OCR with Tesseract (see `crate::tools`): "auto" (the PATH and the usual
+    /// install folders), a path to the program, or "off".
+    #[serde(default = "default_tool")]
+    pub tesseract: String,
+    /// Tesseract's languages, joined with '+' ("eng", "eng+deu"); each one's
+    /// traineddata must be installed.
+    #[serde(default = "default_ocr_languages")]
+    pub ocr_languages: String,
+    /// Pages of a scanned PDF read by OCR, at most.
+    #[serde(default = "default_ocr_pages")]
+    pub ocr_pages: u32,
+    /// ffmpeg, for thumbnails of HEIC and AVIF photos and HEVC, VP9 and AV1
+    /// video: "auto", a path to the program, or "off".
+    #[serde(default = "default_tool")]
+    pub ffmpeg: String,
     /// Malware scanning of uploads (see `crate::scan`).
     #[serde(default)]
     pub scan: ScanConfig,
@@ -424,6 +439,18 @@ fn default_sandbox_memory_mb() -> u64 {
     1024
 }
 
+fn default_tool() -> String {
+    "auto".into()
+}
+
+fn default_ocr_languages() -> String {
+    "eng".into()
+}
+
+fn default_ocr_pages() -> u32 {
+    20
+}
+
 fn default_thumbnail_px() -> u32 {
     320
 }
@@ -475,6 +502,10 @@ impl Default for FilesConfig {
             thumbnail_px: default_thumbnail_px(),
             sandbox: true,
             sandbox_memory_mb: default_sandbox_memory_mb(),
+            tesseract: default_tool(),
+            ocr_languages: default_ocr_languages(),
+            ocr_pages: default_ocr_pages(),
+            ffmpeg: default_tool(),
             scan: ScanConfig::default(),
         }
     }

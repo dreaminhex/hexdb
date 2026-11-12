@@ -33,6 +33,7 @@ pub mod settings;
 pub mod lattice_config;
 pub mod ai;
 pub mod email;
+pub mod tools;
 pub mod alerts;
 pub mod retire;
 pub mod review;

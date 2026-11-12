@@ -499,7 +499,7 @@ async fn run_plugin(engine: Arc<HexDBEngine>, manifest: Manifest, dir: PathBuf, 
 }
 
 /// Paths a plugin may never be given: HexDB's data, configuration and TLS key.
-fn protected_paths(engine: &HexDBEngine) -> Vec<PathBuf> {
+pub(crate) fn protected_paths(engine: &HexDBEngine) -> Vec<PathBuf> {
     let mut paths = vec![engine.config.storage_dir()];
     if let Some(source) = &engine.config.source {
         paths.extend(crate::config::local_config_path(source));

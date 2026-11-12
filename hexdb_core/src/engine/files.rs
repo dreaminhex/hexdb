@@ -1055,6 +1055,7 @@ impl HexDBEngine {
         stats.fetched_from_peers = self.file_sync.fetched.load(Ordering::Relaxed);
         stats.fetch_failures = self.file_sync.failed.load(Ordering::Relaxed);
         stats.parser_sandbox = crate::extract::sandbox::stats();
+        stats.tools = crate::tools::status();
         stats
     }
 
@@ -1402,6 +1403,52 @@ impl HexDBEngine {
         }
     }
 
+    /// The ffmpeg thumbnail (when HexDB made none and ffmpeg can) and the OCR
+    /// text (images, and PDFs with little text of their own) for one file.
+    async fn with_tools(
+        &self,
+        job: ToolJob,
+        thumbnail_px: Option<u32>,
+        thumbnail: Option<Result<Option<crate::extract::thumbnail::Thumbnail>>>,
+        extracted: &mut crate::extract::Extracted,
+    ) -> Option<Result<Option<crate::extract::thumbnail::Thumbnail>>> {
+        let mut thumbnail = thumbnail;
+        let made = matches!(thumbnail, Some(Ok(Some(_))));
+        if let (Some(px), Some(ffmpeg), false) = (thumbnail_px.or_else(|| self.config.files.thumbnails.then_some(self.config.files.thumbnail_px.clamp(32, 2048))), crate::tools::ffmpeg(), made) {
+            if let Some(input) = job.ffmpeg_input().await {
+                match input {
+                    Ok((bytes, format, rotation)) => match crate::tools::ffmpeg_thumbnail(ffmpeg, bytes, format, rotation, px, TOOL_TIMEOUT).await {
+                        Ok(Some(t)) => {
+                            extracted.extractors.push("ffmpeg".into());
+                            thumbnail = Some(Ok(Some(t)));
+                        }
+                        Ok(None) => {}
+                        Err(e) => extracted.errors.push(format!("thumbnail: {}", crate::extract::truncate_text(&format!("{:#}", e), 300))),
+                    },
+                    Err(e) => extracted.errors.push(format!("thumbnail: {}", crate::extract::truncate_text(&format!("{:#}", e), 300))),
+                }
+            }
+        }
+        if let Some(tesseract) = crate::tools::tesseract() {
+            let had = extracted.meta.get("text").and_then(Value::as_str).map_or(0, |t| t.trim().len());
+            match job.ocr(tesseract, had, self.config.files.ocr_pages.clamp(1, 500) as usize).await {
+                Ok(Some((text, pages))) => {
+                    let room = (self.config.files.text_kb as usize) * 1024;
+                    let text = crate::extract::truncate_text(&text, room).to_string();
+                    extracted.extractors.push("ocr".into());
+                    extracted.meta.insert(
+                        "ocr".into(),
+                        json!({ "engine": "tesseract", "version": tesseract.version, "languages": crate::tools::ocr_languages(), "pages": pages, "chars": text.chars().count() }),
+                    );
+                    extracted.meta.insert("text".into(), Value::String(text));
+                }
+                Ok(None) => {}
+                Err(e) => extracted.errors.push(format!("ocr: {}", crate::extract::truncate_text(&format!("{:#}", e), 300))),
+            }
+        }
+        thumbnail
+    }
+
     /// Extract one file's metadata and store it on its document.
     async fn extract_file(&self, tess: &str, id: Ulid, force: bool) -> Result<()> {
         let key = DocKey::new(tess, id);
@@ -1431,6 +1478,7 @@ impl HexDBEngine {
         let thumbnail_px = (kept_thumbnail.is_none() && self.config.files.thumbnails && crate::extract::thumbnail::supported(&content_type, &name))
             .then_some(self.config.files.thumbnail_px.clamp(32, 2048));
         let file_type = content_type.clone();
+        let (tool_store, tool_manifest, tool_name) = (store.clone(), manifest.chunks.clone(), name.clone());
         // Parsed in the sandbox worker when it's on (see crate::extract::sandbox).
         let work = tokio::task::spawn_blocking(move || {
             crate::extract::sandbox::extract(Box::new(BlobSource::new(store, &manifest)), &name, &content_type, &limits, thumbnail_px)
@@ -1442,6 +1490,10 @@ impl HexDBEngine {
             Ok(Err(e)) => (crate::extract::Extracted { errors: vec![format!("extraction failed: {}", e)], ..Default::default() }, None),
             Err(_) => (crate::extract::Extracted { errors: vec!["extraction took too long".into()], ..Default::default() }, None),
         };
+        // What HexDB can't do itself, ffmpeg and Tesseract do when they're installed (see crate::tools).
+        let thumbnail = self
+            .with_tools(ToolJob { store: tool_store, chunks: tool_manifest, name: tool_name, content_type: file_type.clone(), limits }, thumbnail_px, thumbnail, &mut extracted)
+            .await;
         let mut pins = Pins::new(self.blobs.clone());
         let mut thumbnail_field = kept_thumbnail;
         match thumbnail {
@@ -1940,4 +1992,122 @@ fn restore_system_fields(doc: &mut Document, previous: &Document) -> Result<()> 
     doc.data.insert("name".into(), crate::document::FieldValue::from_json(&json!(name)));
     doc.data.insert("path".into(), crate::document::FieldValue::from_json(&json!(path)));
     Ok(())
+}
+
+/// How long Tesseract may take on one page, and ffmpeg on one thumbnail.
+const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Largest picture or video start handed to ffmpeg or Tesseract whole.
+const TOOL_INPUT_MAX: u64 = 64 * 1024 * 1024;
+/// The start of a streamable video (Matroska, WebM, AVI, MPEG-TS...) handed to ffmpeg.
+const VIDEO_HEAD: usize = 32 * 1024 * 1024;
+/// A PDF with less text than this of its own is read with OCR.
+const SCANNED_TEXT_BELOW: usize = 200;
+/// Longer side of a PDF page rendered for OCR (about 200 dpi for A4 or Letter).
+const OCR_PAGE_PX: u32 = 2200;
+
+const HEIF_TYPES: &[&str] = &["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence", "image/avif"];
+const STREAMED_VIDEO: &[&str] = &[
+    "video/webm",
+    "video/x-matroska",
+    "video/x-msvideo",
+    "video/avi",
+    "video/mp2t",
+    "video/mpeg",
+    "video/x-flv",
+    "video/ogg",
+    "video/x-ms-wmv",
+    "video/x-ms-asf",
+];
+const OCR_IMAGES: &[&str] = &["image/jpeg", "image/png", "image/tiff", "image/bmp", "image/x-ms-bmp", "image/gif", "image/webp"];
+
+/// One file, for the external tools.
+struct ToolJob {
+    store: Arc<blobs::BlobStore>,
+    chunks: Vec<(blobs::ChunkId, u32)>,
+    name: String,
+    content_type: String,
+    limits: crate::extract::Limits,
+}
+
+impl ToolJob {
+    fn source(&self) -> BlobSource {
+        BlobSource::new(self.store.clone(), &Manifest { chunks: self.chunks.clone() })
+    }
+
+    fn ext(&self) -> String {
+        self.name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
+    }
+
+    /// The first `max` bytes (all of them for a smaller file), off the async runtime.
+    async fn head(&self, max: usize) -> Result<Vec<u8>> {
+        let source = self.source();
+        let limits = crate::extract::Limits { max_read_bytes: TOOL_INPUT_MAX, ..self.limits };
+        tokio::task::spawn_blocking(move || {
+            let mut source = crate::extract::Source::new(Box::new(source), &limits);
+            Ok(source.head(max)?)
+        })
+        .await
+        .map_err(|e| anyhow!("{}", e))?
+    }
+
+    fn len(&self) -> u64 {
+        self.chunks.iter().map(|(_, l)| *l as u64).sum()
+    }
+
+    /// What ffmpeg should read for this file's thumbnail: (bytes, input format, quarter turns), if anything.
+    async fn ffmpeg_input(&self) -> Option<Result<(Vec<u8>, Option<&'static str>, u32)>> {
+        let t = self.content_type.as_str();
+        if HEIF_TYPES.contains(&t) || matches!(self.ext().as_str(), "heic" | "heif" | "avif") {
+            if self.len() > TOOL_INPUT_MAX {
+                return None;
+            }
+            return Some(self.head(TOOL_INPUT_MAX as usize).await.map(|b| (b, None, 0)));
+        }
+        if crate::extract::video::TYPES.contains(&t) {
+            // HEVC, AV1 and VP9 in MP4/QuickTime: one keyframe, found by the parser (H.264 is decoded there already).
+            let source = self.source();
+            let limits = self.limits;
+            let found = tokio::task::spawn_blocking(move || crate::extract::sandbox::video_stream(Box::new(source), &limits)).await;
+            return match found {
+                Ok(Ok(Some(frame))) => Some(Ok((frame.data, Some(frame.format), frame.rotation))),
+                Ok(Ok(None)) => None,
+                Ok(Err(e)) => Some(Err(e)),
+                Err(e) => Some(Err(anyhow!("{}", e))),
+            };
+        }
+        if STREAMED_VIDEO.contains(&t) || matches!(self.ext().as_str(), "mkv" | "webm" | "avi" | "ts" | "m2ts" | "mpg" | "mpeg" | "flv" | "ogv" | "wmv") {
+            return Some(self.head(VIDEO_HEAD).await.map(|b| (b, None, 0)));
+        }
+        None
+    }
+
+    /// OCR text, and the pages read (1 for an image), when there's any worth keeping.
+    /// `had`: the length of the text extraction already found.
+    async fn ocr(&self, tesseract: &crate::tools::Tool, had: usize, max_pages: usize) -> Result<Option<(String, usize)>> {
+        let t = self.content_type.as_str();
+        let pages: Vec<Vec<u8>> = if OCR_IMAGES.contains(&t) && self.len() <= TOOL_INPUT_MAX {
+            vec![self.head(TOOL_INPUT_MAX as usize).await?]
+        } else if t == "application/pdf" && had < SCANNED_TEXT_BELOW {
+            let source = self.source();
+            let limits = self.limits;
+            let rendered = tokio::task::spawn_blocking(move || crate::extract::sandbox::pdf_pages(Box::new(source), max_pages, OCR_PAGE_PX, &limits))
+                .await
+                .map_err(|e| anyhow!("{}", e))??;
+            rendered.into_iter().map(|p| p.bytes).collect()
+        } else {
+            return Ok(None);
+        };
+        let count = pages.len();
+        let mut text = String::new();
+        for page in pages {
+            let read = crate::tools::tidy(&crate::tools::ocr(tesseract, page, TOOL_TIMEOUT).await?);
+            if !read.is_empty() {
+                if !text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str(&read);
+            }
+        }
+        Ok(crate::tools::worth_keeping(&text).then_some((text, count)))
+    }
 }

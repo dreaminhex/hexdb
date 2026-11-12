@@ -391,6 +391,136 @@ pub fn keyframes(source: &mut Source, fractions: &[f64]) -> anyhow::Result<Vec<R
     Ok(Vec::new())
 }
 
+/// One keyframe of a video track HexDB can't decode itself (HEVC, AV1, VP9),
+/// as a stream ffmpeg reads from a pipe without seeking (`crate::tools`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodedFrame {
+    /// ffmpeg's input format: "hevc" (Annex B), "obu" (AV1 low-overhead OBUs) or "ivf" (VP9).
+    pub format: &'static str,
+    pub data: Vec<u8>,
+    /// Quarter turns clockwise to make it upright.
+    pub rotation: u32,
+}
+
+/// The HEVC parameter sets (VPS, SPS, PPS, SEI) and NAL length size from an `hvcC` box.
+fn hevc_config(hvcc: &[u8]) -> Option<(usize, Vec<Vec<u8>>)> {
+    let nal_length = (*hvcc.get(21)? & 0x03) as usize + 1;
+    let arrays = *hvcc.get(22)? as usize;
+    let mut at = 23;
+    let mut nals = Vec::new();
+    for _ in 0..arrays.min(16) {
+        let count = u16_at(hvcc, at + 1)? as usize;
+        at += 3;
+        for _ in 0..count.min(64) {
+            let len = u16_at(hvcc, at)? as usize;
+            nals.push(hvcc.get(at + 2..at + 2 + len)?.to_vec());
+            at += 2 + len;
+        }
+    }
+    Some((nal_length, nals))
+}
+
+/// Length-prefixed NAL units as Annex B (start codes), after `prefix` NALs.
+fn to_annex_b(prefix: &[Vec<u8>], nal_length: usize, sample: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(sample.len() + 512);
+    for nal in prefix {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal);
+    }
+    let mut at = 0;
+    while at + nal_length <= sample.len() {
+        let len = sample[at..at + nal_length].iter().fold(0usize, |n, &b| (n << 8) | b as usize);
+        at += nal_length;
+        if len == 0 || at + len > sample.len() {
+            break;
+        }
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(&sample[at..at + len]);
+        at += len;
+    }
+    out
+}
+
+/// One VP9 frame in an IVF file.
+fn ivf(width: u16, height: u16, frame: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(frame.len() + 44);
+    out.extend_from_slice(b"DKIF");
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&32u16.to_le_bytes());
+    out.extend_from_slice(b"VP90");
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&30u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    out.extend_from_slice(frame);
+    out
+}
+
+/// How to turn a sample of this track into a stream ffmpeg reads, from its sample entry.
+enum Coded {
+    Hevc(usize, Vec<Vec<u8>>),
+    Av1(Vec<u8>),
+    Vp9(u16, u16),
+}
+
+fn coded_config(stsd: &[u8]) -> Option<Coded> {
+    for (kind, entry) in children(stsd.get(8..)?) {
+        let boxes = entry.get(78..)?;
+        match &kind {
+            b"hvc1" | b"hev1" => return hevc_config(child(boxes, b"hvcC")?).map(|(n, nals)| Coded::Hevc(n, nals)),
+            // av1C: 4 bytes, then the configuration OBUs (the sequence header).
+            b"av01" => return Some(Coded::Av1(child(boxes, b"av1C")?.get(4..)?.to_vec())),
+            // VisualSampleEntry: width and height at 24 and 26.
+            b"vp09" => return Some(Coded::Vp9(u16_at(entry, 24)?, u16_at(entry, 26)?)),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A keyframe about a third of the way in (the first fragment's first sample
+/// in fragmented MP4) of the first video track that's HEVC, AV1 or VP9, as a
+/// stream for ffmpeg; `None` for H.264 (decoded here) and other tracks.
+pub fn keyframe_stream(source: &mut Source) -> anyhow::Result<Option<CodedFrame>> {
+    let (moov, moofs) = top_boxes(source)?;
+    let Some(moov_bytes) = moov else { return Ok(None) };
+    for (kind, trak) in children(&moov_bytes) {
+        if &kind != b"trak" {
+            continue;
+        }
+        let Some(hdlr) = path(trak, &[b"mdia", b"hdlr"]) else { continue };
+        if hdlr.get(8..12) != Some(b"vide") {
+            continue;
+        }
+        let Some(stbl) = path(trak, &[b"mdia", b"minf", b"stbl"]) else { continue };
+        let Some(coded) = child(stbl, b"stsd").and_then(coded_config) else { return Ok(None) };
+        let tkhd = child(trak, b"tkhd").unwrap_or_default();
+        let location = match pick_keyframe(stbl, 1.0 / 3.0).and_then(|s| sample_location(stbl, s)) {
+            Some(l) => Some(l),
+            None => match track_id(tkhd) {
+                Some(id) => first_fragment_sample(source, &moofs, id)?,
+                None => None,
+            },
+        };
+        let Some((offset, size)) = location else { bail!("couldn't find a keyframe") };
+        if size == 0 || size > MAX_SAMPLE {
+            bail!("keyframe is {} bytes", size);
+        }
+        let sample = source.range(offset, size as usize)?;
+        let (format, data) = match coded {
+            Coded::Hevc(nal_length, nals) => ("hevc", to_annex_b(&nals, nal_length, &sample)),
+            Coded::Av1(config) => ("obu", [config, sample].concat()),
+            Coded::Vp9(w, h) => ("ivf", ivf(w, h, &sample)),
+        };
+        return Ok(Some(CodedFrame { format, data, rotation: rotation(tkhd) }));
+    }
+    Ok(None)
+}
+
 /// Builds small H.264 MP4 files for tests (here and in hexdb_tests).
 #[cfg(feature = "video-thumbnails")]
 #[doc(hidden)]

@@ -286,6 +286,8 @@ pub struct BlobStats {
     pub fetch_failures: u64,
     /// The parser sandbox (see `crate::extract::sandbox`).
     pub parser_sandbox: crate::extract::sandbox::SandboxStats,
+    /// Tesseract and ffmpeg, if found (see `crate::tools`).
+    pub tools: crate::tools::ToolsStatus,
     pub vertices: Vec<BlobVertexStats>,
 }
 

@@ -647,6 +647,10 @@ impl HexDBEngine {
         engine.rebuild_indexes().await?;
         engine.load_metrics_history();
         engine.refresh_disk_usage().await;
+        // Tesseract and ffmpeg, when installed (files.tesseract, files.ffmpeg); never HexDB's own files.
+        if engine.config.files.extract {
+            crate::tools::detect(&engine.config.files, crate::plugins::protected_paths(&engine)).await;
+        }
         // Look for a ClamAV (clamd = "auto") without holding up the start; say loudly
         // if uploads will be scanned by the built-in rules only.
         if let Some(scanner) = scanner {

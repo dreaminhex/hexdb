@@ -680,3 +680,113 @@ fn files_are_parsed_in_the_sandbox() -> Result<()> {
     assert_eq!(sandbox["failed"], 0, "{}", sandbox);
     Ok(())
 }
+
+/// A program on the PATH, if there is one.
+fn installed(program: &str) -> bool {
+    std::process::Command::new(program).arg(if program == "ffmpeg" { "-version" } else { "--version" }).output().is_ok_and(|o| o.status.success())
+}
+
+/// A one-page PDF whose only content is a greyscale picture (a scan): no text of its own.
+fn scanned_pdf(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let content = format!("q {} 0 0 {} 0 0 cm /Im0 Do Q", width, height);
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> >> >>", width, height).into_bytes(),
+        format!("<< /Length {} >>\nstream\n{}\nendstream", content.len(), content).into_bytes(),
+        [
+            format!("<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n", width, height, pixels.len()).as_bytes(),
+            pixels,
+            b"\nendstream",
+        ]
+        .concat(),
+    ];
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend(body);
+        pdf.extend(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend(format!("{:010} 00000 n \n", o).as_bytes());
+    }
+    pdf.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", objects.len() + 1, xref).as_bytes());
+    pdf
+}
+
+/// Words in large type as a greyscale picture, drawn by rendering a text PDF (hayro's built-in Helvetica).
+fn words_picture(words: &str) -> (Vec<u8>, u32, u32) {
+    let content = format!("BT /F1 36 Tf 30 60 Td ({}) Tj ET", words);
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 900 150] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{}\nendstream", content.len(), content),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{} 0 obj\n{}\nendobj\n", i + 1, body).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend(format!("{:010} 00000 n \n", o).as_bytes());
+    }
+    pdf.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", objects.len() + 1, xref).as_bytes());
+    let mut source = hexdb_core::extract::Source::new(Box::new(pdf), &hexdb_core::extract::Limits::default());
+    let page = hexdb_core::extract::render::Pdf::open(&mut source).unwrap().unwrap().render(0, 1800).unwrap();
+    let gray = image::DynamicImage::ImageRgb8(page).into_luma8();
+    let (w, h) = gray.dimensions();
+    (gray.into_raw(), w, h)
+}
+
+/// Needs `tesseract` (with English) and `ffmpeg` (with libx265 and libvpx) on the PATH; skipped otherwise.
+#[test]
+fn ocr_and_ffmpeg_thumbnails_when_installed() -> Result<()> {
+    if !installed("tesseract") || !installed("ffmpeg") {
+        eprintln!("skipped: needs tesseract and ffmpeg on the PATH");
+        return Ok(());
+    }
+    let server = files_server()?;
+    let tools = server.request(Method::GET, "/status", None, &[])?.body["storage"]["files"]["tools"].clone();
+    assert!(tools["tesseract"]["version"].as_str().is_some_and(|v| v.contains("tesseract")), "{}", tools);
+    assert!(tools["ffmpeg"]["version"].as_str().is_some_and(|v| v.contains("ffmpeg")), "{}", tools);
+
+    // OCR: a picture of words, and a scanned PDF of the same words.
+    let (pixels, w, h) = words_picture("HEXDB READS SCANNED INVOICES");
+    let mut png = Vec::new();
+    image::GrayImage::from_raw(w, h, pixels.clone()).unwrap().write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    let picture = upload(&server, "scans/words.png", &png)?["id"].as_str().unwrap().to_string();
+    let scan = upload(&server, "scans/invoice.pdf", &scanned_pdf(&pixels, w, h))?["id"].as_str().unwrap().to_string();
+    for id in [&picture, &scan] {
+        let doc = extracted(&server, id)?;
+        let text = doc["meta"]["text"].as_str().unwrap_or_default().to_uppercase();
+        assert!(text.contains("SCANNED") && text.contains("INVOICES"), "{}", doc);
+        assert_eq!(doc["meta"]["ocr"]["engine"], "tesseract", "{}", doc);
+    }
+    assert_eq!(extracted(&server, &scan)?["meta"]["ocr"]["pages"], 1);
+    // Found by full-text search like any other text.
+    let found = server.request(Method::POST, "/media/_query", Some(&json!({ "filter": { "$text": "invoices" } })), &[])?;
+    assert!(found.body["documents"].as_array().unwrap().len() >= 2, "{}", found.body);
+
+    // ffmpeg: HEVC in MP4 (one keyframe, given to ffmpeg as a stream) and VP9 in WebM (its start).
+    let dir = tempfile::tempdir()?;
+    for (file, codec, extra) in [("clip.mp4", "libx265", vec!["-tag:v", "hvc1"]), ("clip.webm", "libvpx-vp9", vec![])] {
+        let out = dir.path().join(file);
+        let mut args = vec!["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=10:duration=2", "-c:v", codec];
+        args.extend(extra);
+        args.push(out.to_str().unwrap());
+        assert!(std::process::Command::new("ffmpeg").args(&args).status()?.success(), "making {}", file);
+        let id = upload(&server, &format!("video/{}", file), &std::fs::read(&out)?)?["id"].as_str().unwrap().to_string();
+        let doc = extracted(&server, &id)?;
+        assert_eq!((doc["thumbnail"]["width"].as_u64(), doc["thumbnail"]["height"].as_u64()), (Some(320), Some(180)), "{}: {}", file, doc);
+    }
+    Ok(())
+}

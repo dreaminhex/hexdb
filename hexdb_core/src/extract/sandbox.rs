@@ -110,6 +110,17 @@ pub fn enabled() -> bool {
 enum Job {
     Extract { name: String, content_type: String, len: u64, max_read_bytes: u64, timeout_ms: u64, max_text_bytes: usize, thumbnail_px: Option<u32> },
     VideoFrames { len: u64, max_read_bytes: u64, timeout_ms: u64, count: usize, px: u32 },
+    /// A keyframe of HEVC, AV1 or VP9 video, as a stream for ffmpeg.
+    VideoStream { len: u64, max_read_bytes: u64, timeout_ms: u64 },
+    /// A PDF's first pages, rendered for OCR.
+    PdfPages { len: u64, max_read_bytes: u64, timeout_ms: u64, count: usize, px: u32 },
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StreamOut {
+    format: String,
+    data: String,
+    rotation: u32,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -131,9 +142,12 @@ struct Output {
     /// Extract: Some(Ok(None)) no thumbnail, Some(Err) a thumbnail error.
     #[serde(default)]
     thumbnail: Option<std::result::Result<Option<ThumbOut>, String>>,
-    /// VideoFrames.
+    /// VideoFrames and PdfPages.
     #[serde(default)]
     frames: Option<std::result::Result<Vec<ThumbOut>, String>>,
+    /// VideoStream.
+    #[serde(default)]
+    stream: Option<std::result::Result<Option<StreamOut>, String>>,
 }
 
 fn thumb_out(t: Thumbnail) -> ThumbOut {
@@ -263,6 +277,53 @@ pub fn video_frames(inner: Box<dyn ByteSource>, count: usize, px: u32, limits: &
         Some(Ok(frames)) => frames.into_iter().map(thumb_in).collect(),
         Some(Err(e)) => Err(anyhow!(e)),
         None => bail!("the worker returned no frames"),
+    }
+}
+
+/// A keyframe of HEVC, AV1 or VP9 video for ffmpeg, in a worker when the sandbox is on.
+pub fn video_stream(inner: Box<dyn ByteSource>, limits: &Limits) -> Result<Option<super::video::CodedFrame>> {
+    let Some(worker) = WORKER.get() else {
+        let mut source = Source::new(inner, limits);
+        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::video::keyframe_stream(&mut source)))
+            .unwrap_or_else(|_| Err(anyhow!("the video parser failed on this file")));
+    };
+    let job = Job::VideoStream { len: inner.len(), max_read_bytes: limits.max_read_bytes, timeout_ms: limits.timeout.as_millis() as u64 };
+    let out = run(worker, inner, &job, limits)?;
+    match out.stream {
+        Some(Ok(Some(s))) => {
+            let format = match s.format.as_str() {
+                "hevc" => "hevc",
+                "obu" => "obu",
+                "ivf" => "ivf",
+                other => bail!("the worker returned a {} stream", other),
+            };
+            // A keyframe is at most 16 MB, plus its parameter sets.
+            if s.data.len() > (17 * 1024 * 1024) * 4 / 3 || s.rotation > 3 {
+                bail!("the worker returned an implausible keyframe");
+            }
+            let data = STANDARD.decode(s.data.as_bytes()).context("the worker's keyframe isn't base64")?;
+            Ok(Some(super::video::CodedFrame { format, data, rotation: s.rotation }))
+        }
+        Some(Ok(None)) => Ok(None),
+        Some(Err(e)) => Err(anyhow!(e)),
+        None => bail!("the worker returned no keyframe"),
+    }
+}
+
+/// A PDF's first `count` pages as greyscale PNGs for OCR, in a worker when the sandbox is on.
+pub fn pdf_pages(inner: Box<dyn ByteSource>, count: usize, px: u32, limits: &Limits) -> Result<Vec<Thumbnail>> {
+    let Some(worker) = WORKER.get() else {
+        let mut source = Source::new(inner, limits);
+        return std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::render::pdf_pages(&mut source, count, px)))
+            .unwrap_or_else(|_| Err(anyhow!("the PDF renderer failed on this file")));
+    };
+    let job = Job::PdfPages { len: inner.len(), max_read_bytes: limits.max_read_bytes, timeout_ms: limits.timeout.as_millis() as u64, count, px };
+    let out = run(worker, inner, &job, limits)?;
+    match out.frames {
+        Some(Ok(pages)) if pages.len() > count => bail!("the worker returned {} pages for {}", pages.len(), count),
+        Some(Ok(pages)) => pages.into_iter().map(thumb_in).collect(),
+        Some(Err(e)) => Err(anyhow!(e)),
+        None => bail!("the worker returned no pages"),
     }
 }
 
@@ -491,7 +552,7 @@ fn worker_job() -> Result<()> {
                 extractors: extracted.extractors,
                 errors: extracted.errors,
                 thumbnail: thumbnail.map(|t| t.map(|t| t.map(thumb_out)).map_err(|e| format!("{:#}", e))),
-                frames: None,
+                ..Default::default()
             }
         }
         Job::VideoFrames { len, max_read_bytes, timeout_ms, count, px } => {
@@ -500,6 +561,21 @@ fn worker_job() -> Result<()> {
             let frames = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::thumbnail::video_frames(&mut source, count, px)))
                 .unwrap_or_else(|_| Err(anyhow!("the video decoder failed on this file")));
             Output { frames: Some(frames.map(|f| f.into_iter().map(thumb_out).collect()).map_err(|e| format!("{:#}", e))), ..Default::default() }
+        }
+        Job::VideoStream { len, max_read_bytes, timeout_ms } => {
+            let limits = limits_of(max_read_bytes, timeout_ms, 0);
+            let mut source = Source::new(pipe(len), &limits);
+            let stream = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::video::keyframe_stream(&mut source)))
+                .unwrap_or_else(|_| Err(anyhow!("the video parser failed on this file")));
+            let stream = stream.map(|s| s.map(|s| StreamOut { format: s.format.to_string(), data: STANDARD.encode(&s.data), rotation: s.rotation }));
+            Output { stream: Some(stream.map_err(|e| format!("{:#}", e))), ..Default::default() }
+        }
+        Job::PdfPages { len, max_read_bytes, timeout_ms, count, px } => {
+            let limits = limits_of(max_read_bytes, timeout_ms, 0);
+            let mut source = Source::new(pipe(len), &limits);
+            let pages = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::render::pdf_pages(&mut source, count, px)))
+                .unwrap_or_else(|_| Err(anyhow!("the PDF renderer failed on this file")));
+            Output { frames: Some(pages.map(|f| f.into_iter().map(thumb_out).collect()).map_err(|e| format!("{:#}", e))), ..Default::default() }
         }
     };
     write_frame(&mut io::stdout().lock(), b'D', &serde_json::to_vec(&out)?)?;
