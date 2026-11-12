@@ -885,6 +885,26 @@ pub async fn start_rollout(State(engine): Engine, Auth(principal): Auth) -> ApiR
     Ok((StatusCode::ACCEPTED, Json(json!(rollout))).into_response())
 }
 
+/// `GET /retire`: the retiring hexes, and whether each can be removed (administrators).
+pub async fn list_retiring(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    Ok(Json(json!({ "hexes": engine.retiring_hexes().await })).into_response())
+}
+
+/// `POST /retire/{hex}`: start retiring a hex (by ID or name) before removing it (administrators; on the Overseer).
+pub async fn retire_hex(Path(hex): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    let view = engine.retire_hex(&hex, &principal.login).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!(view))).into_response())
+}
+
+/// `DELETE /retire/{hex}`: cancel a retirement (administrators; on the Overseer).
+pub async fn unretire_hex(Path(hex): Path<String>, State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    engine.unretire_hex(&hex, &principal.login).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 /// Text analyzers: the built-in ones and those defined in hexdb.toml.
 pub async fn list_analyzers(State(engine): Engine, Auth(_principal): Auth) -> ApiResult {
     let analyzers: Vec<Value> = hexdb_core::analysis::all(&engine.config.analyzers)

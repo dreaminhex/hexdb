@@ -276,8 +276,9 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         api_endpoint: advertised(config, &config.network.api_endpoint),
         ram_mb: config.memory.ram_mb,
         disk_mb: config.storage.disk_mb,
-        // An Overseer handing over its role stops being a candidate once its replicas caught up.
-        preference: if crate::updates::withdrawn() {
+        // An Overseer handing over its role stops being a candidate once its replicas caught up;
+        // a retiring hex, once it isn't the Overseer.
+        preference: if crate::updates::withdrawn() || (crate::retire::is_retiring(&engine.id.to_string()) && !engine.is_writable()) {
             "replicant".into()
         } else {
             parse_preference(&config.identity.role).unwrap_or_else(|_| "auto".into())
@@ -460,7 +461,7 @@ async fn answer_identity(engine: &HexDBEngine) -> PeerHex {
                     identity.replication_source = history.clone();
                 }
             }
-            if crate::updates::withdrawn() {
+            if crate::updates::withdrawn() || (crate::retire::is_retiring(&identity.id) && !engine.is_writable()) {
                 identity.preference = "replicant".into();
             }
             identity
@@ -853,10 +854,14 @@ pub fn spawn_discovery_task(engine: Arc<HexDBEngine>, interval: Duration, shutdo
                     warn!("⏱️ This hex's discovery round ran {:.1} s late (the hex is short of CPU); peers that miss it aren't counted as lost.", (last_round.elapsed() - interval).as_secs_f64());
                 }
                 last_round = std::time::Instant::now();
+                crate::retire::refresh(&engine).await;
                 discovery_round(&engine, interval, on_time).await;
                 // Its own task: a handover waits for the replicas, and discovery must keep running meanwhile.
                 let handing = engine.clone();
-                tokio::spawn(async move { crate::updates::hand_over_to_preferred(&handing).await });
+                tokio::spawn(async move {
+                    crate::updates::hand_over_to_preferred(&handing).await;
+                    crate::retire::hand_over_if_retiring(&handing).await;
+                });
             }
         }
     });

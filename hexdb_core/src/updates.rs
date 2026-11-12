@@ -215,6 +215,23 @@ static HAND_BACK_FAILED: Mutex<Option<Instant>> = Mutex::new(None);
 static HANDING_BACK: AtomicBool = AtomicBool::new(false);
 const HAND_BACK_RETRY: Duration = Duration::from_secs(5 * 60);
 
+/// Hand the Overseer role over now (`step_down`), and carry on as a replica.
+/// Audited as `lattice.handover` with `reason`. One handover at a time.
+pub(crate) async fn hand_over(engine: &HexDBEngine, to: &str, reason: &str) -> anyhow::Result<()> {
+    if HANDING_BACK.swap(true, AtomicOrdering::Relaxed) {
+        anyhow::bail!("a handover is already running");
+    }
+    let result = step_down(engine).await;
+    STEPPING_DOWN.store(false, AtomicOrdering::Relaxed);
+    WITHDRAWN.store(false, AtomicOrdering::Relaxed);
+    HANDING_BACK.store(false, AtomicOrdering::Relaxed);
+    if result.is_ok() {
+        info!("🤝 Handed the Overseer role to '{}'.", to);
+        engine.audit("system", "lattice.handover", to, serde_json::json!({ "reason": reason })).await;
+    }
+    result
+}
+
 /// A sitting Overseer that doesn't prefer to lead hands the role to a hex that
 /// does (`identity.role = "overseer"`), once that hex has every change: the
 /// election never takes the role from a sitting Overseer (it would lose the

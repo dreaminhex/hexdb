@@ -2482,6 +2482,24 @@ On the Dashboard, "Add a hex" (administrators, password required) shows:
 
 The lattice name is `network.lattice_name`. When it's left empty on the first hex, HexDB generates a name (an adjective and a noun) and saves it in the catalog. Every other hex must use the same name.
 
+### Retiring a hex
+
+Before removing a hex for good (moving a lattice to other regions or machines, or making it smaller), retire it, so nothing it holds is lost and it isn't the Overseer when it goes:
+
+```bash
+curl -X POST http://localhost:7700/retire/hex-2 -H "Authorization: Bearer $HEXDB_API_KEY"     # by name or ID; 202
+curl http://localhost:7700/retire -H "Authorization: Bearer $HEXDB_API_KEY"
+# => { "hexes": [{ "id": "...", "name": "hex-2", "role": "Replicant", "status": "active", "removable": false,
+#                  "waiting_for": "12 of its slices aren't kept by enough other replicas yet" }] }
+```
+
+- **A retiring replica** leaves slice placement: the other replicas copy its slices from the Overseer, and only then does it give them up. Other replicas don't count it as a holder of theirs either. It stops being a candidate for Overseer.
+- **A retiring Overseer** hands its role over first. A successor is chosen the same way on every hex (a hex with `identity.role = "overseer"`, then the one holding the most slices, then the lowest ID); it copies every slice, and once it has every change the Overseer steps down to it as in a [rolling update](#restarts-and-upgrades) (writes pause for a moment). The handover is audited as `lattice.handover` with `"reason": "retiring"`.
+- **Removable** (in `GET /retire`, and `retiring` and `removable` per hex in `/status`'s lattice list) turns true once the hex isn't the Overseer and every slice it holds is kept by `replication.slice_copies` other replicas that aren't retiring (or all of them, if fewer). Then stop it and delete its data. A hex no longer heard from at all counts as removable.
+- **Refused:** retiring the last hex that could lead (add a hex first). Retiring needs an administrator, runs on the Overseer (any hex forwards it), and is audited as `lattice.retire`.
+- **Cancel** with `DELETE /retire/{hex}` (audited as `lattice.unretire`); the hex takes slices again and can be elected.
+- Add the new hexes before retiring the old ones, so the data always has somewhere to go. HexDB Enterprise does this when a plan changes region, size or hex count.
+
 ### Hex names
 
 Every hex has a name, shown in logs, in the dashboard and to other hexes. Set it with `identity.name` (or `HEXDB_IDENTITY__NAME`): 1 to 64 printable characters, spaces allowed. When it's left empty, the first start draws a name from a built-in list of cat and dog breeds (Great Pyrenees, Ocelot, Dachshund, Norwegian Forest Cat, ...) and saves it in the catalog with the hex's ID, so the hex keeps its name and ID across restarts. Setting `identity.name` later renames the hex and keeps its ID; clearing it again keeps the configured name, since it was saved. Two hexes in a lattice can't share a name: a configured name that a live hex already uses stops the start with an error, and a drawn name that collides is replaced by a free one.

@@ -185,6 +185,8 @@ pub fn app_router(
         .route("/tessellations/{name}/schemas/pending/apply", post(apply_pending_schema))
         .route("/updates", get(get_updates))
         .route("/updates/rollout", post(start_rollout))
+        .route("/retire", get(crate::handlers::list_retiring))
+        .route("/retire/{hex}", post(crate::handlers::retire_hex).delete(crate::handlers::unretire_hex))
         .route("/analyzers", get(list_analyzers))
         .route("/analyzers/_analyze", post(analyze))
 

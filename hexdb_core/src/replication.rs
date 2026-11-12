@@ -954,14 +954,25 @@ impl Follower {
             return ALL_SLICES;
         }
         let me = self.engine.id.to_string();
-        let mut replicas: Vec<String> = {
+        // A retiring hex keeps nothing: the others take its slices before it gives any up.
+        if crate::retire::is_retiring(&me) {
+            return 0;
+        }
+        let (mut replicas, members): (Vec<String>, Vec<(crate::network::discovery::PeerHex, String)>) = {
             let peers = self.engine.peers.lock().await;
-            peers
+            let replicas = peers
                 .iter()
                 .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.role != crate::network::discovery::ROLE_ORACLE && p.hex.id != me)
+                .filter(|p| !crate::retire::is_retiring(&p.hex.id))
                 .map(|p| p.hex.id.clone())
-                .collect()
+                .collect();
+            (replicas, peers.iter().map(|p| (p.hex.clone(), p.status.clone())).collect())
         };
+        // The successor of a retiring Overseer keeps every slice, to take over without collecting any.
+        let identity = self.engine.identity_cache.read().unwrap().clone();
+        if identity.is_some_and(|mine| crate::retire::is_successor(&mine, &overseer.hex, &members)) {
+            return ALL_SLICES;
+        }
         replicas.push(me.clone());
         if replicas.len() < 2 {
             return ALL_SLICES;
@@ -1034,7 +1045,8 @@ impl Follower {
                 let peers = engine.peers.lock().await;
                 peers
                     .iter()
-                    .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.id != me && p.hex.replication_source == source)
+                    // A retiring replica is about to go: its copies don't count.
+                    .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.id != me && p.hex.replication_source == source && !crate::retire::is_retiring(&p.hex.id))
                     .map(|p| p.hex.slices_held)
                     .collect()
             };

@@ -163,6 +163,11 @@ pub struct LatticeHex {
     pub version: String,
     /// Where it runs (`identity.region`, or Fly.io's region); empty when unknown.
     pub region: String,
+    /// Retiring (`crate::retire`): leaving the lattice once its data is kept elsewhere.
+    pub retiring: bool,
+    /// For a retiring hex: its machine and disk can go now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removable: Option<bool>,
 }
 
 /// Report structure for the current lattice state.
@@ -233,6 +238,8 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
         slices_held: crate::slicing::count(me.slices_held),
         version: me.version,
         region: me.region,
+        retiring: false,
+        removable: None,
     }];
     for member in engine.peers.lock().await.iter() {
         lattice_hexes.push(LatticeHex {
@@ -254,7 +261,13 @@ pub async fn collect(engine: &HexDBEngine) -> HexMeta {
             slices_held: crate::slicing::count(member.hex.slices_held),
             version: member.hex.version.clone(),
             region: member.hex.region.clone(),
+            retiring: false,
+            removable: None,
         });
+    }
+    let retiring = engine.retiring_hexes().await;
+    for hex in lattice_hexes.iter_mut() {
+        (hex.retiring, hex.removable) = crate::retire::status_of(&hex.id, &retiring);
     }
     // On the Overseer, replicas' positions are exact: each poll for changes
     // acknowledges everything before it.
