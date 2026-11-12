@@ -2499,7 +2499,7 @@ curl http://localhost:7700/retire -H "Authorization: Bearer $HEXDB_API_KEY"
 - **Refused:** retiring the last hex that could lead (add a hex first). Retiring needs an administrator, runs on the Overseer (any hex forwards it), and is audited as `lattice.retire`.
 - **Cancel** with `DELETE /retire/{hex}` (audited as `lattice.unretire`); the hex takes slices again and can be elected.
 - Add the new hexes before retiring the old ones, so the data always has somewhere to go. HexDB Enterprise does this when a plan changes region, size or hex count.
-- **Hosted lattices** (with `updates.control_url` and `updates.control_token`) also answer their control service, authorized by that token as a Bearer token: `GET /lattice/control/hexes` lists every hex with its machine, region, version, position (`applied_seq`, `lag`), slices, `retiring` and `removable`, and `POST /lattice/control/retire` takes `{"hex", "cancel"?}`. Any hex answers; a retirement reaching a replica is passed on to the Overseer. On other lattices these routes answer 404.
+- **Hosted lattices** (with `updates.control_url` and `updates.control_token`) also answer their control service, authorized by that token as a Bearer token: `GET /lattice/control/hexes` lists every hex with its machine, region, version, position (`applied_seq`, `lag`), slices, `retiring` and `removable` (and, under `answered_by`, the answering hex's own disk use), and `POST /lattice/control/retire` takes `{"hex", "cancel"?}`. Any hex answers; a retirement reaching a replica is passed on to the Overseer. On other lattices these routes answer 404.
 
 ### Hex names
 

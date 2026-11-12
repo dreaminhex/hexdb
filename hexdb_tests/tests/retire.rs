@@ -136,7 +136,7 @@ fn the_control_service_lists_and_retires_hexes_with_its_token() -> Result<()> {
     let control = [("Authorization", "Bearer control-token-1")];
     wait_until(Duration::from_secs(60), "three hexes in the control view", || {
         let view = a.request(Method::GET, "/lattice/control/hexes", None, &control)?.body;
-        Ok(view["hexes"].as_array().is_some_and(|h| h.len() == 3 && h.iter().all(|h| h["status"] == "active")))
+        Ok(view["answered_by"]["disk_used_bytes"].as_u64().is_some() && view["hexes"].as_array().is_some_and(|h| h.len() == 3 && h.iter().all(|h| h["status"] == "active")))
     })?;
     assert_eq!(a.request(Method::GET, "/lattice/control/hexes", None, &[])?.status, 401);
     assert_eq!(a.request(Method::GET, "/lattice/control/hexes", None, &[("Authorization", "Bearer wrong")])?.status, 401);

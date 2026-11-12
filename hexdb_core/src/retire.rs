@@ -150,7 +150,9 @@ impl HexDBEngine {
                 })
             })
             .collect();
-        json!({ "lattice": self.config.network.lattice_name, "hexes": list })
+        // The answering hex's own disk use (the Overseer's is the lattice's largest: it keeps everything).
+        let answered_by = json!({ "id": self.id.to_string(), "machine_id": crate::updates::machine_id(), "disk_used_bytes": self.disk_used_bytes() });
+        json!({ "lattice": self.config.network.lattice_name, "hexes": list, "answered_by": answered_by })
     }
 
     /// Every retiring hex, and whether it can be removed.
