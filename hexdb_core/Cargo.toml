@@ -55,6 +55,10 @@ tar = { version = "0.4.46", default-features = false }
 flate2 = "1.1.10"
 zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+# SVG thumbnails: no system fonts (the parser worker can't open files anyway), embedded raster images only.
+resvg = { version = "0.50.0", default-features = false, features = ["raster-images"] }
+# PDF first pages, for thumbnails and OCR: a pure-Rust rasterizer.
+hayro = "0.9.0"
 # Video thumbnails: Cisco's OpenH264, built from source into the binary (BSD-2). Only an H.264
 # keyframe is ever decoded. Optional so a build can leave H.264 out (--no-default-features).
 openh264 = { version = "0.9.8", optional = true }

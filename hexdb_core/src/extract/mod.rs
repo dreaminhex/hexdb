@@ -29,6 +29,7 @@ mod gpmf;
 mod icc;
 mod image;
 mod media;
+pub mod render;
 pub mod sandbox;
 pub mod thumbnail;
 pub mod video;
@@ -41,7 +42,8 @@ use std::time::{Duration, Instant};
 /// Bumped whenever extraction changes what it finds.
 /// 2: thumbnails from H.264 video keyframes.
 /// 3: PDF body text, ICC color profiles, GoPro GPMF telemetry.
-pub const VERSION: u64 = 3;
+/// 4: thumbnails of SVG, PDF first pages and RAW previews; OCR text.
+pub const VERSION: u64 = 4;
 
 /// Longest string kept in a value.
 const MAX_STRING: usize = 4096;

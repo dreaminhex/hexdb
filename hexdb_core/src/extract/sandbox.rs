@@ -272,7 +272,7 @@ fn in_process(inner: Box<dyn ByteSource>, name: &str, content_type: &str, limits
     let extracted = super::extract(&mut source, name, content_type, limits);
     let thumbnail = thumbnail_px.map(|px| {
         source.restart(limits);
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::thumbnail::make(&mut source, content_type, px)))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::thumbnail::make(&mut source, content_type, name, px)))
             .unwrap_or_else(|_| Err(anyhow!("the image decoder failed on this file")))
     });
     (extracted, thumbnail)

@@ -1428,7 +1428,7 @@ impl HexDBEngine {
         let store = self.blobs.clone();
         // A thumbnail the AI chose for this content is kept.
         let kept_thumbnail = Self::kept_ai_thumbnail(&map);
-        let thumbnail_px = (kept_thumbnail.is_none() && self.config.files.thumbnails && crate::extract::thumbnail::supported(&content_type))
+        let thumbnail_px = (kept_thumbnail.is_none() && self.config.files.thumbnails && crate::extract::thumbnail::supported(&content_type, &name))
             .then_some(self.config.files.thumbnail_px.clamp(32, 2048));
         let file_type = content_type.clone();
         // Parsed in the sandbox worker when it's on (see crate::extract::sandbox).

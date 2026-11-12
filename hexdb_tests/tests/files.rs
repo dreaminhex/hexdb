@@ -609,6 +609,65 @@ fn images_get_thumbnails() -> Result<()> {
     Ok(())
 }
 
+/// A one-page PDF filled with blue (MediaBox 300 x 150), with correct xref offsets.
+fn blue_pdf() -> Vec<u8> {
+    let content = "0 0 1 rg 0 0 300 150 re f";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 150] /Contents 4 0 R >>".to_string(),
+        format!("<< /Length {} >>
+stream
+{}
+endstream", content.len(), content),
+    ];
+    let mut pdf = b"%PDF-1.4
+".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{} 0 obj
+{}
+endobj
+", i + 1, body).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend(format!("xref
+0 {}
+0000000000 65535 f 
+", objects.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend(format!("{:010} 00000 n 
+", o).as_bytes());
+    }
+    pdf.extend(format!("trailer
+<< /Size {} /Root 1 0 R >>
+startxref
+{}
+%%EOF
+", objects.len() + 1, xref).as_bytes());
+    pdf
+}
+
+#[test]
+fn svgs_and_pdfs_get_thumbnails_in_the_sandbox() -> Result<()> {
+    let server = files_server()?;
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><rect width="400" height="200" fill="#00ff00"/><image href="/etc/hostname" width="5" height="5"/></svg>"##;
+    let svg_id = upload(&server, "drawings/green.svg", svg)?["id"].as_str().unwrap().to_string();
+    let pdf_id = upload(&server, "docs/blue.pdf", &blue_pdf())?["id"].as_str().unwrap().to_string();
+    for (id, color) in [(&svg_id, [0u8, 255, 0]), (&pdf_id, [0, 0, 255])] {
+        let doc = extracted(&server, id)?;
+        assert_eq!((doc["thumbnail"]["width"].as_u64(), doc["thumbnail"]["height"].as_u64()), (Some(320), Some(160)), "{}", doc);
+        let (status, _, bytes) = server.get_bytes(&format!("/media/{}/thumbnail", id), &[])?;
+        assert_eq!(status, StatusCode::OK);
+        let pixel = image::load_from_memory(&bytes)?.to_rgb8().get_pixel(160, 80).0;
+        assert!(pixel.iter().zip(color).all(|(a, b)| a.abs_diff(b) < 40), "{:?} should be about {:?}", pixel, color);
+    }
+    let sandbox = server.request(Method::GET, "/status", None, &[])?.body["storage"]["files"]["parser_sandbox"].clone();
+    assert_eq!(sandbox["failed"], 0, "{}", sandbox);
+    Ok(())
+}
+
 #[test]
 fn files_are_parsed_in_the_sandbox() -> Result<()> {
     let server = files_server()?;

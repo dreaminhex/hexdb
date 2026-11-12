@@ -1,8 +1,9 @@
 // Thumbnails for files tessellations: a small JPEG (or PNG when the image has
 // transparency) that fits in a square, made from images the `image` crate
 // decodes (JPEG, PNG, GIF, WebP, BMP, TIFF), from the preview Photoshop
-// embeds in PSD files, and from a keyframe of H.264 MP4 and QuickTime video
-// (see `video`). EXIF orientation and video rotation are applied. Decoding has
+// embeds in PSD files, from a keyframe of H.264 MP4 and QuickTime video
+// (see `video`), and (see `render`) from SVG drawings, a PDF's first page and
+// the preview a RAW camera file embeds. EXIF orientation and video rotation are applied. Decoding has
 // memory and size limits, and runs inside the same bounded `Source` as extraction.
 
 use super::Source;
@@ -21,13 +22,29 @@ pub struct Thumbnail {
 
 const DECODED: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/tiff", "image/x-ms-bmp"];
 
-/// Whether a thumbnail can be made for this type.
-pub fn supported(content_type: &str) -> bool {
-    DECODED.contains(&content_type) || content_type == "image/vnd.adobe.photoshop" || (cfg!(feature = "video-thumbnails") && super::video::TYPES.contains(&content_type))
+/// Whether a thumbnail can be made for this type (RAW files are known by their name).
+pub fn supported(content_type: &str, name: &str) -> bool {
+    DECODED.contains(&content_type)
+        || matches!(content_type, "image/vnd.adobe.photoshop" | "image/svg+xml" | "application/pdf")
+        || super::render::is_raw(name)
+        || (cfg!(feature = "video-thumbnails") && super::video::TYPES.contains(&content_type))
 }
 
 /// A thumbnail at most `max_px` on each side, or `None` for types without one.
-pub fn make(source: &mut Source, content_type: &str, max_px: u32) -> anyhow::Result<Option<Thumbnail>> {
+pub fn make(source: &mut Source, content_type: &str, name: &str, max_px: u32) -> anyhow::Result<Option<Thumbnail>> {
+    // RAW files are often typed image/tiff: their own preview is the picture, not the sensor data.
+    if super::render::is_raw(name) {
+        let Some(jpeg) = super::render::raw_preview(source)? else { return Ok(None) };
+        return decode(jpeg, max_px).map(Some);
+    }
+    match content_type {
+        "image/svg+xml" => return super::render::svg(source, max_px)?.map(|i| encode(DynamicImage::ImageRgba8(i), max_px)).transpose(),
+        "application/pdf" => {
+            let Some(pdf) = super::render::Pdf::open(source)? else { return Ok(None) };
+            return pdf.render(0, max_px).map(|i| encode(DynamicImage::ImageRgb8(i), max_px)).transpose();
+        }
+        _ => {}
+    }
     if super::video::TYPES.contains(&content_type) {
         return match super::video::keyframe(source)? {
             Some(frame) => encode(DynamicImage::ImageRgb8(frame), max_px).map(Some),
@@ -44,6 +61,11 @@ pub fn make(source: &mut Source, content_type: &str, max_px: u32) -> anyhow::Res
     } else {
         return Ok(None);
     };
+    decode(encoded, max_px).map(Some)
+}
+
+/// Decode an image (JPEG, PNG, ...) within limits, upright, and make its thumbnail.
+fn decode(encoded: Vec<u8>, max_px: u32) -> anyhow::Result<Thumbnail> {
     let mut reader = ImageReader::new(Cursor::new(encoded)).with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(512 * 1024 * 1024);
@@ -54,7 +76,7 @@ pub fn make(source: &mut Source, content_type: &str, max_px: u32) -> anyhow::Res
     let orientation = decoder.orientation()?;
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
-    encode(image, max_px).map(Some)
+    encode(image, max_px)
 }
 
 /// Candidate video thumbnails: `count` keyframes spread through the video
@@ -117,18 +139,18 @@ mod tests {
         image::RgbImage::from_fn(1200, 600, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]))
             .write_to(&mut Cursor::new(&mut photo), ImageFormat::Jpeg)
             .unwrap();
-        let thumb = make(&mut source(photo), "image/jpeg", 320).unwrap().unwrap();
+        let thumb = make(&mut source(photo), "image/jpeg", "a.jpg", 320).unwrap().unwrap();
         assert_eq!((thumb.width, thumb.height), (320, 160));
         assert_eq!(thumb.content_type, "image/jpeg");
         assert!(thumb.bytes.starts_with(&[0xFF, 0xD8]));
 
         let mut icon = Vec::new();
         image::RgbaImage::from_fn(64, 128, |_, _| image::Rgba([0, 0, 0, 0])).write_to(&mut Cursor::new(&mut icon), ImageFormat::Png).unwrap();
-        let thumb = make(&mut source(icon), "image/png", 320).unwrap().unwrap();
+        let thumb = make(&mut source(icon), "image/png", "a.png", 320).unwrap().unwrap();
         assert_eq!((thumb.width, thumb.height), (64, 128), "never enlarged");
         assert_eq!(thumb.content_type, "image/png");
 
-        assert!(make(&mut source(b"not an image".to_vec()), "image/png", 320).is_err());
-        assert!(make(&mut source(b"text".to_vec()), "text/plain", 320).unwrap().is_none());
+        assert!(make(&mut source(b"not an image".to_vec()), "image/png", "a.png", 320).is_err());
+        assert!(make(&mut source(b"text".to_vec()), "text/plain", "a.txt", 320).unwrap().is_none());
     }
 }
