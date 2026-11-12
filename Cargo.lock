@@ -2091,7 +2091,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hexdb_api"
-version = "2.4.7"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "async-graphql",
@@ -2125,7 +2125,7 @@ dependencies = [
 
 [[package]]
 name = "hexdb_bench"
-version = "2.4.7"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2138,7 +2138,7 @@ dependencies = [
 
 [[package]]
 name = "hexdb_cli"
-version = "2.4.7"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "hexdb_core"
-version = "2.4.7"
+version = "2.5.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "hexdb_odbc"
-version = "2.4.7"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "hexdb_tests",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "hexdb_query"
-version = "2.4.7"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "async-graphql",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "hexdb_tests"
-version = "2.4.7"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
