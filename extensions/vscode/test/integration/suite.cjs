@@ -54,7 +54,7 @@ check("the tree shows the lattice, tessellations and functions", async () => {
   const children = await api.tree.getChildren(root)
   const kinds = children.map((c) => c.kind)
   // Administrators of HexDB 2.4+ also see the quarantine.
-  assert.deepEqual(kinds.filter((k) => k !== "message" && k !== "quarantine"), ["lattice", "tessellations", "functions"])
+  assert.deepEqual(kinds.filter((k) => k !== "message" && k !== "quarantine"), ["lattice", "tessellations", "functions", "deletes"])
   const hexes = await api.tree.getChildren(children[0])
   assert.ok(hexes.length >= 1)
   assert.ok(hexes.every((h) => h.kind === "hex"))
@@ -165,6 +165,40 @@ check("administrators see quarantined files, with a badge, and release or delete
   // With nothing left, the Quarantine node goes away.
   const after = await api.tree.getChildren(root)
   assert.equal(after.find((c) => c.kind === "quarantine"), undefined, "an empty Quarantine node is still shown")
+})
+
+check("the delete history lists deletes, restores one and purges another", async () => {
+  if (process.env.HEXDB_TEST_SEED !== "1") return console.log("  (skipped: only on a throwaway server)")
+  const session = await api.connections.session(connection.id)
+  await session.request("POST", "/tessellations", { name: "scratch" })
+  for (let i = 0; i < 4; i++) await session.request("POST", "/scratch", { n: i })
+  const count = async () => (await session.request("GET", "/scratch/count")).count
+  await session.request("POST", "/scratch/_delete", { filter: { n: { $lt: 2 } } })
+  assert.equal(await count(), 2)
+
+  const [root] = await api.tree.getChildren()
+  const deletes = (await api.tree.getChildren(root)).find((c) => c.kind === "deletes")
+  assert.ok(deletes, "no Deletes node")
+  const items = await api.tree.getChildren(deletes)
+  const first = items.find((i) => i.kind === "delete" && i.batch.tessellation === "scratch")
+  assert.ok(first, JSON.stringify(items.map((i) => i.kind)))
+  assert.equal(api.tree.getTreeItem(first).label, "2 documents from scratch")
+  assert.equal(api.tree.getTreeItem(first).contextValue, "delete-restorable")
+
+  const original = vscode.window.showWarningMessage
+  vscode.window.showWarningMessage = async (_text, _options, choice) => choice
+  try {
+    assert.equal(await api.deletes.restore(api.connections, connection, first.batch), true)
+    assert.equal(await count(), 4)
+    await session.request("POST", "/scratch/_delete", { filter: { n: { $gte: 3 } } })
+    const second = (await api.deletes.list(api.connections, connection)).find((b) => b.tessellation === "scratch" && !b.restored_at)
+    assert.equal(await api.deletes.purge(api.connections, connection, second), true)
+  } finally {
+    vscode.window.showWarningMessage = original
+  }
+  const after = await api.tree.getChildren(deletes)
+  const states = after.filter((i) => i.kind === "delete" && i.batch.tessellation === "scratch").map((i) => api.tree.getTreeItem(i).description)
+  assert.ok(states.some((d) => /restored/.test(d)) && states.some((d) => /purged/.test(d)), JSON.stringify(states))
 })
 
 check("administrators edit, save, run and delete a script function", async () => {

@@ -25,6 +25,8 @@ An `http://` or `https://` address works too. The same URI works with every HexD
 - **Functions.** Run any function, giving its parameters. Administrators can create functions (Python, TypeScript or JavaScript scripts, or query, aggregate and transaction functions), edit a script's code or any function's JSON definition, save with Ctrl+S, and delete them.
 - **Quarantine.** When the malware scan (ClamAV and YARA) flags an upload, administrators of HexDB 2.4 or later see a Quarantine node under that connection: what matched, the engines that scanned it, who uploaded it and when. It's hidden while nothing is quarantined. Click a file for its full record. **Release** stores a false positive as a normal file in its tessellation; **Delete** removes it for good; **Rescan Stored Files** (on the node, or from the Command Palette) scans everything again. The HexDB icon in the activity bar shows how many files are waiting, and a notification says when a new one is quarantined. Signed-in connections are checked every minute; nothing signs in on its own.
 
+- **Deletes.** Under each connection, the delete history (HexDB 2.4.2 or later): what each delete took, cascade included, who deleted it and when. **Restore** puts it all back in one step; **Purge for Good** empties what it left in the trash. Both ask first.
+
 What you see and can change follows your HexDB permissions: tessellations you can't read aren't listed, documents you can't write open read-only, only administrators can change functions, and only administrators see the quarantine.
 
 ## Settings

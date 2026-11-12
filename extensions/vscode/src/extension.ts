@@ -9,6 +9,7 @@ import { HexDBFileSystem, scheme } from "./fs"
 import { Functions } from "./functions"
 import { LatticePanels } from "./lattice"
 import { toConnectionUri, withoutCredentials } from "./lib"
+import { listDeletes, purgeDelete, restoreDelete, showDelete } from "./deletes"
 import { Quarantine } from "./quarantine"
 import { Queries } from "./queries"
 import { ResultsPanel } from "./results"
@@ -16,7 +17,14 @@ import { ConnectionsTree, type Node } from "./tree"
 
 const playgroundInfo = "https://hexdb.app/api/playground"
 
-export function activate(context: vscode.ExtensionContext): { connections: Connections; queries: Queries; results: ResultsPanel; tree: ConnectionsTree; quarantine: Quarantine } {
+export function activate(context: vscode.ExtensionContext): {
+  connections: Connections
+  queries: Queries
+  results: ResultsPanel
+  tree: ConnectionsTree
+  quarantine: Quarantine
+  deletes: { list: typeof listDeletes; restore: typeof restoreDelete; purge: typeof purgeDelete }
+} {
   const connections = new Connections(context)
   const quarantine = new Quarantine(connections)
   const tree = new ConnectionsTree(connections, quarantine)
@@ -145,6 +153,18 @@ export function activate(context: vscode.ExtensionContext): { connections: Conne
       const connection = await target(node)
       if (connection) await quarantine.rescan(connection)
     }),
+    command("hexdb.restoreDelete", async (node?: Node) => {
+      if (node?.kind === "delete" && (await restoreDelete(connections, node.connection, node.batch))) tree.refresh({ kind: "deletes", connection: node.connection })
+    }),
+    command("hexdb.purgeDelete", async (node?: Node) => {
+      if (node?.kind === "delete" && (await purgeDelete(connections, node.connection, node.batch))) tree.refresh({ kind: "deletes", connection: node.connection })
+    }),
+    command("hexdb.showDelete", async (node?: Node) => {
+      if (node?.kind === "delete") await showDelete(connections, node.connection, node.batch)
+    }),
+    command("hexdb.refreshDeletes", (node?: Node) => {
+      if (node?.kind === "deletes") tree.refresh(node)
+    }),
     command("hexdb.showQuarantined", async (node?: Node) => {
       if (node?.kind !== "quarantined") return
       const doc = await vscode.workspace.openTextDocument({ language: "json", content: JSON.stringify(node.file, null, 2) })
@@ -153,7 +173,7 @@ export function activate(context: vscode.ExtensionContext): { connections: Conne
   )
 
   // Internals for the integration tests (test/integration); not a public API.
-  return { connections, queries, results, tree, quarantine }
+  return { connections, queries, results, tree, quarantine, deletes: { list: listDeletes, restore: restoreDelete, purge: purgeDelete } }
 }
 
 export function deactivate(): void {

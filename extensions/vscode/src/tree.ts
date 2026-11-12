@@ -4,6 +4,8 @@
 import * as vscode from "vscode"
 
 import { errorMessage, type Connections, type SavedConnection, type Session } from "./connections"
+import { listDeletes } from "./deletes"
+import { ago, deleteState, describeDelete, type DeleteBatch } from "./lib"
 import { describeDetections, type Quarantine, type QuarantinedFile } from "./quarantine"
 import { describeRegion } from "./regions"
 import { formatLag } from "./shared/format"
@@ -61,6 +63,8 @@ export type Node =
   | { kind: "function"; connection: SavedConnection; fn: FunctionInfo; admin: boolean }
   | { kind: "quarantine"; connection: SavedConnection; files: QuarantinedFile[] }
   | { kind: "quarantined"; connection: SavedConnection; file: QuarantinedFile }
+  | { kind: "deletes"; connection: SavedConnection }
+  | { kind: "delete"; connection: SavedConnection; batch: DeleteBatch }
   | { kind: "message"; label: string; error?: boolean }
 
 const roleIcon: Record<string, string> = { Overseer: "star-full", Harvester: "circle-filled", Replicant: "circle-outline" }
@@ -219,6 +223,38 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
         item.command = { command: "hexdb.showQuarantined", title: "Show Details", arguments: [node] }
         return item
       }
+      case "deletes": {
+        const item = new vscode.TreeItem("Deletes", C.Collapsed)
+        item.id = `${node.connection.id}/deletes`
+        item.tooltip = "The delete history: what each delete took, cascade included. Restore one from the trash, or purge it for good."
+        item.iconPath = new vscode.ThemeIcon("history")
+        item.contextValue = "deletes"
+        return item
+      }
+      case "delete": {
+        const b = node.batch
+        const state = deleteState(b)
+        const item = new vscode.TreeItem(describeDelete(b), C.None)
+        item.id = `${node.connection.id}/d/${b.batch}`
+        item.description = [b.by, ago(b.time), b.kind === "delete" ? "" : b.kind, state === "restorable" ? "" : state].filter(Boolean).join(" · ")
+        item.tooltip = new vscode.MarkdownString(
+          [
+            `**${md(describeDelete(b))}**`,
+            `Deleted by ${md(b.by)} at ${md(new Date(b.time).toLocaleString())} (${md(b.kind)})`,
+            Object.keys(b.counts).length > 1 ? `Per tessellation: ${md(Object.entries(b.counts).map(([t, n]) => `${t} ${n}`).join(", "))}` : "",
+            b.detached.length ? `Links detached: ${md(b.detached.length)}` : "",
+            b.restored_at ? `Restored by ${md(b.restored_by ?? "")} at ${md(new Date(b.restored_at).toLocaleString())}` : "",
+            b.purged_at ? `Purged by ${md(b.purged_by ?? "")} at ${md(new Date(b.purged_at).toLocaleString())}` : "",
+            b.trashed ? "" : "The trash was off (storage.trash_days = 0), so this can't be restored.",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        )
+        item.iconPath = new vscode.ThemeIcon(state === "restorable" ? "trash" : state === "restored" ? "history" : "circle-slash")
+        item.contextValue = state === "restorable" ? "delete-restorable" : "delete-done"
+        item.command = { command: "hexdb.showDelete", title: "Show Details", arguments: [node] }
+        return item
+      }
       case "message": {
         const item = new vscode.TreeItem(node.label, C.None)
         item.iconPath = new vscode.ThemeIcon(node.error ? "error" : "info", node.error ? new vscode.ThemeColor("errorForeground") : undefined)
@@ -264,6 +300,12 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
           if (functions.length === 0) return [{ kind: "message", label: node.admin ? "No functions yet: use + to add one" : "No functions" }]
           return functions.sort((a, b) => a.name.localeCompare(b.name)).map((fn) => ({ kind: "function", connection: node.connection, fn, admin: node.admin }))
         }
+        case "deletes": {
+          const batches = await listDeletes(this.connections, node.connection)
+          if (!batches) return [{ kind: "message", label: "This lattice has no delete history (HexDB 2.4.2 or later)" }]
+          if (batches.length === 0) return [{ kind: "message", label: "Nothing deleted yet" }]
+          return batches.map((batch) => ({ kind: "delete", connection: node.connection, batch }))
+        }
         case "quarantine":
           if (node.files.length === 0) return [{ kind: "message", label: "Nothing is quarantined" }]
           return node.files
@@ -297,7 +339,7 @@ export class ConnectionsTree implements vscode.TreeDataProvider<Node> {
     } catch {
       nodes.push({ kind: "message", label: "Lattice hidden: needs the status permission" })
     }
-    nodes.push({ kind: "tessellations", connection }, { kind: "functions", connection, admin: session.isAdmin })
+    nodes.push({ kind: "tessellations", connection }, { kind: "functions", connection, admin: session.isAdmin }, { kind: "deletes", connection })
     // Administrators only (and HexDB 2.4+), and only while something is quarantined: an empty quarantine
     // is just clutter. The tree redraws when the quarantine changes, so it appears when a file lands.
     if (session.isAdmin) {

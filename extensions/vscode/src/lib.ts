@@ -227,3 +227,51 @@ export function graphqlTessellation(query: string): string | undefined {
   const names = new Set([...query.matchAll(/\btessellation\s*:\s*"([A-Za-z0-9_-]+)"/g)].map((m) => m[1]))
   return names.size === 1 ? [...names][0] : undefined
 }
+
+/** One delete in a lattice's history (GET /deletes, HexDB 2.4.2+). */
+export interface DeleteBatch {
+  batch: string
+  time: number
+  at: string
+  by: string
+  /** delete, filter, transaction or folder. */
+  kind: string
+  tessellation: string
+  filter?: unknown
+  counts: Record<string, number>
+  documents: number
+  files: { tessellation: string; id: string }[]
+  detached: { tessellation: string; id: string; field: string; value: unknown }[]
+  /** False when the trash was off: nothing to restore. */
+  trashed: boolean
+  restored_at?: string
+  restored_by?: string
+  purged_at?: string
+  purged_by?: string
+}
+
+/** Where a delete stands: it can be restored, or it was restored, purged, or never kept. */
+export function deleteState(batch: DeleteBatch): "restorable" | "restored" | "purged" | "not kept" {
+  if (batch.restored_at) return "restored"
+  if (batch.purged_at) return "purged"
+  if (!batch.trashed) return "not kept"
+  return "restorable"
+}
+
+/** "3 documents and 1 file from orders": what a delete took, cascade included. */
+export function describeDelete(batch: DeleteBatch): string {
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
+  const parts = [batch.documents ? plural(batch.documents, "document") : "", batch.files.length ? plural(batch.files.length, "file") : ""].filter(Boolean)
+  const what = parts.length ? parts.join(" and ") : "nothing"
+  const others = Object.keys(batch.counts).filter((t) => t !== batch.tessellation)
+  return `${what} from ${batch.tessellation}${others.length ? ` (and ${others.join(", ")})` : ""}`
+}
+
+/** How long ago, briefly: "just now", "5m ago", "3h ago", "2d ago". */
+export function ago(time: number, now = Date.now()): string {
+  const s = Math.max(0, Math.floor((now - time) / 1000))
+  if (s < 60) return "just now"
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 
-import { can, duration, graphqlTessellation, parseParam, singleTable, sqlIdent, statementAt, tabulate, toConnectionUri, toCsv, withoutCredentials } from "../out/lib.mjs"
+import { ago, can, deleteState, describeDelete, duration, graphqlTessellation, parseParam, singleTable, sqlIdent, statementAt, tabulate, toConnectionUri, toCsv, withoutCredentials } from "../out/lib.mjs"
 import { formatLag, formatLagMs } from "../out/format.mjs"
 import { describeRegion, place } from "../out/regions.mjs"
 
@@ -101,4 +101,19 @@ test("regions and durations", () => {
   assert.equal(describeRegion(""), "No region")
   assert.equal(duration(64523), "17h 55m")
   assert.equal(duration(5), "5s")
+})
+
+test("deletes are described by what they took and where they stand", () => {
+  const batch = { batch: "b1", time: 0, at: "", by: "ada", kind: "filter", tessellation: "orders", counts: { orders: 3, order_items: 7 }, documents: 10, files: [], detached: [], trashed: true }
+  assert.equal(describeDelete(batch), "10 documents from orders (and order_items)")
+  assert.equal(describeDelete({ ...batch, documents: 1, files: [{ tessellation: "media", id: "f" }], counts: { orders: 1 } }), "1 document and 1 file from orders")
+  assert.equal(describeDelete({ ...batch, documents: 0, counts: {} }), "nothing from orders")
+  assert.equal(deleteState(batch), "restorable")
+  assert.equal(deleteState({ ...batch, restored_at: "2026-11-12T00:00:00Z" }), "restored")
+  assert.equal(deleteState({ ...batch, purged_at: "2026-11-12T00:00:00Z" }), "purged")
+  assert.equal(deleteState({ ...batch, trashed: false }), "not kept")
+  assert.equal(ago(1_000, 30_000), "just now")
+  assert.equal(ago(0, 5 * 60_000), "5m ago")
+  assert.equal(ago(0, 3 * 3_600_000), "3h ago")
+  assert.equal(ago(0, 2 * 86_400_000), "2d ago")
 })

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0
+
+- **Deletes.** Each connection has a Deletes node: the delete history of HexDB 2.4.2 or later, newest first. Each delete says what it took (cascade included), who deleted it and when, and whether it was restored or purged. **Restore** puts everything back in one step (and, if some documents exist again, offers to restore the rest); **Purge for Good** empties what it left in the trash. Click a delete for its full record. You see your own deletes and those of tessellations you can read, as in the admin UI.
+
 ## 0.2.2
 
 - **Quarantine shows only when there's something in it.** An empty quarantine no longer adds a node under each connection. **HexDB: Rescan Stored Files** is still in the Command Palette.
