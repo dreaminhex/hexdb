@@ -94,16 +94,17 @@ fn is_share_route(method: &Method, path: &str) -> bool {
     }
 }
 
-/// The hex-to-hex routes, which check their own lattice signatures. Listed
+/// The hex-to-hex routes, which check their own lattice signatures (and the
+/// hosting control service's, which check its token). Listed
 /// exactly, so no other handler is ever reached without credentials.
 fn is_lattice_route(method: &Method, path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/lattice/") else { return false };
     let one_segment = |prefix: &str| rest.strip_prefix(prefix).is_some_and(|s| !s.is_empty() && !s.contains('/'));
     match *method {
         Method::GET => {
-            matches!(rest, "snapshot" | "catalog" | "changes") || one_segment("snapshot/") || one_segment("slice-snapshot/") || one_segment("chunks/")
+            matches!(rest, "snapshot" | "catalog" | "changes" | "control/hexes") || one_segment("snapshot/") || one_segment("slice-snapshot/") || one_segment("chunks/")
         }
-        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "content" | "ai-tool" | "security-review" | "throttle" | "share-download" | "elect" | "rehash-key"),
+        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "content" | "ai-tool" | "security-review" | "throttle" | "share-download" | "elect" | "rehash-key" | "retire" | "control/retire"),
         _ => false,
     }
 }
@@ -639,6 +640,9 @@ mod tests {
             (Method::POST, "/lattice/ai-usage"),
             (Method::POST, "/lattice/content"),
             (Method::POST, "/lattice/ai-tool"),
+            (Method::POST, "/lattice/retire"),
+            (Method::GET, "/lattice/control/hexes"),
+            (Method::POST, "/lattice/control/retire"),
             (Method::POST, "/auth/login"),
             (Method::GET, "/health"),
             (Method::GET, "/ready"),
@@ -650,6 +654,8 @@ mod tests {
         }
         for (method, path) in [
             (Method::GET, "/lattice/count"),
+            (Method::GET, "/lattice/control/other"),
+            (Method::POST, "/lattice/control/hexes"),
             (Method::GET, "/lattice/_files/a.jpg"),
             (Method::GET, "/lattice/snapshot/orders/extra"),
             (Method::DELETE, "/lattice/chunks/ab12"),

@@ -129,6 +129,30 @@ pub fn blocker(hex: &PeerHex, hexes: &[(PeerHex, String)], retiring: &BTreeSet<S
 }
 
 impl HexDBEngine {
+    /// Every hex for a hosting control service: where it runs, what it runs,
+    /// how far along it is, and whether it's retiring and removable.
+    pub async fn control_view(&self) -> serde_json::Value {
+        let hexes = members(self).await;
+        let retiring = self.retiring_hexes().await;
+        let head = hexes.iter().find(|(h, s)| s == "active" && h.role == ROLE_OVERSEER).map(|(h, _)| h.applied_seq);
+        let list: Vec<serde_json::Value> = hexes
+            .iter()
+            .map(|(h, status)| {
+                // On the Overseer, a replica's position is exact (its polls acknowledge it).
+                let applied = if self.is_writable() && h.id != self.id.to_string() { self.replica_applied(&h.id).unwrap_or(h.applied_seq) } else { h.applied_seq };
+                let (is_retiring, removable) = status_of(&h.id, &retiring);
+                json!({
+                    "id": h.id, "name": h.name, "machine_id": h.machine_id, "region": h.region, "role": h.role, "status": status,
+                    "version": h.version, "preference": h.preference, "applied_seq": applied,
+                    "lag": head.map(|head| head.saturating_sub(applied)),
+                    "slicing": h.slicing, "slices_held": slicing::count(if h.slicing { h.slices_held } else { ALL_SLICES }),
+                    "retiring": is_retiring, "removable": removable,
+                })
+            })
+            .collect();
+        json!({ "lattice": self.config.network.lattice_name, "hexes": list })
+    }
+
     /// Every retiring hex, and whether it can be removed.
     pub async fn retiring_hexes(&self) -> Vec<RetiringHex> {
         let retiring = RETIRING.read().unwrap().clone();

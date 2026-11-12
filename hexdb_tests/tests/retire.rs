@@ -121,3 +121,44 @@ fn retiring_hexes_hand_their_data_and_role_over_first() -> Result<()> {
     wait_until(Duration::from_secs(90), "the last replica to keep everything", || Ok(kept(follower)? == (64, 301)))?;
     Ok(())
 }
+
+#[test]
+fn the_control_service_lists_and_retires_hexes_with_its_token() -> Result<()> {
+    let ports: Vec<u16> = (0..3).map(|_| TestServer::free_port()).collect::<Result<_>>()?;
+    let hosted = |i: usize, ram: u64| {
+        let mut options = hex(&ports, i, ram);
+        options.extra_toml.push_str("\n[updates]\ncheck = false\ncontrol_url = \"http://127.0.0.1:9/api/lattice\"\ncontrol_token = \"control-token-1\"\n");
+        options
+    };
+    let overseer = TestServer::start_with(hosted(0, 4096))?;
+    let a = TestServer::start_with(hosted(1, 1024))?;
+    let b = TestServer::start_with(hosted(2, 1024))?;
+    let control = [("Authorization", "Bearer control-token-1")];
+    wait_until(Duration::from_secs(60), "three hexes in the control view", || {
+        let view = a.request(Method::GET, "/lattice/control/hexes", None, &control)?.body;
+        Ok(view["hexes"].as_array().is_some_and(|h| h.len() == 3 && h.iter().all(|h| h["status"] == "active")))
+    })?;
+    assert_eq!(a.request(Method::GET, "/lattice/control/hexes", None, &[])?.status, 401);
+    assert_eq!(a.request(Method::GET, "/lattice/control/hexes", None, &[("Authorization", "Bearer wrong")])?.status, 401);
+
+    // Sent to a replica, it reaches the Overseer.
+    let b_name = status(&b)?["network"]["lattice"]["hexes"].as_array().unwrap().iter().find(|h| h["is_self"] == true).unwrap()["name"].as_str().unwrap().to_string();
+    let res = a.request(Method::POST, "/lattice/control/retire", Some(&json!({ "hex": b_name })), &control)?;
+    assert_eq!(res.status, 202, "{}", res.body);
+    wait_until(Duration::from_secs(90), "the retired hex to be removable", || {
+        let view = overseer.request(Method::GET, "/lattice/control/hexes", None, &control)?.body;
+        Ok(view["hexes"].as_array().unwrap().iter().any(|h| h["name"] == b_name.as_str() && h["retiring"] == true && h["removable"] == true))
+    })?;
+    let res = a.request(Method::POST, "/lattice/control/retire", Some(&json!({ "hex": b_name, "cancel": true })), &control)?;
+    assert!(res.status.is_success(), "{}", res.body);
+    wait_until(Duration::from_secs(30), "the cancellation to reach every hex", || {
+        let view = a.request(Method::GET, "/lattice/control/hexes", None, &control)?.body;
+        Ok(view["hexes"].as_array().unwrap().iter().all(|h| h["retiring"] == false))
+    })?;
+
+    // A lattice that isn't hosted has no control routes.
+    let plain = TestServer::start()?;
+    assert_eq!(plain.request(Method::GET, "/lattice/control/hexes", None, &control)?.status, 404);
+    drop((overseer, b));
+    Ok(())
+}

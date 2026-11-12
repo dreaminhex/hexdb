@@ -413,3 +413,76 @@ pub async fn forward_revocation(engine: &HexDBEngine, session_id: &str, expires_
         )
     })
 }
+
+// ---------------------------------------------------------------------------
+// The hosting control service (HexDB Enterprise)
+// ---------------------------------------------------------------------------
+//
+//   GET  /lattice/control/hexes    every hex: machine, region, version, position, retiring, removable
+//   POST /lattice/control/retire   {"hex": "<machine ID, name or ID>", "cancel"?: bool}
+//
+// For a hosted lattice's control service, which adds and removes its machines
+// when the plan changes. Authorized by `updates.control_token` (the token the
+// lattice itself presents to `updates.control_url`) as a Bearer token; off on
+// lattices that aren't hosted. Any hex answers; a retirement reaching a
+// replica goes on to the Overseer as a signed lattice request.
+
+/// The control token, checked in constant time.
+fn control_authorized(engine: &HexDBEngine, headers: &HeaderMap) -> Result<(), ApiError> {
+    let config = &engine.config.updates;
+    if !config.hosted() {
+        return Err(ApiError::not_found("This lattice isn't hosted."));
+    }
+    let given = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or_default();
+    let expected = config.control_token.trim();
+    let same = given.len() == expected.len() && given.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+    if !same {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "Needs the lattice's control token."));
+    }
+    Ok(())
+}
+
+/// `GET /lattice/control/hexes`.
+pub async fn control_hexes(headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
+    control_authorized(&engine, &headers)?;
+    Ok(Json(engine.control_view().await).into_response())
+}
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlRetire {
+    hex: String,
+    #[serde(default)]
+    cancel: bool,
+}
+
+async fn apply_retire(engine: &HexDBEngine, request: &ControlRetire) -> ApiResult {
+    if request.cancel {
+        engine.unretire_hex(&request.hex, "control").await?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    let view = engine.retire_hex(&request.hex, "control").await?;
+    Ok((StatusCode::ACCEPTED, Json(serde_json::json!(view))).into_response())
+}
+
+/// `POST /lattice/control/retire`: here on the Overseer, or passed on to it.
+pub async fn control_retire(headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    control_authorized(&engine, &headers)?;
+    let request: ControlRetire = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    if engine.is_writable() {
+        return apply_retire(&engine, &request).await;
+    }
+    let value = serde_json::to_value(&request).map_err(|e| ApiError::invalid(e.to_string()))?;
+    tokio::time::timeout(Duration::from_secs(15), hexdb_core::replication::post_to_overseer(&engine, "/lattice/retire", &value))
+        .await
+        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "overseer_unreachable", "The Overseer didn't answer in time."))?
+        .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "overseer_unreachable", format!("{:#}", e)))?;
+    Ok(StatusCode::ACCEPTED.into_response())
+}
+
+/// `POST /lattice/retire`: a retirement a replica passed on (signed; on the Overseer).
+pub async fn retire(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let request: ControlRetire = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    apply_retire(&engine, &request).await
+}
