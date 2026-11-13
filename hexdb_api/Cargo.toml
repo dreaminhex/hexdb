@@ -1,6 +1,6 @@
 [package]
 name = "hexdb_api"
-version = "2.5.0"
+version = "2.5.1"
 license = "Apache-2.0"
 edition = "2021"
 homepage = "https://hexdb.app"
