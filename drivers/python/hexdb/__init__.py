@@ -29,7 +29,7 @@ from typing import Any, BinaryIO, Callable, Dict, Iterator, List, Optional, Sequ
 from .connection_uri import ConnectionUri, is_connection_uri, parse_connection_uri
 
 __all__ = ["HexDB", "HexDBError", "Tessellation", "Stream", "Files", "ConnectionUri", "parse_connection_uri"]
-__version__ = "2.5.2"
+__version__ = "2.5.3"
 
 Json = Any
 Document = Dict[str, Any]
