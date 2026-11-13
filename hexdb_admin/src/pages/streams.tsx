@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
-import { IconArrowRight, IconLoader2, IconPencil, IconPlus, IconSend, IconTrash } from "@tabler/icons-react"
+import { IconArrowRight, IconLoader2, IconPencil, IconPlayerPause, IconPlayerPlay, IconPlus, IconSend, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
+import { CodeSnippets } from "@/components/code-snippets"
 import { ConfirmDialog } from "@/components/confirm-dialog"
 import { JsonEditor, parseJson } from "@/components/json-editor"
 import { Badge } from "@/components/ui/badge"
@@ -15,6 +16,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { usePoll } from "@/hooks/use-poll"
 import { api, errorMessage, type StreamConfig, type StreamMessage } from "@/lib/api"
 import { can, useAuth } from "@/lib/auth"
+import { streamSnippets } from "@/lib/examples"
 import { formatNumber } from "@/lib/format"
 
 const EXAMPLE_SOURCES = `[
@@ -126,6 +128,9 @@ function StreamPanel({ name, onClose }: { name: string | null; onClose: () => vo
   const [next, setNext] = useState<string | null>(null)
   const [payload, setPayload] = useState('{ "hello": "world" }')
   const [busy, setBusy] = useState(false)
+  // Subscribed: new messages arrive over Server-Sent Events, as they would in your own code.
+  const [live, setLive] = useState(true)
+  const [fresh, setFresh] = useState<Set<string>>(new Set())
 
   const load = async (after?: string) => {
     if (!name) return
@@ -141,13 +146,30 @@ function StreamPanel({ name, onClose }: { name: string | null; onClose: () => vo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
 
+  useEffect(() => {
+    if (!name || !live) return
+    // From now on: the subscription starts after the newest message.
+    const events = new EventSource(`/streams/${encodeURIComponent(name)}/subscribe`, { withCredentials: true })
+    events.onmessage = (e) => {
+      try {
+        const m = JSON.parse(e.data) as StreamMessage
+        setMessages((list) => (list.some((x) => x.offset === m.offset) ? list : [m, ...list]))
+        setFresh((f) => new Set(f).add(m.offset))
+      } catch {
+        // Not a message; ignore it.
+      }
+    }
+    events.addEventListener("unauthorized", () => events.close())
+    return () => events.close()
+  }, [name, live])
+
   const publish = async () => {
     if (!name) return
     setBusy(true)
     try {
       await api.publish(name, [{ payload: parseJson(payload, "The payload") }])
-      toast.success("Published.")
-      await load()
+      toast.success(live ? "Published: watch it arrive below." : "Published.")
+      if (!live) await load()
     } catch (e) {
       toast.error(errorMessage(e))
     } finally {
@@ -164,7 +186,7 @@ function StreamPanel({ name, onClose }: { name: string | null; onClose: () => vo
           <SheetDescription>{d?.stream.description || "Messages in publish order."}</SheetDescription>
         </SheetHeader>
         {d && (
-          <div className="grid gap-5 px-4 pb-6">
+          <div className="grid min-w-0 gap-5 px-4 pb-6">
             <div className="grid gap-2 text-sm">
               <div className="font-medium">Delivery</div>
               {d.stream.sources.map((s, i) => (
@@ -194,6 +216,13 @@ function StreamPanel({ name, onClose }: { name: string | null; onClose: () => vo
                   </div>
                 ))}
             </div>
+            <div className="grid min-w-0 gap-2">
+              <div className="text-sm font-medium">Subscribe from your code</div>
+              <p className="text-muted-foreground text-xs">
+                Every subscriber gets every message, in order. Watch live (below) uses the first of these, right here in your browser.
+              </p>
+              <CodeSnippets snippets={streamSnippets(name ?? "")} />
+            </div>
             <div className="grid gap-2">
               <div className="text-sm font-medium">Publish a message</div>
               <JsonEditor value={payload} onChange={setPayload} label="Message payload" className="h-24" />
@@ -202,11 +231,30 @@ function StreamPanel({ name, onClose }: { name: string | null; onClose: () => vo
               </Button>
             </div>
             <div className="grid gap-2">
-              <div className="text-sm font-medium">Messages</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  Messages
+                  {live && (
+                    <Badge variant="secondary" className="gap-1.5">
+                      <span className="relative flex size-2">
+                        <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+                        <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+                      </span>
+                      subscribed
+                    </Badge>
+                  )}
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => setLive((v) => !v)}>
+                  {live ? <IconPlayerPause /> : <IconPlayerPlay />} {live ? "Pause" : "Watch live"}
+                </Button>
+              </div>
+              <p className="text-muted-foreground text-xs">
+                Newest first. {live ? "New messages appear as they're published, by you, someone else, or the stream's sources." : "Paused: new messages wait until you watch again."}
+              </p>
               {messages.length === 0 && <p className="text-muted-foreground text-sm">No messages.</p>}
               <div className="divide-y rounded-md border">
                 {messages.map((m) => (
-                  <div key={m.offset} className="grid gap-1 p-2.5">
+                  <div key={m.offset} className={`grid gap-1 p-2.5 transition-colors ${fresh.has(m.offset) ? "bg-emerald-500/10" : ""}`}>
                     <div className="text-muted-foreground flex flex-wrap gap-2 text-xs">
                       <span className="font-mono">{m.offset}</span>
                       <span>{new Date(m.time).toLocaleString()}</span>
@@ -242,10 +290,17 @@ export function StreamsPage() {
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
       <div className="flex items-start gap-4">
-        <p className="text-muted-foreground max-w-3xl text-sm">
-          Streams are publish/subscribe logs. Producers publish messages; consumers read them in order by offset, as consumer groups, or live
-          over Server-Sent Events. Grant access with <code>stream:&lt;name&gt;</code> in a role's tessellation list.
-        </p>
+        <div className="text-muted-foreground max-w-3xl space-y-1.5 text-sm">
+          <p>
+            A stream is an ordered log of messages. Producers <strong className="text-foreground font-medium">publish</strong> to it, or a source turns
+            a tessellation's changes into messages; every subscriber <strong className="text-foreground font-medium">gets every message</strong>, in
+            order, live (Server-Sent Events or a WebSocket), by reading from an offset, as a consumer group that HexDB keeps the place of, or by webhook.
+          </p>
+          <p>
+            Open a stream to watch it live and to get code that subscribes. Grant <code>stream:&lt;name&gt;</code> in a role: read to subscribe,
+            write to publish. For work that should be done once, use a queue.
+          </p>
+        </div>
         {me?.is_admin && (
           <Button size="sm" className="ml-auto shrink-0" onClick={() => setEditing(null)}>
             <IconPlus /> New stream

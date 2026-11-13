@@ -38,9 +38,22 @@ export function AccountPage() {
         </CardContent>
       </Card>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <PasswordCard />
+        {me.demo_mode && !me.is_admin ? (
+          // The server refuses these too: changing a shared demo login would lock everyone else out.
+          <Card>
+            <CardHeader>
+              <CardTitle>Shared demo account</CardTitle>
+              <CardDescription>
+                Everyone on this demo signs in with this account, so its password and multi-factor authentication can't be changed, and it can't
+                manage users or roles.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        ) : (
+          <PasswordCard />
+        )}
         <ApiKeysCard />
-        <MfaCard />
+        {!(me.demo_mode && !me.is_admin) && <MfaCard />}
       </div>
     </div>
   )

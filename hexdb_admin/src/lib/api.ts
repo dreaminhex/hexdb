@@ -842,6 +842,15 @@ export interface QueueConfig {
   created_by?: string
 }
 
+/** A message leased by receive: acknowledge or release it with its receipt before the lease runs out. */
+export interface QueueMessage {
+  id: string
+  receipt: string
+  body: unknown
+  receives: number
+  sent_at: number
+}
+
 export interface QueueStats {
   queue: QueueConfig
   ready: number
@@ -1382,6 +1391,9 @@ export const api = {
   createQueue: (config: Omit<QueueConfig, "created" | "created_by">) => request<QueueConfig>("POST", "/queues", config),
   deleteQueue: (name: string) => request<void>("DELETE", `/queues/${enc(name)}`),
   sendToQueue: (name: string, messages: { body: unknown; delay_seconds?: number }[]) => request<{ ids: (string | null)[] }>("POST", `/queues/${enc(name)}/messages`, { messages }),
+  receiveFromQueue: (name: string, max: number) => request<{ messages: QueueMessage[] }>("POST", `/queues/${enc(name)}/receive`, { max }).then((r) => r.messages),
+  ackQueue: (name: string, receipts: string[]) => request<{ acked: number; stale: number }>("POST", `/queues/${enc(name)}/ack`, { receipts }),
+  releaseQueue: (name: string, receipts: string[]) => request<{ released: number; stale: number }>("POST", `/queues/${enc(name)}/nack`, { receipts }),
   streams: () => request<{ streams: StreamConfig[] }>("GET", "/streams").then((r) => r.streams),
   stream: (name: string) => request<StreamDetail>("GET", `/streams/${enc(name)}`),
   createStream: (config: StreamConfig) => request<StreamConfig>("POST", "/streams", config),

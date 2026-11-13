@@ -1269,6 +1269,8 @@ websocat "ws://localhost:7700/streams/order-events/ws?group=billing" -H "Authori
 
 Creating a stream needs `manage` on its name. A grant on `*` covers every tessellation and every stream.
 
+**In the admin UI**, opening a stream on the Streams page subscribes to it (Server-Sent Events, as your own code would), so new messages appear as they're published; "Subscribe from your code" shows each way to consume it (SSE, WebSocket, reading in order, a consumer group, a webhook) and to publish, filled in with the hex's address and the stream's name.
+
 **Storage.** Messages are documents in the system tessellation `_stream_<name>`, so they're encrypted, replicated, and expire by TTL. Configurations live in `_streams` and offsets in `_stream_offsets`. Sources and destinations run on the Overseer.
 
 ### Queues
@@ -1292,7 +1294,7 @@ curl http://localhost:7700/queues/thumbnails      # configuration and counts: re
 - **Sending** takes up to 100 messages, each a JSON `body` of at most 256 KB, optionally delayed (`delay_seconds`, up to 15 minutes) or de-duplicated (a `dedupe_key` sent again within 5 minutes is skipped; its ID comes back `null`).
 - **Delivery** is at least once: a consumer that dies before acknowledging leaves the message to come back, so make handlers idempotent. Order is roughly first in, first out, not strict.
 - **Permissions** use `queue:<name>` in role grants: `write` to send, `read` to receive, acknowledge, release and extend, `manage` to create, change and delete. Changes are audited (`queue.create`, `queue.update`, `queue.delete`).
-- **Storage.** Messages are documents in `_queue_<name>` (encrypted, replicated, kept for `retention_hours`). Every queue call but the `GET`s changes messages, so it runs on the Overseer (replicas forward them); the Overseer keeps an index of when each message is next ready in memory and rebuilds it from the documents after a failover. The admin UI's Queues page shows each queue's counts and sends test messages.
+- **Storage.** Messages are documents in `_queue_<name>` (encrypted, replicated, kept for `retention_hours`). Every queue call but the `GET`s changes messages, so it runs on the Overseer (replicas forward them); the Overseer keeps an index of when each message is next ready in memory and rebuilds it from the documents after a failover. The admin UI's Queues page shows each queue's counts, sends messages, and receives them as a worker would: each received message shows its lease counting down, with Acknowledge and Release. "Use it from your code" gives the same steps in curl and Node.js, filled in with the hex's address and the queue's name.
 
 ## 16. Files
 
