@@ -52,6 +52,117 @@ fn seed(server: &TestServer, from: usize, count: usize) -> Result<()> {
     Ok(())
 }
 
+/// A hex that once led, now a replica of the hex that took over, gives up
+/// slices; restarted, it must still say it keeps only the slices it has, or
+/// the others give up their copies and, once it leads again, it never collects
+/// what it deleted. (The playground lost documents in 14 slices this way.)
+#[test]
+fn former_overseer_restarted_as_replica_keeps_its_own_slice_count() -> Result<()> {
+    let ports = [TestServer::free_port()?, TestServer::free_port()?, TestServer::free_port()?];
+    let mut a = TestServer::start_with(hex(&ports, 0, 4096))?;
+    let mut b = TestServer::start_with(hex(&ports, 1, 2048))?;
+    let c = TestServer::start_with(hex(&ports, 2, 1024))?;
+    seed(&a, 0, 300)?;
+    wait_until(Duration::from_secs(90), "B and C to split the slices", || {
+        let (x, y) = (kept(&b)?, kept(&c)?);
+        Ok(x.0 + y.0 == 64 && x.0 > 0 && y.0 > 0 && x.1 + y.1 == 300)
+    })?;
+
+    // A steps down; B (the most RAM left) leads and collects every slice.
+    a.stop()?;
+    wait_until(Duration::from_secs(90), "B to lead with every document", || {
+        Ok(status(&b)?["hex_type"] == "Overseer" && b.request(Method::GET, "/items/count", None, &[])?.body["count"] == 300)
+    })?;
+
+    // A comes back as B's replica, and A and C split the slices again.
+    a.launch()?;
+    wait_until(Duration::from_secs(120), "A and C to split the slices", || {
+        let (x, y) = (kept(&a)?, kept(&c)?);
+        Ok(status(&a)?["hex_type"] != "Overseer" && x.0 < 64 && x.0 + y.0 == 64 && x.1 + y.1 == 300)
+    })?;
+    let before = kept(&a)?;
+
+    // Restarted, A reports the slices it has, not every slice.
+    a.restart()?;
+    wait_until(Duration::from_secs(60), "A to answer after its restart", || Ok(status(&a)?["hex_type"] != "Overseer"))?;
+    let after = kept(&a)?;
+    assert!(after.0 < 64, "A claims every slice after a restart while it keeps {} documents of 300 (before: {:?})", after.1, before);
+
+    // And if A leads again, it collects what it doesn't have.
+    b.stop()?;
+    wait_until(Duration::from_secs(120), "A to lead with every document", || {
+        Ok(status(&a)?["hex_type"] == "Overseer" && a.request(Method::GET, "/items/count", None, &[])?.body["count"] == 300)
+    })?;
+    Ok(())
+}
+
+/// A full sync cut short (a restart, a crash) leaves a replica with some
+/// tessellations copied and others not, and its old cursor claiming what it
+/// held before. Such a hex must never lead: it would serve part of the data as
+/// everything, and the others would copy it and drop the rest. (The playground
+/// lost documents in 14 slices this way.) Alone, it waits; when a hex with the
+/// data is back, that one leads and this one copies everything again.
+#[test]
+fn replica_whose_full_sync_was_cut_short_never_leads() -> Result<()> {
+    let ports = [TestServer::free_port()?, TestServer::free_port()?];
+    let mut a = TestServer::start_with(hex(&ports, 0, 1024))?;
+    for tess in ["aa", "bb", "cc"] {
+        let docs: Vec<Value> = (0..200).map(|i| json!({ "n": i })).collect();
+        let res = a.request(Method::POST, &format!("/{}/_bulk", tess), Some(&json!(docs)), &[])?;
+        assert!(res.status.is_success(), "{}", res.body);
+    }
+
+    // B (more RAM: it would win an election) stops after copying one tessellation.
+    let mut options = hex(&ports, 1, 4096);
+    options.env = vec![("HEXDB_DEBUG_STOP_FULL_SYNC_AFTER".into(), "1".into())];
+    let mut b = TestServer::create(options)?;
+    // It may stop before it's ready (the sync starts as it does) or just after.
+    let _ = b.launch();
+    wait_until(Duration::from_secs(60), "B to stop in the middle of its full sync", || Ok(b.has_exited()))?;
+
+    // The Overseer goes; B comes back alone. It must not take the role.
+    a.stop()?;
+    b.set_options(hex(&ports, 1, 4096));
+    // It can't sign anyone in (its copy of the users may be missing), so the harness's sign-in may fail.
+    let _ = b.launch();
+    std::thread::sleep(Duration::from_secs(8));
+
+    // A is back: A leads with everything it had, and B copies it all again.
+    a.launch()?;
+    let mut last = String::new();
+    let waited = wait_until(Duration::from_secs(120), "A to lead with every document, and B to have a full copy", || {
+        let s = status(&a)?;
+        last = format!(
+            "A: {} {}; counts {:?}; lattice {}",
+            s["hex_type"],
+            s["replication"],
+            ["aa", "bb", "cc"].map(|t| a.request(Method::GET, &format!("/{}/count", t), None, &[]).map(|r| r.body["count"].clone()).unwrap_or_default()),
+            s["network"]["lattice"]["hexes"]
+        );
+        if s["hex_type"] != "Overseer" {
+            return Ok(false);
+        }
+        for tess in ["aa", "bb", "cc"] {
+            if a.request(Method::GET, &format!("/{}/count", tess), None, &[])?.body["count"] != 200 {
+                return Ok(false);
+            }
+        }
+        let hexes = s["network"]["lattice"]["hexes"].as_array().cloned().unwrap_or_default();
+        let b_view = hexes.iter().find(|h| h["is_self"] != true);
+        Ok(b_view.is_some_and(|h| h["status"] == "active" && h["role"] != "Overseer" && h["replication_state"] == "streaming"))
+    });
+    if let Err(e) = waited {
+        bail!("{}: {}
+B's log:
+{}", e, last, std::fs::read_to_string(b.log_path()).unwrap_or_default().lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("
+"));
+    }
+    for tess in ["aa", "bb", "cc"] {
+        assert_eq!(a.request(Method::GET, &format!("/{}/count", tess), None, &[])?.body["count"], 200, "{}", tess);
+    }
+    Ok(())
+}
+
 #[test]
 fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     let ports = [TestServer::free_port()?, TestServer::free_port()?, TestServer::free_port()?];

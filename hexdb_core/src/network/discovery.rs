@@ -265,7 +265,10 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
     };
     let (slices_held, replication_source) = {
         let status = engine.replication.lock().unwrap();
-        (status.slices_held, if engine.is_writable() { engine.history_id() } else { status.history.clone().unwrap_or_default() })
+        // A copy in progress says so even as the Overseer (a lone hex starts as
+        // one), so every election, its own included, passes it over.
+        let copying = status.history.as_deref().filter(|h| h.starts_with(crate::replication::INTERRUPTED_SYNC)).map(String::from);
+        (status.slices_held, copying.unwrap_or_else(|| if engine.is_writable() { engine.history_id() } else { status.history.clone().unwrap_or_default() }))
     };
     PeerHex {
         id: engine.id.to_string(),
@@ -759,7 +762,15 @@ fn rank(a: &PeerHex, b: &PeerHex) -> Ordering {
 /// every hex with the same view reaches the same answer.
 pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
     let all: Vec<&PeerHex> = std::iter::once(local).chain(live_peers.iter()).collect();
-    let mut candidates: Vec<&PeerHex> = all.iter().copied().filter(|h| h.preference == "auto" || h.preference == "overseer").collect();
+    let mut candidates: Vec<&PeerHex> = all
+        .iter()
+        .copied()
+        .filter(|h| h.preference == "auto" || h.preference == "overseer")
+        // A hex whose full sync is unfinished (or was cut short) has part of
+        // the data and isn't a copy of anything: leading, it would serve that
+        // part as everything, and the others would copy it and drop the rest.
+        .filter(|h| !h.replication_source.starts_with(crate::replication::INTERRUPTED_SYNC))
+        .collect();
 
     // A sitting Overseer keeps the role, whatever the others prefer: a hex that
     // took it would lack the writes the sitting one accepted, and the sitting one

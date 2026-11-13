@@ -222,6 +222,26 @@ impl std::fmt::Display for OverseerRebuilding {
 impl std::error::Error for OverseerRebuilding {}
 
 /// "Carl", "Carl and Donut", "Carl, Donut and Katia".
+/// The history a replica names while a full sync is under way (then the
+/// Overseer's): whatever it has then is no copy of anything.
+pub const INTERRUPTED_SYNC: &str = "full-sync-in-progress:";
+
+/// Tests only (debug builds): `HEXDB_DEBUG_STOP_FULL_SYNC_AFTER=<n>` ends the
+/// process once a full sync has copied n tessellations, as a restart or crash
+/// in the middle of one would.
+fn debug_stop_during_full_sync() {
+    #[cfg(debug_assertions)]
+    {
+        static DONE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if let Some(limit) = std::env::var("HEXDB_DEBUG_STOP_FULL_SYNC_AFTER").ok().and_then(|v| v.parse::<usize>().ok()) {
+            if DONE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 >= limit {
+                warn!("🧪 Stopping in the middle of a full sync (HEXDB_DEBUG_STOP_FULL_SYNC_AFTER).");
+                std::process::exit(86);
+            }
+        }
+    }
+}
+
 fn join_names(names: &[String]) -> String {
     match names {
         [] => String::new(),
@@ -736,6 +756,23 @@ impl Follower {
         info!("📥 Full sync from Overseer '{}' at sequence {}...", meta.source_name, meta.seq);
 
         let engine = self.engine.clone();
+        // Until the copy is complete, this hex vouches for nothing: a full sync
+        // deletes, tessellation by tessellation, what the Overseer no longer has
+        // and the slices this hex no longer keeps, so a sync cut short (a
+        // restart, a crash, an error) leaves some tessellations thinned out.
+        // Its old cursor would still claim every slice it held, and a hex that
+        // claims a slice is counted as a copy of it and, elected Overseer,
+        // collects nothing: that lost documents for good. Recorded first, this
+        // marks it as a copy in progress: it holds no slice, follows no history
+        // another hex can resume or collect from, can't be elected Overseer
+        // (`discovery::elect`), and its next start copies everything again.
+        let interrupted = format!("{}{}", INTERRUPTED_SYNC, meta.source_id);
+        engine.apply_replicated(Vec::new(), Some(&ReplicaCursor { source_id: interrupted.clone(), applied_seq: 0, held_slices: 0 })).await?;
+        self.set_status(|s| {
+            s.slices_held = 0;
+            s.applied_seq = 0;
+            s.history = Some(interrupted.clone());
+        });
         engine.adopt_content_key(&meta.content_key)?;
         engine.adopt_token_key(&meta.token_key)?;
         let slices = self.wanted_slices(overseer).await;
@@ -792,6 +829,7 @@ impl Follower {
             for chunk in stale.chunks(PAGE) {
                 engine.apply_replicated(chunk.to_vec(), None).await?;
             }
+            debug_stop_during_full_sync();
         }
         for (name, info) in &meta.tessellations {
             engine.reconcile_indexes(name, &info.indexes).await?;
@@ -1122,6 +1160,9 @@ impl Follower {
         }
         for (holder, slices) in plan.into_values() {
             info!("📥 Collecting {} slice(s) from '{}'.", slicing::count(slices), holder.name);
+            // Anything left here in these slices (a give-up or a full sync cut
+            // short) is stale: the holder's copy replaces it, deletions included.
+            self.delete_slices(&tessellations, slices).await?;
             let base = peer_base_url(&holder);
             let mut position: Option<u64> = None;
             for name in &tessellations {

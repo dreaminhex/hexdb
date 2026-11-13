@@ -180,6 +180,8 @@ pub struct TestOptions {
     /// Storage key (default: [`TEST_ENCRYPTION_KEY`]) and previous keys.
     pub encryption_key: Option<String>,
     pub previous_encryption_keys: Vec<String>,
+    /// Extra environment variables for the server process (e.g. debug hooks).
+    pub env: Vec<(String, String)>,
 }
 
 /// A self-signed certificate for localhost and 127.0.0.1: (PEM cert, PEM key).
@@ -196,6 +198,13 @@ impl TestServer {
 
     /// Create a fresh directory and start a server with the given options.
     pub fn start_with(options: TestOptions) -> Result<Self> {
+        let mut server = Self::create(options)?;
+        server.launch()?;
+        Ok(server)
+    }
+
+    /// Create a fresh directory and a server with the given options, not started yet.
+    pub fn create(options: TestOptions) -> Result<Self> {
         // HEXDB_TEST_DIR puts test servers in a known folder (CI keeps their logs from there).
         let dir = match std::env::var_os("HEXDB_TEST_DIR") {
             Some(base) => {
@@ -219,7 +228,6 @@ impl TestServer {
         };
         server.client = server.client_builder()?.build()?;
         server.anon = server.client_builder()?.build()?;
-        server.launch()?;
         Ok(server)
     }
 
@@ -256,6 +264,18 @@ impl TestServer {
 
     pub fn is_running(&self) -> bool {
         self.child.is_some()
+    }
+
+    /// True once the server process has ended (on its own or killed); forgets it then.
+    pub fn has_exited(&mut self) -> bool {
+        match self.child.as_mut().map(|c| c.try_wait()) {
+            None => true,
+            Some(Ok(Some(_))) => {
+                self.child = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -387,6 +407,9 @@ admin_email = "admin@example.com"
         }
         // Test servers don't ask GitHub for new releases.
         cmd.env("HEXDB_UPDATES__CHECK", "false");
+        for (key, value) in &self.options.env {
+            cmd.env(key, value);
+        }
 
         let spawned = Instant::now();
         self.child = Some(cmd.spawn().context("Failed to start hexdb_api")?);
