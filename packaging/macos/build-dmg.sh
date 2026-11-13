@@ -82,7 +82,10 @@ Documentation: https://github.com/dreaminhex/hexdb
 EOF
 
 rm -f "$out"
-hdiutil create -volname "HexDB $version" -srcfolder "$work/dmg" -ov -format UDZO "$out"
+# hdiutil's own estimate of the volume size from -srcfolder runs short as the binaries grow
+# ("No space left on device"): size it from the contents, with room for the file system.
+size_mb=$(( $(du -sm "$work/dmg" | cut -f1) * 12 / 10 + 32 ))
+hdiutil create -volname "HexDB $version" -srcfolder "$work/dmg" -size "${size_mb}m" -ov -format UDZO "$out"
 if [ -n "${MACOS_APP_IDENTITY:-}" ]; then
   codesign --force --timestamp --sign "$MACOS_APP_IDENTITY" "$out"
 fi
