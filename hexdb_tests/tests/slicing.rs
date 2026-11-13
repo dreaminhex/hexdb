@@ -60,24 +60,32 @@ fn seed(server: &TestServer, from: usize, count: usize) -> Result<()> {
 fn former_overseer_restarted_as_replica_keeps_its_own_slice_count() -> Result<()> {
     let ports = [TestServer::free_port()?, TestServer::free_port()?, TestServer::free_port()?];
     let mut a = TestServer::start_with(hex(&ports, 0, 4096))?;
-    let mut b = TestServer::start_with(hex(&ports, 1, 2048))?;
-    let c = TestServer::start_with(hex(&ports, 2, 1024))?;
+    let mut others = [TestServer::start_with(hex(&ports, 1, 2048))?, TestServer::start_with(hex(&ports, 2, 1024))?];
     seed(&a, 0, 300)?;
-    wait_until(Duration::from_secs(90), "B and C to split the slices", || {
-        let (x, y) = (kept(&b)?, kept(&c)?);
+    wait_until(Duration::from_secs(90), "the replicas to split the slices", || {
+        let (x, y) = (kept(&others[0])?, kept(&others[1])?);
         Ok(x.0 + y.0 == 64 && x.0 > 0 && y.0 > 0 && x.1 + y.1 == 300)
     })?;
 
-    // A steps down; B (the most RAM left) leads and collects every slice.
+    // A steps down; a replica (whichever the election picks) leads and collects every slice.
     a.stop()?;
-    wait_until(Duration::from_secs(90), "B to lead with every document", || {
-        Ok(status(&b)?["hex_type"] == "Overseer" && b.request(Method::GET, "/items/count", None, &[])?.body["count"] == 300)
+    let mut leader = None;
+    wait_until(Duration::from_secs(90), "a replica to lead with every document", || {
+        for (i, server) in others.iter().enumerate() {
+            if status(server)?["hex_type"] == "Overseer" && server.request(Method::GET, "/items/count", None, &[])?.body["count"] == 300 {
+                leader = Some(i);
+                return Ok(true);
+            }
+        }
+        Ok(false)
     })?;
+    let leader = leader.unwrap();
+    let follower = 1 - leader;
 
-    // A comes back as B's replica, and A and C split the slices again.
+    // A comes back as a replica, and A and the other replica split the slices again.
     a.launch()?;
-    wait_until(Duration::from_secs(120), "A and C to split the slices", || {
-        let (x, y) = (kept(&a)?, kept(&c)?);
+    wait_until(Duration::from_secs(120), "A and the other replica to split the slices", || {
+        let (x, y) = (kept(&a)?, kept(&others[follower])?);
         Ok(status(&a)?["hex_type"] != "Overseer" && x.0 < 64 && x.0 + y.0 == 64 && x.1 + y.1 == 300)
     })?;
     let before = kept(&a)?;
@@ -88,10 +96,16 @@ fn former_overseer_restarted_as_replica_keeps_its_own_slice_count() -> Result<()
     let after = kept(&a)?;
     assert!(after.0 < 64, "A claims every slice after a restart while it keeps {} documents of 300 (before: {:?})", after.1, before);
 
-    // And if A leads again, it collects what it doesn't have.
-    b.stop()?;
-    wait_until(Duration::from_secs(120), "A to lead with every document", || {
-        Ok(status(&a)?["hex_type"] == "Overseer" && a.request(Method::GET, "/items/count", None, &[])?.body["count"] == 300)
+    // The leader goes: whichever hex takes over collects what it lacks and has every document.
+    others[leader].stop()?;
+    let rest = [&a, &others[follower]];
+    wait_until(Duration::from_secs(120), "the new Overseer to have every document", || {
+        for server in rest {
+            if status(server)?["hex_type"] == "Overseer" {
+                return Ok(server.request(Method::GET, "/items/count", None, &[])?.body["count"] == 300);
+            }
+        }
+        Ok(false)
     })?;
     Ok(())
 }
