@@ -3,7 +3,7 @@
 id = "@examples/change-logger"
 name = "Change logger"
 type = "stream"
-version = "2.5.1"
+version = "2.5.2"
 description = "Prints a one-line summary of each change and appends the full change to changes.ndjson in its data folder."
 command = ["node", "change-logger.mjs"]
 # tessellations = ["orders"]   # only these tessellations (default: all user tessellations)
