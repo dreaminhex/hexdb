@@ -12,7 +12,7 @@ It needs Java 11 or later and has no dependencies.
   <dependency>
     <groupId>com.dreaminhex</groupId>
     <artifactId>hexdb-jdbc</artifactId>
-    <version>2.5.3</version>
+    <version>2.5.4</version>
   </dependency>
   ```
 
