@@ -23,12 +23,17 @@ export function LoginPage() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
 
-  const submit = async (event: React.FormEvent) => {
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    // Read what the fields hold now: a browser's autofill fills them without telling React until the page is touched.
+    const form = new FormData(event.currentTarget)
+    const field = (name: string, fallback: string) => String(form.get(name) ?? fallback)
+    const [user, secret, otp] = [field("login", login), field("password", password), field("code", code)]
+    setLogin(user)
     setBusy(true)
     setError(undefined)
     try {
-      await api.login(login.trim(), password, needsCode ? code.trim() : undefined)
+      await api.login(user.trim(), secret, needsCode ? otp.trim() : undefined)
       setPassword("")
       setCode("")
       await refresh()
@@ -80,11 +85,11 @@ export function LoginPage() {
                 <>
                   <div className="grid gap-2">
                     <Label htmlFor="login">Login</Label>
-                    <Input id="login" value={login} onChange={(e) => setLogin(e.target.value)} autoComplete="username" autoFocus required />
+                    <Input id="login" name="login" value={login} onChange={(e) => setLogin(e.target.value)} autoComplete="username" autoFocus required />
                   </div>
                   <div className="grid gap-2">
                     <Label htmlFor="password">Password</Label>
-                    <Input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+                    <Input id="password" name="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
                   </div>
                 </>
               )}
@@ -93,6 +98,7 @@ export function LoginPage() {
                   <Label htmlFor="code">Code</Label>
                   <Input
                     id="code"
+                    name="code"
                     value={code}
                     onChange={(e) => setCode(e.target.value)}
                     autoComplete="one-time-code"
@@ -109,7 +115,7 @@ export function LoginPage() {
                   {error}
                 </p>
               )}
-              <Button type="submit" disabled={busy || !login.trim() || !password || (needsCode && !code.trim())}>
+              <Button type="submit" disabled={busy}>
                 {busy && <IconLoader2 className="animate-spin" />}
                 {needsCode ? "Verify" : "Sign in"}
               </Button>
