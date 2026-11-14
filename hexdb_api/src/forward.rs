@@ -21,13 +21,16 @@
 // While there's no Overseer (an election), or while this hex hands its role
 // over, a write waits up to `HOLD_FOR_OVERSEER` for one instead of failing,
 // and one whose connection to the Overseer was refused is tried again then (a
-// refused connection never reached it, so it can't run twice). Without an
+// refused connection never reached it, so it can't run twice). A read, or a
+// write with an idempotency key, is also sent again after a connection that
+// broke mid-request: running either twice changes nothing. Without an
 // Overseer after that, the request is handled locally, which refuses writes
 // with 421 `read_only_replica`.
 //
 // A sliced replica (`replication.slicing`) keeps only some of the data, so
-// it forwards reads of user data too, and refuses live feeds (WebSocket and
-// Server-Sent Events) with 421 naming the Overseer. While a newly elected
+// it forwards reads of user data too. Server-Sent Events feeds stream through
+// from the Overseer like any other answer; WebSocket feeds can't be passed on,
+// so those are refused with 421 naming the Overseer. While a newly elected
 // Overseer collects slices, it answers data requests with 503.
 
 use axum::{
@@ -171,8 +174,10 @@ fn answers_without_data(path: &str) -> bool {
 }
 
 /// Long-lived feeds, which forwarding can't carry.
-fn live_feed(path: &str) -> bool {
-    path.ends_with("/ws") || path == "/changes/stream" || (path.starts_with("/streams/") && path.ends_with("/subscribe"))
+/// A WebSocket feed (`/changes/ws`, `/streams/{name}/ws`): an upgraded connection,
+/// which forwarding can't pass on. Server-Sent Events feeds stream through.
+fn websocket_feed(path: &str) -> bool {
+    path.ends_with("/ws")
 }
 
 /// True if a GraphQL request body contains a mutation.
@@ -372,12 +377,12 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
         }
         return next.run(request).await;
     };
-    if partial && live_feed(&path) {
+    if partial && websocket_feed(&path) {
         return crate::handlers::ApiError::new(
             StatusCode::MISDIRECTED_REQUEST,
             "sliced_replica",
             format!(
-                "This hex keeps only some of the lattice's slices, so it doesn't serve live feeds. Connect to the Overseer '{}' at {}.",
+                "This hex keeps only some of the lattice's slices, so it doesn't serve WebSocket feeds. Connect to the Overseer '{}' at {}, or use the Server-Sent Events feed, which any hex passes on.",
                 overseer.name,
                 hexdb_core::replication::peer_base_url(&overseer)
             ),
@@ -422,6 +427,8 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
             headers.insert(HeaderName::from_static(crate::handlers::IDEMPOTENCY_KEY_HEADER), key);
         }
     }
+    // A read (a sliced replica forwards those too) changes nothing, so it's always safe to send again.
+    let read = matches!(parts.method, Method::GET | Method::HEAD);
     let mut overseer = overseer;
     let response = loop {
         debug!("↪️ Forwarding {} {} to the Overseer '{}'.", parts.method, path, overseer.name);
@@ -432,8 +439,8 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
                 // A refused connection never reached the Overseer (it's restarting, or
                 // gone): try the Overseer the lattice has once one is there. Other send
                 // errors (a connection the stopping Overseer closed) may have reached it,
-                // so only a keyed write is sent again. A timeout isn't: it may still be running.
-                if (e.is_connect() || (resendable && !e.is_timeout())) && Instant::now() < until {
+                // so only a read or a keyed write is sent again. A timeout isn't: it may still be running.
+                if (e.is_connect() || ((resendable || read) && !e.is_timeout())) && Instant::now() < until {
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     if let Some(next) = overseer_until(&engine, until).await {
                         overseer = next;

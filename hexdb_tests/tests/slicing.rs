@@ -209,9 +209,16 @@ fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     assert!(res.headers.get("x-hexdb-forwarded-to").is_some(), "answered by the Overseer");
     let sql = second.request(Method::POST, "/sql", Some(&json!({ "sql": "SELECT COUNT(*) FROM items WHERE n >= 100" })), &[])?;
     assert_eq!(sql.body["rows"], json!([[150]]), "{}", sql.body);
-    // Live feeds aren't proxied: a sliced replica names the Overseer instead.
-    let feed = second.request(Method::GET, "/changes/stream", None, &[])?;
-    assert_eq!(feed.status, 421, "{}", feed.body);
+    // A Server-Sent Events feed streams through from the Overseer (headers are enough:
+    // the feed itself never ends); a WebSocket feed can't, so it names the Overseer.
+    let sse = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let feed = sse.get(second.url("/changes/stream")).bearer_auth(second.token()).header("accept", "text/event-stream").send()?;
+    assert_eq!(feed.status().as_u16(), 200);
+    assert!(feed.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|t| t.starts_with("text/event-stream")), "{:?}", feed.headers());
+    assert!(feed.headers().get("x-hexdb-forwarded-to").is_some(), "streamed from the Overseer");
+    drop(feed);
+    let ws = second.request(Method::GET, "/changes/ws", None, &[])?;
+    assert_eq!(ws.status, 421, "{}", ws.body);
 
     // A failover: both replicas have applied everything before the Overseer goes.
     let published = status(&overseer)?["replication"]["applied_seq"].as_u64().unwrap_or(0);

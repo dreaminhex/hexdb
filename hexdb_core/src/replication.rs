@@ -86,7 +86,12 @@ const CATALOG_EVERY: Duration = Duration::from_secs(15);
 /// An HTTP client for talking to other hexes: HTTPS-capable, trusting the
 /// system roots plus `tls.ca_file` if set.
 pub fn lattice_client(config: &HexConfig, timeout: Duration) -> Result<reqwest::Client> {
-    let mut builder = crate::crypt::http_client().timeout(timeout).https_only(config.tls.enabled());
+    // A hex closes a keep-alive connection that's idle for `limits.header_timeout_seconds`
+    // (10 by default). A pooled connection kept longer can be reused just as the other
+    // hex closes it, and the request fails with "connection closed" though nothing is
+    // wrong, so idle connections are dropped well before then.
+    let idle = Duration::from_secs((config.limits.header_timeout_seconds / 2).max(1));
+    let mut builder = crate::crypt::http_client().timeout(timeout).pool_idle_timeout(idle).https_only(config.tls.enabled());
     if !config.tls.ca_file.is_empty() {
         let pem = std::fs::read(&config.tls.ca_file).with_context(|| format!("Failed to read tls.ca_file {}", config.tls.ca_file))?;
         for cert in reqwest::Certificate::from_pem_bundle(&pem).context("tls.ca_file is not valid PEM")? {
