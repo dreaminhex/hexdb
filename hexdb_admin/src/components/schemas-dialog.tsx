@@ -175,7 +175,7 @@ export function SchemaManager({ tessellation, roomy = false }: { tessellation: s
   const links = info.data?.links ?? []
   const children = info.data?.children ?? []
   return (
-    <div className="grid gap-4">
+    <div className={cn("grid", roomy ? "gap-6" : "gap-4")}>
       {schemas.error && <p className="text-destructive text-sm">{schemas.error.message}</p>}
       {(links.length > 0 || children.length > 0) && (
         <div className="grid gap-1 rounded-md border px-3 py-2 text-xs">

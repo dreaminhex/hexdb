@@ -21,7 +21,7 @@ export function PluginsPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <p className="text-muted-foreground max-w-3xl text-sm">
+      <p className="text-muted-foreground min-w-0 flex-1 text-sm">
         Plugins run while this hex is the Overseer. Stream plugins receive every committed change, in order (a process reads JSON lines on
         stdin; a webhook receives batched POSTs); log and metrics plugins receive this hex's logs and metrics; source plugins write into
         HexDB with their own API key.

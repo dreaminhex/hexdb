@@ -26,7 +26,7 @@ export function SharesPage() {
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-muted-foreground max-w-3xl text-sm">
+        <p className="text-muted-foreground min-w-0 flex-1 text-sm">
           Links that give people without an account a file or a folder. Make them from the Files page. A link shows only what its maker can see,
           and stops working when it expires, runs out of downloads, or is deleted.
         </p>

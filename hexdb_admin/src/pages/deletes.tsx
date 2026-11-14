@@ -70,7 +70,7 @@ export function DeletesPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <p className="text-muted-foreground max-w-3xl text-sm">
+      <p className="text-muted-foreground min-w-0 flex-1 text-sm">
         Every delete goes to the trash, with what was deleted along with it through parent links, as one batch. Restore a batch to put all of it back at once,
         or purge it to delete it for good. Deleted documents stay in the trash for storage.trash_days (30 by default).
         {!has(me, "audit") && " You see your own deletes; the audit permission shows everyone's."}

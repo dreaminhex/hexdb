@@ -43,7 +43,7 @@ export function BlocklistPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <p className="text-muted-foreground max-w-3xl text-sm">
+      <p className="text-muted-foreground min-w-0 flex-1 text-sm">
         Every hex refuses requests from these addresses and ranges before they're authenticated (403). Health checks and the hexes' own traffic are
         never blocked, and an entry can't cover your own address. Adding and removing entries is audited.
       </p>

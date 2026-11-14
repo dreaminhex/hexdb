@@ -573,7 +573,7 @@ export function FunctionsPage() {
         </div>
         <TabsContent value="functions" className="grid gap-4 pt-2">
           <div className="flex items-start gap-4">
-            <p className="text-muted-foreground max-w-3xl text-sm">
+            <p className="text-muted-foreground min-w-0 flex-1 text-sm">
               Functions are saved queries, aggregations, transactions and scripts (Python, TypeScript, JavaScript). Anyone signed in can run them;
               they run with the runner's permissions. Administrators create them.
             </p>
@@ -639,7 +639,7 @@ export function FunctionsPage() {
         {admin && (
           <TabsContent value="schedules" className="grid gap-4 pt-2">
             <div className="flex items-start gap-4">
-              <p className="text-muted-foreground max-w-3xl text-sm">Schedules run functions on the Overseer, as the administrator who created them.</p>
+              <p className="text-muted-foreground min-w-0 flex-1 text-sm">Schedules run functions on the Overseer, as the administrator who created them.</p>
               <Button size="sm" className="ml-auto shrink-0" onClick={() => setEditingSchedule(null)} disabled={!functions.data?.length}>
                 <IconPlus /> New schedule
               </Button>
@@ -708,7 +708,7 @@ export function FunctionsPage() {
         {admin && (
           <TabsContent value="triggers" className="grid gap-4 pt-2">
             <div className="flex items-start gap-4">
-              <p className="text-muted-foreground max-w-3xl text-sm">
+              <p className="text-muted-foreground min-w-0 flex-1 text-sm">
                 Triggers run a function when documents are inserted, updated or deleted: before the write (to check or change it) or after it commits.
               </p>
               <Button size="sm" className="ml-auto shrink-0" onClick={() => setEditingTrigger(null)} disabled={!functions.data?.length}>

@@ -24,7 +24,7 @@ export function QuarantinePage() {
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
       <div className="flex flex-wrap items-start justify-between gap-2">
-        <p className="text-muted-foreground max-w-3xl text-sm">
+        <p className="text-muted-foreground min-w-0 flex-1 text-sm">
           Every upload is scanned before it's stored, and stored files are scanned again when the signatures change. A file that matches is kept here
           instead, on the Overseer only: it isn't in its tessellation, can't be downloaded, and never reaches another hex. Release a false positive to
           store it as a normal file, or delete it.

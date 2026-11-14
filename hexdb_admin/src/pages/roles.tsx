@@ -163,7 +163,7 @@ export function RolesPage() {
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
       <div className="flex items-start gap-4">
-        <p className="text-muted-foreground max-w-3xl text-sm">
+        <p className="text-muted-foreground min-w-0 flex-1 text-sm">
           A role is a named set of permissions. Grant roles on the{" "}
           <a className="text-foreground underline-offset-4 hover:underline" href={href("/users")} onClick={linkHandler("/users")}>
             Users

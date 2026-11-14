@@ -115,7 +115,7 @@ export function SettingsPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <p className="text-muted-foreground max-w-3xl text-sm">
+      <p className="text-muted-foreground min-w-0 flex-1 text-sm">
         These settings override <span className="font-mono">{data?.config_file ?? "hexdb.toml"}</span> for this hex only. They are saved,
         encrypted, in its data directory. Live settings apply at once; the others at the next restart. Everything else is set in the config
         file.

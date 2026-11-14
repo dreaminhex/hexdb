@@ -18,7 +18,7 @@ export function SchemasPage() {
   const chosen = useQueryParam("tessellation") ?? list[0]?.name ?? null
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[16rem_1fr]">
+    <div className="grid grid-cols-1 items-start gap-6 p-4 lg:grid-cols-[18rem_1fr] lg:p-6">
       <Card className="h-fit">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -28,10 +28,10 @@ export function SchemasPage() {
             Optional per tessellation. Save a new version to apply now, or to apply later: until then, writes follow the current version.
           </CardDescription>
         </CardHeader>
-        <CardContent className="px-2">
+        <CardContent className="px-3">
           {tessellations.error && <p className="text-destructive px-2 text-sm">{tessellations.error.message}</p>}
           {tessellations.data && list.length === 0 && <p className="text-muted-foreground px-2 text-sm">No tessellations yet.</p>}
-          <nav aria-label="Tessellations" className="grid gap-0.5">
+          <nav aria-label="Tessellations" className="grid gap-1">
             {list.map((t) => (
               <button
                 key={t.name}
@@ -39,7 +39,7 @@ export function SchemasPage() {
                 onClick={() => setQueryParam("tessellation", t.name)}
                 aria-current={t.name === chosen ? "page" : undefined}
                 className={cn(
-                  "hover:bg-accent flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm",
+                  "hover:bg-accent flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm",
                   t.name === chosen && "bg-accent font-medium",
                 )}
               >
@@ -61,7 +61,7 @@ export function SchemasPage() {
             documents are migrated in the background when it's applied, and any document is upgraded when it's written.
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="pt-2">
           {chosen ? (
             <Suspense fallback={<IconLoader2 className="text-muted-foreground animate-spin" />}>
               <SchemaManager key={chosen} tessellation={chosen} roomy />

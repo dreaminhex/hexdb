@@ -296,7 +296,7 @@ export function QueuesPage() {
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
       <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="text-muted-foreground max-w-3xl space-y-1.5 text-sm">
+        <div className="text-muted-foreground min-w-0 flex-1 space-y-1.5 text-sm">
           <p>
             A queue hands out work. Producers <strong className="text-foreground font-medium">send</strong> messages; workers{" "}
             <strong className="text-foreground font-medium">receive</strong> them, each message leased to one worker at a time, and{" "}

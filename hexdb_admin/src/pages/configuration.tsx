@@ -540,7 +540,7 @@ export function ConfigurationPage() {
   const count = Object.keys(changes).length
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <p className="text-muted-foreground max-w-3xl text-sm">
+      <p className="text-muted-foreground min-w-0 flex-1 text-sm">
         Settings for the whole lattice, saved as encrypted, versioned configuration and applied by every hex, including hexes that join later and a new
         Overseer after a failover. Secrets are write-only: they can be replaced or cleared, never shown. Settings for one machine (addresses, data
         directory, keys) stay in hexdb.toml; this hex's runtime limits are on the Settings page.

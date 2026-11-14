@@ -99,7 +99,7 @@ export function SecurityReviewsPage() {
   const data = reviews.data
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <p className="text-muted-foreground max-w-3xl text-sm">
+      <p className="text-muted-foreground min-w-0 flex-1 text-sm">
         The AI reads a summary of the audit trail (failed sign-ins, refused requests, users on new addresses, activity by hour, administrative changes) and
         says what looks like an attack or misuse, with the evidence. Findings of medium severity or worse (adjustable below) are emailed and sent to the alert
         channels. It sees counts, logins and addresses,

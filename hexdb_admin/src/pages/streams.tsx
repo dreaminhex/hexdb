@@ -290,7 +290,7 @@ export function StreamsPage() {
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
       <div className="flex items-start gap-4">
-        <div className="text-muted-foreground max-w-3xl space-y-1.5 text-sm">
+        <div className="text-muted-foreground min-w-0 flex-1 space-y-1.5 text-sm">
           <p>
             A stream is an ordered log of messages. Producers <strong className="text-foreground font-medium">publish</strong> to it, or a source turns
             a tessellation's changes into messages; every subscriber <strong className="text-foreground font-medium">gets every message</strong>, in

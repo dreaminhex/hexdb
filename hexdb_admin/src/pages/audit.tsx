@@ -75,7 +75,7 @@ export function AuditPage() {
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 lg:p-6">
-      <p className="text-muted-foreground max-w-3xl text-sm">
+      <p className="text-muted-foreground min-w-0 flex-1 text-sm">
         Every hex records sign-ins, credential and permission changes, schema changes, maintenance and refused requests here. Events are kept
         for <code>security.audit_retention_days</code> and replicate across the lattice like any other data.
       </p>
