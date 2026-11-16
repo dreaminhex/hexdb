@@ -17,6 +17,7 @@
 //   NODE_EXTRA_CA_CERTS the server's CA file, when the lattice uses private certificates
 // plus whatever the manifest's [env] sets. Anything printed goes to the HexDB log.
 
+import { randomUUID } from "node:crypto"
 import { readFileSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
@@ -85,22 +86,56 @@ export class HexDBError extends Error {
 
 /**
  * A small client for the HexDB REST API, acting as the plugin's user.
- * Retries 429/502/503 responses a few times, honoring Retry-After.
+ *
+ * Retries are safe: every write (POST, PUT, PATCH, DELETE) carries an
+ * `Idempotency-Key`, the same on every try of that call, so HexDB applies it
+ * once and answers a retry with the first result. A 429 (refused before
+ * anything was done) is retried for any request, honoring Retry-After; an
+ * uncertain answer (502, 503, a dropped connection, a timeout) is retried for
+ * reads (and queries), and for writes only when they carry a key. Give your
+ * own key to make a write safe to repeat across process restarts too, or
+ * `{ "Idempotency-Key": "" }` in its headers to send none (it then isn't
+ * retried after an uncertain answer).
  */
-export function api({ base = process.env.HEXDB_API, key = process.env.HEXDB_API_KEY, retries = 4 } = {}) {
+export function api({ base = process.env.HEXDB_API, key = process.env.HEXDB_API_KEY, retries = 4, timeoutMs = 60_000 } = {}) {
   if (!base) throw new Error("HEXDB_API is not set (is this running as a HexDB plugin?)")
   if (!key) throw new Error("HEXDB_API_KEY is not set: add an [access] section to plugin.toml")
 
+  const delay = (response, attempt) => {
+    const after = Number(response?.headers.get("retry-after"))
+    return (Number.isFinite(after) && after >= 0 ? after : 2 ** attempt) * 1000
+  }
+
   async function request(method, path, body, headers = {}) {
+    // Queries are reads sent as POST.
+    const write = !["GET", "HEAD"].includes(method) && !path.split("?")[0].endsWith("/_query")
+    const given = Object.keys(headers).find((h) => h.toLowerCase() === "idempotency-key")
+    const extra = { ...headers }
+    if (write && given === undefined) extra["Idempotency-Key"] = randomUUID()
+    if (given !== undefined && !extra[given]) delete extra[given]
+    // A write without a key may have happened when the answer is lost: don't send it again then.
+    const retryUncertain = !write || Object.keys(extra).some((h) => h.toLowerCase() === "idempotency-key")
     for (let attempt = 0; ; attempt++) {
-      const response = await fetch(base + path, {
-        method,
-        headers: { Authorization: `Bearer ${key}`, Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      })
-      if ([429, 502, 503].includes(response.status) && attempt < retries) {
-        const wait = Number(response.headers.get("retry-after")) || 2 ** attempt
-        await new Promise((resolve) => setTimeout(resolve, wait * 1000))
+      let response
+      try {
+        response = await fetch(base + path, {
+          method,
+          headers: { Authorization: `Bearer ${key}`, Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...extra },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: AbortSignal.timeout(timeoutMs),
+        })
+      } catch (e) {
+        // No answer (a connection error or a timeout): whether a write happened is unknown.
+        if (retryUncertain && attempt < retries) {
+          await new Promise((resolve) => setTimeout(resolve, 2 ** attempt * 1000))
+          continue
+        }
+        throw e
+      }
+      const retry = response.status === 429 || (retryUncertain && [502, 503].includes(response.status))
+      if (retry && attempt < retries) {
+        await response.body?.cancel()
+        await new Promise((resolve) => setTimeout(resolve, delay(response, attempt)))
         continue
       }
       const text = await response.text()
@@ -113,6 +148,7 @@ export function api({ base = process.env.HEXDB_API, key = process.env.HEXDB_API_
   }
 
   const enc = encodeURIComponent
+  const keyed = (idempotencyKey) => (idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {})
   return {
     request,
     get: (path) => request("GET", path),
@@ -121,18 +157,17 @@ export function api({ base = process.env.HEXDB_API, key = process.env.HEXDB_API_
     patch: (path, body, headers) => request("PATCH", path, body, headers),
     delete: (path, headers) => request("DELETE", path, undefined, headers),
     /** Insert one document; returns it with its new `id`. */
-    insert: (tessellation, doc) => request("POST", `/${enc(tessellation)}`, doc),
-    /** Insert up to 1000 documents at once. An idempotency key makes retries safe. */
-    insertMany: (tessellation, docs, idempotencyKey) =>
-      request("POST", `/${enc(tessellation)}/_bulk`, docs, idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+    insert: (tessellation, doc, idempotencyKey) => request("POST", `/${enc(tessellation)}`, doc, keyed(idempotencyKey)),
+    /** Insert up to 1000 documents at once. */
+    insertMany: (tessellation, docs, idempotencyKey) => request("POST", `/${enc(tessellation)}/_bulk`, docs, keyed(idempotencyKey)),
     /** Replace an existing document by ID. */
-    replace: (tessellation, id, doc) => request("PUT", `/${enc(tessellation)}/${enc(id)}`, doc),
+    replace: (tessellation, id, doc, idempotencyKey) => request("PUT", `/${enc(tessellation)}/${enc(id)}`, doc, keyed(idempotencyKey)),
     /**
      * Insert or replace documents by key fields (e.g. the ID in the source
      * system): `upsert("orders", ["source_id"], rows)`. Up to 1000 at a time.
      */
     upsert: (tessellation, key, docs, idempotencyKey) =>
-      request("POST", `/${enc(tessellation)}/_upsert`, { key, documents: docs }, idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      request("POST", `/${enc(tessellation)}/_upsert`, { key, documents: docs }, keyed(idempotencyKey)),
     query: (tessellation, query) => request("POST", `/${enc(tessellation)}/_query`, query),
   }
 }

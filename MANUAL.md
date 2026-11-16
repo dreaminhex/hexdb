@@ -1919,6 +1919,8 @@ for await (const change of payloads()) {          // stream, logs and metrics pl
 await api().post("/orders", { total: 12 })         // plugins with [access]
 ```
 
+`api()` retries safely: every write carries an `Idempotency-Key`, the same on each try, so a write whose answer was lost (502, 503, a dropped connection, a timeout) is sent again and applied once. A 429 is retried for any request, honoring `Retry-After`. Pass your own key (`insert(tessellation, doc, key)`, or the header) to make a write safe to repeat across restarts too; a write sent with an empty `Idempotency-Key` header isn't retried after an uncertain answer.
+
 Any language works: read JSON lines from stdin, and use `HEXDB_API` and `HEXDB_API_KEY` for the API. Variables a plugin gets: `HEXDB_PLUGIN_ID`, `HEXDB_PLUGIN_TYPE`, `HEXDB_API`, `HEXDB_API_KEY` (with `[access]`), `HEXDB_PLUGIN_DATA` (its writable folder), plus its `[env]`. The SDK's `dataFile(name)`, `readState(name, fallback)` and `saveState(name, state)` keep JSON state there.
 
 ### Example plugins
