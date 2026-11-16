@@ -215,6 +215,8 @@ pub(crate) fn is_long_running(path: &str) -> bool {
 struct TrackedBody {
     inner: Option<axum::body::Body>,
     done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set once any of it was asked for: the handler meant to read it.
+    started: std::sync::Arc<std::sync::atomic::AtomicBool>,
     rest: std::sync::Arc<std::sync::Mutex<Option<axum::body::Body>>>,
 }
 
@@ -223,6 +225,7 @@ impl http_body::Body for TrackedBody {
     type Error = axum::Error;
 
     fn poll_frame(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        self.started.store(true, std::sync::atomic::Ordering::Relaxed);
         let Some(inner) = self.inner.as_mut() else { return std::task::Poll::Ready(None) };
         let polled = std::pin::Pin::new(inner).poll_frame(cx);
         if let std::task::Poll::Ready(None) = &polled {
@@ -253,27 +256,31 @@ impl Drop for TrackedBody {
 /// Most of an unread request body read (and dropped) to keep its connection usable.
 const DRAIN_LIMIT: usize = 32 * 1024 * 1024;
 /// Longest spent reading it.
-const DRAIN_TIME: Duration = Duration::from_secs(10);
+const DRAIN_TIME: Duration = Duration::from_secs(5);
 
-/// An answer given before its request's body was read (an upload refused at once: over a quota,
-/// not allowed): the rest of the body is read and dropped first (up to 32 MB, for 10 s), so the
-/// client finishes sending, reads the answer, and can use the connection again. A bigger or slower
-/// body ends the HTTP/1 connection instead, and the answer says so (`Connection: close`) so the
-/// client doesn't put it back in its pool and lose its next request on it.
+/// An answer given without reading its request's body at all (an upload refused at once: over a
+/// quota, not allowed): the body is read and dropped first (up to 32 MB, for 5 s), so the client
+/// finishes sending, reads the answer, and can use the connection again. A bigger or slower body,
+/// or one a handler began to read and gave up on (a request timeout, a client sending too slowly),
+/// ends the HTTP/1 connection instead, and the answer says so (`Connection: close`) so the client
+/// doesn't put it back in its pool and lose its next request on it.
 pub async fn drain_unread(request: Request, next: Next) -> Response {
     use http_body::Body as _;
     if request.version() > axum::http::Version::HTTP_11 || request.body().is_end_stream() {
         return next.run(request).await;
     }
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let rest = std::sync::Arc::new(std::sync::Mutex::new(None));
     let (parts, body) = request.into_parts();
-    let tracked = axum::body::Body::new(TrackedBody { inner: Some(body), done: done.clone(), rest: rest.clone() });
+    let tracked = axum::body::Body::new(TrackedBody { inner: Some(body), done: done.clone(), started: started.clone(), rest: rest.clone() });
     let mut response = next.run(Request::from_parts(parts, tracked)).await;
     if done.load(std::sync::atomic::Ordering::Relaxed) {
         return response;
     }
     let unread = rest.lock().ok().and_then(|mut r| r.take());
+    // A body a handler began to read and gave up on may never arrive: don't wait for it.
+    let unread = unread.filter(|_| !started.load(std::sync::atomic::Ordering::Relaxed));
     let drained = match unread {
         Some(body) => matches!(tokio::time::timeout(DRAIN_TIME, axum::body::to_bytes(body, DRAIN_LIMIT)).await, Ok(Ok(_))),
         // Still held somewhere (a task that outlives the request): don't wait for it.

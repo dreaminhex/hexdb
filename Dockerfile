@@ -80,6 +80,7 @@ RUN apt-get update \
  && mkdir -p /var/lib/hexdb /etc/hexdb \
  && chown hexdb:hexdb /var/lib/hexdb
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/LICENSE /usr/share/doc/nodejs/LICENSE
 COPY --from=binaries /usr/local/bin/ /usr/local/bin/
 COPY --from=binaries /usr/share/hexdb/ui /usr/share/hexdb/ui
 COPY docker/hexdb.toml /etc/hexdb/hexdb.toml

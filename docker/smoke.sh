@@ -6,7 +6,7 @@ set -eu
 image="$1"
 run() { docker run --rm --entrypoint sh "$image" -c "$1"; }
 
-run 'hexdb_api --version && test -x /usr/local/bin/hexdb && ffmpeg -hide_banner -version | head -1 && tesseract --version | head -1'
+run 'hexdb_api --version && test -x /usr/local/bin/hexdb && test -s /usr/share/doc/nodejs/LICENSE && ffmpeg -hide_banner -version | head -1 && tesseract --version | head -1'
 run 'python3 -c "import json, sys; print(json.dumps({\"python\": sys.version.split()[0]}))"'
 run 'node -e "console.log(JSON.stringify({ node: process.version }))"'
 # TypeScript functions need type stripping (Node.js 22.6 or later).

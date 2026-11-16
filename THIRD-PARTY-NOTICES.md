@@ -39,6 +39,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 The image (`Dockerfile`) also carries programs HexDB runs, each as a separate process, never linked into HexDB:
 
 - **FFmpeg** (https://ffmpeg.org), for thumbnails of HEIC and AVIF photos and of HEVC, VP9 and AV1 video. It is licensed under the GNU Lesser General Public License, version 2.1 or later; the license text is in the image at `/usr/share/doc/ffmpeg/COPYING.LGPLv2.1`. It is built by `docker/build-ffmpeg.sh` from Debian trixie's `ffmpeg` source package (`apt-get source ffmpeg`, also at https://sources.debian.org/src/ffmpeg/), without `--enable-gpl` or `--enable-nonfree` and with only the components that script lists; running the script builds it again. It uses dav1d (BSD 2-clause) for AV1, from Debian's `libdav1d7` package.
+- **Node.js** (https://nodejs.org), for JavaScript and TypeScript functions and process plugins: the `node` program from the official `node:24` image, under the MIT license, with the licenses of the components it bundles in the same file, in the image at `/usr/share/doc/nodejs/LICENSE`. (Before 2.5.6 the image used Debian's `nodejs` package.)
+- **Python** 3 (https://www.python.org), for Python functions and plugins, from Debian's `python3` package, under the Python Software Foundation License.
 - **Tesseract OCR** (https://github.com/tesseract-ocr/tesseract), Apache License 2.0, with its English language data, from Debian's `tesseract-ocr` and `tesseract-ocr-eng` packages.
 
 Debian packages keep their copyright and license files under `/usr/share/doc/<package>/` in the image.
