@@ -18,11 +18,19 @@ pub fn run(policy: &Policy, program: &Path, args: &[String]) -> Result<i32> {
         bail!("PR_SET_NO_NEW_PRIVS failed");
     }
     if !landlock::apply(policy, program)? {
+        if policy.require_filesystem {
+            bail!("refused to start: this kernel has no Landlock (Linux 5.13 or later), so its file access can't be restricted (plugins.require_full_sandbox is on)");
+        }
         eprintln!("sandbox: this kernel has no Landlock (Linux 5.13 or later), so file access isn't restricted");
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
     seccomp::apply(policy)?;
     exec(program, args)
+}
+
+/// The kernel's Landlock ABI version (0 or less: no Landlock).
+pub fn landlock_abi() -> i64 {
+    landlock::abi()
 }
 
 /// Add `root` (or, if a denied path is inside it, its other children) to `rules`.
@@ -74,6 +82,12 @@ mod landlock {
     struct PathBeneathAttr {
         allowed_access: u64,
         parent_fd: i32,
+    }
+
+    /// The kernel's Landlock ABI version (0 or less: none). Changes nothing.
+    pub fn abi() -> i64 {
+        // SAFETY: the version query takes no pointers.
+        unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, std::ptr::null::<RulesetAttr>(), 0usize, CREATE_RULESET_VERSION) as i64 }
     }
 
     /// Restrict this process's file access. False if the kernel has no Landlock.

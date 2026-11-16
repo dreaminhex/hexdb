@@ -2106,6 +2106,9 @@ pub async fn plugins(State(engine): Engine, Auth(principal): Auth) -> ApiResult 
         "plugins": engine.plugins.list(),
         "registry": hexdb_core::plugins::registry_path(&engine).display().to_string(),
         "enabled": engine.config.plugins.enabled,
+        // What the sandbox actually enforces on this hex, and whether plugins refuse to run with less.
+        "sandbox": hexdb_core::sandbox::capability(),
+        "require_full_sandbox": engine.config.plugins.require_full_sandbox,
     }))
     .into_response())
 }

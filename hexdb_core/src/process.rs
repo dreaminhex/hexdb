@@ -60,6 +60,37 @@ pub fn kill_group(pid: u32) {
     let _ = pid;
 }
 
+/// A job object of its own for one process and everything it starts (Windows):
+/// dropping it kills them all. Elsewhere it does nothing (see `own_group`).
+pub struct RunJob {
+    #[cfg(windows)]
+    handle: usize,
+}
+
+impl RunJob {
+    /// A job for `child` (which may already be in the server's job: jobs nest).
+    pub fn for_child(child: &tokio::process::Child) -> Option<RunJob> {
+        #[cfg(windows)]
+        {
+            let handle = windows_job::new_kill_on_close()?;
+            let job = RunJob { handle };
+            windows_job::assign(handle, child).then_some(job)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            None
+        }
+    }
+}
+
+impl Drop for RunJob {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        windows_job::close(self.handle);
+    }
+}
+
 /// Attach a started process to the server's job (Windows; a no-op elsewhere).
 pub fn adopt(child: &tokio::process::Child) {
     #[cfg(windows)]
@@ -79,6 +110,46 @@ mod windows_job {
     /// The job handle, as an integer so it can live in a static. Never closed:
     /// it closes when the server exits, which kills the job's processes.
     static JOB: OnceLock<usize> = OnceLock::new();
+
+    /// A new job that kills its processes when its last handle closes.
+    pub fn new_kill_on_close() -> Option<usize> {
+        // SAFETY: plain Win32 calls with valid arguments; failures return null/0.
+        let handle = unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+                return None;
+            }
+            job as usize
+        };
+        Some(handle)
+    }
+
+    /// Put a process in a job. False if it couldn't.
+    pub fn assign(job: usize, child: &tokio::process::Child) -> bool {
+        let Some(process) = child.raw_handle() else { return false };
+        // SAFETY: both handles are valid for the duration of the call.
+        unsafe { AssignProcessToJobObject(job as *mut core::ffi::c_void, process) != 0 }
+    }
+
+    /// Close a job's handle (killing its processes, for a kill-on-close job).
+    pub fn close(job: usize) {
+        // SAFETY: the handle is ours and closed once.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(job as *mut core::ffi::c_void);
+        }
+    }
 
     fn job() -> Option<usize> {
         let handle = *JOB.get_or_init(|| {

@@ -269,3 +269,20 @@ fn review255_script_timeout_includes_stdin_delivery() -> Result<()> {
     }
     Ok(())
 }
+
+/// A script stopped at its timeout takes the processes it started with it (a process group
+/// on Unix, a job object on Windows), so nothing it began carries on after the run.
+#[test]
+fn review255_timed_out_script_children_are_stopped() -> Result<()> {
+    let s = TestServer::start()?;
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("child-survived.txt");
+    let code = "import sys,json,subprocess,time\np=json.load(sys.stdin)['params']['path']\nsubprocess.Popen([sys.executable,'-c','import time,sys; time.sleep(4); open(sys.argv[1],\"w\").write(\"x\")',p])\ntime.sleep(30)";
+    let r = s.request(Method::POST, "/functions", Some(&json!({"name":"spawner","kind":"script","runtime":"python","code":code,"timeout_seconds":2,"params":[{"name":"path","type":"string","required":true}]})), &[])?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let r = s.request(Method::POST, "/functions/spawner/run", Some(&json!({"params":{"path":marker}})), &[])?;
+    assert!(r.body.to_string().contains("didn't finish"), "{}", r.body);
+    std::thread::sleep(std::time::Duration::from_secs(6));
+    assert!(!marker.exists(), "A process the timed-out script started kept running and wrote its file");
+    Ok(())
+}

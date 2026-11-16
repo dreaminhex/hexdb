@@ -376,6 +376,14 @@ pub fn spawn_plugins(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>)
         info!("🧩 Plugins are disabled (plugins.enabled = false).");
         return;
     }
+    let sandbox = crate::sandbox::capability();
+    if sandbox.filesystem {
+        info!("🧩 Plugin sandbox: {} ({}).", sandbox.isolation, sandbox.detail);
+    } else if engine.config.plugins.require_full_sandbox {
+        warn!("⚠️ Plugin sandbox: {}. Sandboxed plugins won't start (plugins.require_full_sandbox).", sandbox.detail);
+    } else {
+        warn!("⚠️ Plugin sandbox: {} Set plugins.require_full_sandbox = true to refuse to run plugins like this.", sandbox.detail);
+    }
     let path = registry_path(&engine);
     if path.exists() {
         if let Err(e) = check_permissions(&path) {
@@ -546,6 +554,7 @@ fn sandbox_policy(engine: &HexDBEngine, manifest: &Manifest, dir: &Path) -> Resu
         write: write.into_iter().chain([data_dir(engine, manifest)]).collect(),
         deny,
         network: manifest.sandbox.network || manifest.access.is_some(),
+        require_filesystem: engine.config.plugins.require_full_sandbox,
         memory_mb: manifest.sandbox.memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
         cpu_seconds: 0,
         max_processes: 0,

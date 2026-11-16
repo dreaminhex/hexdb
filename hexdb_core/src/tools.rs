@@ -153,6 +153,7 @@ impl Tool {
             memory_mb: MEMORY_MB,
             cpu_seconds: timeout.as_secs().max(1) * 2,
             max_processes: 1,
+            require_filesystem: false,
         }
     }
 

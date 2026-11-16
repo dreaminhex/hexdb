@@ -563,7 +563,7 @@ impl HexDBEngine {
         // Inside a trigger, the session is marked so the script's writes don't fire triggers.
         let expires = Utc::now().timestamp() + def.timeout_seconds as i64 + 60;
         let (token, claims) = crate::auth::issue_session_until(&self.config.session_key()?, &principal.user_id, expires, crate::access::current_trigger());
-        let mut run = ScriptRun { engine: self, dir: dir.clone(), sid: claims.sid.clone(), exp: claims.exp, child: None, finished: false };
+        let mut run = ScriptRun { engine: self, dir: dir.clone(), sid: claims.sid.clone(), exp: claims.exp, child: None, job: None, finished: false };
         std::fs::write(dir.join(file), code)?;
         let scheme = if self.config.tls.enabled() { "https" } else { "http" };
         let mut command = tokio::process::Command::new(&program);
@@ -593,6 +593,8 @@ impl HexDBEngine {
         let result = async {
             let child = command.spawn().with_context(|| format!("couldn't start {} (set functions.{} in hexdb.toml)", program, if runtime == "python" { "python" } else { "node" }))?;
             crate::process::adopt(&child);
+            // Windows: a job of its own, so whatever the script starts dies with the run.
+            run.job = crate::process::RunJob::for_child(&child);
             let child = run.child.insert(child);
             let mut input = json!({ "params": params, "function": def.name, "caller": principal.login });
             if let Some((name, value)) = &context {
@@ -801,6 +803,8 @@ struct ScriptRun<'a> {
     exp: i64,
     /// The script's process, once started.
     child: Option<tokio::process::Child>,
+    /// Windows: the run's job; dropped with the run, it stops every process the script started.
+    job: Option<crate::process::RunJob>,
     finished: bool,
 }
 

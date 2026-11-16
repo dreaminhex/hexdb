@@ -1699,7 +1699,7 @@ The body references a parameter as `{"$param": "name"}`, anywhere in the JSON. H
 
 **Environment.** It gets `HEXDB_API` (the server's URL) and `HEXDB_TOKEN`, a session of the user who ran it. The session expires a minute after `timeout_seconds` and is revoked when the script ends, however it ends: finished, failed, timed out, or the request that ran it gone (a request timeout, a client that disconnected). The script runs in a clean environment in a temporary folder only the server's user can open, removed when it ends.
 
-**Timeout.** It's stopped after `timeout_seconds`, counted from its start and covering its input, its output and its exit, so a script that never reads its input or writes before reading can't hold on longer. On Linux and macOS the script runs in a process group of its own, and the whole group is stopped. If the server exits, the script dies with it.
+**Timeout.** It's stopped after `timeout_seconds`, counted from its start and covering its input, its output and its exit, so a script that never reads its input or writes before reading can't hold on longer. On Linux and macOS the script runs in a process group of its own, and the whole group is stopped; on Windows it runs in a job object of its own, closed when the run ends, which stops everything it started. If the server exits, the script dies with it.
 
 **Runtimes:**
 - `python` runs the `python` (Windows) or `python3` interpreter.
@@ -1895,6 +1895,13 @@ What the sandbox enforces depends on the platform:
 - **Linux.** Landlock confines the file system: `/usr`, `/lib`, `/bin`, `/etc`, `/proc`, `/sys` and `/dev` are readable, but HexDB's own config files and data stay out even when they're inside those folders. The command's folder and the folders granted above are also allowed. A seccomp filter refuses sockets without `network`; with it, only IPv4, IPv6 and netlink are allowed, never Unix sockets. The filter also refuses signals to other processes (so a plugin can't stop its own child processes either), ptrace, io_uring, mounts, namespaces, BPF, keyrings and kernel modules. The memory limit is an rlimit, and the plugin can't gain privileges. Kernels older than 5.13 have no Landlock: the plugin gets everything else, and its log says file access isn't restricted. Linux 6.12 and later also scope signals and abstract sockets through Landlock.
 - **Windows.** The plugin runs in an AppContainer named `HexDB.Plugin.<id>`. It can read only what every AppContainer can (Windows, Program Files) plus the folders HexDB grants it. HexDB grants them by adding the container to their ACLs the first time. With `network` it gets the internet and private-network capabilities. Windows keeps AppContainers off localhost, which includes the HexDB API, until an administrator exempts them. HexDB does this itself when it runs as an administrator or as the service. Otherwise the plugin's log gives the command: `CheckNetIsolation.exe LoopbackExempt -a -n=HexDB.Plugin.<id>`. A job object holds the memory limit. The command must be an `.exe` (`node`, `python`), not a `.cmd` or `.bat` script.
 - **macOS.** Only the memory limit.
+
+What a hex actually enforces is probed when it starts, not assumed: `GET /plugins` shows it under `sandbox` (`isolation`, whether `filesystem` and `network` access are restricted, and why), and the log says so at startup. To refuse to run plugins where file access can't be restricted (a Linux kernel without Landlock, macOS) rather than run them with less, set:
+
+```toml
+[plugins]
+require_full_sandbox = true   # sandboxed plugins don't start without file-system confinement
+```
 
 Things that change for plugins written before 2.5:
 - Keep state in `HEXDB_PLUGIN_DATA`, not the plugin's folder. The SDK's `readState`/`saveState` do this, and they still read a state file left in the folder by an older version.

@@ -706,11 +706,15 @@ pub struct PluginsConfig {
     /// (the working directory when there's no config file).
     #[serde(default = "default_registry")]
     pub registry: String,
+    /// Refuse to start a sandboxed plugin on a host that can't restrict its file
+    /// access (Linux without Landlock, macOS) instead of starting it with less.
+    #[serde(default)]
+    pub require_full_sandbox: bool,
 }
 
 impl Default for PluginsConfig {
     fn default() -> Self {
-        PluginsConfig { enabled: true, registry: default_registry() }
+        PluginsConfig { enabled: true, registry: default_registry(), require_full_sandbox: false }
     }
 }
 

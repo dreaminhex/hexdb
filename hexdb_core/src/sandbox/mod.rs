@@ -32,6 +32,12 @@
 //     job object holds the limits and kills the program with the launcher.
 //   * macOS: rlimits only.
 //
+// What a host can actually enforce is probed, not assumed (`capability`): a
+// Linux kernel without Landlock restricts system calls but not files. Plugins
+// show it, and with `plugins.require_full_sandbox` a policy's
+// `require_filesystem` makes the launcher refuse to start a program it can't
+// keep to its folders, instead of starting it with less.
+//
 // The Linux parser worker doesn't use this: it is HexDB's own code, so it
 // restricts itself more tightly (see `extract::sandbox`).
 
@@ -73,6 +79,56 @@ pub struct Policy {
     /// Processes it may run at once, itself included (0: no limit; Windows only).
     #[serde(default)]
     pub max_processes: u32,
+    /// Refuse to start the program where its file access can't be restricted
+    /// (Linux without Landlock, macOS) rather than start it with less.
+    #[serde(default)]
+    pub require_filesystem: bool,
+}
+
+/// What the sandbox enforces on this host, probed once.
+#[derive(Debug, Clone, Serialize)]
+pub struct Capability {
+    /// "landlock+seccomp", "seccomp" (Linux without Landlock), "appcontainer" or "rlimits".
+    pub isolation: &'static str,
+    /// Whether a sandboxed program's file access is limited to what its policy grants.
+    pub filesystem: bool,
+    /// Whether network access is refused unless granted.
+    pub network: bool,
+    pub detail: String,
+}
+
+/// What the sandbox enforces on this host (probed once; see the module comment).
+pub fn capability() -> &'static Capability {
+    static PROBED: OnceLock<Capability> = OnceLock::new();
+    PROBED.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        {
+            let abi = linux::landlock_abi();
+            if abi >= 1 {
+                Capability { isolation: "landlock+seccomp", filesystem: true, network: true, detail: format!("Landlock ABI {}, seccomp, rlimits", abi) }
+            } else {
+                Capability {
+                    isolation: "seccomp",
+                    filesystem: false,
+                    network: true,
+                    detail: "This kernel has no Landlock (Linux 5.13 or later): sandboxed programs can read and write whatever the server's user can. Seccomp and rlimits still apply.".into(),
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            Capability { isolation: "appcontainer", filesystem: true, network: true, detail: "AppContainer, job object limits".into() }
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            Capability {
+                isolation: "rlimits",
+                filesystem: false,
+                network: false,
+                detail: "Only resource limits: sandboxed programs can use whatever the server's user can.".into(),
+            }
+        }
+    })
 }
 
 static LAUNCHER: OnceLock<PathBuf> = OnceLock::new();
@@ -87,15 +143,9 @@ pub fn launcher() -> Option<&'static Path> {
     LAUNCHER.get().map(PathBuf::as_path)
 }
 
-/// How much isolation this platform gives, for status pages.
+/// How much isolation this host gives, for status pages (see `capability`).
 pub fn isolation() -> &'static str {
-    if cfg!(target_os = "linux") {
-        "landlock+seccomp"
-    } else if cfg!(windows) {
-        "appcontainer"
-    } else {
-        "rlimits"
-    }
+    capability().isolation
 }
 
 /// A name usable as a sandbox (AppContainer) name: "HexDB.<prefix>.<cleaned>".
@@ -219,6 +269,9 @@ fn exec(program: &Path, args: &[String]) -> anyhow::Result<i32> {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn unix_rlimits_then_exec(policy: &Policy, program: &Path, args: &[String]) -> anyhow::Result<i32> {
+    if policy.require_filesystem {
+        anyhow::bail!("refused to start: this system can't restrict its file access (plugins.require_full_sandbox is on)");
+    }
     set_rlimits(policy);
     exec(program, args)
 }
