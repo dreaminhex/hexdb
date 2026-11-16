@@ -63,13 +63,13 @@ jobs:
   ui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
       - run: npm ci && npm run build
         working-directory: hexdb_admin
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ui
           path: hexdb_admin/dist
@@ -87,17 +87,18 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ui
           path: ui
       # Linux builds link against glibc 2.28 (through zig), so they run on Ubuntu
       # 20.04+, Debian 10+ and RHEL 8+, not only on the runner's own glibc.
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         if: contains(matrix.target, 'linux')
         with:
           python-version: "3.12"
@@ -133,7 +134,7 @@ jobs:
             *) cp "target/$TARGET/release/libhexdb_odbc.so" "$name/odbc/" ;;
           esac
           if [ "$ARCHIVE" = zip ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: bin-${{ matrix.target }}
           path: hexdb-*.${{ matrix.archive }}
@@ -142,8 +143,8 @@ jobs:
     needs: binaries
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: bin-x86_64-pc-windows-msvc
           path: dl
@@ -156,7 +157,7 @@ jobs:
           Expand-Archive (Get-ChildItem dl\*.zip | Select-Object -First 1).FullName -DestinationPath stage
           $dir = (Get-ChildItem stage -Directory | Select-Object -First 1).FullName
           ./packaging/windows/build-msi.ps1 -Version $env:GITHUB_REF_NAME -StageDir $dir -Out hexdb-windows-x64.msi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: msi
           path: hexdb-windows-x64.msi
@@ -168,8 +169,8 @@ jobs:
       MACOS_CERTS_P12: ${{ secrets.MACOS_CERTS_P12 }}
       MACOS_CERTS_PASSWORD: ${{ secrets.MACOS_CERTS_PASSWORD }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: bin-*-apple-darwin
           path: dl
@@ -198,7 +199,7 @@ jobs:
           arm="dl/hexdb-${GITHUB_REF_NAME}-aarch64-apple-darwin"
           intel="dl/hexdb-${GITHUB_REF_NAME}-x86_64-apple-darwin"
           bash packaging/macos/build-dmg.sh "$GITHUB_REF_NAME" "$arm" "$intel" hexdb-macos-universal.dmg
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dmg
           path: hexdb-macos-universal.dmg
@@ -213,14 +214,15 @@ jobs:
           - { os: ubuntu-24.04-arm, arch: arm64, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ui
           path: hexdb_admin/dist
@@ -232,7 +234,7 @@ jobs:
           pip install cargo-zigbuild ziglang
           cargo zigbuild --locked --release --target "$TARGET.2.28" -p hexdb_api -p hexdb_cli -p hexdb_odbc
           cargo deb -p hexdb_api --no-build --target "$TARGET"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: deb-${{ matrix.arch }}
           path: target/debian/*.deb
@@ -241,14 +243,14 @@ jobs:
   jdbc:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: "21"
       - name: Build the JDBC driver
         run: mvn -B -f drivers/java package -DskipTests
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: jdbc
           path: drivers/java/target/hexdb-jdbc-*.jar
@@ -258,7 +260,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # For the release notes (packaging/release-notes/<tag>.md, if there is one).
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           sparse-checkout: packaging/release-notes
       - name: Release notes
@@ -266,31 +268,31 @@ jobs:
           notes="packaging/release-notes/${GITHUB_REF_NAME}.md"
           if [ -f "$notes" ]; then cp "$notes" release-notes.md; else : > release-notes.md; fi
       # Only the release files: the ui artifact is an input, not a download.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: bin-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: deb-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: msi
           path: dist
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dmg
           path: dist
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: jdbc
           path: dist
       - name: Checksums
         run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           files: dist/*
           # The notes go above the generated list of changes.
@@ -306,10 +308,10 @@ jobs:
           - { arch: arm64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Build
         run: docker run --rm -v "$PWD/docker:/scripts:ro" -v "$PWD/out:/out" debian:trixie bash /scripts/build-ffmpeg.sh /out
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ffmpeg-${{ matrix.arch }}
           path: out/
@@ -322,13 +324,18 @@ jobs:
     needs: [verify, binaries, ffmpeg]
     if: ${{ !cancelled() && needs.verify.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Keyless signing (cosign) with this workflow's identity.
+      id-token: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: bin-*-linux-gnu
           path: artifacts
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: ffmpeg-*
           path: artifacts
@@ -343,9 +350,9 @@ jobs:
             [ -d prebuilt/ui ] || cp -r "artifacts/${name}/ui" prebuilt/ui
           done
           file prebuilt/*/hexdb_api
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -355,7 +362,7 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       # Before publishing: the amd64 image runs its programs and every script runtime,
       # and has no critical vulnerability with a fix available.
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64
@@ -365,13 +372,17 @@ jobs:
       - name: Smoke test
         run: sh docker/smoke.sh hexdb:smoke
       - name: Scan
-        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress hexdb:smoke
-      - uses: docker/build-push-action@v7
+        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2 image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress hexdb:smoke
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        id: push
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           build-args: BINARIES=prebuilt
           push: true
+          # An SBOM and build provenance (SLSA) attached to the image.
+          sbom: true
+          provenance: mode=max
           tags: |
             ghcr.io/${{ github.repository_owner }}/hexdb:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/hexdb:${{ steps.tags.outputs.version }}
@@ -381,6 +392,11 @@ jobs:
             org.opencontainers.image.description=HexDB: a document database with REST, GraphQL, SQL, replication and an admin UI
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+      # Signed by digest, keyless (Sigstore, this workflow's GitHub identity). Check with:
+      #   cosign verify ghcr.io/<owner>/hexdb@<digest> --certificate-identity-regexp 'https://github.com/<owner>/hexdb/' --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Sign the image
+        run: cosign sign --yes "ghcr.io/${{ github.repository_owner }}/hexdb@${{ steps.push.outputs.digest }}"
 
   docker-hub:
     # The image built above, copied to Docker Hub (see docker-hub.yml, which can also be run by hand).
@@ -413,7 +429,7 @@ jobs:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: env.HOMEBREW_TAP_TOKEN != ''
       - name: Update the formula in dreaminhex/homebrew-hexdb
         if: env.HOMEBREW_TAP_TOKEN != ''
@@ -446,7 +462,7 @@ jobs:
       CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: env.CHOCOLATEY_API_KEY != ''
       - name: Pack and push the Chocolatey package
         if: env.CHOCOLATEY_API_KEY != ''
@@ -472,7 +488,7 @@ jobs:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: env.WINGET_TOKEN != ''
       - name: Submit to microsoft/winget-pkgs
         if: env.WINGET_TOKEN != ''
@@ -516,9 +532,9 @@ jobs:
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: env.NODE_AUTH_TOKEN != ''
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         if: env.NODE_AUTH_TOKEN != ''
         with:
           node-version: 22
@@ -535,9 +551,9 @@ jobs:
       TWINE_USERNAME: __token__
       TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: env.TWINE_PASSWORD != ''
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         if: env.TWINE_PASSWORD != ''
         with:
           python-version: "3.12"
@@ -560,9 +576,9 @@ jobs:
       NUGET_USER: ${{ secrets.NUGET_USER }}
       NUGET_API_KEY: ${{ secrets.NUGET_API_KEY || secrets.NUGET_KEY }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: env.NUGET_USER != '' || env.NUGET_API_KEY != ''
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
         if: env.NUGET_USER != '' || env.NUGET_API_KEY != ''
         with:
           dotnet-version: |
@@ -571,7 +587,7 @@ jobs:
       - name: Sign in to NuGet with GitHub's identity token
         id: nuget-login
         if: env.NUGET_USER != ''
-        uses: NuGet/login@v1
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
         with:
           user: ${{ secrets.NUGET_USER }}
       - name: Publish HexDB.Client and HexDB.EntityFrameworkCore to NuGet
@@ -595,9 +611,9 @@ jobs:
       MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
       HAS_KEY: ${{ secrets.MAVEN_GPG_PRIVATE_KEY != '' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: env.MAVEN_CENTRAL_USERNAME != '' && env.HAS_KEY == 'true'
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         if: env.MAVEN_CENTRAL_USERNAME != '' && env.HAS_KEY == 'true'
         with:
           distribution: temurin
