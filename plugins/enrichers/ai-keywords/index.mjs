@@ -5,7 +5,7 @@
 // (including this plugin's own update) is skipped.
 import { createHash } from "node:crypto"
 
-import { api, log, main, payloads, warn } from "../../sdk/hexdb-plugin.mjs"
+import { ack, api, log, main, payloads, warn } from "../../sdk/hexdb-plugin.mjs"
 
 const env = process.env
 const fields = (env.TEXT_FIELDS || "title,body").split(",").map((f) => f.trim()).filter(Boolean)
@@ -39,12 +39,12 @@ await main(async () => {
   const hexdb = api()
   log(`adding ${keywordsField} from ${fields.join(", ")} with the lattice's AI provider`)
 
-  for await (const change of payloads()) {
-    if (change.op !== "put" || !change.document) continue
+  async function enrich(change) {
+    if (change.op !== "put" || !change.document) return
     const text = textOf(change.document)
-    if (!text) continue
+    if (!text) return
     const hash = createHash("sha256").update(text).digest("hex").slice(0, 16)
-    if (change.document[hashField] === hash) continue
+    if (change.document[hashField] === hash) return
     try {
       const found = await keywords(hexdb, text)
       await hexdb.patch(`/${encodeURIComponent(change.tessellation)}/${encodeURIComponent(change.id)}`, { [keywordsField]: found, [hashField]: hash })
@@ -52,5 +52,10 @@ await main(async () => {
       // A deleted document, or a failed call: log and go on with the next change.
       warn(`${change.tessellation}/${change.id}: ${e.message}`)
     }
+  }
+
+  for await (const change of payloads()) {
+    await enrich(change)
+    ack(change)
   }
 })

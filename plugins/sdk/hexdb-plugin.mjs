@@ -3,6 +3,7 @@
 //   import { payloads, api, log } from "../../sdk/hexdb-plugin.mjs"
 //
 //   for await (const change of payloads()) { ... }   // stream, logs and metrics plugins
+//   ack(change)                                         // stream plugins with acks = true
 //   await api().post("/orders", { total: 12 })          // plugins with [access] in plugin.toml
 //
 // HexDB starts the plugin in its folder with these environment variables:
@@ -49,6 +50,19 @@ export async function* payloads() {
   for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
     if (line.trim()) yield JSON.parse(line)
   }
+}
+
+/**
+ * Tell HexDB that a change (and every change before it) is safely at its destination.
+ * For stream plugins with `acks = true` in plugin.toml: HexDB saves the plugin's
+ * position only up to what it acknowledged, so after a crash or restart the plugin
+ * gets every unacknowledged change again (deduplicate on `seq`). Call it after the
+ * destination confirmed the write, in order; acknowledging a later change covers
+ * the earlier ones. Takes the change or its `seq`.
+ */
+export function ack(change) {
+  const seq = typeof change === "number" ? change : change?.seq
+  if (Number.isSafeInteger(seq)) process.stdout.write(`{"ack":${seq}}\n`)
 }
 
 /** Log a line (it shows up on the HexDB Logs page, tagged with the plugin id). */

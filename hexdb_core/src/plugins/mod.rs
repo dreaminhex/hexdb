@@ -138,6 +138,11 @@ pub struct Manifest {
     /// Only send changes to these tessellations (default: all user tessellations).
     #[serde(default)]
     pub tessellations: Vec<String>,
+    /// A stream plugin that acknowledges: it prints `{"ack": <seq>}` once every change up to
+    /// that sequence number is safely at its destination, and its position only moves to what
+    /// it acknowledged (see `run_once`).
+    #[serde(default)]
+    pub acks: bool,
     /// Extra environment variables for a process plugin.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -547,8 +552,15 @@ fn sandbox_policy(engine: &HexDBEngine, manifest: &Manifest, dir: &Path) -> Resu
     })
 }
 
-/// Start the plugin's process (if it has a command) with its environment.
-async fn start_process(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path, command: &Command) -> Result<tokio::process::Child> {
+/// Start the plugin's process (if it has a command) with its environment. With `acks`, its
+/// `{"ack": <seq>}` stdout lines go there instead of the log.
+async fn start_process(
+    engine: &Arc<HexDBEngine>,
+    manifest: &Manifest,
+    dir: &Path,
+    command: &Command,
+    acks: Option<tokio::sync::mpsc::UnboundedSender<u64>>,
+) -> Result<tokio::process::Child> {
     let id = &manifest.id;
     let args: Vec<String> = match command {
         Command::Args(args) => args.clone(),
@@ -633,6 +645,7 @@ async fn start_process(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Pat
     ] {
         if let Some(stream) = stream {
             let id = id.clone();
+            let acks = if is_err { None } else { acks.clone() };
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stream);
                 let mut line = Vec::new();
@@ -645,6 +658,10 @@ async fn start_process(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Pat
                     }
                     let text = String::from_utf8_lossy(&line);
                     let text = text.trim_end();
+                    if let (Some(acks), Some(seq)) = (&acks, parse_ack(text)) {
+                        let _ = acks.send(seq);
+                        continue;
+                    }
                     if is_err {
                         warn!(target: "hexdb_core::plugins", plugin = %id, "[{}] {}", id, text);
                     } else {
@@ -655,6 +672,16 @@ async fn start_process(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Pat
         }
     }
     Ok(child)
+}
+
+/// Most changes a stream plugin with `acks` may have unacknowledged; HexDB waits for acks beyond that.
+const MAX_UNACKED: usize = 10_000;
+
+/// An acknowledgement line from a stream plugin: `{"ack": <seq>}`.
+fn parse_ack(line: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let map = value.as_object().filter(|m| m.len() == 1)?;
+    map.get("ack")?.as_u64()
 }
 
 /// Saves a stream plugin's position at most once per SAVE_EVERY (and on the way out).
@@ -697,13 +724,28 @@ fn note_delivered(engine: &HexDBEngine, id: &str, batch: &feeds::Batch) {
 }
 
 /// Deliver until the plugin fails or this hex stops being the Overseer.
+///
+/// A stream plugin's saved position is where it starts again after a restart,
+/// so it moves only past changes known to be delivered:
+/// - with `acks`, to the last change the plugin acknowledged (`{"ack": <seq>}`
+///   on stdout, after its destination accepted everything up to it), so a
+///   plugin that fails gets every unacknowledged change again;
+/// - without, a change counts as delivered once the plugin has stayed up for
+///   a full SAVE_EVERY after it was written to its stdin, so one that fails
+///   right after reading (or before reading what's in the pipe) gets it again.
+///   A plugin that loses changes later than that needs `acks` for at-least-once.
+///
+/// Either way the position written to stdin is never saved when the plugin
+/// stops: the saved position is the delivered one.
 async fn run_once(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path) -> Result<()> {
     let id = manifest.id.clone();
     let mut feed = feeds::Feed::open(engine, manifest).await;
     let mut checkpoint = Checkpoint { saved: feed.position().unwrap_or_default(), at: std::time::Instant::now() };
 
     if let Some(command) = &manifest.command {
-        let mut child = start_process(engine, manifest, dir, command).await?;
+        let acks = manifest.acks && manifest.kind() == PluginKind::Stream;
+        let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let mut child = start_process(engine, manifest, dir, command, acks.then_some(ack_tx)).await?;
         let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
         if manifest.kind() == PluginKind::Source {
             // Sources receive nothing; closing stdin tells them so.
@@ -721,21 +763,41 @@ async fn run_once(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path) ->
                 }
             }
         }
+        // The position that's safe to save (see above), and what decides it: batches written
+        // and not yet acknowledged, oldest first, as (their last change's seq, the position
+        // after them, their changes); or, without acks, the position written by the last tick.
+        let mut safe = feed.position();
+        let mut inflight: std::collections::VecDeque<(Option<u64>, u64, usize)> = std::collections::VecDeque::new();
+        let mut unacked = 0usize;
+        let (mut written, mut written_at_tick) = (feed.position(), feed.position());
         let result: Result<()> = loop {
             tokio::select! {
                 status = child.wait() => {
                     let status = status?;
                     break Err(anyhow!("the process exited ({})", status));
                 }
+                Some(seq) = ack_rx.recv(), if acks => {
+                    while inflight.front().is_some_and(|(last, _, _)| last.is_none_or(|l| l <= seq)) {
+                        let (_, position, count) = inflight.pop_front().unwrap();
+                        safe = Some(position);
+                        unacked -= count;
+                    }
+                    checkpoint.save(engine, &id, safe, false).await;
+                }
                 _ = tokio::time::sleep(SAVE_EVERY) => {
-                    checkpoint.save(engine, &id, feed.position(), false).await;
+                    if !acks {
+                        // Written a full tick ago, and the plugin is still up.
+                        safe = written_at_tick;
+                        written_at_tick = written;
+                    }
+                    checkpoint.save(engine, &id, safe, false).await;
                     if !engine.is_writable() {
                         let _ = child.kill().await;
                         info!(plugin = %id, "🧩 Plugin '{}' paused: this hex is no longer the Overseer.", id);
                         break Ok(());
                     }
                 }
-                batch = feed.next_batch(engine, manifest, 1000) => {
+                batch = feed.next_batch(engine, manifest, 1000), if !acks || unacked < MAX_UNACKED => {
                     let Some(batch) = batch else { break Ok(()) };
                     if !engine.is_writable() {
                         let _ = child.kill().await;
@@ -757,11 +819,26 @@ async fn run_once(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path) ->
                     }
                     note_delivered(engine, &id, &batch);
                     note_skipped(engine, &id, &mut feed);
-                    checkpoint.save(engine, &id, batch.position, false).await;
+                    if let Some(position) = batch.position {
+                        if acks {
+                            let last = batch.payloads.iter().rev().find_map(|p| p["seq"].as_u64());
+                            if batch.payloads.is_empty() && inflight.is_empty() {
+                                // Nothing for the plugin, nothing waiting: past it at once.
+                                safe = Some(position);
+                            } else {
+                                inflight.push_back((last, position, batch.payloads.len()));
+                                unacked += batch.payloads.len();
+                            }
+                        } else {
+                            written = Some(position);
+                        }
+                    }
+                    checkpoint.save(engine, &id, safe, false).await;
                 }
             }
         };
-        checkpoint.save(engine, &id, feed.position(), true).await;
+        // Only the delivered position: what was written but not delivered comes again.
+        checkpoint.save(engine, &id, safe, true).await;
         return result;
     }
 

@@ -402,3 +402,52 @@ fn process_exists(pid: u32) -> bool {
         Path::new(&format!("/proc/{}", pid)).exists()
     }
 }
+
+/// A plugin that fails after reading changes it hasn't delivered gets them again
+/// after its restart (H255-06): with acks, however long after reading it fails;
+/// without, when it fails right away.
+#[test]
+fn process_plugins_get_undelivered_changes_again() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    let toml_path = |p: &Path| p.display().to_string().replace('\\', "/");
+    let echo = toml_path(Path::new(env!("CARGO_BIN_EXE_plugin_echo")));
+    let plugin =|name: &str, tess: &str, env: &str| -> Result<()> {
+        let out = toml_path(&root.join(format!("{}.ndjson", name)));
+        let marker = toml_path(&root.join(format!("{}.failed", name)));
+        write(
+            &root.join(format!("{}/plugin.toml", name)),
+            &format!(
+                "id = \"@test/{name}\"\nname = \"{name}\"\ncommand = ['{echo}']\ntessellations = [\"{tess}\"]\n{ack}[env]\nECHO_OUT = '{out}'\nECHO_FAIL_MARKER = '{marker}'\n{env}\n",
+                ack = if env.contains("ECHO_ACK") { "acks = true\n" } else { "" },
+            ),
+        )
+    };
+    // Acknowledging: fails 3 seconds after reading its second change (long after a pipe write would have counted).
+    plugin("acker", "acked", "ECHO_ACK = '1'\nECHO_FAIL_AT = '2'\nECHO_FAIL_DELAY_MS = '3000'")?;
+    // Not acknowledging: fails as soon as it reads its first change.
+    plugin("plain", "plain", "ECHO_FAIL_AT = '1'")?;
+    write(&root.join("plugins.json"), &json!({ "@test/acker": { "path": "./acker", "sandbox": false }, "@test/plain": { "path": "./plain", "sandbox": false } }).to_string())?;
+    let server = TestServer::start_with(TestOptions { extra_toml: format!("\n[plugins]\nregistry = '{}'\n", toml_path(&root.join("plugins.json"))), ..Default::default() })?;
+    let running = |id: &str| -> Result<bool> {
+        let list = server.request(Method::GET, "/plugins", None, &[])?;
+        Ok(list.body["plugins"].as_array().unwrap().iter().any(|p| p["id"] == id && p["state"] == "running"))
+    };
+    wait_until(Duration::from_secs(10), "plugins to start", || Ok(running("@test/acker")? && running("@test/plain")?))?;
+    let delivered = |name: &str| std::fs::read_to_string(root.join(format!("{}.ndjson", name))).unwrap_or_default();
+
+    let first = server.insert("acked", &json!({ "n": 1 }))?;
+    wait_until(Duration::from_secs(10), "the first acknowledged change", || Ok(delivered("acker").contains(&first)))?;
+    let second = server.insert("acked", &json!({ "n": 2 }))?;
+    let lost = server.insert("plain", &json!({ "job": "must-replay" }))?;
+    wait_until(Duration::from_secs(10), "both plugins to fail once", || Ok(root.join("acker.failed").exists() && root.join("plain.failed").exists()))?;
+    std::thread::sleep(Duration::from_secs(6));
+    let third = server.insert("acked", &json!({ "n": 3 }))?;
+    let sentinel = server.insert("plain", &json!({ "job": "sentinel" }))?;
+    wait_until(Duration::from_secs(30), "the restarted plugins", || Ok(delivered("acker").contains(&third) && delivered("plain").contains(&sentinel)))?;
+    assert!(delivered("acker").contains(&second), "The unacknowledged change was skipped after the plugin's restart:\n{}", delivered("acker"));
+    assert!(delivered("plain").contains(&lost), "Plugin cursor advanced despite process failure before delivery:\n{}", delivered("plain"));
+    // Acknowledged changes aren't sent again.
+    assert_eq!(delivered("acker").lines().filter(|l| l.contains(&first)).count(), 1, "{}", delivered("acker"));
+    Ok(())
+}

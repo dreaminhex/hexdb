@@ -10,6 +10,8 @@ type = "stream"
 version = "1.0.0"
 description = "Puts every change on a Kinesis data stream."
 command = ["node", "index.mjs"]
+# Acknowledges each batch once Kinesis accepted it; HexDB resends anything unacknowledged.
+acks = true
 
 [env]
 AWS_REGION = "us-east-1"

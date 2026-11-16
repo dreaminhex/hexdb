@@ -1,10 +1,11 @@
 // Kafka change data capture: one message per change, key = document ID,
 // value = the change JSON, headers op / seq / tessellation. Changes arrive
-// in order; each batch is sent before the next is read, so a crash resends at
-// most the last batch (HexDB delivers at least once: deduplicate on `seq`).
+// in order; each is acknowledged to HexDB once Kafka has accepted it (acks =
+// true in plugin.toml), so a crash or restart resends everything Kafka didn't
+// confirm (HexDB delivers at least once: deduplicate on `seq`).
 import { Kafka, logLevel } from "kafkajs"
 
-import { log, main, payloads } from "../../sdk/hexdb-plugin.mjs"
+import { ack, log, main, payloads } from "../../sdk/hexdb-plugin.mjs"
 
 const env = process.env
 const sasl = env.KAFKA_SASL_MECHANISM
@@ -36,5 +37,6 @@ await main(async () => {
         },
       ],
     })
+    ack(change)
   }
 })

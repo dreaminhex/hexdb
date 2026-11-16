@@ -19,6 +19,8 @@ type = "stream"
 version = "1.0.0"
 description = "Adds AI-extracted keywords and entities to documents, for full-text search."
 command = ["node", "index.mjs"]
+# Acknowledges each change once it is handled, so a restart picks up where it left off.
+acks = true
 tessellations = ["articles"]
 
 [access]

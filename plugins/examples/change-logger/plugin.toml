@@ -6,6 +6,8 @@ type = "stream"
 version = "2.5.5"
 description = "Prints a one-line summary of each change and appends the full change to changes.ndjson in its data folder."
 command = ["node", "change-logger.mjs"]
+# It acknowledges each change once it is in changes.ndjson, so a crash never skips one.
+acks = true
 # tessellations = ["orders"]   # only these tessellations (default: all user tessellations)
 
 # Process plugins run in a sandbox: they can read their own folder and write

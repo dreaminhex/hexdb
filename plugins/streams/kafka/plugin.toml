@@ -10,6 +10,8 @@ type = "stream"
 version = "1.0.0"
 description = "Produces every change to a Kafka topic."
 command = ["node", "index.mjs"]
+# Acknowledges each change once Kafka accepted it; HexDB resends anything unacknowledged.
+acks = true
 # tessellations = ["orders", "customers"]
 
 [env]

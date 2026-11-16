@@ -1813,6 +1813,7 @@ Plugins extend HexDB without changing it. Each is a folder with a `plugin.toml` 
 
 ```toml
 command = ["node", "index.mjs"]   # a process in the plugin folder: one JSON payload per line on stdin
+acks = true                       # stream plugins: it acknowledges deliveries (see Delivery guarantees)
 
 # or a webhook: payloads POSTed in batches as a JSON array
 [webhook]
@@ -1851,7 +1852,10 @@ With `[access]`, HexDB creates a user `plugin-<id>` holding exactly that role. I
 
 ### Delivery guarantees
 
-Stream plugins get at-least-once delivery.
+A plugin's saved position is where it starts again after a restart, so it only moves past changes known to be delivered.
+- **With `acks = true`** in plugin.toml, the plugin prints `{"ack": <seq>}` on stdout once its destination has accepted every change up to that `seq` (the SDK's `ack(change)` does this). The position moves only to what was acknowledged, so a plugin that fails, however long after reading a change, gets every unacknowledged change again. This is at-least-once delivery end to end. HexDB stops sending once 10,000 changes are unacknowledged, until acks catch up. The bundled Kafka, Kinesis, AI keywords and change-logger plugins acknowledge.
+- **Without acks**, a change counts as delivered once the plugin has stayed up for a full second after it was written to its stdin. A plugin that fails right after reading (or before reading what's still in the pipe) gets it again; one that loses a change later than that needs acks.
+- What was written to the plugin but not delivered is never saved as its position when it stops or fails.
 - Each plugin's position is saved in the `_plugin_cursors` system tessellation, about once a second and when it stops.
 - A restarted plugin continues from there, reading older changes from the change history.
 - A change may be delivered twice after a crash, so make consumers idempotent (use `seq`).

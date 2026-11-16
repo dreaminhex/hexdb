@@ -1,6 +1,8 @@
 // Example HexDB plugin. Each line on stdin is a change:
 //   {"seq", "timestamp", "op": "put" | "delete" | "drop_tessellation", "tessellation", "id", "document"}
-// Lines printed to stdout and stderr appear in the HexDB log (Logs page).
+// Lines printed to stdout and stderr appear in the HexDB log (Logs page), except
+// acknowledgements: with acks = true in plugin.toml, printing {"ack": <seq>} once a
+// change is safely stored tells HexDB it needn't send it (or anything before it) again.
 import { appendFileSync } from "node:fs"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
@@ -13,4 +15,5 @@ for await (const line of createInterface({ input: process.stdin })) {
   const change = JSON.parse(line)
   appendFileSync(out, line + "\n")
   console.log(`#${change.seq} ${change.op} ${change.tessellation}${change.id ? "/" + change.id : ""}`)
+  console.log(JSON.stringify({ ack: change.seq }))
 }
