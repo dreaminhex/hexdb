@@ -22,6 +22,21 @@
 // with an in-memory index of when each message is next ready, rebuilt from the
 // documents when a hex becomes the Overseer. Permissions use `queue:<name>` in
 // role grants: write to send, read to receive/ack/nack, manage to configure.
+//
+// The index never disagrees with the documents for long: a commit is visible
+// in the hex before it's durable, and a request can go away (a timeout, a
+// client gone) while it waits, after the write but before the index is
+// updated. So the index counts as unloaded from just before each write until
+// it's updated after it; an operation that never got there leaves it to be
+// rebuilt from the documents by the next one. A lease is checked against the
+// stored message before it's handed out, too.
+//
+// A move to the dead-letter queue is one commit (delete here, put there), so a
+// message is always in exactly one of the two. Dead-letter queues can't form a
+// cycle. De-duplication keys are documents in `_queue_dedupe` (replicated,
+// expiring after 5 minutes), written in the same commit as the message, so
+// they survive a restart or a new Overseer and only count once the message is
+// stored.
 
 use crate::engine::{EngineError, HexDBEngine};
 use anyhow::{bail, Result};
@@ -43,6 +58,13 @@ pub const MAX_WAIT_SECONDS: u64 = 20;
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
 /// How long a de-duplication key is remembered.
 const DEDUPE_MS: i64 = 5 * 60 * 1000;
+/// De-duplication keys: `{"queue", "key", "message", "at"}`, expiring after `DEDUPE_MS`.
+pub const DEDUPE_TESSELLATION: &str = "_queue_dedupe";
+
+fn dedupe_id(queue: &str, key: &str) -> Ulid {
+    let hash = blake3::derive_key("HexDB 2026 queue dedupe v1", format!("{}\u{0}{}", queue, key).as_bytes());
+    Ulid::from(u128::from_be_bytes(hash[..16].try_into().unwrap()))
+}
 
 pub fn messages_tessellation(queue: &str) -> String {
     format!("_queue_{}", queue)
@@ -172,8 +194,6 @@ struct QueueState {
     ready: BTreeSet<(i64, Ulid)>,
     /// When each message is next ready (to update `ready`).
     at: HashMap<Ulid, i64>,
-    /// Recent de-duplication keys -> when they were sent.
-    dedupe: HashMap<String, i64>,
 }
 
 /// Queue state on this hex.
@@ -182,6 +202,10 @@ pub struct Queues {
     states: Mutex<HashMap<String, Arc<tokio::sync::Mutex<QueueState>>>>,
     /// Wakes long-polling receivers when messages are sent or released.
     notify: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    /// Messages moved into a queue (its dead letters) since its index was loaded:
+    /// added to the index by its next operation, so a move never waits for the
+    /// dead-letter queue's own lock (two queues can be each other's target).
+    arrived: Mutex<HashMap<String, Vec<(i64, Ulid)>>>,
 }
 
 impl Queues {
@@ -196,6 +220,7 @@ impl Queues {
     /// Forget every queue's state (a new Overseer reloads it from the documents).
     pub fn reset(&self) {
         self.states.lock().unwrap().clear();
+        self.arrived.lock().unwrap().clear();
     }
 }
 
@@ -231,6 +256,17 @@ impl HexDBEngine {
         config.validate()?;
         if let Some(dead) = &config.dead_letter {
             self.queue_or_404(dead).await.map_err(|_| invalid(format!("The dead-letter queue '{}' doesn't exist; create it first.", dead)))?;
+            // Follow the chain of dead-letter queues: it must not lead back here.
+            let (mut next, mut seen) = (Some(dead.clone()), std::collections::HashSet::new());
+            while let Some(name) = next {
+                if name == config.name {
+                    bail!(invalid(format!("Dead-letter queues can't form a cycle: '{}' leads back to '{}'.", dead, config.name)));
+                }
+                if !seen.insert(name.clone()) {
+                    break;
+                }
+                next = self.get_queue(&name).await?.and_then(|q| q.dead_letter);
+            }
         }
         let existing = self.get_queue(&config.name).await?;
         match (&existing, create) {
@@ -262,14 +298,34 @@ impl HexDBEngine {
         self.delete_system_document(QUEUES_TESSELLATION, config_id(name)).await?;
         self.delete_tessellation_unchecked(&messages_tessellation(name)).await?;
         self.queues.states.lock().unwrap().remove(name);
+        self.queues.arrived.lock().unwrap().remove(name);
+        // Its de-duplication keys, so a new queue of this name starts afresh.
+        if self.tessellation_exists(DEDUPE_TESSELLATION) {
+            let page = self.list_documents(DEDUPE_TESSELLATION, None, usize::MAX).await?;
+            let ids: Vec<(String, Ulid)> = page.documents.iter().filter(|d| d.data_json()["queue"] == name).map(|d| (DEDUPE_TESSELLATION.to_string(), d.id)).collect();
+            if !ids.is_empty() {
+                self.commit_system(Vec::new(), ids).await?;
+            }
+        }
         Ok(true)
     }
 
     /// Load a queue's index from its documents (once per Overseer term).
     async fn load_queue(&self, name: &str, state: &mut QueueState) -> Result<()> {
-        if state.loaded {
-            return Ok(());
+        if !state.loaded {
+            self.reload_queue(name, state).await?;
         }
+        // Taken after reading the documents, so a move whose commit the read missed is still added.
+        let arrived = self.queues.arrived.lock().unwrap().remove(name).unwrap_or_default();
+        for (at, id) in arrived {
+            if !state.at.contains_key(&id) {
+                Self::set_ready(state, id, Some(at));
+            }
+        }
+        Ok(())
+    }
+
+    async fn reload_queue(&self, name: &str, state: &mut QueueState) -> Result<()> {
         state.ready.clear();
         state.at.clear();
         let tess = messages_tessellation(name);
@@ -332,22 +388,33 @@ impl HexDBEngine {
         let mut state = state.lock().await;
         self.load_queue(name, &mut state).await?;
         let now = now_ms();
-        state.dedupe.retain(|_, at| now - *at < DEDUPE_MS);
         let mut ids = Vec::with_capacity(messages.len());
+        // Unloaded until the index is updated below (see the module comment).
+        state.loaded = false;
         for m in messages {
+            let id = self.stream_ids.lock().unwrap().generate().unwrap_or_else(|_| Ulid::generate());
+            let stored = Stored { body: m.body, sent_at: now, sent_by: by.to_string(), ready_at: now + m.delay_seconds as i64 * 1000, lease: None, receives: 0, dead_from: None };
+            let ttl = stored.sent_at + config.retention_hours as i64 * 3_600_000;
+            let mut docs = vec![crate::document::Document { id, tessellation: tess.clone(), data: crate::document::infer_fields_from_json(&serde_json::to_value(&stored)?), ttl: Some(ttl) }];
             if let Some(key) = &m.dedupe_key {
-                if state.dedupe.contains_key(key) {
+                if self.seen_dedupe_key(name, key, now).await? {
                     ids.push(None);
                     continue;
                 }
-                state.dedupe.insert(key.clone(), now);
+                // Stored with the message, so the key counts only if the message does.
+                let data = json!({ "queue": name, "key": key, "message": id.to_string(), "at": now });
+                docs.push(crate::document::Document {
+                    id: dedupe_id(name, key),
+                    tessellation: DEDUPE_TESSELLATION.to_string(),
+                    data: crate::document::infer_fields_from_json(&data),
+                    ttl: Some(now + DEDUPE_MS),
+                });
             }
-            let id = self.stream_ids.lock().unwrap().generate().unwrap_or_else(|_| Ulid::generate());
-            let stored = Stored { body: m.body, sent_at: now, sent_by: by.to_string(), ready_at: now + m.delay_seconds as i64 * 1000, lease: None, receives: 0, dead_from: None };
-            self.put_message(&tess, id, &stored, config.retention_hours).await?;
+            self.commit_system(docs, Vec::new()).await?;
             Self::set_ready(&mut state, id, Some(stored.ready_at));
             ids.push(Some(id.to_string()));
         }
+        state.loaded = true;
         drop(state);
         self.queues.notifier(name).notify_waiters();
         Ok(ids)
@@ -374,6 +441,16 @@ impl HexDBEngine {
         }
     }
 
+    /// True if `key` was sent to this queue in the last 5 minutes.
+    async fn seen_dedupe_key(&self, name: &str, key: &str, now: i64) -> Result<bool> {
+        if !self.tessellation_exists(DEDUPE_TESSELLATION) {
+            return Ok(false);
+        }
+        let Some(doc) = self.get_system_document(DEDUPE_TESSELLATION, dedupe_id(name, key)).await? else { return Ok(false) };
+        let data = doc.data_json();
+        Ok(data["queue"] == name && data["key"] == key && data["at"].as_i64().is_some_and(|at| now - at < DEDUPE_MS))
+    }
+
     async fn next_ready_in(&self, name: &str) -> Option<Duration> {
         let state = self.queues.state(name);
         let state = state.lock().await;
@@ -389,6 +466,8 @@ impl HexDBEngine {
         let now = now_ms();
         let due: Vec<Ulid> = state.ready.iter().take_while(|(at, _)| *at <= now).map(|(_, id)| *id).collect();
         let mut out = Vec::new();
+        // Unloaded until the index is updated below (see the module comment).
+        state.loaded = false;
         for id in due {
             if out.len() >= max {
                 break;
@@ -402,6 +481,11 @@ impl HexDBEngine {
                 Self::set_ready(&mut state, id, None);
                 continue;
             };
+            // The stored message decides: leased or delayed after all, it waits.
+            if stored.ready_at > now {
+                Self::set_ready(&mut state, id, Some(stored.ready_at));
+                continue;
+            }
             // Received too often without an ack: off to the dead-letter queue.
             if stored.receives >= config.max_receives {
                 self.dead_letter(config, id, stored).await?;
@@ -416,19 +500,24 @@ impl HexDBEngine {
             Self::set_ready(&mut state, id, Some(stored.ready_at));
             out.push(Received { id: id.to_string(), receipt: format!("{}.{}", id, nonce), body: stored.body, receives: stored.receives, sent_at: stored.sent_at });
         }
+        state.loaded = true;
         Ok(out)
     }
 
-    /// Move a message to the queue's dead-letter queue (or drop it).
+    /// Move a message to the queue's dead-letter queue (or drop it), in one
+    /// commit: it's in exactly one of the two queues whatever happens.
     async fn dead_letter(&self, config: &QueueConfig, id: Ulid, mut stored: Stored) -> Result<()> {
-        self.delete_system_document(&messages_tessellation(&config.name), id).await?;
-        let Some(dead) = &config.dead_letter else {
-            tracing::warn!("⚠️ Queue '{}' dropped message {} after {} receives (no dead-letter queue).", config.name, id, stored.receives);
-            return Ok(());
+        let source = (messages_tessellation(&config.name), id);
+        let target = match &config.dead_letter {
+            Some(dead) => self.get_queue(dead).await?,
+            None => None,
         };
-        let Some(target) = self.get_queue(dead).await? else {
-            tracing::warn!("⚠️ Queue '{}' dropped message {}: its dead-letter queue '{}' is gone.", config.name, id, dead);
-            return Ok(());
+        let Some(target) = target else {
+            match &config.dead_letter {
+                None => tracing::warn!("⚠️ Queue '{}' dropped message {} after {} receives (no dead-letter queue).", config.name, id, stored.receives),
+                Some(dead) => tracing::warn!("⚠️ Queue '{}' dropped message {}: its dead-letter queue '{}' is gone.", config.name, id, dead),
+            }
+            return self.commit_system(Vec::new(), vec![source]).await;
         };
         let now = now_ms();
         stored.dead_from = Some(config.name.clone());
@@ -436,15 +525,17 @@ impl HexDBEngine {
         stored.receives = 0;
         stored.ready_at = now;
         stored.sent_at = now;
-        let tess = messages_tessellation(dead);
-        self.ensure_system_tessellation(&tess)?;
-        let state = self.queues.state(dead);
-        let mut state = state.lock().await;
-        self.load_queue(dead, &mut state).await?;
-        self.put_message(&tess, id, &stored, target.retention_hours).await?;
-        Self::set_ready(&mut state, id, Some(now));
-        drop(state);
-        self.queues.notifier(dead).notify_waiters();
+        let moved = crate::document::Document {
+            id,
+            tessellation: messages_tessellation(&target.name),
+            data: crate::document::infer_fields_from_json(&serde_json::to_value(&stored)?),
+            ttl: Some(now + target.retention_hours as i64 * 3_600_000),
+        };
+        // Into the dead-letter queue's index at its next operation (a stale entry, if this
+        // commit doesn't happen, is dropped when its document isn't found).
+        self.queues.arrived.lock().unwrap().entry(target.name.clone()).or_default().push((now, id));
+        self.commit_system(vec![moved], vec![source]).await?;
+        self.queues.notifier(&target.name).notify_waiters();
         Ok(())
     }
 
@@ -465,6 +556,7 @@ impl HexDBEngine {
         let mut state = state.lock().await;
         self.load_queue(name, &mut state).await?;
         let mut done = 0;
+        state.loaded = false;
         for receipt in receipts.iter().take(MAX_BATCH) {
             if let Some((id, _)) = self.leased(name, receipt).await? {
                 self.delete_system_document(&messages_tessellation(name), id).await?;
@@ -472,6 +564,7 @@ impl HexDBEngine {
                 done += 1;
             }
         }
+        state.loaded = true;
         Ok(done)
     }
 
@@ -488,6 +581,7 @@ impl HexDBEngine {
         let mut state = state.lock().await;
         self.load_queue(name, &mut state).await?;
         let mut done = 0;
+        state.loaded = false;
         for receipt in receipts.iter().take(MAX_BATCH) {
             if let Some((id, mut stored)) = self.leased(name, receipt).await? {
                 stored.ready_at = now_ms() + seconds as i64 * 1000;
@@ -499,6 +593,7 @@ impl HexDBEngine {
                 done += 1;
             }
         }
+        state.loaded = true;
         drop(state);
         if !extend {
             self.queues.notifier(name).notify_waiters();
@@ -604,5 +699,102 @@ mod tests {
         assert_eq!(engine.receive_messages("jobs", 10, None, Duration::ZERO).await.unwrap().len(), 1, "ready again at once");
         engine.shutdown().await.unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // Fault injection from the 2.5.5 review: the WAL is paused, the request is
+    // dropped while it waits, then the WAL goes on and a later write fences it.
+
+    fn config(name: &str, dead: Option<&str>) -> QueueConfig {
+        QueueConfig { name: name.into(), description: String::new(), visibility_seconds: 60, max_receives: 1, dead_letter: dead.map(String::from), retention_hours: 1, created: 0, created_by: String::new() }
+    }
+
+    fn message() -> NewQueueMessage {
+        NewQueueMessage { body: json!("synthetic-job"), delay_seconds: 0, dedupe_key: None }
+    }
+
+    #[tokio::test]
+    async fn review255_canceled_send_remains_deliverable() {
+        let (e, dir) = crate::engine::test_engine().await;
+        e.save_queue(config("jobs", None), "test", true).await.unwrap();
+        e.receive_messages("jobs", 1, None, Duration::ZERO).await.unwrap();
+        let release = e.pause_wal_for_review().await;
+        let mut write = Box::pin(e.send_messages("jobs", vec![message()], "test"));
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        assert_eq!(e.queue_stats("jobs").await.unwrap()["ready"], 1, "reached the committed message");
+        drop(write);
+        release.send(()).unwrap();
+        e.insert_json("fence", json!({"x": 1}), None).await.unwrap();
+        let got = e.receive_messages("jobs", 1, None, Duration::ZERO).await.unwrap();
+        e.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(got.len(), 1, "Durable message was stranded outside the ready index after cancellation");
+    }
+
+    #[tokio::test]
+    async fn review255_canceled_receive_keeps_lease_until_expiry() {
+        let (e, dir) = crate::engine::test_engine().await;
+        let mut cfg = config("jobs", None);
+        cfg.max_receives = 5;
+        e.save_queue(cfg, "test", true).await.unwrap();
+        e.send_messages("jobs", vec![message()], "test").await.unwrap();
+        let release = e.pause_wal_for_review().await;
+        let mut recv = Box::pin(e.receive_messages("jobs", 1, None, Duration::ZERO));
+        assert!(futures::poll!(recv.as_mut()).is_pending());
+        assert_eq!(e.queue_stats("jobs").await.unwrap()["in_flight"], 1, "reached the committed lease");
+        drop(recv);
+        release.send(()).unwrap();
+        e.insert_json("fence", json!({"x": 1}), None).await.unwrap();
+        let got = e.receive_messages("jobs", 1, None, Duration::ZERO).await.unwrap();
+        e.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(got.is_empty(), "A committed 60-second lease was immediately redelivered after cancellation");
+    }
+
+    #[tokio::test]
+    async fn review255_dead_letter_cancellation_preserves_message() {
+        let (e, dir) = crate::engine::test_engine().await;
+        e.save_queue(config("dead", None), "test", true).await.unwrap();
+        e.save_queue(config("jobs", Some("dead")), "test", true).await.unwrap();
+        e.send_messages("jobs", vec![message()], "test").await.unwrap();
+        let got = e.receive_messages("jobs", 1, None, Duration::ZERO).await.unwrap();
+        e.release_messages("jobs", &[got[0].receipt.clone()], 0, false).await.unwrap();
+        let release = e.pause_wal_for_review().await;
+        let mut recv = Box::pin(e.receive_messages("jobs", 1, None, Duration::ZERO));
+        assert!(futures::poll!(recv.as_mut()).is_pending());
+        assert_eq!(e.queue_stats("jobs").await.unwrap()["ready"], 0, "reached source deletion");
+        drop(recv);
+        release.send(()).unwrap();
+        e.insert_json("fence", json!({"x": 1}), None).await.unwrap();
+        let a = e.queue_stats("jobs").await.unwrap();
+        let b = e.queue_stats("dead").await.unwrap();
+        // And the dead-letter queue hands it out.
+        let dead = e.receive_messages("dead", 10, None, Duration::ZERO).await.unwrap();
+        e.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(a["ready"].as_u64().unwrap() + b["ready"].as_u64().unwrap(), 1, "Dead-letter cancellation durably lost the message from both queues");
+        assert_eq!(dead.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dead_letter_queues_cannot_form_a_cycle_and_keys_outlive_the_index() {
+        let (e, dir) = crate::engine::test_engine().await;
+        e.save_queue(config("a", None), "test", true).await.unwrap();
+        e.save_queue(config("b", Some("a")), "test", true).await.unwrap();
+        e.save_queue(config("c", Some("b")), "test", true).await.unwrap();
+        let err = e.save_queue(config("a", Some("c")), "test", false).await.unwrap_err();
+        assert!(err.to_string().contains("cycle"), "{}", err);
+
+        // A de-duplication key is a document, not just memory: a new Overseer's empty index keeps it.
+        let keyed = || NewQueueMessage { body: json!("x"), delay_seconds: 0, dedupe_key: Some("same".into()) };
+        assert!(e.send_messages("a", vec![keyed()], "test").await.unwrap()[0].is_some());
+        e.queues.reset();
+        assert!(e.send_messages("a", vec![keyed()], "test").await.unwrap()[0].is_none());
+        // Acknowledged or not, the key holds for its 5 minutes; another queue's key is separate.
+        let got = e.receive_messages("a", 1, None, Duration::ZERO).await.unwrap();
+        e.ack_messages("a", &[got[0].receipt.clone()]).await.unwrap();
+        assert!(e.send_messages("a", vec![keyed()], "test").await.unwrap()[0].is_none());
+        assert!(e.send_messages("b", vec![keyed()], "test").await.unwrap()[0].is_some());
+        e.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -212,3 +212,20 @@ fn review255_stream_owner_cannot_post_to_loopback_by_default() -> Result<()> {
     assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
     Ok(())
 }
+
+/// H255-10: a de-duplication key outlives a restart (within its five minutes).
+#[test]
+fn review255_queue_dedupe_survives_restart() -> Result<()> {
+    let mut s = TestServer::start()?;
+    let r = s.request(Method::POST, "/queues", Some(&json!({"name":"jobs"})), &[])?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let body = json!({"messages":[{"body":"synthetic-job","dedupe_key":"same-job"}]});
+    let first = s.request(Method::POST, "/queues/jobs/messages", Some(&body), &[])?;
+    assert_eq!(first.status, StatusCode::CREATED);
+    assert!(first.body["ids"][0].is_string());
+    s.restart()?;
+    let second = s.request(Method::POST, "/queues/jobs/messages", Some(&body), &[])?;
+    assert_eq!(second.status, StatusCode::CREATED);
+    assert!(second.body["ids"][0].is_null(), "Restart forgot a de-duplication key before its five-minute expiry");
+    Ok(())
+}

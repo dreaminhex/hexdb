@@ -917,6 +917,29 @@ impl HexDBEngine {
         self.commit(items).await.map(|_| ())
     }
 
+    /// Review-only fault injection: suspend the WAL writer until the returned sender sends.
+    #[cfg(test)]
+    pub(crate) async fn pause_wal_for_review(&self) -> std::sync::mpsc::Sender<()> {
+        self.wal.pause_for_review().await
+    }
+
+    /// Write documents to system tessellations and delete others, all in one commit
+    /// (so all of it happens or none of it does).
+    pub(crate) async fn commit_system(&self, puts: Vec<Document>, deletes: Vec<(String, Ulid)>) -> Result<()> {
+        self.ensure_writable()?;
+        let mut items = Vec::with_capacity(puts.len() + deletes.len());
+        for (tess, id) in deletes {
+            if self.tessellation_exists(&tess) {
+                items.push(writes::BatchItem { key: DocKey::new(&tess, id), op: WalOp::Delete { tessellation: tess.clone(), id }, expected_seq: None });
+            }
+        }
+        for doc in puts {
+            self.ensure_system_tessellation(&doc.tessellation)?;
+            items.push(writes::BatchItem { key: DocKey::new(&doc.tessellation, doc.id), op: WalOp::Put(doc), expected_seq: None });
+        }
+        self.commit(items).await.map(|_| ())
+    }
+
     pub(crate) async fn delete_system_document(&self, tess: &str, id: Ulid) -> Result<()> {
         self.ensure_writable()?;
         if !self.tessellation_exists(tess) {
