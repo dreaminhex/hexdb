@@ -59,8 +59,19 @@ async fn starting_position(engine: &HexDBEngine, plugin: &str) -> u64 {
             return c.seq;
         }
         Some(c) if c.history_id != engine.history_id() => {
-            warn!(plugin = %plugin, "⚠️ Plugin '{}' was following another Overseer's history; it starts at the end of this one.", plugin);
-            end
+            // A new Overseer that continued the old history knows where its own history holds the
+            // old one up to the saved position (or a little before it: some changes come again).
+            let continued = engine.continuation.read().unwrap().as_ref().and_then(|k| k.resume_at(&c.history_id, c.seq));
+            match continued {
+                Some(local) if local >= engine.history_available_after() && local <= end => {
+                    info!(plugin = %plugin, "🧩 Plugin '{}' continues from the previous Overseer's history (here after sequence {}).", plugin, local);
+                    local
+                }
+                _ => {
+                    warn!(plugin = %plugin, "⚠️ Plugin '{}' was following another Overseer's history that this one doesn't continue (or no longer keeps); changes it hadn't received are skipped, and it starts at the end of this history.", plugin);
+                    end
+                }
+            }
         }
         Some(c) => {
             warn!(plugin = %plugin, "⚠️ Plugin '{}' was at sequence {}, older than the change history kept; changes up to {} are skipped.", plugin, c.seq, end);
@@ -191,5 +202,29 @@ impl Feed {
             },
             Feed::Nothing => std::future::pending().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod review_256 {
+    use super::*;
+
+    /// H256-03: a plugin's position in the previous Overseer's history carries over through the
+    /// continuation instead of jumping to the end of the new history.
+    #[tokio::test]
+    async fn review256_plugin_cursor_must_use_available_failover_continuation() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        for n in 0..3 {
+            engine.insert_json("orders", serde_json::json!({ "n": n }), None).await.unwrap();
+        }
+        let local = engine.history_available_after().max(1);
+        assert!(engine.changes.published_seq() > local, "changes after the continuation point");
+        *engine.continuation.write().unwrap() = Some(crate::replication::Continuation { source_id: "old-history".into(), seq: 40, local_seq: local, earlier: Vec::new() });
+        let saved = SavedCursor { plugin: "@test/sink".into(), history_id: "old-history".into(), seq: 40 };
+        engine.put_system_document(PLUGIN_CURSORS_TESSELLATION, cursor_doc_id("@test/sink"), serde_json::to_value(&saved).unwrap(), None).await.unwrap();
+        let start = starting_position(&engine, "@test/sink").await;
+        engine.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).ok();
+        assert_eq!(start, local, "the plugin must resume where the continuation says, not at the end");
     }
 }

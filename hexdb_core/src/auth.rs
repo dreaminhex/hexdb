@@ -503,6 +503,10 @@ pub async fn store_rehashed_key(engine: &HexDBEngine, id: Ulid, old_hash: &str, 
     }
     let Some(doc) = engine.get_system_document(API_KEYS_TESSELLATION, id).await? else { return Ok(false) };
     let Ok(mut stored) = serde_json::from_value::<StoredApiKey>(doc.data_json()) else { return Ok(false) };
+    // Already moved (another hex asked first): done.
+    if crate::crypt::constant_time_eq(stored.secret_hash.as_bytes(), new_hash.as_bytes()) {
+        return Ok(true);
+    }
     if !crate::crypt::constant_time_eq(stored.secret_hash.as_bytes(), old_hash.as_bytes()) {
         return Ok(false);
     }
@@ -656,22 +660,26 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
                 // new hash only if it also uses this lattice key (every hex
                 // has the new secret), so a key used only for reads on
                 // replicas survives the old secret's removal.
-                static ASKED: std::sync::Mutex<Vec<(Ulid, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+                // Asked again after 10 s until the Overseer confirms it stored the new hash (it
+                // can't while it still uses the old key), then left alone for 5 minutes.
+                static ASKED: std::sync::Mutex<Vec<(Ulid, std::time::Instant, std::time::Duration)>> = std::sync::Mutex::new(Vec::new());
                 let due = {
                     let mut asked = ASKED.lock().unwrap();
-                    asked.retain(|(_, at)| at.elapsed() < std::time::Duration::from_secs(300));
-                    let due = !asked.iter().any(|(k, _)| *k == id);
-                    if due {
-                        asked.push((id, std::time::Instant::now()));
-                    }
-                    due
+                    asked.retain(|(_, at, wait)| at.elapsed() < *wait);
+                    !asked.iter().any(|(k, _, _)| *k == id)
                 };
                 if due {
                     let body = serde_json::json!({ "id": id.to_string(), "old_hash": stored.secret_hash, "new_hash": new_hash, "key": key_fingerprint(&lattice_keys[0]) });
-                    let ask = crate::replication::post_to_overseer(engine, "/lattice/rehash-key", &body);
-                    if let Ok(Err(e)) = tokio::time::timeout(std::time::Duration::from_secs(2), ask).await {
-                        tracing::debug!("Couldn't ask the Overseer to re-hash an API key: {:#}", e);
-                    }
+                    let ask = crate::replication::post_to_overseer_for(engine, "/lattice/rehash-key", &body, std::time::Duration::from_secs(2));
+                    let stored_there = match ask.await {
+                        Ok(answer) => serde_json::from_slice::<serde_json::Value>(&answer).ok().is_some_and(|v| v["stored"] == true),
+                        Err(e) => {
+                            tracing::debug!("Couldn't ask the Overseer to re-hash an API key: {:#}", e);
+                            false
+                        }
+                    };
+                    let wait = std::time::Duration::from_secs(if stored_there { 300 } else { 10 });
+                    ASKED.lock().unwrap().push((id, std::time::Instant::now(), wait));
                 }
             }
         }

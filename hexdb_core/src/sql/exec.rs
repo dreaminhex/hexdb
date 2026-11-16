@@ -1649,28 +1649,36 @@ impl HexDBEngine {
             if !self.tessellation_exists(&spec.table) {
                 return Err(crate::engine::EngineError::NotFound(format!("Tessellation '{}' not found.", spec.table)).into());
             }
-            let request = DocumentQuery {
-                filter: Filter::parse(&spec.filter)?,
-                sort: Vec::new(),
-                offset: 0,
-                limit: max_rows + 1,
-                after: None,
-                with_total: false,
-            };
-            let page = self.query_documents(&spec.table, &request).await?;
-            if page.documents.len() > max_rows {
-                return Err(invalid(format!(
-                    "reading '{}' would return more than {} documents (limits.sql_max_rows). Narrow it with WHERE.",
-                    spec.table, max_rows
-                )));
-            }
-            let rows: Vec<Arc<Value>> = page.documents.iter().map(|d| Arc::new(d.to_api_json())).collect();
-            held = held.saturating_add(rows.iter().map(|r| json_size(r)).sum::<usize>());
-            if held > max_bytes {
-                return Err(invalid(format!(
-                    "the statement would hold more than {} MB of documents (limits.sql_max_mb). Narrow it with WHERE or select fewer tables.",
-                    max_bytes >> 20
-                )));
+            // Read in small batches, counting toward the statement's memory budget as it goes, so a
+            // statement over budget stops after at most one batch more than the budget.
+            let filter = Filter::parse(&spec.filter)?;
+            let mut rows: Vec<Arc<Value>> = Vec::new();
+            let mut after = None;
+            loop {
+                let request = DocumentQuery { filter: filter.clone(), sort: Vec::new(), offset: 0, limit: SQL_READ_BATCH, after, with_total: false };
+                let page = self.query_documents(&spec.table, &request).await?;
+                let fetched = page.documents.len();
+                after = page.documents.last().map(|d| d.id);
+                for doc in page.documents {
+                    let row = doc.to_api_json();
+                    held = held.saturating_add(json_size(&row));
+                    rows.push(Arc::new(row));
+                }
+                if held > max_bytes {
+                    return Err(invalid(format!(
+                        "the statement would hold more than {} MB of documents (limits.sql_max_mb). Narrow it with WHERE or select fewer tables.",
+                        max_bytes >> 20
+                    )));
+                }
+                if rows.len() > max_rows {
+                    return Err(invalid(format!(
+                        "reading '{}' would return more than {} documents (limits.sql_max_rows). Narrow it with WHERE.",
+                        spec.table, max_rows
+                    )));
+                }
+                if fetched < SQL_READ_BATCH {
+                    break;
+                }
             }
             let mut columns = vec!["id".to_string()];
             for row in &rows {
@@ -1701,6 +1709,9 @@ impl HexDBEngine {
         ctx.query(&plan.root, None)
     }
 }
+
+/// Documents one SQL table read takes at a time (see `limits.sql_max_mb`).
+const SQL_READ_BATCH: usize = 32;
 
 /// About how many bytes a value takes as JSON (without building the text).
 fn json_size(value: &Value) -> usize {

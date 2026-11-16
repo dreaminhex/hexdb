@@ -373,6 +373,13 @@ jobs:
         run: sh docker/smoke.sh hexdb:smoke
       - name: Scan
         run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2 image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress hexdb:smoke
+      # The gate above only stops fixable critical findings; the full scan is kept for triage.
+      - name: Full scan
+        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" aquasec/trivy:0.76.2 image --format json --output /out/trivy-image.json --no-progress hexdb:smoke
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: trivy-image
+          path: trivy-image.json
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         id: push
         with:

@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import http from "node:http"
 import { test } from "node:test"
 
-import { api } from "./hexdb-plugin.mjs"
+import { api, idempotentRoute } from "./hexdb-plugin.mjs"
 
 /** A local server answering each request with the next of `answers` (status codes); records what it got. */
 async function server(answers) {
@@ -66,4 +66,20 @@ test("reads and 429s are retried", async () => {
   } finally {
     await close()
   }
+})
+
+test("only writes the server applies once per key are retried after an uncertain answer", async () => {
+  // H256-04: queue sends and stream publishes don't honor Idempotency-Key.
+  const { client, seen, close } = await server([503, 201])
+  try {
+    await assert.rejects(client.post("/queues/jobs/messages", { messages: [{ body: 1 }] }), { status: 503 })
+    assert.equal(seen.length, 1, "not sent again")
+    assert.equal(seen[0].key, null, "and no key that would suggest it's safe")
+  } finally {
+    await close()
+  }
+  for (const [method, path, ok] of [
+    ["POST", "/orders", true], ["POST", "/orders/_bulk", true], ["PATCH", "/orders/01J", true], ["POST", "/transactions", true],
+    ["POST", "/queues/jobs/messages", false], ["POST", "/streams/s/messages", false], ["POST", "/functions/f/run", false], ["POST", "/users", false],
+  ]) assert.equal(idempotentRoute(method, path), ok, `${method} ${path}`)
 })

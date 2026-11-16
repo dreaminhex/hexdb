@@ -148,6 +148,16 @@ pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_jso
     post_to_peer(engine, &overseer, path, body).await
 }
 
+/// [`post_to_overseer`], returning the answer's body.
+pub async fn post_to_overseer_for(engine: &HexDBEngine, path: &str, body: &serde_json::Value, timeout: Duration) -> Result<Vec<u8>> {
+    let overseer = {
+        let peers = engine.peers.lock().await;
+        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone())
+    }
+    .ok_or_else(|| anyhow!("no Overseer is reachable"))?;
+    post_to_peer_for(engine, &overseer, path, body, timeout).await
+}
+
 /// POST a JSON body to a hex's lattice API, signed with the lattice key.
 pub async fn post_to_peer(engine: &HexDBEngine, peer: &crate::network::discovery::PeerHex, path: &str, body: &serde_json::Value) -> Result<()> {
     post_to_peer_for(engine, peer, path, body, Duration::from_secs(10)).await.map(|_| ())

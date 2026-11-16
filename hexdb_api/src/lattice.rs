@@ -387,8 +387,9 @@ pub async fn rehash_key(method: Method, uri: Uri, headers: HeaderMap, axum::extr
     let body: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
     let field = |k: &str| body[k].as_str().ok_or_else(|| ApiError::invalid(format!("{} is required.", k)));
     let id = ulid::Ulid::from_string(field("id")?).map_err(|_| ApiError::invalid("id isn't an API key ID."))?;
-    hexdb_core::auth::store_rehashed_key(&engine, id, field("old_hash")?, field("new_hash")?, field("key")?).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    // Whether the new hash is stored now: a replica asks again until it is.
+    let stored = hexdb_core::auth::store_rehashed_key(&engine, id, field("old_hash")?, field("new_hash")?, field("key")?).await?;
+    Ok(Json(serde_json::json!({ "stored": stored })).into_response())
 }
 
 /// Count a sharing link download made on a replica.

@@ -912,7 +912,11 @@ impl HexDBEngine {
             }
             summary.matched += 1;
 
+            let before = (!write.is_full()).then(|| doc.clone());
             let mut changed = apply_changes(&mut doc.data, changes);
+            if let Some(before) = &before {
+                write.check_transition(before, &doc.data_json())?;
+            }
             if ttl.is_some() && doc.ttl != ttl {
                 doc.ttl = ttl;
                 changed = true;

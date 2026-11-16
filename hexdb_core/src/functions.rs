@@ -563,7 +563,7 @@ impl HexDBEngine {
         // Inside a trigger, the session is marked so the script's writes don't fire triggers.
         let expires = Utc::now().timestamp() + def.timeout_seconds as i64 + 60;
         let (token, claims) = crate::auth::issue_session_until(&self.config.session_key()?, &principal.user_id, expires, crate::access::current_trigger());
-        let mut run = ScriptRun { engine: self, dir: dir.clone(), sid: claims.sid.clone(), exp: claims.exp, child: None, job: None, finished: false };
+        let mut run = ScriptRun { engine: self, dir: dir.clone(), sid: claims.sid.clone(), exp: claims.exp, child: None, pid: None, job: None, finished: false };
         std::fs::write(dir.join(file), code)?;
         let scheme = if self.config.tls.enabled() { "https" } else { "http" };
         let mut command = tokio::process::Command::new(&program);
@@ -595,6 +595,7 @@ impl HexDBEngine {
             crate::process::adopt(&child);
             // Windows: a job of its own, so whatever the script starts dies with the run.
             run.job = crate::process::RunJob::for_child(&child);
+            run.pid = child.id();
             let child = run.child.insert(child);
             let mut input = json!({ "params": params, "function": def.name, "caller": principal.login });
             if let Some((name, value)) = &context {
@@ -625,8 +626,7 @@ impl HexDBEngine {
             };
             let finished = tokio::time::timeout_at(deadline, async { tokio::join!(write_in, child.wait(), read_out, read_err) }).await;
             let Ok((written, status, out, err)) = finished else {
-                // Still running (not yet waited for), so its process group is still its own.
-                if let Some(pid) = child.id() {
+                if let Some(pid) = run.pid {
                     crate::process::kill_group(pid);
                 }
                 let _ = child.kill().await;
@@ -803,6 +803,8 @@ struct ScriptRun<'a> {
     exp: i64,
     /// The script's process, once started.
     child: Option<tokio::process::Child>,
+    /// The script's process ID, which leads its process group (Unix).
+    pid: Option<u32>,
     /// Windows: the run's job; dropped with the run, it stops every process the script started.
     job: Option<crate::process::RunJob>,
     finished: bool,
@@ -811,6 +813,11 @@ struct ScriptRun<'a> {
 impl ScriptRun<'_> {
     async fn finish(&mut self, name: &str) {
         self.finished = true;
+        // Whatever the script left running (a background child) stops with the run. The group's ID
+        // stays its own while any member lives; with none left the signal finds nothing.
+        if let Some(pid) = self.pid {
+            crate::process::kill_group(pid);
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
         if let Err(e) = self.engine.revoke_script_session(&self.sid, self.exp).await {
             warn!("⚠️ Couldn't revoke the session of script '{}' yet: {:#}", name, e);
@@ -825,11 +832,10 @@ impl Drop for ScriptRun<'_> {
             return;
         }
         ABANDONED_SESSIONS.lock().unwrap().insert(self.sid.clone(), (self.exp, false));
+        if let Some(pid) = self.pid {
+            crate::process::kill_group(pid);
+        }
         if let Some(child) = &mut self.child {
-            // Only while it hasn't exited (and been reaped) is its process group certainly its own.
-            if let (Ok(None), Some(pid)) = (child.try_wait(), child.id()) {
-                crate::process::kill_group(pid);
-            }
             let _ = child.start_kill();
         }
         let _ = std::fs::remove_dir_all(&self.dir);

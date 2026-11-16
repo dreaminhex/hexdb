@@ -405,15 +405,51 @@ impl Scope {
     }
 
     /// Refuse a write that sets or removes `fields` of a document, as the grants for its rows
-    /// before the change (`None` for a new document) and after it (`after`, its fields) see them.
+    /// before the change (`None` for a new document) and after it (`after`, its fields) see them,
+    /// or that moves the document to rows where a value protected before would show more.
     pub fn check_change<'a>(&self, before: Option<&Document>, after: &Value, fields: impl IntoIterator<Item = &'a str> + Clone) -> Result<()> {
         if !self.protects_fields() {
             return Ok(());
         }
         if let Some(before) = before {
             self.for_document(before).check_writable(fields.clone())?;
+            self.check_transition(before, after)?;
         }
         self.for_json(after).check_writable(fields)
+    }
+
+    /// Refuse a write after which a value the caller couldn't see in full stays in the
+    /// document but shows more: hidden before and not hidden after, or masked before and
+    /// unprotected or masked less after. A write that moves a row from one grant's rows to
+    /// another's (changing `tenant`, say) mustn't declassify what the first grant protects.
+    pub fn check_transition(&self, before: &Document, after: &Value) -> Result<()> {
+        if !self.protects_fields() {
+            return Ok(());
+        }
+        let was = self.for_document(before);
+        let now = self.for_json(after);
+        if was.views.is_empty() && now.views.is_empty() && was.hidden == now.hidden && was.masked == now.masked {
+            return Ok(());
+        }
+        let old = before.data_json();
+        let refuse = |path: &str| -> Result<()> {
+            Err(EngineError::Forbidden(format!("'{}' is protected for your role in this document, and this change would let your role see more of it.", path)).into())
+        };
+        for path in &was.hidden {
+            if get_path(&old, path).is_some() && get_path(after, path).is_some() && !now.hidden.iter().any(|h| is_within(path, h)) {
+                return refuse(path);
+            }
+        }
+        for (path, mask) in &was.masked {
+            if get_path(&old, path).is_none() || get_path(after, path).is_none() || now.hidden.iter().any(|h| is_within(path, h)) {
+                continue;
+            }
+            let shown = now.mask_of(path);
+            if shown.is_none_or(|m| m.show_first > mask.show_first || m.show_last > mask.show_last) {
+                return refuse(path);
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a write that sets or removes a hidden or masked field.
@@ -439,6 +475,12 @@ impl Scope {
             None => Cow::Borrowed(self),
         };
         before.check_replace_as(submitted, old)?;
+        if let Some(old) = old {
+            // The new document keeps the protected values (see restore_hidden): they mustn't show more.
+            let mut kept = Document { id: old.id, tessellation: old.tessellation.clone(), data: crate::document::infer_fields_from_json(submitted), ttl: old.ttl };
+            before.restore_hidden(&mut kept, old);
+            self.check_transition(old, &kept.data_json())?;
+        }
         // Rows moving to other grants: fields those grants protect can't be set either
         // (beyond what the check above already allows, such as a masked value sent back).
         let after = self.for_json(submitted);
@@ -883,6 +925,11 @@ mod tests {
         assert!(write.check_change(None, &json!({ "tenant": "B", "secret": "x" }), ["tenant", "secret"]).is_ok());
         assert!(write.check_replace(&json!({ "tenant": "A", "secret": "x" }), Some(&b)).is_err());
         assert!(write.check_replace(&json!({ "tenant": "B", "secret": "x" }), Some(&b)).is_ok());
+        // H256-01: moving A's row to B (only `tenant` changes) would show its hidden secret: refused.
+        assert!(write.check_change(Some(&a), &json!({ "tenant": "B", "secret": "s", "card": "4111111111111111" }), ["tenant"]).is_err());
+        assert!(write.check_replace(&json!({ "tenant": "B", "card": "************1111" }), Some(&a)).is_err());
+        // A move that keeps the protection is fine, and so is one that drops the protected value.
+        assert!(write.check_change(Some(&a), &json!({ "tenant": "A", "secret": "s", "card": "4111111111111111", "n": 1 }), ["n"]).is_ok());
         // A full replace of A keeps its hidden secret.
         let mut replaced = doc(json!({ "tenant": "A", "card": "************1111" }));
         write.restore_hidden(&mut replaced, &a);

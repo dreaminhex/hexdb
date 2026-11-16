@@ -87,9 +87,9 @@ export class HexDBError extends Error {
 /**
  * A small client for the HexDB REST API, acting as the plugin's user.
  *
- * Retries are safe: every write (POST, PUT, PATCH, DELETE) carries an
+ * Retries are safe: every document write and transaction carries an
  * `Idempotency-Key`, the same on every try of that call, so HexDB applies it
- * once and answers a retry with the first result. A 429 (refused before
+ * once and answers a retry with the first result (see idempotentRoute). A 429 (refused before
  * anything was done) is retried for any request, honoring Retry-After; an
  * uncertain answer (502, 503, a dropped connection, a timeout) is retried for
  * reads (and queries), and for writes only when they carry a key. Give your
@@ -97,6 +97,28 @@ export class HexDBError extends Error {
  * `{ "Idempotency-Key": "" }` in its headers to send none (it then isn't
  * retried after an uncertain answer).
  */
+// API routes that aren't tessellations (hexdb_core::catalog's reserved names and route names).
+const ROUTES = new Set(
+  ("health status flush shutdown tessellation tessellations ui wal graphql logs changes indexes auth transactions plugins lattice " +
+    "replication compact audit settings join streams functions schedules analyzers schemas openapi backup backups triggers sql scrub " +
+    "config ai deletes blocklist queues shares mcp quarantine users roles updates a2a ready security retire").split(" "),
+)
+
+/**
+ * True if the server applies a write to `path` once per Idempotency-Key, so sending it again after
+ * an uncertain answer is safe: document writes (insert, bulk, upsert, update and delete by filter,
+ * replace, patch, delete) and transactions. Other writes (queue sends, stream publishes, function
+ * runs, administration) aren't retried after an uncertain answer.
+ */
+export function idempotentRoute(method, path) {
+  const parts = path.split("?")[0].split("/").filter(Boolean).map(decodeURIComponent)
+  if (parts.length === 1 && parts[0] === "transactions") return method === "POST"
+  if (parts.length === 0 || parts.length > 2 || ROUTES.has(parts[0].toLowerCase()) || parts[0].startsWith("_")) return false
+  if (parts.length === 1) return method === "POST"
+  if (["_bulk", "_upsert", "_update", "_delete"].includes(parts[1])) return method === "POST"
+  return !parts[1].startsWith("_") && ["PUT", "PATCH", "DELETE"].includes(method)
+}
+
 export function api({ base = process.env.HEXDB_API, key = process.env.HEXDB_API_KEY, retries = 4, timeoutMs = 60_000 } = {}) {
   if (!base) throw new Error("HEXDB_API is not set (is this running as a HexDB plugin?)")
   if (!key) throw new Error("HEXDB_API_KEY is not set: add an [access] section to plugin.toml")
@@ -109,12 +131,14 @@ export function api({ base = process.env.HEXDB_API, key = process.env.HEXDB_API_
   async function request(method, path, body, headers = {}) {
     // Queries are reads sent as POST.
     const write = !["GET", "HEAD"].includes(method) && !path.split("?")[0].endsWith("/_query")
+    const keyed = write && idempotentRoute(method, path)
     const given = Object.keys(headers).find((h) => h.toLowerCase() === "idempotency-key")
     const extra = { ...headers }
-    if (write && given === undefined) extra["Idempotency-Key"] = randomUUID()
+    if (keyed && given === undefined) extra["Idempotency-Key"] = randomUUID()
     if (given !== undefined && !extra[given]) delete extra[given]
-    // A write without a key may have happened when the answer is lost: don't send it again then.
-    const retryUncertain = !write || Object.keys(extra).some((h) => h.toLowerCase() === "idempotency-key")
+    // A write whose answer is lost may have happened: it's sent again only where the server applies it
+    // once per key, and with a key.
+    const retryUncertain = !write || (keyed && Object.keys(extra).some((h) => h.toLowerCase() === "idempotency-key"))
     for (let attempt = 0; ; attempt++) {
       let response
       try {

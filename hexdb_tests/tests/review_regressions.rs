@@ -321,3 +321,38 @@ fn early_answers_to_unread_uploads_reach_the_client() -> Result<()> {
     }
     Ok(())
 }
+
+/// H256-01: changing a row's selector (tenant A -> B) must not declassify a field A's grant hides.
+#[test]
+fn review256_moving_a_row_must_not_declassify_its_hidden_field() -> Result<()> {
+    let s = TestServer::start()?;
+    let a = s.insert("accounts", &json!({"tenant":"A","secret":"SYNTHETIC_HIDDEN_VALUE"}))?;
+    for (name, restriction) in [("a-hidden", json!({"filter":{"tenant":"A"},"hide":["secret"]})), ("b-full", json!({"filter":{"tenant":"B"}}))] {
+        let r = s.request(Method::POST, "/roles", Some(&json!({"name":name,"permissions":["read","write"],"restrictions":{"accounts":restriction}})), &[])?;
+        assert!(r.status.is_success(), "{}", r.body);
+    }
+    let user = s.user_with_roles("mover", json!([{"name":"a-hidden","tessellations":["accounts"]},{"name":"b-full","tessellations":["accounts"]}]))?;
+    let moved = s.request_as(Some(&user), Method::PATCH, &format!("/accounts/{}", a), Some(&json!({"tenant":"B"})), &[])?;
+    assert_eq!(moved.status, StatusCode::FORBIDDEN, "{}", moved.body);
+    let by_filter = s.request_as(Some(&user), Method::POST, "/accounts/_update", Some(&json!({"filter":{"tenant":"A"},"update":{"tenant":"B"}})), &[])?;
+    assert!(!by_filter.status.is_success(), "{}", by_filter.body);
+    let read = s.request_as(Some(&user), Method::GET, &format!("/accounts/{}", a), None, &[])?;
+    assert!(!read.body.to_string().contains("SYNTHETIC_HIDDEN_VALUE"), "{}", read.body);
+    Ok(())
+}
+
+/// H256-05: a script that succeeds takes its background children with it too.
+#[test]
+fn review256_successful_script_children_must_stop_with_the_run() -> Result<()> {
+    let s = TestServer::start()?;
+    let temp = tempfile::tempdir()?;
+    let marker = temp.path().join("background-child.txt");
+    let code = "import sys,json,subprocess\np=json.load(sys.stdin)['params']['path']\nsubprocess.Popen([sys.executable,'-c','import time,sys; time.sleep(3); open(sys.argv[1],\"w\").write(\"x\")',p], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\nprint('{}')";
+    let r = s.request(Method::POST, "/functions", Some(&json!({"name":"leaver","kind":"script","runtime":"python","code":code,"timeout_seconds":10,"params":[{"name":"path","type":"string","required":true}]})), &[])?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let r = s.request(Method::POST, "/functions/leaver/run", Some(&json!({"params":{"path":marker}})), &[])?;
+    assert!(r.status.is_success(), "{}", r.body);
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert!(!marker.exists(), "A background child of a finished script kept running");
+    Ok(())
+}

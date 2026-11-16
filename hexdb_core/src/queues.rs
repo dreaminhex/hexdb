@@ -56,6 +56,8 @@ pub const MAX_BATCH: usize = 100;
 pub const MAX_WAIT_SECONDS: u64 = 20;
 /// Largest message body (JSON), in bytes.
 pub const MAX_BODY_BYTES: usize = 256 * 1024;
+/// How long a dead letter's arrival is kept while its move may still be committing.
+const ARRIVAL_GRACE_MS: i64 = 60_000;
 /// How long a de-duplication key is remembered.
 const DEDUPE_MS: i64 = 5 * 60 * 1000;
 /// De-duplication keys: `{"queue", "key", "message", "at"}`, expiring after `DEDUPE_MS`.
@@ -194,6 +196,9 @@ struct QueueState {
     ready: BTreeSet<(i64, Ulid)>,
     /// When each message is next ready (to update `ready`).
     at: HashMap<Ulid, i64>,
+    /// Messages moved in from another queue (dead letters), until when they may still be
+    /// committing: one not found yet is tried again rather than forgotten.
+    arriving: HashMap<Ulid, i64>,
 }
 
 /// Queue state on this hex.
@@ -314,6 +319,13 @@ impl HexDBEngine {
     async fn load_queue(&self, name: &str, state: &mut QueueState) -> Result<()> {
         if !state.loaded {
             self.reload_queue(name, state).await?;
+            // Dead letters still committing survive a reload: they're looked for again.
+            let now = now_ms();
+            state.arriving.retain(|_, until| *until > now);
+            let pending: Vec<Ulid> = state.arriving.keys().filter(|id| !state.at.contains_key(*id)).copied().collect();
+            for id in pending {
+                Self::set_ready(state, id, Some(now));
+            }
         }
         // Taken after reading the documents, so a move whose commit the read missed is still added.
         let arrived = self.queues.arrived.lock().unwrap().remove(name).unwrap_or_default();
@@ -321,6 +333,7 @@ impl HexDBEngine {
             if !state.at.contains_key(&id) {
                 Self::set_ready(state, id, Some(at));
             }
+            state.arriving.insert(id, now_ms() + ARRIVAL_GRACE_MS);
         }
         Ok(())
     }
@@ -475,10 +488,17 @@ impl HexDBEngine {
                 break;
             }
             let Some(doc) = self.get_system_document(&tess, id).await? else {
+                // A dead letter whose move hasn't committed yet: look again shortly.
+                if state.arriving.get(&id).is_some_and(|until| now < *until) {
+                    Self::set_ready(&mut state, id, Some(now + 500));
+                    continue;
+                }
                 // Expired by retention or deleted: forget it.
+                state.arriving.remove(&id);
                 Self::set_ready(&mut state, id, None);
                 continue;
             };
+            state.arriving.remove(&id);
             let Ok(mut stored) = serde_json::from_value::<Stored>(doc.data_json()) else {
                 Self::set_ready(&mut state, id, None);
                 continue;
@@ -775,6 +795,28 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
         assert_eq!(a["ready"].as_u64().unwrap() + b["ready"].as_u64().unwrap(), 1, "Dead-letter cancellation durably lost the message from both queues");
         assert_eq!(dead.len(), 1);
+    }
+
+    /// H256-02: a receive that runs between a dead letter's arrival and its commit must not
+    /// forget it: once the move commits, it's delivered.
+    #[tokio::test]
+    async fn review256_dead_letter_arrival_cannot_be_consumed_before_commit() {
+        let (e, dir) = crate::engine::test_engine().await;
+        e.save_queue(config("dead", None), "test", true).await.unwrap();
+        assert!(e.receive_messages("dead", 1, None, Duration::ZERO).await.unwrap().is_empty(), "index loaded");
+        let id = Ulid::generate();
+        let now = now_ms();
+        // The arrival is published, but the moved document isn't committed yet.
+        e.queues.arrived.lock().unwrap().entry("dead".into()).or_default().push((now, id));
+        assert!(e.receive_messages("dead", 1, None, Duration::ZERO).await.unwrap().is_empty());
+        // The move commits.
+        let stored = Stored { body: json!("synthetic-job"), sent_at: now, sent_by: "t".into(), ready_at: now, lease: None, receives: 0, dead_from: Some("jobs".into()) };
+        let doc = crate::document::Document { id, tessellation: messages_tessellation("dead"), data: crate::document::infer_fields_from_json(&serde_json::to_value(&stored).unwrap()), ttl: None };
+        e.commit_system(vec![doc], Vec::new()).await.unwrap();
+        let got = e.receive_messages("dead", 1, None, Duration::from_secs(3)).await.unwrap();
+        e.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(got.len(), 1, "the dead letter was stranded");
     }
 
     #[tokio::test]
