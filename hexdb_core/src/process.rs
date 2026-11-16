@@ -29,6 +29,37 @@ pub fn contain(command: &mut tokio::process::Command) {
     let _ = command;
 }
 
+/// Start the process in a process group of its own (Unix), so `kill_group`
+/// stops whatever it started too.
+pub fn own_group(command: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Kill the process group led by `pid` (from `own_group`; Unix). On Windows the
+/// caller kills the process itself; its job object stops the rest with the server.
+pub fn kill_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        const SIGKILL: i32 = 9;
+        if let Ok(pid) = i32::try_from(pid) {
+            if pid > 0 {
+                // SAFETY: kill only sends a signal; a negative pid names the group.
+                unsafe {
+                    kill(-pid, SIGKILL);
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
 /// Attach a started process to the server's job (Windows; a no-op elsewhere).
 pub fn adopt(child: &tokio::process::Child) {
     #[cfg(windows)]

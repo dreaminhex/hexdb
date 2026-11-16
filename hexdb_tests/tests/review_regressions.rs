@@ -229,3 +229,43 @@ fn review255_queue_dedupe_survives_restart() -> Result<()> {
     assert!(second.body["ids"][0].is_null(), "Restart forgot a de-duplication key before its five-minute expiry");
     Ok(())
 }
+
+/// H255-08: a script whose request is cancelled (the request timeout) loses its session at once.
+#[test]
+fn review255_script_cancellation_revokes_temporary_session() -> Result<()> {
+    let mut s = TestServer::start_with(hexdb_tests::TestOptions { extra_toml: "\n[limits]\nrequest_timeout_seconds = 2\n".into(), ..Default::default() })?;
+    let temp = tempfile::tempdir()?;
+    let token_file = temp.path().join("synthetic-session.txt");
+    let code = "import sys,json,os,time\np=json.load(sys.stdin)['params']\nwith open(p['path'],'w') as f: f.write(os.environ['HEXDB_TOKEN'])\ntime.sleep(12)\nprint('{}')";
+    let r = s.request(Method::POST, "/functions", Some(&json!({"name":"waiter","kind":"script","runtime":"python","code":code,"timeout_seconds":30,"params":[{"name":"path","type":"string","required":true}]})), &[])?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let reader = s.user_with_roles("limited", json!([{"name":"reader","tessellations":["orders"]}]))?;
+    let r = s.request_as(Some(&reader), Method::POST, "/functions/waiter/run", Some(&json!({"params":{"path":token_file}})), &[])?;
+    assert_eq!(r.status, StatusCode::SERVICE_UNAVAILABLE, "expected request cancellation: {}", r.body);
+    let token = std::fs::read_to_string(&token_file)?;
+    let check = s.request_as(Some(&token), Method::GET, "/auth/me", None, &[])?;
+    assert_eq!(check.status, StatusCode::UNAUTHORIZED, "The canceled script's temporary session still authenticates");
+    // Revoked lattice-wide (a durable record) within a few seconds, not just refused in this
+    // process's memory: still refused after a restart.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    s.restart()?;
+    let check = s.request_as(Some(&token), Method::GET, "/auth/me", None, &[])?;
+    assert_eq!(check.status, StatusCode::UNAUTHORIZED, "The canceled script's session authenticates again after a restart");
+    Ok(())
+}
+
+/// H255-09: a script's timeout covers delivering its input, and a script that writes before it
+/// reads can't wedge the server.
+#[test]
+fn review255_script_timeout_includes_stdin_delivery() -> Result<()> {
+    let s = TestServer::start()?;
+    for (name, code) in [("noinput", "import time\ntime.sleep(4)\nprint('{}')"), ("chatty", "import sys,time\nsys.stdout.write('x'*1048576)\nsys.stdout.flush()\ntime.sleep(4)")] {
+        let r = s.request(Method::POST, "/functions", Some(&json!({"name":name,"kind":"script","runtime":"python","code":code,"timeout_seconds":1,"params":[{"name":"payload","type":"string"}]})), &[])?;
+        assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+        let start = std::time::Instant::now();
+        let r = s.request(Method::POST, &format!("/functions/{}/run", name), Some(&json!({"params":{"payload":"x".repeat(256*1024)}})), &[])?;
+        assert!(start.elapsed() < std::time::Duration::from_secs(3), "A one-second script ran for {:?} (HTTP {}: {})", start.elapsed(), r.status, r.body);
+        assert!(r.body.to_string().contains("didn't finish"), "{}", r.body);
+    }
+    Ok(())
+}

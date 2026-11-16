@@ -1697,9 +1697,9 @@ The body references a parameter as `{"$param": "name"}`, anywhere in the JSON. H
 
 **Input.** A script reads `{"params", "function", "caller"}` as JSON on stdin and prints its result as JSON on stdout.
 
-**Environment.** It gets `HEXDB_API` (the server's URL) and `HEXDB_TOKEN`, a session of the user who ran it. The session is revoked when the script ends. The script runs in a clean environment in a temporary folder.
+**Environment.** It gets `HEXDB_API` (the server's URL) and `HEXDB_TOKEN`, a session of the user who ran it. The session expires a minute after `timeout_seconds` and is revoked when the script ends, however it ends: finished, failed, timed out, or the request that ran it gone (a request timeout, a client that disconnected). The script runs in a clean environment in a temporary folder only the server's user can open, removed when it ends.
 
-**Timeout.** It's stopped after `timeout_seconds`. If the server exits, the script dies with it.
+**Timeout.** It's stopped after `timeout_seconds`, counted from its start and covering its input, its output and its exit, so a script that never reads its input or writes before reading can't hold on longer. On Linux and macOS the script runs in a process group of its own, and the whole group is stopped. If the server exits, the script dies with it.
 
 **Runtimes:**
 - `python` runs the `python` (Windows) or `python3` interpreter.

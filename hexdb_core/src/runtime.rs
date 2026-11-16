@@ -98,6 +98,19 @@ impl RuntimeInfo {
 /// Windows, inheritance is removed and only the current user and SYSTEM are
 /// granted access. The file is created empty and restricted before the
 /// contents are written, so they are never readable by others.
+/// Create a new directory only this user can open (mode 0700 on Unix; on
+/// Windows the temp folders it's used under are already the user's own).
+pub fn create_private_dir(path: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path).with_context(|| format!("Failed to create {}", path.display()))
+}
+
 pub fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);

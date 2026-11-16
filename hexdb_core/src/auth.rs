@@ -420,12 +420,17 @@ pub fn issue_session(key: &[u8; 32], user_id: &str, hours: u64) -> (String, Sess
 
 /// A session token, marked when it's issued to a trigger's script.
 pub fn issue_session_for(key: &[u8; 32], user_id: &str, hours: u64, trigger: Option<String>) -> (String, SessionClaims) {
+    issue_session_until(key, user_id, Utc::now().timestamp() + (hours.clamp(1, 24 * 30) as i64) * 3600, trigger)
+}
+
+/// A session token that expires at `expires` (epoch seconds), e.g. one script run's.
+pub fn issue_session_until(key: &[u8; 32], user_id: &str, expires: i64, trigger: Option<String>) -> (String, SessionClaims) {
     let now = Utc::now();
     let claims = SessionClaims {
         sub: user_id.to_string(),
         sid: Ulid::generate().to_string(),
         iat: now.timestamp_millis(),
-        exp: now.timestamp() + (hours.clamp(1, 24 * 30) as i64) * 3600,
+        exp: expires.clamp(now.timestamp() + 1, now.timestamp() + 30 * 24 * 3600),
         trg: trigger,
     };
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap_or_default());
@@ -602,6 +607,10 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
     if token.starts_with(SESSION_PREFIX) {
         // Sessions signed with a previous lattice key stay valid during a rotation.
         let Some(claims) = engine.config.session_keys()?.iter().find_map(|key| verify_session(key, token)) else { return Ok(None) };
+        // A script run that ended without its cleanup: refused here before its revocation is written.
+        if crate::functions::is_abandoned_session(&claims.sid) {
+            return Ok(None);
+        }
         if let Ok(sid) = Ulid::from_string(&claims.sid) {
             if engine.get_system_document(REVOKED_SESSIONS_TESSELLATION, sid).await?.is_some() {
                 return Ok(None);

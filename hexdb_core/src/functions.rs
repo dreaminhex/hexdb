@@ -552,16 +552,19 @@ impl HexDBEngine {
         let runtime = def.runtime.as_deref().unwrap_or_default();
         let code = def.code.clone().unwrap_or_default();
         let dir = std::env::temp_dir().join(format!("hexdb-fn-{}", Ulid::generate()));
-        std::fs::create_dir_all(&dir)?;
+        crate::runtime::create_private_dir(&dir)?;
         let (program, args, file) = match runtime {
             "python" => (self.config.functions.python.clone(), vec![], "main.py"),
             "typescript" => (self.config.functions.node.clone(), vec!["--experimental-strip-types".to_string(), "--no-warnings".to_string()], "main.mts"),
             _ => (self.config.functions.node.clone(), vec![], "main.mjs"),
         };
-        std::fs::write(dir.join(file), code)?;
-        // A session for the caller, only for this run.
+        // A session for the caller, only for this run: it expires a minute after the
+        // script's timeout, and is revoked when the run ends, however it ends (see `ScriptRun`).
         // Inside a trigger, the session is marked so the script's writes don't fire triggers.
-        let (token, claims) = crate::auth::issue_session_for(&self.config.session_key()?, &principal.user_id, 1, crate::access::current_trigger());
+        let expires = Utc::now().timestamp() + def.timeout_seconds as i64 + 60;
+        let (token, claims) = crate::auth::issue_session_until(&self.config.session_key()?, &principal.user_id, expires, crate::access::current_trigger());
+        let mut run = ScriptRun { engine: self, dir: dir.clone(), sid: claims.sid.clone(), exp: claims.exp, child: None, finished: false };
+        std::fs::write(dir.join(file), code)?;
         let scheme = if self.config.tls.enabled() { "https" } else { "http" };
         let mut command = tokio::process::Command::new(&program);
         command.args(&args).arg(file).current_dir(&dir).env_clear();
@@ -583,17 +586,31 @@ impl HexDBEngine {
             command.env("NODE_EXTRA_CA_CERTS", &self.config.tls.ca_file).env("REQUESTS_CA_BUNDLE", &self.config.tls.ca_file).env("SSL_CERT_FILE", &self.config.tls.ca_file);
         }
         crate::process::contain(&mut command);
+        crate::process::own_group(&mut command);
         let started = std::time::Instant::now();
+        // One deadline for everything: starting, writing the input, reading the output, exiting.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(def.timeout_seconds);
         let result = async {
-            let mut child = command.spawn().with_context(|| format!("couldn't start {} (set functions.{} in hexdb.toml)", program, if runtime == "python" { "python" } else { "node" }))?;
+            let child = command.spawn().with_context(|| format!("couldn't start {} (set functions.{} in hexdb.toml)", program, if runtime == "python" { "python" } else { "node" }))?;
             crate::process::adopt(&child);
+            let child = run.child.insert(child);
             let mut input = json!({ "params": params, "function": def.name, "caller": principal.login });
             if let Some((name, value)) = &context {
                 input[*name] = value.clone();
             }
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(input.to_string().as_bytes()).await?;
-            }
+            let input = input.to_string();
+            let stdin = child.stdin.take();
+            // Written while the output is read, so a script that writes before it reads (or never
+            // reads) can't block the server, and a script that exits without reading isn't an error.
+            let write_in = async move {
+                if let Some(mut stdin) = stdin {
+                    match stdin.write_all(input.as_bytes()).await {
+                        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e),
+                        _ => {}
+                    }
+                }
+                Ok(())
+            };
             let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
             let mut stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
             let read_out = async {
@@ -604,13 +621,16 @@ impl HexDBEngine {
                 let mut buf = Vec::new();
                 (&mut stderr).take(64 * 1024).read_to_end(&mut buf).await.map(|_| buf)
             };
-            let timeout = Duration::from_secs(def.timeout_seconds);
-            let finished = tokio::time::timeout(timeout, async { tokio::join!(child.wait(), read_out, read_err) }).await;
-            let Ok((status, out, err)) = finished else {
+            let finished = tokio::time::timeout_at(deadline, async { tokio::join!(write_in, child.wait(), read_out, read_err) }).await;
+            let Ok((written, status, out, err)) = finished else {
+                // Still running (not yet waited for), so its process group is still its own.
+                if let Some(pid) = child.id() {
+                    crate::process::kill_group(pid);
+                }
                 let _ = child.kill().await;
                 bail!(invalid(format!("The script didn't finish within {} seconds.", def.timeout_seconds)));
             };
-            let (status, out, err) = (status?, out?, err?);
+            let (_, status, out, err) = (written?, status?, out?, err?);
             let stderr_text = String::from_utf8_lossy(&err).trim().to_string();
             if !stderr_text.is_empty() {
                 info!(target: "hexdb_core::functions", function = %def.name, "[{}] {}", def.name, stderr_text.chars().take(2000).collect::<String>());
@@ -626,10 +646,7 @@ impl HexDBEngine {
             Ok(serde_json::from_str::<Value>(&text).unwrap_or(json!({ "output": text })))
         }
         .await;
-        let _ = std::fs::remove_dir_all(&dir);
-        if let Err(e) = self.revoke_script_session(&claims.sid, claims.exp).await {
-            warn!("⚠️ Couldn't revoke the session of script '{}': {:#}", def.name, e);
-        }
+        run.finish(&def.name).await;
         info!(target: "hexdb_core::functions", "⚙️ Script '{}' run by '{}' in {} ms.", def.name, principal.login, started.elapsed().as_millis());
         result
     }
@@ -743,6 +760,79 @@ impl HexDBEngine {
     }
 }
 
+/// Script sessions whose run ended without its cleanup (the request went away
+/// mid-run): session ID -> expiry (epoch seconds). Refused at once on this hex
+/// (see `crate::auth::authenticate`), and revoked lattice-wide by the scheduler
+/// loop within a second.
+static ABANDONED_SESSIONS: std::sync::Mutex<std::collections::BTreeMap<String, (i64, bool)>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// True if a script's session was left behind by a run that didn't finish.
+pub fn is_abandoned_session(sid: &str) -> bool {
+    ABANDONED_SESSIONS.lock().unwrap().contains_key(sid)
+}
+
+/// One script run's cleanup: its temporary directory, its session and its processes.
+/// Done by [`ScriptRun::finish`]; if the run's future is dropped first (a request
+/// timeout or a client gone), `Drop` kills the processes, removes the directory and
+/// leaves the session for the scheduler loop to revoke.
+struct ScriptRun<'a> {
+    engine: &'a HexDBEngine,
+    dir: std::path::PathBuf,
+    sid: String,
+    exp: i64,
+    /// The script's process, once started.
+    child: Option<tokio::process::Child>,
+    finished: bool,
+}
+
+impl ScriptRun<'_> {
+    async fn finish(&mut self, name: &str) {
+        self.finished = true;
+        let _ = std::fs::remove_dir_all(&self.dir);
+        if let Err(e) = self.engine.revoke_script_session(&self.sid, self.exp).await {
+            warn!("⚠️ Couldn't revoke the session of script '{}' yet: {:#}", name, e);
+            ABANDONED_SESSIONS.lock().unwrap().insert(self.sid.clone(), (self.exp, false));
+        }
+    }
+}
+
+impl Drop for ScriptRun<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        ABANDONED_SESSIONS.lock().unwrap().insert(self.sid.clone(), (self.exp, false));
+        if let Some(child) = &mut self.child {
+            // Only while it hasn't exited (and been reaped) is its process group certainly its own.
+            if let (Ok(None), Some(pid)) = (child.try_wait(), child.id()) {
+                crate::process::kill_group(pid);
+            }
+            let _ = child.start_kill();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Revoke the sessions of abandoned script runs (kept refused here until they expire).
+async fn revoke_abandoned_sessions(engine: &HexDBEngine) {
+    let now = Utc::now().timestamp();
+    let pending: Vec<(String, i64)> = {
+        let mut abandoned = ABANDONED_SESSIONS.lock().unwrap();
+        abandoned.retain(|_, (exp, _)| *exp > now);
+        abandoned.iter().filter(|(_, (_, revoked))| !revoked).map(|(sid, (exp, _))| (sid.clone(), *exp)).collect()
+    };
+    for (sid, exp) in pending {
+        match engine.revoke_script_session(&sid, exp).await {
+            Ok(()) => {
+                if let Some(entry) = ABANDONED_SESSIONS.lock().unwrap().get_mut(&sid) {
+                    entry.1 = true;
+                }
+            }
+            Err(e) => tracing::debug!("Couldn't revoke an abandoned script session yet: {:#}", e),
+        }
+    }
+}
+
 /// Run due schedules on the Overseer.
 pub fn spawn_scheduler(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
     crate::tasks::supervise("scheduler", shutdown_rx.clone(), move || {
@@ -754,6 +844,7 @@ pub fn spawn_scheduler(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()
                     _ = shutdown_rx.changed() => break,
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
+                revoke_abandoned_sessions(&engine).await;
                 if !engine.is_writable() {
                     continue;
                 }
