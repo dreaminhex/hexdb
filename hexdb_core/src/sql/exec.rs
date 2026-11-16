@@ -30,6 +30,7 @@ use crate::filter::{compare, sort_order, Filter};
 use anyhow::Result;
 use serde_json::{json, Map, Number, Value};
 use sqlparser::ast::{
+    InTarget,
     self, BinaryOperator, Distinct, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, JoinConstraint, JoinOperator,
     LimitClause, OrderByKind, OrderBySort, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier,
     TableFactor, UnaryOperator,
@@ -752,6 +753,7 @@ impl<'p> Compiler<'p> {
             let right_bindings = node_bindings(&right);
             let on = match constraint {
                 Some(JoinConstraint::On(expr)) => Some(self.expr(expr, None)?),
+                Some(JoinConstraint::UsingAlias(..)) => return Err(unsupported("USING (...) AS")),
                 Some(JoinConstraint::Using(names)) => {
                     let mut on: Option<Ex> = None;
                     for name in names {
@@ -935,7 +937,7 @@ impl<'p> Compiler<'p> {
             Expr::IsNotFalse(inner) => Ex::IsBool(e!(inner), false, true),
             Expr::IsDistinctFrom(a, b) => Ex::DistinctFrom(e!(a), e!(b), false),
             Expr::IsNotDistinctFrom(a, b) => Ex::DistinctFrom(e!(a), e!(b), true),
-            Expr::InList { expr: inner, list, negated } => {
+            Expr::In { expr: inner, target: InTarget::List(list), negated, .. } => {
                 let target = e!(inner);
                 let mut values = Vec::with_capacity(list.len());
                 for item in list {
@@ -943,7 +945,7 @@ impl<'p> Compiler<'p> {
                 }
                 Ex::InList(target, values, *negated)
             }
-            Expr::InSubquery { expr: inner, subquery, negated } => {
+            Expr::In { expr: inner, target: InTarget::Subquery(subquery), negated, .. } => {
                 let target = e!(inner);
                 Ex::InSub(target, self.sub(subquery)?, *negated)
             }

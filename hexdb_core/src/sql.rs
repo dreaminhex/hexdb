@@ -59,6 +59,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{json, Map, Number, Value};
 use sqlparser::ast::{
+    InTarget,
     self as ast, BinaryOperator, Distinct, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, LimitClause,
     ObjectName, OrderByKind, OrderBySort, SelectItem, SelectItemQualifiedWildcardKind, SetExpr, Statement, TableFactor,
     UnaryOperator,
@@ -1023,7 +1024,7 @@ impl<'a> Translator<'a> {
             ),
             Expr::IsNull(e) => Having::IsNull(self.operand(e, group_by, aggregates, items)?),
             Expr::IsNotNull(e) => Having::Not(Box::new(Having::IsNull(self.operand(e, group_by, aggregates, items)?))),
-            Expr::InList { expr, list, negated } => {
+            Expr::In { expr, target: InTarget::List(list), negated, .. } => {
                 let operand = self.operand(expr, group_by, aggregates, items)?;
                 let values = list.iter().map(|e| self.value(e)).collect::<Result<Vec<_>>>()?;
                 let test = Having::In(operand, values);
@@ -1091,7 +1092,7 @@ impl<'a> Translator<'a> {
                 let equal = matches!(expr, Expr::IsTrue(_) | Expr::IsFalse(_)) != negated;
                 Cond::Filter(json!({ field: { (if equal { "$eq" } else { "$ne" }): target } }))
             }
-            Expr::InList { expr: e, list, negated: not_in } => {
+            Expr::In { expr: e, target: InTarget::List(list), negated: not_in, .. } => {
                 let field = self.require_field(e, expr)?;
                 let values = list.iter().map(|v| self.value(v)).collect::<Result<Vec<_>>>()?;
                 in_list(&field, values, *not_in != negated)
@@ -1127,7 +1128,7 @@ impl<'a> Translator<'a> {
                 like(&field, &pattern, escape, *not_like != negated)?
             }
             Expr::ILike { .. } => return Err(unsupported("ILIKE (HexDB's string matching is case-sensitive; use LIKE)")),
-            Expr::InSubquery { .. } | Expr::Exists { .. } | Expr::Subquery(_) => return Err(unsupported("subqueries")),
+            Expr::In { target: InTarget::Subquery(_), .. } | Expr::Exists { .. } | Expr::Subquery(_) => return Err(unsupported("subqueries")),
             Expr::Function(f) => return Err(unsupported(format!("the function {} in WHERE", f.name))),
             _ => {
                 if let Some(field) = self.field(expr)? {
