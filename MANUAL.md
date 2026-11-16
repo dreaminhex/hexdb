@@ -419,6 +419,7 @@ Errors have one shape:
 | 502 | `ai_provider_error` | The AI provider returned an error (its message, without the key) |
 | 503 | `replication_timeout` | Committed, but fewer than `replication.min_acks` replicas confirmed in time |
 | 503 | `no_quorum` | The Overseer can't see `replication.quorum` hexes, so it refuses writes |
+| 503 | `stepping_down` | The Overseer was handing its role over and wrote nothing. Normally never seen: the request goes on to the next Overseer by itself. With `replication.forward_writes` off, or for an upload, send it again |
 | 507 | `quota_exceeded` | An upload would take its user past their quota |
 | 503 | `content_unavailable` | A file's content can't be read here or fetched from another hex right now |
 | 507 | `disk_full` | The data directory is over `storage.disk_mb`; deletes still work |
@@ -2395,7 +2396,9 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 - Secrets belong in `hexdb.local.toml` or environment variables, never in a committed `hexdb.toml`.
 - `GET /settings` hides secrets in the effective configuration.
 - Uploaded files are parsed in a sandboxed worker process that has no keys, no store and (on Linux and Windows) no file or network access; see [the parser sandbox](#metadata-extraction).
-- Process plugins run in a sandbox (Landlock and seccomp on Linux, an AppContainer on Windows). They can't read HexDB's data, config or TLS key, and get only the network and folders their manifest declares; see [Isolation](#isolation).
+- Process plugins run in a sandbox (Landlock and seccomp on Linux, an AppContainer on Windows). They can't read HexDB's data, config or TLS key, and get only the network and folders their manifest declares; see [Isolation](#isolation). On a Linux kernel without Landlock, and on macOS, file access isn't confined: `GET /plugins` and the startup log say so, and `plugins.require_full_sandbox = true` refuses to run plugins there.
+- Script functions run with a session of the caller that ends with the run (however it ends), in a private temporary folder, and with every process they start stopped with them; see [Scripts](#scripts).
+- Webhooks the server calls for users (stream destinations, A2A push notifications) must resolve to public addresses unless an administrator allows private networks (`streams.private_networks`, `a2a.push_private_networks`), and their credentials are never shown back through the API.
 
 ### Configuration, AI and storage
 
@@ -2744,7 +2747,7 @@ Changes are saved, encrypted, in the data directory and apply on top of the conf
 
 | Live | Applies at restart |
 | --- | --- |
-| `limits.max_document_kb`, `storage.disk_mb`, `storage.change_history_hours`, `storage.change_history_mb`, `security.session_hours`, `security.audit_retention_days`, `replication.min_acks`, `replication.ack_timeout_ms` | `limits.max_request_mb`, `limits.max_connections`, `limits.max_connections_per_client`, `limits.request_timeout_seconds`, `limits.header_timeout_seconds`, `memory.ram_mb`, `memory.ttl_scan_frequency`, `security.max_failed_logins`, `security.lockout_minutes`, `storage.compaction_frequency`, `storage.wal_flush_check_frequency`, `storage.wal_sync`, `compression.compression_level`, `replication.forward_writes`, `replication.quorum`, `plugins.enabled` |
+| `limits.max_document_kb`, `storage.disk_mb`, `storage.change_history_hours`, `storage.change_history_mb`, `security.session_hours`, `security.audit_retention_days`, `replication.min_acks`, `replication.ack_timeout_ms` | `limits.max_request_mb`, `limits.max_connections`, `limits.max_connections_per_client`, `limits.request_timeout_seconds`, `limits.header_timeout_seconds`, `memory.ram_mb`, `memory.ttl_scan_frequency`, `security.max_failed_logins`, `security.lockout_minutes`, `storage.compaction_frequency`, `storage.wal_flush_check_frequency`, `storage.wal_sync`, `compression.compression_level`, `replication.forward_writes`, `replication.quorum`, `plugins.enabled`, `limits.sql_max_rows`, `limits.sql_max_mb` |
 
 ### Lattice configuration
 
