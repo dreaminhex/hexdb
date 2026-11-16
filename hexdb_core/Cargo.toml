@@ -41,7 +41,7 @@ ring = "0.17"
 # Outbound email (the security reviewer), over SMTP with TLS.
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "hostname"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
-sqlparser = "0.63.0"
+sqlparser = "0.64.0"
 fastcdc = "5.0.0"
 infer = "0.22.0"
 mime_guess = "2.0.5"
@@ -50,7 +50,7 @@ lofty = "0.25.4"
 nom-exif = "3.8.0"
 imagesize = "0.15.0"
 quick-xml = "0.42"
-lopdf = { version = "0.46.0", default-features = false }
+lopdf = { version = "0.47.0", default-features = false }
 tar = { version = "0.4.46", default-features = false }
 flate2 = "1.1.10"
 zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
