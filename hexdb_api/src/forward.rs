@@ -360,8 +360,37 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     let partial = !engine.is_writable() && engine.is_partial_replica() && !answers_without_data(&path);
     // An Overseer handing its role over passes writes on to the next one.
     let writing_here = engine.is_writable() && !hexdb_core::updates::stepping_down();
+    let mut request = request;
     if !partial && (writing_here || !engine.config.replication.forward_writes || handled_locally(request.method(), &path)) {
-        return next.run(request).await;
+        let resendable = writing_here
+            && engine.config.replication.forward_writes
+            && !handled_locally(request.method(), &path)
+            && !path.contains("/_files/")
+            && !path.contains("/_uploads/")
+            && !crate::server::is_long_running(&path);
+        if !resendable {
+            return next.run(request).await;
+        }
+        // A write that arrived just before this Overseer began handing its role over is refused
+        // untouched (`stepping_down`): it goes on to the next Overseer, as a replica would send it,
+        // instead of failing. So the body is kept until the answer is known.
+        let (parts, body) = request.into_parts();
+        let bytes: Bytes = match axum::body::to_bytes(body, crate::routes::bulk_body_limit(&engine)).await {
+            Ok(bytes) => bytes,
+            Err(_) => return crate::handlers::ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "The request body is too large.").into_response(),
+        };
+        let response = next.clone().run(Request::from_parts(parts.clone(), Body::from(bytes.clone()))).await;
+        if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+            return response;
+        }
+        let (response_parts, response_body) = response.into_parts();
+        let answer = axum::body::to_bytes(response_body, 64 * 1024).await.unwrap_or_default();
+        let refused_untouched = serde_json::from_slice::<serde_json::Value>(&answer).ok().is_some_and(|v| v["error"]["code"] == crate::handlers::STEPPING_DOWN_CODE);
+        if !refused_untouched {
+            return Response::from_parts(response_parts, Body::from(answer));
+        }
+        debug!("A write reached this Overseer as it began handing its role over; sending it to the next one.");
+        request = Request::from_parts(parts, Body::from(bytes));
     }
     let until = Instant::now() + HOLD_FOR_OVERSEER;
     let overseer = overseer_until(&engine, until).await;

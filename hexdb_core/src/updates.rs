@@ -166,6 +166,9 @@ static STEPPING_DOWN: AtomicBool = AtomicBool::new(false);
 static WITHDRAWN: AtomicBool = AtomicBool::new(false);
 static ROLLOUT: Mutex<Option<Rollout>> = Mutex::new(None);
 
+/// What a write this Overseer refused while handing its role over says (the API normally sends it on instead).
+pub const STEPPING_DOWN_MESSAGE: &str = "This Overseer is handing its role to another hex for an update; try again in a few seconds.";
+
 /// True while this Overseer hands its role over: it takes no more writes
 /// (the API holds them for the next Overseer).
 pub fn stepping_down() -> bool {

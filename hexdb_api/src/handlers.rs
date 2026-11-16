@@ -39,6 +39,8 @@ use ulid::Ulid;
 
 /// Header carrying the client's idempotency key.
 pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+/// The error code of a write an Overseer refused, untouched, as it started handing its role over.
+pub const STEPPING_DOWN_CODE: &str = "stepping_down";
 /// Response header set when a result is replayed from an idempotency record.
 pub const IDEMPOTENT_REPLAYED_HEADER: &str = "idempotent-replayed";
 
@@ -128,6 +130,7 @@ impl From<anyhow::Error> for ApiError {
             Some(EngineError::ReplicationTimeout(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "replication_timeout", m.clone()),
             Some(EngineError::NoQuorum(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no_quorum", m.clone()),
             Some(EngineError::Unavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "content_unavailable", m.clone()),
+            Some(EngineError::SteppingDown(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, STEPPING_DOWN_CODE, m.clone()).with_retry_after(2),
             Some(EngineError::QuotaExceeded(m)) => ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "quota_exceeded", m.clone()),
             Some(EngineError::ScannerUnavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "scanner_unavailable", m.clone()).with_retry_after(10),
             Some(EngineError::Quarantined(m)) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "file_quarantined", m.clone()),

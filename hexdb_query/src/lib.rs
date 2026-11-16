@@ -62,6 +62,7 @@ fn to_gql(e: anyhow::Error) -> async_graphql::Error {
         Some(EngineError::ReplicationTimeout(m)) => gql_error("REPLICATION_TIMEOUT", m.clone()),
         Some(EngineError::NoQuorum(m)) => gql_error("NO_QUORUM", m.clone()),
         Some(EngineError::Unavailable(m)) => gql_error("CONTENT_UNAVAILABLE", m.clone()),
+        Some(EngineError::SteppingDown(m)) => gql_error("STEPPING_DOWN", m.clone()),
         Some(EngineError::QuotaExceeded(m)) => gql_error("QUOTA_EXCEEDED", m.clone()),
         Some(EngineError::ScannerUnavailable(m)) => gql_error("SCANNER_UNAVAILABLE", m.clone()),
         Some(EngineError::Quarantined(m)) => gql_error("FILE_QUARANTINED", m.clone()),

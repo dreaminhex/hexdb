@@ -1225,7 +1225,7 @@ impl HexDBEngine {
             // passed `ensure_writable` just before a step-down began takes none, so the
             // stepping-down Overseer's last change is final (see `updates::step_down`).
             if !replicated && self.is_writable() && crate::updates::stepping_down() {
-                return Err(EngineError::Unavailable("This Overseer is handing its role to another hex for an update; try again in a few seconds.".into()).into());
+                return Err(EngineError::SteppingDown(crate::updates::STEPPING_DOWN_MESSAGE.into()).into());
             }
             for item in &items {
                 if let Some(expected) = item.expected_seq {

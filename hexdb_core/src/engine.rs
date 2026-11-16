@@ -104,6 +104,9 @@ pub enum EngineError {
     /// Stored content can't be read right now (503): its shards are unreadable
     /// here and no other hex could supply it.
     Unavailable(String),
+    /// This Overseer is handing its role over and took no part of the write (503): the
+    /// API sends the same request on to the next Overseer (see `hexdb_api::forward`).
+    SteppingDown(String),
     /// An upload would take a user past their quota (507).
     QuotaExceeded(String),
     /// The malware scanner can't give a verdict, so the upload is held (503).
@@ -141,6 +144,7 @@ impl fmt::Display for EngineError {
             | EngineError::DiskFull(m)
             | EngineError::NoQuorum(m)
             | EngineError::Unavailable(m)
+            | EngineError::SteppingDown(m)
             | EngineError::QuotaExceeded(m)
             | EngineError::ScannerUnavailable(m)
             | EngineError::Quarantined(m)
@@ -874,7 +878,7 @@ impl HexDBEngine {
                 return Err(EngineError::Unavailable(note).into());
             }
             if crate::updates::stepping_down() {
-                return Err(EngineError::Unavailable("This Overseer is handing its role to another hex for an update; try again in a few seconds.".into()).into());
+                return Err(EngineError::SteppingDown(crate::updates::STEPPING_DOWN_MESSAGE.into()).into());
             }
             return self.check_quorum();
         }
