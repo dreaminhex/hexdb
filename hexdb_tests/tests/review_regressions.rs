@@ -301,3 +301,24 @@ fn sql_statements_have_a_memory_budget() -> Result<()> {
     assert!(r.body.to_string().contains("limits.sql_max_mb"), "{}", r.body);
     Ok(())
 }
+
+/// An answer given before the request's body was read (an upload refused at once) still reaches
+/// the client, and the client's next request on the same connection works.
+#[test]
+fn early_answers_to_unread_uploads_reach_the_client() -> Result<()> {
+    let s = TestServer::start()?;
+    assert!(s.request(Method::POST, "/tessellations", Some(&json!({ "name": "media", "kind": "files" })), &[])?.status.is_success());
+    let client = hexdb_tests::http().build()?;
+    for size in [600 * 1024, 2 * 1024 * 1024, 40 * 1024 * 1024] {
+        // No credentials: refused before a byte of the body is read.
+        let refused = client.put(s.url("/media/_files/big.bin")).body(vec![7u8; size]).send()?;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{} bytes", size);
+        // Small enough to drain: the connection stays usable; too big: it's closed, and says so.
+        let closes = refused.headers().get("connection").is_some_and(|v| v == "close");
+        assert_eq!(closes, size > 32 * 1024 * 1024, "{} bytes", size);
+        drop(refused);
+        let next = client.get(s.url("/health")).send()?;
+        assert!(next.status().is_success(), "the next request after {} bytes", size);
+    }
+    Ok(())
+}

@@ -2322,6 +2322,7 @@ dependencies = [
  "futures",
  "hexdb_core",
  "hexdb_query",
+ "http-body",
  "hyper",
  "hyper-util",
  "prost",

@@ -287,6 +287,8 @@ pub fn app_router(
         .layer(middleware::from_fn_with_state(engine.clone(), log_request))
         .layer(middleware::from_fn_with_state((proxies, engine.clone()), crate::client::resolve_client))
         .layer(middleware::from_fn_with_state(engine.clone(), crate::auth::security_headers))
+        // Outermost: it sees whether anything inside read the request's body.
+        .layer(middleware::from_fn(crate::server::drain_unread))
         .layer(Extension(shutdown_handle))
         .layer(Extension(blocklist))
         .layer(Extension(schema))

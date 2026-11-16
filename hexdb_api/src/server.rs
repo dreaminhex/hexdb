@@ -210,6 +210,81 @@ pub(crate) fn is_long_running(path: &str) -> bool {
         || (path.starts_with("/streams/") && (path.ends_with("/messages") || path.ends_with("/subscribe")))
 }
 
+/// A request body that notes when it has been read to its end, and if it's dropped before
+/// that, leaves the rest in `rest` (see `drain_unread`).
+struct TrackedBody {
+    inner: Option<axum::body::Body>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    rest: std::sync::Arc<std::sync::Mutex<Option<axum::body::Body>>>,
+}
+
+impl http_body::Body for TrackedBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let Some(inner) = self.inner.as_mut() else { return std::task::Poll::Ready(None) };
+        let polled = std::pin::Pin::new(inner).poll_frame(cx);
+        if let std::task::Poll::Ready(None) = &polled {
+            self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.as_ref().is_none_or(|b| b.is_end_stream())
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.as_ref().map(|b| b.size_hint()).unwrap_or_default()
+    }
+}
+
+impl Drop for TrackedBody {
+    fn drop(&mut self) {
+        if !self.done.load(std::sync::atomic::Ordering::Relaxed) {
+            if let (Some(body), Ok(mut rest)) = (self.inner.take(), self.rest.lock()) {
+                *rest = Some(body);
+            }
+        }
+    }
+}
+
+/// Most of an unread request body read (and dropped) to keep its connection usable.
+const DRAIN_LIMIT: usize = 32 * 1024 * 1024;
+/// Longest spent reading it.
+const DRAIN_TIME: Duration = Duration::from_secs(10);
+
+/// An answer given before its request's body was read (an upload refused at once: over a quota,
+/// not allowed): the rest of the body is read and dropped first (up to 32 MB, for 10 s), so the
+/// client finishes sending, reads the answer, and can use the connection again. A bigger or slower
+/// body ends the HTTP/1 connection instead, and the answer says so (`Connection: close`) so the
+/// client doesn't put it back in its pool and lose its next request on it.
+pub async fn drain_unread(request: Request, next: Next) -> Response {
+    use http_body::Body as _;
+    if request.version() > axum::http::Version::HTTP_11 || request.body().is_end_stream() {
+        return next.run(request).await;
+    }
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let rest = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (parts, body) = request.into_parts();
+    let tracked = axum::body::Body::new(TrackedBody { inner: Some(body), done: done.clone(), rest: rest.clone() });
+    let mut response = next.run(Request::from_parts(parts, tracked)).await;
+    if done.load(std::sync::atomic::Ordering::Relaxed) {
+        return response;
+    }
+    let unread = rest.lock().ok().and_then(|mut r| r.take());
+    let drained = match unread {
+        Some(body) => matches!(tokio::time::timeout(DRAIN_TIME, axum::body::to_bytes(body, DRAIN_LIMIT)).await, Ok(Ok(_))),
+        // Still held somewhere (a task that outlives the request): don't wait for it.
+        None => false,
+    };
+    if !drained {
+        response.headers_mut().insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("close"));
+    }
+    response
+}
+
 /// Fail requests that take longer than `limits.request_timeout_seconds` with 503.
 pub async fn request_timeout(axum::extract::State(timeout): axum::extract::State<Duration>, request: Request, next: Next) -> Response {
     if is_long_running(request.uri().path()) {
