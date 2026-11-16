@@ -414,24 +414,45 @@ impl HexDBEngine {
         plan: Option<&Plan>,
     ) -> Result<Option<crate::engine::QueryPage>> {
         let key = &query.sort[0];
-        let (name, ordered) = {
+        // One page of the index at a time (the lock isn't held while documents are read):
+        // what the query needs, growing when the filter or plan passes over entries.
+        let page = |after: Option<&(crate::index::KeyPart, ulid::Ulid)>, size: usize| {
             let indexes = self.indexes.read().unwrap();
-            let Some(index) = indexes.by_tessellation.get(tess).and_then(|list| {
+            let index = indexes.by_tessellation.get(tess).and_then(|list| {
                 list.iter().find(|i| i.usable() && i.def.kind == crate::index::IndexKind::Field && i.def.fields == [key.field.clone()])
-            }) else {
-                return Ok(None);
-            };
-            (index.def.name.clone(), index.ordered(key.descending))
+            })?;
+            Some((index.def.name.clone(), index.ordered_page(key.descending, after, size)?))
         };
-        let Some(ordered) = ordered else { return Ok(None) };
-        let path: Vec<String> = key.field.split('.').map(String::from).collect();
         let want = query.offset.saturating_add(query.limit);
+        let mut size = want.saturating_add(16).clamp(64, 4096);
+        let Some((name, first)) = page(None, size) else { return Ok(None) };
+        let path: Vec<String> = key.field.split('.').map(String::from).collect();
         let ties_matter = query.sort.len() > 1;
         let mut seen = HashSet::new();
         let mut documents = Vec::new();
         let mut last_part = None;
         let mut scanned = 0;
-        for (part, id) in ordered {
+        // A page shorter than asked for was the end of the index.
+        let mut exhausted = first.len() < size;
+        let mut entries = first.into_iter();
+        let mut cursor = None;
+        loop {
+            let (part, id) = match entries.next() {
+                Some(entry) => entry,
+                None if exhausted => break,
+                None => {
+                    size = (size * 2).min(65_536);
+                    // The index went away meanwhile: the general path answers instead.
+                    let Some((_, next)) = page(cursor.as_ref(), size) else { return Ok(None) };
+                    exhausted = next.len() < size;
+                    entries = next.into_iter();
+                    match entries.next() {
+                        Some(entry) => entry,
+                        None => break,
+                    }
+                }
+            };
+            cursor = Some((part.clone(), id));
             if documents.len() >= want && (!ties_matter || last_part.as_ref() != Some(&part)) {
                 break;
             }

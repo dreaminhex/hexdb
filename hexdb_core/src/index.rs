@@ -522,25 +522,69 @@ impl Index {
         IndexInfo { def: self.def.clone(), documents, keys, ready: self.ready }
     }
 
-    /// For a single-field index: every (first key part, ID) in key order
-    /// (descending keys when `descending`), IDs ascending within a key.
-    pub(crate) fn ordered(&self, descending: bool) -> Option<Vec<(KeyPart, Ulid)>> {
+    /// For a single-field index: up to `limit` (first key part, ID) after `after`
+    /// (from the start without one), in key order (descending keys when
+    /// `descending`), IDs ascending within a key. Reads only what it returns
+    /// (plus a range seek), so a small page of a large index is cheap.
+    pub(crate) fn ordered_page(&self, descending: bool, after: Option<&(KeyPart, Ulid)>, limit: usize) -> Option<Vec<(KeyPart, Ulid)>> {
+        use std::ops::Bound;
         let IndexData::Field(f) = &self.data else { return None };
         if f.paths.len() != 1 || !f.irregular.is_empty() || !f.overflow.is_empty() {
             return None;
         }
-        let mut out = Vec::with_capacity(f.by_doc.len());
-        let mut push = |key: &Key, ids: &BTreeSet<Ulid>| {
+        let mut out = Vec::with_capacity(limit.min(f.by_doc.len()));
+        let mut take = |key: &Key, ids: &BTreeSet<Ulid>, from: Option<Ulid>| -> bool {
+            let ids: Box<dyn Iterator<Item = &Ulid>> = match from {
+                Some(id) => Box::new(ids.range((Bound::Excluded(id), Bound::Unbounded))),
+                None => Box::new(ids.iter()),
+            };
             for id in ids {
+                if out.len() >= limit {
+                    return false;
+                }
                 out.push((key[0].clone(), *id));
             }
+            out.len() < limit
         };
-        if descending {
-            f.entries.iter().rev().for_each(|(k, ids)| push(k, ids));
-        } else {
-            f.entries.iter().for_each(|(k, ids)| push(k, ids));
+        match (after, descending) {
+            (None, false) => {
+                for (k, ids) in &f.entries {
+                    if !take(k, ids, None) {
+                        break;
+                    }
+                }
+            }
+            (None, true) => {
+                for (k, ids) in f.entries.iter().rev() {
+                    if !take(k, ids, None) {
+                        break;
+                    }
+                }
+            }
+            (Some((part, id)), false) => {
+                let key: Key = vec![part.clone()];
+                for (k, ids) in f.entries.range::<Key, _>((Bound::Included(&key), Bound::Unbounded)) {
+                    if !take(k, ids, (*k == key).then_some(*id)) {
+                        break;
+                    }
+                }
+            }
+            (Some((part, id)), true) => {
+                let key: Key = vec![part.clone()];
+                for (k, ids) in f.entries.range::<Key, _>((Bound::Unbounded, Bound::Included(&key))).rev() {
+                    if !take(k, ids, (*k == key).then_some(*id)) {
+                        break;
+                    }
+                }
+            }
         }
         Some(out)
+    }
+
+    /// Every (first key part, ID) of a single-field index in key order (see `ordered_page`).
+    #[cfg(test)]
+    pub(crate) fn ordered(&self, descending: bool) -> Option<Vec<(KeyPart, Ulid)>> {
+        self.ordered_page(descending, None, usize::MAX)
     }
 
     pub(crate) fn contains(&self, id: &Ulid) -> bool {
@@ -1117,6 +1161,31 @@ mod tests {
         let mut unique = field(&["tags"]);
         unique.unique = true;
         assert!(ready(unique, std::slice::from_ref(&plain)).overflows(&over));
+    }
+
+    /// H255-13: pages of the sort walk read only what they return, and together are the whole walk.
+    #[test]
+    fn ordered_pages_are_bounded_and_add_up_to_the_whole_index() {
+        // 300 documents over 40 ranks: ties within a key, ascending IDs within each.
+        let docs: Vec<Document> = (0..300).map(|i| doc(json!({ "rank": (i * 7) % 40 }))).collect();
+        let index = ready(field(&["rank"]), &docs);
+        for descending in [false, true] {
+            let whole = index.ordered(descending).unwrap();
+            assert_eq!(whole.len(), 300);
+            let mut paged = Vec::new();
+            let mut after = None;
+            loop {
+                let page = index.ordered_page(descending, after.as_ref(), 13).unwrap();
+                assert!(page.len() <= 13);
+                if page.is_empty() {
+                    break;
+                }
+                after = page.last().cloned();
+                paged.extend(page);
+            }
+            assert_eq!(paged, whole, "descending = {}", descending);
+        }
+        assert_eq!(index.ordered_page(false, None, 10).unwrap().len(), 10);
     }
 
     #[test]
