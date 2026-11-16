@@ -32,11 +32,34 @@ on:
 permissions:
   contents: write
   packages: write
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Nothing is published unless CI passed on this exact commit: the tag must point at a commit
+  # pushed to main (or a features/ branch) whose CI run succeeded. Builds go ahead meanwhile.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Wait for CI on ${{ github.sha }}
+        run: |
+          for i in $(seq 1 110); do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --json status,conclusion,event)
+            if echo "$runs" | jq -e 'map(select(.event == "push" and .conclusion == "success")) | length > 0' >/dev/null; then
+              echo "CI passed on $GITHUB_SHA"; exit 0
+            fi
+            if echo "$runs" | jq -e 'length > 0 and all(.status == "completed") and all(.conclusion != "success")' >/dev/null; then
+              echo "::error::CI failed on $GITHUB_SHA; nothing is published"; exit 1
+            fi
+            sleep 60
+          done
+          echo "::error::No successful CI run on $GITHUB_SHA within 110 minutes; push the commit to main first"; exit 1
+
   ui:
     runs-on: ubuntu-latest
     steps:
@@ -231,7 +254,7 @@ jobs:
           path: drivers/java/target/hexdb-jdbc-*.jar
 
   publish:
-    needs: [binaries, msi, dmg, deb, jdbc]
+    needs: [verify, binaries, msi, dmg, deb, jdbc]
     runs-on: ubuntu-latest
     steps:
       # For the release notes (packaging/release-notes/<tag>.md, if there is one).
@@ -296,8 +319,8 @@ jobs:
     # the base image's packages install under emulation, so this takes minutes,
     # not the two hours compiling arm64 under QEMU did. Not held back by another
     # platform's build: it needs only the Linux ones.
-    needs: [binaries, ffmpeg]
-    if: ${{ !cancelled() }}
+    needs: [verify, binaries, ffmpeg]
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -488,6 +511,7 @@ jobs:
           $global:LASTEXITCODE = 0
 
   npm:
+    needs: verify
     runs-on: ubuntu-latest
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -505,6 +529,7 @@ jobs:
         run: npm ci && npm run build && npm publish --access public
 
   pypi:
+    needs: verify
     runs-on: ubuntu-latest
     env:
       TWINE_USERNAME: __token__
@@ -526,6 +551,7 @@ jobs:
   # GitHub's OIDC token is exchanged for a one-hour API key; nothing long-lived is
   # stored. Otherwise a NUGET_API_KEY secret works too.
   nuget:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -561,6 +587,7 @@ jobs:
   # A Central Portal user token (central.sonatype.com) and a GPG key whose
   # public half is on a keyserver; the com.dreaminhex namespace must be verified.
   maven-central:
+    needs: verify
     runs-on: ubuntu-latest
     env:
       MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}

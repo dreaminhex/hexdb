@@ -464,7 +464,9 @@ impl HexDBEngine {
         let mut state = state.lock().await;
         self.load_queue(name, &mut state).await?;
         let now = now_ms();
-        let due: Vec<Ulid> = state.ready.iter().take_while(|(at, _)| *at <= now).map(|(_, id)| *id).collect();
+        // A bounded look at the front of the index, not every due message: entries this call finds
+        // gone, delayed or dead are moved out of the way, so the next call goes further.
+        let due: Vec<Ulid> = state.ready.iter().take_while(|(at, _)| *at <= now).take(max.saturating_mul(4).max(64)).map(|(_, id)| *id).collect();
         let mut out = Vec::new();
         // Unloaded until the index is updated below (see the module comment).
         state.loaded = false;
