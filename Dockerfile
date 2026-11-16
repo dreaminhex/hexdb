@@ -66,15 +66,20 @@ COPY prebuilt/ui /usr/share/hexdb/ui
 
 FROM ${BINARIES}-binaries AS binaries
 
+# Node.js for JavaScript and TypeScript functions and plugins: the official build, since
+# TypeScript functions need type stripping (22.6 or later) and Debian's is older.
+FROM node:24-bookworm-slim AS node
+
 # Trixie: Tesseract 5.5 with English for OCR, and dav1d for the small ffmpeg's AV1 decoding; HexDB
 # finds both programs on its own (files.tesseract, files.ffmpeg). Binaries built on bookworm run here.
 FROM debian:trixie-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl python3 nodejs tesseract-ocr tesseract-ocr-eng libdav1d7 \
+ && apt-get upgrade -y  && apt-get install -y --no-install-recommends ca-certificates curl python3 tesseract-ocr tesseract-ocr-eng libdav1d7 \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home-dir /var/lib/hexdb --shell /usr/sbin/nologin hexdb \
  && mkdir -p /var/lib/hexdb /etc/hexdb \
  && chown hexdb:hexdb /var/lib/hexdb
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=binaries /usr/local/bin/ /usr/local/bin/
 COPY --from=binaries /usr/share/hexdb/ui /usr/share/hexdb/ui
 COPY docker/hexdb.toml /etc/hexdb/hexdb.toml

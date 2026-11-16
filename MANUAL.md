@@ -1704,7 +1704,7 @@ The body references a parameter as `{"$param": "name"}`, anywhere in the JSON. H
 **Runtimes:**
 - `python` runs the `python` (Windows) or `python3` interpreter.
 - `javascript` runs `node`.
-- `typescript` runs Node.js 22.6 or later with type stripping.
+- `typescript` runs Node.js 22.6 or later with type stripping. The server logs at startup whether `functions.node` can (the Docker image ships Node.js 24, and Python 3).
 
 ```toml
 [functions]

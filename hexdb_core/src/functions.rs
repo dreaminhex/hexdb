@@ -760,6 +760,25 @@ impl HexDBEngine {
     }
 }
 
+/// Node.js's version (major, minor), if `node` runs.
+async fn node_version(node: &str) -> Option<(u32, u32)> {
+    let mut command = tokio::process::Command::new(node);
+    command.arg("--version").stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), command.output()).await.ok()?.ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut parts = text.trim().trim_start_matches('v').split('.').map(|p| p.parse::<u32>().ok());
+    Some((parts.next()??, parts.next()??))
+}
+
+/// Log whether JavaScript and TypeScript functions can run with `functions.node`.
+pub async fn check_node(node: &str) {
+    match node_version(node).await {
+        None => info!("⚙️ Node.js ({}) not found: JavaScript and TypeScript functions won't run.", node),
+        Some(v) if v < (22, 6) => warn!("⚠️ Node.js {}.{} ({}) can't run TypeScript functions: they need 22.6 or later.", v.0, v.1, node),
+        Some(v) => info!("⚙️ Node.js {}.{} runs JavaScript and TypeScript functions.", v.0, v.1),
+    }
+}
+
 /// Script sessions whose run ended without its cleanup (the request went away
 /// mid-run): session ID -> expiry (epoch seconds). Refused at once on this hex
 /// (see `crate::auth::authenticate`), and revoked lattice-wide by the scheduler

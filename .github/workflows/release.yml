@@ -330,6 +330,19 @@ jobs:
       - name: Tags
         id: tags
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      # Before publishing: the amd64 image runs its programs and every script runtime,
+      # and has no critical vulnerability with a fix available.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: BINARIES=prebuilt
+          load: true
+          tags: hexdb:smoke
+      - name: Smoke test
+        run: sh docker/smoke.sh hexdb:smoke
+      - name: Scan
+        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress hexdb:smoke
       - uses: docker/build-push-action@v7
         with:
           context: .

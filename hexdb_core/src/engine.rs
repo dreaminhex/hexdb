@@ -651,6 +651,11 @@ impl HexDBEngine {
         if engine.config.files.extract {
             crate::tools::detect(&engine.config.files, crate::plugins::protected_paths(&engine)).await;
         }
+        // Say at startup if TypeScript functions can't run (they need Node.js 22.6 or later).
+        if engine.config.functions.scripts {
+            let node = engine.config.functions.node.clone();
+            tokio::spawn(async move { crate::functions::check_node(&node).await });
+        }
         // Look for a ClamAV (clamd = "auto") without holding up the start; say loudly
         // if uploads will be scanned by the built-in rules only.
         if let Some(scanner) = scanner {
