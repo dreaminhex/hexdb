@@ -129,6 +129,11 @@ impl Filter {
         eval(&self.0, &json)
     }
 
+    /// True if a document in its API form (`{"id": ..., field: ...}`) matches.
+    pub fn matches_json(&self, json: &Value) -> bool {
+        eval(&self.0, json)
+    }
+
     /// The filter with the values compared for equality (`$eq`, `$ne`,
     /// `$in`, `$nin`, plain values) replaced where `f` returns a new one for
     /// (field path, value).

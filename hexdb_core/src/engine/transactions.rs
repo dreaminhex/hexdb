@@ -401,7 +401,15 @@ impl HexDBEngine {
             if let Some(Value::Object(data)) = &op.data {
                 match op.kind {
                     TxOpKind::Replace => write.check_replace(op.data.as_ref().unwrap_or(&Value::Null), slot.current.as_ref())?,
-                    TxOpKind::Insert | TxOpKind::Patch => write.check_writable(data.keys().map(String::as_str))?,
+                    TxOpKind::Insert => write.check_change(None, &Value::Object(data.clone()), data.keys().map(String::as_str))?,
+                    TxOpKind::Patch => {
+                        let after = slot.current.as_ref().map(|current| {
+                            let mut doc = current.clone();
+                            apply_patch(&mut doc.data, data);
+                            doc.data_json()
+                        });
+                        write.check_change(slot.current.as_ref(), after.as_ref().unwrap_or(&Value::Object(data.clone())), data.keys().map(String::as_str))?
+                    }
                     _ => {}
                 }
             }

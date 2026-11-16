@@ -116,3 +116,46 @@ fn review_idempotent_retry_still_requires_replica_acks() -> Result<()> {
     assert_eq!(retry.status, StatusCode::SERVICE_UNAVAILABLE, "No replica exists, but retry acknowledged a synchronously replicated write: {}", retry.body);
     Ok(())
 }
+
+// Review of 2.5.5 (November 2026).
+
+/// H255-01: two grants with different row filters. The tenant-B grant must not
+/// uncover a field the tenant-A grant hides in tenant A's documents, over REST,
+/// queries, SQL or the change feed; and the field can't be used to probe them.
+#[test]
+fn review255_role_fields_are_scoped_to_rows_the_role_allows() -> Result<()> {
+    let s = TestServer::start()?;
+    let a = s.insert("accounts", &json!({"tenant":"A","secret":"SYNTHETIC_A_SECRET"}))?;
+    let b = s.insert("accounts", &json!({"tenant":"B","secret":"SYNTHETIC_B_VALUE"}))?;
+    for (name, restriction) in [("a-redacted", json!({"filter":{"tenant":"A"},"hide":["secret"]})), ("b-full", json!({"filter":{"tenant":"B"}}))] {
+        let r = s.request(Method::POST, "/roles", Some(&json!({"name":name,"permissions":["read","write"],"restrictions":{"accounts":restriction}})), &[])?;
+        assert!(r.status.is_success(), "{}", r.body);
+    }
+    let single = s.user_with_roles("single", json!([{"name":"a-redacted","tessellations":["accounts"]}]))?;
+    let both = s.user_with_roles("both", json!([{"name":"a-redacted","tessellations":["accounts"]},{"name":"b-full","tessellations":["accounts"]}]))?;
+    let get = |who: &str, id: &str| s.request_as(Some(who), Method::GET, &format!("/accounts/{}", id), None, &[]);
+    assert!(!get(&single, &a)?.body.to_string().contains("SYNTHETIC_A_SECRET"));
+    assert!(!get(&both, &a)?.body.to_string().contains("SYNTHETIC_A_SECRET"), "A grant restricted to tenant B exposed tenant A's protected field");
+    // The tenant-B grant still shows tenant B's field.
+    assert_eq!(get(&both, &b)?.body["secret"], json!("SYNTHETIC_B_VALUE"));
+
+    let listed = s.request_as(Some(&both), Method::POST, "/accounts/_query", Some(&json!({"filter":{}})), &[])?;
+    assert_eq!(listed.body["documents"].as_array().map(Vec::len), Some(2), "{}", listed.body);
+    assert!(!listed.body.to_string().contains("SYNTHETIC_A_SECRET"), "{}", listed.body);
+    let probe = s.request_as(Some(&both), Method::POST, "/accounts/_query", Some(&json!({"filter":{"secret":"SYNTHETIC_A_SECRET"}})), &[])?;
+    assert_eq!(probe.status, StatusCode::FORBIDDEN, "A query on a field hidden in tenant A's rows can probe them: {}", probe.body);
+    let sql = s.request_as(Some(&both), Method::POST, "/sql", Some(&json!({"sql":"SELECT * FROM accounts"})), &[])?;
+    assert!(!sql.body.to_string().contains("SYNTHETIC_A_SECRET"), "{}", sql.body);
+    let feed = s.request_as(Some(&both), Method::GET, "/changes?after=0&limit=100", None, &[])?;
+    assert!(feed.status.is_success(), "{}", feed.body);
+    assert!(!feed.body.to_string().contains("SYNTHETIC_A_SECRET"), "{}", feed.body);
+
+    // Writes follow the document's rows too.
+    let w = s.request_as(Some(&both), Method::PATCH, &format!("/accounts/{}", b), Some(&json!({"secret":"changed"})), &[])?;
+    assert!(w.status.is_success(), "{}", w.body);
+    let w = s.request_as(Some(&both), Method::PATCH, &format!("/accounts/{}", a), Some(&json!({"secret":"changed"})), &[])?;
+    assert_eq!(w.status, StatusCode::FORBIDDEN, "{}", w.body);
+    let w = s.request_as(Some(&both), Method::PATCH, &format!("/accounts/{}", b), Some(&json!({"tenant":"A","secret":"moved"})), &[])?;
+    assert_eq!(w.status, StatusCode::FORBIDDEN, "Moving a document into tenant A with a hidden field set: {}", w.body);
+    Ok(())
+}

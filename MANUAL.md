@@ -2143,8 +2143,10 @@ curl -X PATCH http://localhost:7700/users/ada -H "Content-Type: application/json
 **Combining grants.** When several of a user's grants allow an action on a tessellation:
 - an unrestricted grant makes access unrestricted;
 - otherwise the user sees the documents any of their filters allows;
-- a field is hidden only if every grant hides it, or a field around it;
-- a field every grant hides or masks (itself or a field around it), and at least one masks, is masked, showing as many characters as the most revealing of those masks. So two roles that each show what the other hides (one hides `card`, the other `card.number`) never add up to `card.number` in the clear.
+- a grant's hidden and masked fields go with its filter. Each document is shown as the grants whose filters include it show it, so a grant for tenant B's documents never uncovers a field another grant hides in tenant A's;
+- among those grants, a field is hidden only if every one hides it, or a field around it;
+- a field every one of them hides or masks (itself or a field around it), and at least one masks, is masked, showing as many characters as the most revealing of those masks. So two roles that each show what the other hides (one hides `card`, the other `card.number`) never add up to `card.number` in the clear;
+- filtering, sorting, grouping, aggregating, SQL columns and detokenizing span documents, so they treat a field as protected if it is protected in any document the user may see. When the grants' filters differ, a field one grant protects stays protected for these unless a grant for every document (or for exactly the same filter) shows it.
 
 **Reads:**
 - Queries, counts, aggregations, `GET /tessellations/{name}`, GraphQL, the change feed and functions only see matching documents. Other documents read as not found.

@@ -632,7 +632,7 @@ impl HexDBEngine {
                     doc.with_expected(seq, &mut items)
                 }
                 None => {
-                    write.check_writable(fields.keys().map(String::as_str))?;
+                    write.check_change(None, &fields_json(fields), fields.keys().map(String::as_str))?;
                     summary.inserted += 1;
                     let doc = Document { id: Ulid::generate(), tessellation: tess.to_string(), data: fields.clone(), ttl };
                     if !write.allows(&doc) {
@@ -761,8 +761,10 @@ impl HexDBEngine {
 
     async fn plan_insert(&self, tess: &str, fields: &[CompactFields], ttl: Option<i64>) -> Result<(Vec<BatchItem>, Vec<Document>)> {
         let write = self.caller_scope(tess, Action::Write);
-        for data in fields {
-            write.check_writable(data.keys().map(String::as_str))?;
+        if write.protects_fields() {
+            for data in fields {
+                write.check_change(None, &fields_json(data), data.keys().map(String::as_str))?;
+            }
         }
         let mut items = self.plan_insert_unchecked(tess, fields, ttl);
         self.run_before_triggers(&mut items).await?;
@@ -836,8 +838,11 @@ impl HexDBEngine {
                     write.restore_hidden(&mut doc, &old);
                 }
                 Modification::Patch(changes) => {
-                    write.check_writable(changes.iter().map(|(k, _)| k.as_str()))?;
+                    let old = write.protects_fields().then(|| doc.clone());
                     apply_changes(&mut doc.data, changes);
+                    if let Some(old) = old {
+                        write.check_change(Some(&old), &fields_json(&doc.data), changes.iter().map(|(k, _)| k.as_str()))?;
+                    }
                 }
             }
             if ttl.is_some() {

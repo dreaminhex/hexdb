@@ -25,9 +25,18 @@
 // A user may hold several grants that allow an action on a tessellation. If
 // any of them is unrestricted, access is unrestricted. Otherwise the user sees
 // the documents any of their filters allows (the filters are combined with
-// $or), and a field is hidden only if every one of those grants hides it. A
-// field every grant hides or masks, and at least one masks, is masked, showing
-// as many characters as the most revealing of those masks.
+// $or). A grant's hidden and masked fields go with its filter: a document is
+// shown as the grants whose filters include it show it, so a field is hidden
+// in it only if every one of those grants hides it. A field every one of them
+// hides or masks, and at least one masks, is masked, showing as many
+// characters as the most revealing of those masks. A grant for other rows
+// never uncovers a field in this one.
+//
+// Queries, sorts, groups, aggregates, SQL columns and detokenizing aren't
+// about one document, so they treat a field as protected if it is protected
+// in any document the caller may see: when the grants' filters differ, a
+// field some grant protects stays protected unless a grant for every row (or
+// for the very same rows) shows it.
 //
 // Reads: queries, counts and aggregations are narrowed to the filter;
 // documents outside it read as not found; hidden fields are removed from
@@ -58,6 +67,7 @@ use crate::{
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::borrow::Cow;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -167,6 +177,11 @@ impl FieldMask {
     fn wider(self, other: FieldMask) -> FieldMask {
         FieldMask { show_first: self.show_first.max(other.show_first), show_last: self.show_last.max(other.show_last) }
     }
+
+    /// The less revealing of two masks.
+    fn narrower(self, other: FieldMask) -> FieldMask {
+        FieldMask { show_first: self.show_first.min(other.show_first), show_last: self.show_last.min(other.show_last) }
+    }
 }
 
 impl Restriction {
@@ -240,10 +255,23 @@ impl Restriction {
 pub struct Scope {
     /// Documents visible to the caller; `None` is every document.
     pub filter: Option<Filter>,
-    /// Fields removed from what the caller sees.
+    /// Fields removed from what the caller sees: in every document when one set
+    /// of protections covers every row; otherwise those hidden in any document
+    /// the caller may see (what queries and SQL columns go by).
     pub hidden: Vec<String>,
-    /// Fields the caller sees masked.
+    /// Fields the caller sees masked (likewise).
     pub masked: Vec<(String, FieldMask)>,
+    /// When the caller's grants have different row filters, each grant's rows and
+    /// protections: a document is shown as the grants whose rows include it show it.
+    /// Empty when `hidden` and `masked` apply to every document.
+    views: Vec<View>,
+}
+
+/// One grant's rows (`None`: every row) and the fields it hides (`None`) or masks.
+#[derive(Debug, Clone)]
+struct View {
+    rows: Option<Filter>,
+    fields: BTreeMap<String, Option<FieldMask>>,
 }
 
 impl Scope {
@@ -274,19 +302,57 @@ impl Scope {
         }
     }
 
+    /// The protections that apply to one document (in its API form, or just its
+    /// fields): those of the grants whose rows include it. A document no grant's
+    /// rows include (the caller can't see it anyway) gets every protection.
+    pub fn for_json(&self, json: &Value) -> Cow<'_, Scope> {
+        if self.views.is_empty() {
+            return Cow::Borrowed(self);
+        }
+        let matching: Vec<BTreeMap<String, Option<FieldMask>>> =
+            self.views.iter().filter(|v| v.rows.as_ref().is_none_or(|f| f.matches_json(json))).map(|v| v.fields.clone()).collect();
+        if matching.is_empty() {
+            return Cow::Borrowed(self);
+        }
+        let (hidden, masked) = split(combine_protections(&matching));
+        Cow::Owned(Scope { filter: self.filter.clone(), hidden, masked, views: Vec::new() })
+    }
+
+    /// The protections that apply to `doc` (those of the grants whose rows include it);
+    /// the row filter is kept.
+    pub fn for_document(&self, doc: &Document) -> Cow<'_, Scope> {
+        if self.views.is_empty() {
+            return Cow::Borrowed(self);
+        }
+        self.for_json(&doc.to_api_json())
+    }
+
     /// The document as the caller sees it: hidden fields removed, masked ones masked.
     pub fn mask(&self, mut doc: Document) -> Document {
         if !self.protects_fields() {
             return doc;
         }
+        let scope = self.for_document(&doc);
+        if !scope.protects_fields() {
+            return doc;
+        }
         let mut json = doc.data_json();
-        self.mask_json(&mut json);
+        scope.apply(&mut json);
         doc.data = crate::document::infer_fields_from_json(&json);
         doc
     }
 
-    /// A JSON document (as returned by the API) as the caller sees it.
+    /// A JSON document (as returned by the API, or just its fields) as the caller sees it.
     pub fn mask_json(&self, json: &mut Value) {
+        if !self.protects_fields() {
+            return;
+        }
+        let scope = self.for_json(json).into_owned();
+        scope.apply(json);
+    }
+
+    /// Remove the hidden fields and mask the masked ones.
+    fn apply(&self, json: &mut Value) {
         for path in &self.hidden {
             remove_path(json, path);
         }
@@ -316,9 +382,10 @@ impl Scope {
         if !self.protects_fields() {
             return;
         }
+        let scope = self.for_document(old);
         let old_json = old.data_json();
         let mut json = doc.data_json();
-        for (path, _) in self.protected() {
+        for (path, _) in scope.protected() {
             // A path through an array can't be put back element by element: the
             // whole top-level field is kept as stored (the caller can't change it).
             if crosses_array(&old_json, path) || crosses_array(&json, path) {
@@ -335,6 +402,18 @@ impl Scope {
             }
         }
         doc.data = crate::document::infer_fields_from_json(&json);
+    }
+
+    /// Refuse a write that sets or removes `fields` of a document, as the grants for its rows
+    /// before the change (`None` for a new document) and after it (`after`, its fields) see them.
+    pub fn check_change<'a>(&self, before: Option<&Document>, after: &Value, fields: impl IntoIterator<Item = &'a str> + Clone) -> Result<()> {
+        if !self.protects_fields() {
+            return Ok(());
+        }
+        if let Some(before) = before {
+            self.for_document(before).check_writable(fields.clone())?;
+        }
+        self.for_json(after).check_writable(fields)
     }
 
     /// Refuse a write that sets or removes a hidden or masked field.
@@ -355,6 +434,21 @@ impl Scope {
         if !self.protects_fields() {
             return Ok(());
         }
+        let before = match old {
+            Some(old) => self.for_document(old),
+            None => Cow::Borrowed(self),
+        };
+        before.check_replace_as(submitted, old)?;
+        // Rows moving to other grants: fields those grants protect can't be set either
+        // (beyond what the check above already allows, such as a masked value sent back).
+        let after = self.for_json(submitted);
+        if let Value::Object(map) = submitted {
+            after.check_writable(map.keys().map(String::as_str).filter(|k| before.touching(k).is_none()))?;
+        }
+        Ok(())
+    }
+
+    fn check_replace_as(&self, submitted: &Value, old: Option<&Document>) -> Result<()> {
         if let Value::Object(map) = submitted {
             for key in map.keys() {
                 if self.hidden.iter().any(|h| overlaps(h, key)) {
@@ -494,20 +588,6 @@ fn set_path(json: &mut Value, path: &str, value: Value) {
 /// masks it (the more revealing mask wins). Every path some grant names is a
 /// candidate; a grant hiding only `profile.ssn` doesn't protect `profile`.
 fn combine_protections(per_grant: &[BTreeMap<String, Option<FieldMask>>]) -> BTreeMap<String, Option<FieldMask>> {
-    // How one grant treats `path`: None if it shows it, Some(None) hidden, Some(Some(mask)) masked.
-    fn treatment(grant: &BTreeMap<String, Option<FieldMask>>, path: &str) -> Option<Option<FieldMask>> {
-        let mut found: Option<Option<FieldMask>> = None;
-        for (protected, mask) in grant.iter().filter(|(p, _)| is_within(path, p)) {
-            let _ = protected;
-            found = Some(match (found, mask) {
-                // Hidden anywhere around it: hidden.
-                (Some(None), _) | (_, None) => None,
-                (Some(Some(a)), Some(b)) => Some(a.wider(*b)),
-                (None, Some(b)) => Some(*b),
-            });
-        }
-        found
-    }
     let candidates: std::collections::BTreeSet<&String> = per_grant.iter().flat_map(|g| g.keys()).collect();
     let mut out = BTreeMap::new();
     for path in candidates {
@@ -536,6 +616,64 @@ fn combine_protections(per_grant: &[BTreeMap<String, Option<FieldMask>>]) -> BTr
         }
     }
     out
+}
+
+/// How one grant treats `path`: None if it shows it, Some(None) hidden, Some(Some(mask)) masked.
+fn treatment(grant: &BTreeMap<String, Option<FieldMask>>, path: &str) -> Option<Option<FieldMask>> {
+    let mut found: Option<Option<FieldMask>> = None;
+    for mask in grant.iter().filter(|(p, _)| is_within(path, p)).map(|(_, m)| m) {
+        found = Some(match (found, mask) {
+            // Hidden anywhere around it: hidden.
+            (Some(None), _) | (_, None) => None,
+            (Some(Some(a)), Some(b)) => Some(a.wider(*b)),
+            (None, Some(b)) => Some(*b),
+        });
+    }
+    found
+}
+
+/// The fields protected in at least one document when grants with different
+/// rows combine (`rows` is each grant's row filter as JSON, `None` for every
+/// row). A grant's protection of a field is lifted only by a grant showing it
+/// for every row or for the very same rows. Hidden by one such grant and masked
+/// by another counts as hidden; two masks keep the less revealing one.
+type GrantFields = (Option<Value>, Protections);
+/// Fields a grant hides (`None`) or masks.
+type Protections = BTreeMap<String, Option<FieldMask>>;
+fn protected_anywhere(per_grant: &[GrantFields]) -> BTreeMap<String, Option<FieldMask>> {
+    let candidates: std::collections::BTreeSet<&String> = per_grant.iter().flat_map(|(_, g)| g.keys()).collect();
+    let mut out = BTreeMap::new();
+    for path in candidates {
+        let mut combined: Option<Option<FieldMask>> = None;
+        for (rows, grant) in per_grant {
+            let Some(t) = treatment(grant, path) else { continue };
+            let lifted = per_grant.iter().any(|(other_rows, other)| (other_rows.is_none() || other_rows == rows) && treatment(other, path).is_none());
+            if lifted {
+                continue;
+            }
+            combined = Some(match (combined, t) {
+                (None, t) => t,
+                (Some(None), _) | (_, None) => None,
+                (Some(Some(a)), Some(b)) => Some(a.narrower(b)),
+            });
+        }
+        if let Some(t) = combined {
+            out.insert(path.clone(), t);
+        }
+    }
+    out
+}
+
+/// Protections split into hidden and masked fields.
+fn split(protections: BTreeMap<String, Option<FieldMask>>) -> (Vec<String>, Vec<(String, FieldMask)>) {
+    let (mut hidden, mut masked) = (Vec::new(), Vec::new());
+    for (path, mask) in protections {
+        match mask {
+            None => hidden.push(path),
+            Some(mask) => masked.push((path, mask)),
+        }
+    }
+    (hidden, masked)
 }
 
 fn invalid(message: String) -> anyhow::Error {
@@ -591,8 +729,9 @@ impl Principal {
         }
         let mut filters = Vec::new();
         let mut all_rows = false;
-        // Each grant's hidden and masked fields; combined below by what each grant actually shows.
-        let mut per_grant: Vec<BTreeMap<String, Option<FieldMask>>> = Vec::new();
+        // Each grant's rows (its filter as JSON and parsed, `None` for every row) and hidden
+        // and masked fields; combined below by what each grant actually shows.
+        let mut per_grant: Vec<(Option<Value>, Option<Filter>, Protections)> = Vec::new();
         let mut any = false;
         for grant in &self.grants {
             if !grant.permissions.contains(&action) || !grant.tessellations.iter().any(|t| t == "*" || t == tessellation) {
@@ -602,13 +741,19 @@ impl Principal {
             let Some(restriction) = grant.restrictions.get(tessellation).or_else(|| grant.restrictions.get("*")) else {
                 return Scope::full();
             };
-            match &restriction.effective_filter() {
-                None => all_rows = true,
-                Some(filter) => match substitute(filter, self).map(|v| Filter::parse(&v)) {
-                    Some(Ok(f)) => filters.push(f),
+            let (rows, filter) = match &restriction.effective_filter() {
+                None => {
+                    all_rows = true;
+                    (None, None)
+                }
+                Some(filter) => match substitute(filter, self).map(|v| Filter::parse(&v).map(|f| (v, f))) {
+                    Some(Ok((v, f))) => (Some(v), Some(f)),
                     // A missing attribute (or a filter that no longer parses) matches nothing.
-                    _ => filters.push(Filter::none()),
+                    _ => (Some(serde_json::json!({ "$none": filter })), Some(Filter::none())),
                 },
+            };
+            if let Some(f) = &filter {
+                filters.push(f.clone());
             }
             let fields: BTreeMap<String, Option<FieldMask>> = restriction
                 .hide
@@ -616,19 +761,22 @@ impl Principal {
                 .map(|h| (h.trim().to_string(), None))
                 .chain(restriction.mask.iter().map(|(m, mask)| (m.trim().to_string(), Some(*mask))))
                 .collect();
-            per_grant.push(fields);
+            per_grant.push((rows, filter, fields));
         }
         if !any {
             return Scope::full();
         }
-        let (mut hidden, mut masked) = (Vec::new(), Vec::new());
-        for (path, mask) in combine_protections(&per_grant) {
-            match mask {
-                None => hidden.push(path),
-                Some(mask) => masked.push((path, mask)),
-            }
+        let filter = if all_rows { None } else { Some(Filter::any(filters)) };
+        // The same rows for every grant: one set of protections applies to every document.
+        if per_grant.iter().all(|(rows, _, _)| *rows == per_grant[0].0) {
+            let fields: Vec<_> = per_grant.into_iter().map(|(_, _, f)| f).collect();
+            let (hidden, masked) = split(combine_protections(&fields));
+            return Scope { filter, hidden, masked, views: Vec::new() };
         }
-        Scope { filter: if all_rows { None } else { Some(Filter::any(filters)) }, hidden, masked }
+        let rows_and_fields: Vec<GrantFields> = per_grant.iter().map(|(rows, _, f)| (rows.clone(), f.clone())).collect();
+        let (hidden, masked) = split(protected_anywhere(&rows_and_fields));
+        let views = per_grant.into_iter().map(|(_, rows, fields)| View { rows, fields }).collect();
+        Scope { filter, hidden, masked, views }
     }
 
     /// True if some grant allowing `action` on `tessellation` is unrestricted.
@@ -692,7 +840,89 @@ mod tests {
         let scope = p.scope("notes", Action::Read);
         assert!(scope.allows(&doc(json!({ "region": "US", "flagged": true }))));
         assert!(!scope.allows(&doc(json!({ "region": "US" }))));
-        assert_eq!(scope.hidden, vec!["margin"]);
+        // Each grant's hidden fields go with its rows: cost shows only in flagged documents.
+        let shown = |data: Value| scope.mask(doc(data)).data_json();
+        assert_eq!(shown(json!({ "region": "EU", "cost": 3, "margin": 1 })), json!({ "region": "EU" }));
+        assert_eq!(shown(json!({ "region": "US", "flagged": true, "cost": 3, "margin": 1 })), json!({ "region": "US", "flagged": true, "cost": 3 }));
+        assert_eq!(shown(json!({ "region": "EU", "flagged": true, "cost": 3, "margin": 1 })), json!({ "region": "EU", "flagged": true, "cost": 3 }));
+        // Queries span documents, so cost (hidden in some) can't be used in them.
+        assert_eq!(scope.hidden, vec!["cost", "margin"]);
+        assert!(scope.check_fields(["cost"]).is_err());
+    }
+
+    #[test]
+    fn a_grant_for_other_rows_never_uncovers_a_field() {
+        // review255_role_fields_are_scoped_to_rows_the_role_allows, at the scope level.
+        let p = principal(
+            vec![
+                ("a-redacted", vec![Action::Read, Action::Write], json!({ "orders": { "filter": { "tenant": "A" }, "hide": ["secret"], "mask": { "card": { "show_last": 4 } } } })),
+                ("b-full", vec![Action::Read, Action::Write], json!({ "orders": { "filter": { "tenant": "B" } } })),
+            ],
+            json!({}),
+        );
+        let scope = p.scope("orders", Action::Read);
+        let a = doc(json!({ "tenant": "A", "secret": "s", "card": "4111111111111111" }));
+        let b = doc(json!({ "tenant": "B", "secret": "s", "card": "4111111111111111" }));
+        assert_eq!(scope.clone().mask(a.clone()).data_json(), json!({ "tenant": "A", "card": "************1111" }));
+        assert_eq!(scope.clone().mask(b.clone()).data_json(), b.data_json());
+        let mut api = a.to_api_json();
+        scope.mask_json(&mut api);
+        assert!(api.get("secret").is_none() && api["card"] == json!("************1111"));
+        // Queries, sorts and aggregates can't probe the field through the other grant.
+        assert!(scope.check_fields(["secret"]).is_err());
+        assert!(scope.check_fields(["card"]).is_err());
+        assert!(scope.protects("secret"));
+
+        // Writes follow the document's rows: tenant B's secret is writable, tenant A's isn't,
+        // and neither is a document moved from B into A with a secret.
+        let write = p.scope("orders", Action::Write);
+        assert!(write.check_change(Some(&b), &json!({ "tenant": "B", "secret": "x" }), ["secret"]).is_ok());
+        assert!(write.check_change(Some(&a), &json!({ "tenant": "A", "secret": "x" }), ["secret"]).is_err());
+        assert!(write.check_change(Some(&b), &json!({ "tenant": "A", "secret": "x" }), ["tenant", "secret"]).is_err());
+        assert!(write.check_change(None, &json!({ "tenant": "A", "secret": "x" }), ["tenant", "secret"]).is_err());
+        assert!(write.check_change(None, &json!({ "tenant": "B", "secret": "x" }), ["tenant", "secret"]).is_ok());
+        assert!(write.check_replace(&json!({ "tenant": "A", "secret": "x" }), Some(&b)).is_err());
+        assert!(write.check_replace(&json!({ "tenant": "B", "secret": "x" }), Some(&b)).is_ok());
+        // A full replace of A keeps its hidden secret.
+        let mut replaced = doc(json!({ "tenant": "A", "card": "************1111" }));
+        write.restore_hidden(&mut replaced, &a);
+        assert_eq!(replaced.data_json()["secret"], json!("s"));
+    }
+
+    #[test]
+    fn grants_for_every_row_or_the_same_rows_still_combine_as_before() {
+        // Three grants: two for tenant A (one hides, one shows `secret`), one for every row hiding `notes`.
+        let p = principal(
+            vec![
+                ("a-hide", vec![Action::Read], json!({ "orders": { "filter": { "tenant": "A" }, "hide": ["secret", "notes"] } })),
+                ("a-show", vec![Action::Read], json!({ "orders": { "filter": { "tenant": "A" }, "hide": ["notes"] } })),
+                ("all", vec![Action::Read], json!({ "orders": { "hide": ["notes", "secret"] } })),
+            ],
+            json!({}),
+        );
+        let scope = p.scope("orders", Action::Read);
+        // `secret` is shown for tenant A by a-show; hidden elsewhere by `all`.
+        assert_eq!(scope.hidden, vec!["notes", "secret"]);
+        let a = scope.mask(doc(json!({ "tenant": "A", "secret": 1, "notes": 2 })));
+        assert_eq!(a.data_json(), json!({ "tenant": "A", "secret": 1 }));
+        let c = scope.mask(doc(json!({ "tenant": "C", "secret": 1, "notes": 2 })));
+        assert_eq!(c.data_json(), json!({ "tenant": "C" }));
+
+        // Masked for one tenant's rows, hidden for another's: hidden for queries, as each grant says per document.
+        let p = principal(
+            vec![
+                ("a", vec![Action::Read], json!({ "orders": { "filter": { "tenant": "A" }, "mask": { "card": { "show_last": 4 } } } })),
+                ("b", vec![Action::Read], json!({ "orders": { "filter": { "tenant": "B" }, "hide": ["card"] } })),
+            ],
+            json!({}),
+        );
+        let scope = p.scope("orders", Action::Read);
+        assert_eq!(scope.hidden, vec!["card"]);
+        assert_eq!(scope.mask(doc(json!({ "tenant": "B", "card": "4111111111111111" }))).data_json(), json!({ "tenant": "B" }));
+        assert_eq!(
+            scope.mask(doc(json!({ "tenant": "A", "card": "4111111111111111", "items": [{ "card": 1 }] }))).data_json()["card"],
+            json!("************1111")
+        );
     }
 
     #[test]
