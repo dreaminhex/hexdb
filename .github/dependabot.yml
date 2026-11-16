@@ -32,6 +32,12 @@ updates:
       node-driver: { patterns: ["*"], update-types: [minor, patch] }
       node-driver-major: { patterns: ["*"], update-types: [major] }
   - package-ecosystem: npm
+    directories: ["/plugins/sources/*", "/plugins/streams/*"]
+    schedule: { interval: monthly }
+    groups:
+      plugins: { patterns: ["*"], update-types: [minor, patch] }
+      plugins-major: { patterns: ["*"], update-types: [major] }
+  - package-ecosystem: npm
     directory: /extensions/vscode
     schedule: { interval: monthly }
     groups:

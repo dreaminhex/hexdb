@@ -4,7 +4,7 @@
 # s3-state.json in the plugin data folder. With KEY_FIELD set, documents are upserted by
 # that field; otherwise they are inserted.
 #
-# Setup: `npm install` in this folder; credentials from the usual AWS sources.
+# Setup: `npm ci` in this folder (the locked versions); credentials from the usual AWS sources.
 id = "@sources/s3"
 name = "S3 import"
 type = "source"

@@ -3,7 +3,7 @@
 # "updated at" column) and upserts them by their primary key, which is stored
 # in each document as `source_id`.
 #
-# Setup: `npm install` in this folder, set the [env] values, and create a
+# Setup: `npm ci` in this folder (the locked versions), set the [env] values, and create a
 # unique index on source_id in the target tessellation for safety:
 #   POST /tessellations/<target>/indexes {"fields": ["source_id"], "unique": true}
 id = "@sources/postgres"

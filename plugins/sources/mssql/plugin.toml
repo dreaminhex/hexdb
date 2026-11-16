@@ -2,7 +2,7 @@
 # sync, using a rowversion column to find changed rows (no clock problems).
 # Rows are upserted by their primary key, stored as `source_id`.
 #
-# Setup: `npm install` in this folder and set the [env] values. A unique
+# Setup: `npm ci` in this folder (the locked versions) and set the [env] values. A unique
 # index on source_id in the target tessellation is recommended.
 id = "@sources/mssql"
 name = "SQL Server source"

@@ -7,7 +7,10 @@ ignore = [
     # rsa 0.10 (Marvin attack: timing side channel in RSA *decryption* with a private
     # key). Only YARA-X uses it, to verify Authenticode signatures in its pe module:
     # public keys only (RsaPublicKey, Pkcs1v15Sign verification), no decryption, so
-    # the attack doesn't apply. No fixed version exists. Revisit when yara-x moves.
+    # the attack doesn't apply. rsa 0.10.0 (stable) is patched, but yara-x 1.23 doesn't
+    # build with it (it imports rsa::Pkcs1v15Sign, gone in 0.10.0); checked 2026-11-16.
+    # Owner: HexDB maintainers. Review by 2027-01-31, or as soon as a yara-x release
+    # accepts rsa 0.10.0, then drop this line.
     "RUSTSEC-2023-0071",
     # bincode: unmaintained, not vulnerable. YARA-X uses it to serialize its compiled
     # rules in memory; HexDB never decodes untrusted bincode with it.

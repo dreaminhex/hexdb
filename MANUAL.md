@@ -1950,7 +1950,7 @@ The four `*-files` source plugins copy files you already have elsewhere into a f
 
 Setting one up:
 
-1. `npm install` in the plugin's folder (S3 and Azure; Drive and Dropbox need nothing).
+1. `npm ci` in the plugin's folder (it installs the versions in its package-lock.json) (S3 and Azure; Drive and Dropbox need nothing).
 2. Credentials go in the HexDB process's environment, never in `plugin.toml`; each manifest's `pass_env` names the variables it passes on (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `AZURE_STORAGE_CONNECTION_STRING`, `GDRIVE_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN`, `DROPBOX_APP_KEY`/`_SECRET`/`_REFRESH_TOKEN`). For Drive and Dropbox, `node connect.mjs` in the plugin's folder signs in with your own app (read-only access) and prints the refresh token.
 3. Set the source (bucket, container, folder ID or Dropbox folder), `TARGET` and `TARGET_FOLDER` in the manifest's `[env]`, and grant the plugin's `[access]` role the target tessellation (`writer` includes `upload`).
 4. Enable it in the registry. It runs as its own user (`plugin-sources-s3-files`, ...), so its role decides where it may write, and an upload quota on that user caps how much it copies.

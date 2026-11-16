@@ -2,7 +2,7 @@
 # MSK): every committed change becomes a Kafka message, keyed by document ID
 # so changes to one document stay in order within a partition.
 #
-# Setup: run `npm install` in this folder, set the [env] values, and enable
+# Setup: run `npm ci` in this folder (the locked versions), set the [env] values, and enable
 # the plugin in plugins.json.
 id = "@streams/kafka"
 name = "Kafka"

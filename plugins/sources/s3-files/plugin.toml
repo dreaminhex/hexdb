@@ -4,7 +4,7 @@
 # Each object is imported once per ETag (a changed object comes in as a new
 # version); progress is kept in s3-import-state.json in the plugin data folder.
 #
-# Setup: `npm install` in this folder. Credentials come from the server's
+# Setup: `npm ci` in this folder (the locked versions). Credentials come from the server's
 # environment (pass_env below), never from this file: set AWS_ACCESS_KEY_ID
 # and AWS_SECRET_ACCESS_KEY for the HexDB process (or use an instance role).
 # The plugin runs as its own user with the role below: grant it the target

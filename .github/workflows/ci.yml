@@ -88,6 +88,12 @@ jobs:
       - name: npm audit
         working-directory: hexdb_admin
         run: npm audit --audit-level=moderate
+      - name: npm audit (driver, VS Code extension, plugins)
+        run: |
+          for dir in drivers/node extensions/vscode $(dirname $(ls plugins/*/*/package-lock.json)); do
+            echo "== $dir"
+            (cd "$dir" && npm audit --omit=dev --audit-level=moderate)
+          done
 
   drivers:
     name: Drivers
