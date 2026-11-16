@@ -5,6 +5,6 @@
   "type": "module",
   "description": "Syncs a SQL Server table into HexDB.",
   "dependencies": {
-    "mssql": "^11.0.1"
+    "mssql": "^12.7.14"
   }
 }
