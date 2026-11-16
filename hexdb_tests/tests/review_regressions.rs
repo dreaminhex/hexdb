@@ -286,3 +286,18 @@ fn review255_timed_out_script_children_are_stopped() -> Result<()> {
     assert!(!marker.exists(), "A process the timed-out script started kept running and wrote its file");
     Ok(())
 }
+
+/// A SQL statement that would hold more documents in memory than limits.sql_max_mb is refused, not run.
+#[test]
+fn sql_statements_have_a_memory_budget() -> Result<()> {
+    let s = TestServer::start_with(hexdb_tests::TestOptions { extra_toml: "\n[limits]\nsql_max_mb = 1\n".into(), ..Default::default() })?;
+    let big = "x".repeat(4000);
+    let docs: Vec<Value> = (0..400).map(|i| json!({"n": i, "pad": big})).collect();
+    let r = s.request(Method::POST, "/notes/_bulk", Some(&json!(docs)), &[])?;
+    assert!(r.status.is_success(), "{}", r.body);
+    // A join loads both sides in memory: about 3 MB here.
+    let r = s.request(Method::POST, "/sql", Some(&json!({"sql":"SELECT a.n FROM notes a JOIN notes b ON a.n = b.n"})), &[])?;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(r.body.to_string().contains("limits.sql_max_mb"), "{}", r.body);
+    Ok(())
+}

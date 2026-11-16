@@ -539,10 +539,18 @@ pub struct LimitsConfig {
     /// how much work such a statement may do.
     #[serde(default = "default_sql_max_rows")]
     pub sql_max_rows: usize,
+    /// Most megabytes of documents such a statement may hold in memory, across
+    /// all its table reads (measured as JSON).
+    #[serde(default = "default_sql_max_mb")]
+    pub sql_max_mb: u64,
 }
 
 fn default_sql_max_rows() -> usize {
     crate::sql::DEFAULT_SQL_MAX_ROWS
+}
+
+fn default_sql_max_mb() -> u64 {
+    256
 }
 
 fn default_max_document_kb() -> u64 {
@@ -579,6 +587,7 @@ impl Default for LimitsConfig {
             max_document_kb: default_max_document_kb(),
             max_request_mb: default_max_request_mb(),
             sql_max_rows: default_sql_max_rows(),
+            sql_max_mb: default_sql_max_mb(),
         }
     }
 }

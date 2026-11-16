@@ -51,6 +51,7 @@ pub const SETTINGS: &[SettingDef] = &[
     int("limits.max_document_kb", 1, 65_536, true, "KB", "Largest document HexDB accepts (as JSON). Larger writes get 413."),
     int("limits.max_request_mb", 1, 1_024, false, "MB", "Largest request body for bulk writes, queries, transactions and GraphQL."),
     int("limits.sql_max_rows", 1, 10_000_000, false, "", "Most documents one table read may return in SQL with joins, subqueries or expressions."),
+    int("limits.sql_max_mb", 1, 1 << 20, false, "MB", "Most megabytes of documents such a SQL statement may hold in memory, all its table reads together."),
     int("storage.disk_mb", 64, 1 << 30, true, "MB", "Disk space the data directory may use. Beyond it, writes that add data get 507; deletes still work."),
     int("memory.ram_mb", 64, 1 << 24, false, "MB", "Memory for documents before they are flushed to disk (also ranks hexes in elections)."),
     int("limits.max_connections", 1, 1_000_000, false, "", "Connections the API accepts at once."),

@@ -343,7 +343,7 @@ impl HexDBEngine {
         documents.sort_by(|a, b| key(b).total_cmp(&key(a)));
         // How many documents were read would reveal how many the caller can't see.
         let scanned = if scope.is_full() { scanned } else { documents.len() };
-        Ok(crate::engine::QueryPage { documents, total: None, next: None, indexes: vec![index_name], scanned })
+        Ok(crate::engine::QueryPage { documents, total: None, next: None, indexes: vec![index_name], scanned, index_entries: 0 })
     }
 
     /// Embed a query text as the calling user, within their daily allowance.

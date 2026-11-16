@@ -17,7 +17,9 @@
 //
 // Parsed documents are cached by (key, version), so repeated reads of the same
 // version skip shard decoding and JSON parsing. The cache holds at most a
-// quarter of the RAM budget, measured by stored size.
+// quarter of the RAM budget, measured by stored size. It drops the least
+// recently used entries first, from an index kept in use order, so eviction
+// costs what it frees rather than a sort of everything under the lock.
 
 use super::{HexDBEngine, TessellationStats};
 use crate::{document::Document, hex::DocKey};
@@ -34,6 +36,8 @@ pub(crate) struct DocCache {
 struct DocCacheInner {
     /// Shared, so a scan can use a cached document without copying it.
     map: HashMap<DocKey, (u64, std::sync::Arc<Document>, usize, u64)>,
+    /// The map's keys by last use (the 4th field there), oldest first.
+    order: std::collections::BTreeMap<u64, DocKey>,
     bytes: usize,
     budget: usize,
     tick: u64,
@@ -41,7 +45,7 @@ struct DocCacheInner {
 
 impl DocCache {
     pub(crate) fn new(budget: usize) -> Self {
-        DocCache { inner: std::sync::Mutex::new(DocCacheInner { map: HashMap::new(), bytes: 0, budget: budget.max(1 << 20), tick: 0 }) }
+        DocCache { inner: std::sync::Mutex::new(DocCacheInner { map: HashMap::new(), order: std::collections::BTreeMap::new(), bytes: 0, budget: budget.max(1 << 20), tick: 0 }) }
     }
 
     pub(crate) fn get(&self, key: &DocKey, seq: u64) -> Option<Document> {
@@ -50,38 +54,41 @@ impl DocCache {
 
     /// The cached version `seq` of a document, shared rather than copied.
     pub(crate) fn get_shared(&self, key: &DocKey, seq: u64) -> Option<std::sync::Arc<Document>> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = &mut *guard;
         inner.tick += 1;
         let tick = inner.tick;
         let (cached_seq, doc, _, last) = inner.map.get_mut(key)?;
         if *cached_seq != seq {
             return None;
         }
-        *last = tick;
-        Some(doc.clone())
+        let previous = std::mem::replace(last, tick);
+        let doc = doc.clone();
+        inner.order.remove(&previous);
+        inner.order.insert(tick, key.clone());
+        Some(doc)
     }
 
     pub(crate) fn put(&self, key: &DocKey, seq: u64, doc: &Document, size: usize) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = &mut *guard;
         if size > inner.budget / 8 {
             return;
         }
         inner.tick += 1;
         let tick = inner.tick;
-        if let Some((_, _, old, _)) = inner.map.insert(key.clone(), (seq, std::sync::Arc::new(doc.clone()), size, tick)) {
+        if let Some((_, _, old, last)) = inner.map.insert(key.clone(), (seq, std::sync::Arc::new(doc.clone()), size, tick)) {
             inner.bytes -= old;
+            inner.order.remove(&last);
         }
+        inner.order.insert(tick, key.clone());
         inner.bytes += size;
         if inner.bytes > inner.budget {
-            // Drop the least recently used quarter.
-            let mut by_age: Vec<(u64, DocKey)> = inner.map.iter().map(|(k, (_, _, _, t))| (*t, k.clone())).collect();
-            by_age.sort_unstable_by_key(|(t, _)| *t);
+            // Drop least recently used entries until a quarter of the budget is free.
             let target = inner.budget * 3 / 4;
-            for (_, key) in by_age {
-                if inner.bytes <= target {
-                    break;
-                }
-                if let Some((_, _, size, _)) = inner.map.remove(&key) {
+            while inner.bytes > target {
+                let Some((_, oldest)) = inner.order.pop_first() else { break };
+                if let Some((_, _, size, _)) = inner.map.remove(&oldest) {
                     inner.bytes -= size;
                 }
             }
@@ -89,7 +96,8 @@ impl DocCache {
     }
 
     pub(crate) fn drop_tessellation(&self, tess: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = &mut *guard;
         let mut freed = 0;
         inner.map.retain(|k, (_, _, size, _)| {
             let keep = k.tessellation != tess;
@@ -98,6 +106,7 @@ impl DocCache {
             }
             keep
         });
+        inner.order.retain(|_, k| k.tessellation != tess);
         inner.bytes -= freed;
     }
 }
@@ -262,5 +271,31 @@ impl HexDBEngine {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cache_drops_the_least_recently_used_first() {
+        let cache = DocCache::new(1 << 20);
+        let doc = |i: u32| Document { id: Ulid::from(i as u128 + 1), tessellation: "t".into(), data: Default::default(), ttl: None };
+        let key = |i: u32| DocKey::new("t", Ulid::from(i as u128 + 1));
+        for i in 0..8 {
+            cache.put(&key(i), 1, &doc(i), 100_000);
+        }
+        // Used again: the most recent now, so it outlives the ones after it.
+        assert!(cache.get(&key(0), 1).is_some());
+        for i in 8..12 {
+            cache.put(&key(i), 1, &doc(i), 100_000);
+        }
+        assert!(cache.get(&key(0), 1).is_some(), "recently used");
+        assert!(cache.get(&key(1), 1).is_none(), "least recently used goes first");
+        assert!(cache.get(&key(11), 1).is_some(), "the newest stays");
+        let inner = cache.inner.lock().unwrap();
+        assert!(inner.bytes <= 1 << 20);
+        assert_eq!(inner.order.len(), inner.map.len());
     }
 }

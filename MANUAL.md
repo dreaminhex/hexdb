@@ -665,7 +665,7 @@ curl -G http://localhost:7700/articles/count --data-urlencode 'filter={"publishe
 - `total=false` (query string) or `"total": false` (body) skips counting every match: `total` is `null`, and a filtered or sorted query stops reading once its page is full. Use it for large tessellations when you only need the page.
 - Without `sort`, results come in ID order (creation order), and `next` goes in `after` for the next page. This cursor paging is stable under concurrent writes.
 - With `sort`, page with `offset`. `sort` is `"-views,title"` (a leading `-` means descending) or an array of `{field, descending}`.
-- Responses include `plan`: `{"indexes": [...], "scanned": n}` shows which indexes were used and how many documents were examined.
+- Responses include `plan`: `{"indexes": [...], "scanned": n, "index_entries": m}` shows which indexes were used, how many documents were examined, and how many index entries were looked at to find them (candidates from the indexes, or entries walked in sort order; 0 without an index).
 
 ### How a query runs
 
@@ -863,7 +863,7 @@ HEXDB_TOKEN=... hexdb sql "SELECT customer, total FROM orders WHERE total > ? OR
 **Two ways a statement runs.**
 - **One query.** A `SELECT` from one tessellation in the shape below becomes a single query or aggregation, run where the data is. It uses indexes for its filter and sort, and pages through results with a cursor, so it handles any table size.
 - **The general executor.** Everything else: joins, subqueries, `UNION` / `INTERSECT` / `EXCEPT`, `WITH`, and expressions over fields. Each table is read once through the query path, with the conditions in `WHERE` and `ON` that compare one table's field with a value sent along as that read's filter (so indexes apply). The rest runs in memory: hash joins on equality conditions, then filters, grouping, sorting and limits.
-  - One read may return at most `limits.sql_max_rows` documents (100,000). A larger read is refused with a message, never cut short: narrow it with `WHERE`.
+  - One read may return at most `limits.sql_max_rows` documents (100,000), and all of a statement's reads together at most `limits.sql_max_mb` (256 MB, measured as JSON). A larger read is refused with a message, never cut short: narrow it with `WHERE`.
   - The same limit, times 100, bounds the work a statement may do (rows read, compared and produced), which stops runaway joins without an equality condition.
   - Pages after the first run the statement again and skip the rows already returned.
 
@@ -2710,6 +2710,7 @@ The ciphertext is `nonce (12) | AES-256-GCM(chunk, maybe compressed)` with the c
 | Document size | 1 MB of JSON | `limits.max_document_kb` (live) |
 | Bulk, query, transaction and GraphQL bodies | 32 MB | `limits.max_request_mb` |
 | Documents one table read returns in SQL with joins, subqueries or expressions | 100,000 | `limits.sql_max_rows` |
+| Documents such a statement holds in memory, all its reads together | 256 MB | `limits.sql_max_mb` |
 | Single-document writes (`POST /{tessellation}`, `PUT` and `PATCH` of `/{tessellation}/{id}`) | The larger of 32 MB and `limits.max_document_kb` | Follows those two settings, as they are at startup |
 | Other request bodies | 2 MB | fixed |
 | Documents per bulk request | 10,000 | fixed |

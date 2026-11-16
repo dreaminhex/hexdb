@@ -345,7 +345,7 @@ async fn run_query(
         "documents": documents,
         "total": page.total,
         "next": page.next.map(|id| id.to_string()),
-        "plan": { "indexes": page.indexes, "scanned": page.scanned },
+        "plan": { "indexes": page.indexes, "scanned": page.scanned, "index_entries": page.index_entries },
     }))
     .into_response())
 }
@@ -1206,7 +1206,7 @@ pub async fn query_docs(
             }
             _ => docs_json(&page.documents),
         };
-        return Ok(Json(json!({ "documents": documents, "total": null, "next": null, "plan": { "indexes": page.indexes, "scanned": page.scanned } })).into_response());
+        return Ok(Json(json!({ "documents": documents, "total": null, "next": null, "plan": { "indexes": page.indexes, "scanned": page.scanned, "index_entries": page.index_entries } })).into_response());
     }
     let sort = match request.sort {
         Some(SortSpec::Text(text)) => parse_sort_text(&text)?,

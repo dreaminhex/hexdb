@@ -432,6 +432,7 @@ impl HexDBEngine {
         let mut documents = Vec::new();
         let mut last_part = None;
         let mut scanned = 0;
+        let mut index_entries = 0;
         // A page shorter than asked for was the end of the index.
         let mut exhausted = first.len() < size;
         let mut entries = first.into_iter();
@@ -452,6 +453,7 @@ impl HexDBEngine {
                     }
                 }
             };
+            index_entries += 1;
             cursor = Some((part.clone(), id));
             if documents.len() >= want && (!ties_matter || last_part.as_ref() != Some(&part)) {
                 break;
@@ -480,7 +482,7 @@ impl HexDBEngine {
             indexes.push(name);
         }
         let documents = documents.into_iter().skip(query.offset).take(query.limit).collect();
-        Ok(Some(crate::engine::QueryPage { documents, total, next: None, indexes, scanned }))
+        Ok(Some(crate::engine::QueryPage { documents, total, next: None, indexes, scanned, index_entries }))
     }
 
     /// Bind `$text` to the tessellation's text index fields, and ask the

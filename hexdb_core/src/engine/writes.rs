@@ -178,6 +178,9 @@ pub struct QueryPage {
     pub indexes: Vec<String>,
     /// Documents read to answer the query.
     pub scanned: usize,
+    /// Index entries the query looked at (candidates from its indexes, or entries walked
+    /// in sort order), apart from the documents read: 0 without an index.
+    pub index_entries: usize,
 }
 
 /// One operation in an atomic commit.
@@ -372,7 +375,7 @@ impl HexDBEngine {
             }
             let next = if more { documents.last().map(|d| d.id) } else { None };
             let total = if query.with_total { Some(self.count_documents(tess).await?) } else { None };
-            return Ok(QueryPage { documents, total, next, indexes: Vec::new(), scanned });
+            return Ok(QueryPage { documents, total, next, indexes: Vec::new(), scanned, index_entries: 0 });
         }
 
         let (filter, plan) = self.prepare_filter(tess, &query.filter);
@@ -389,6 +392,7 @@ impl HexDBEngine {
         // Filtered, in ID order, without a total: stop once the page is full.
         if query.sort.is_empty() && !query.with_total {
             let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
+            let index_entries = plan.as_ref().map_or(0, |p| p.candidates.len());
             let ids = self.candidate_ids(tess, plan, query.after).await;
             let want = query.offset.saturating_add(query.limit).saturating_add(1);
             let (mut matched, mut scanned) = (Vec::new(), 0);
@@ -406,10 +410,11 @@ impl HexDBEngine {
             let more = matched.len() > query.offset + query.limit;
             let documents: Vec<Document> = matched.into_iter().skip(query.offset).take(query.limit).collect();
             let next = if more { documents.last().map(|d| d.id) } else { None };
-            return Ok(QueryPage { documents, total: None, next, indexes, scanned });
+            return Ok(QueryPage { documents, total: None, next, indexes, scanned, index_entries });
         }
 
         let indexes = plan.as_ref().map(|p| p.indexes.clone()).unwrap_or_default();
+        let index_entries = plan.as_ref().map_or(0, |p| p.candidates.len());
         // Every candidate is checked so `total` covers all pages; `after`
         // only decides where the returned page starts.
         let ids = self.candidate_ids(tess, plan, None).await;
@@ -437,7 +442,7 @@ impl HexDBEngine {
         } else {
             None
         };
-        Ok(QueryPage { documents, total: Some(total), next, indexes, scanned })
+        Ok(QueryPage { documents, total: Some(total), next, indexes, scanned, index_entries })
     }
 
     /// IDs to read for a query, in ID order: the planner's candidates, or

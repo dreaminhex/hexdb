@@ -1630,6 +1630,8 @@ impl HexDBEngine {
             &rewritten
         };
         let max_rows = self.config.limits.sql_max_rows.max(1);
+        let max_bytes = (self.config.limits.sql_max_mb.max(1) as usize).saturating_mul(1 << 20);
+        let mut held = 0usize;
         let mut scans = Vec::with_capacity(plan.scans.len());
         let mut loaded: HashMap<(String, String), usize> = HashMap::new();
         for spec in &plan.scans {
@@ -1661,6 +1663,13 @@ impl HexDBEngine {
                 )));
             }
             let rows: Vec<Arc<Value>> = page.documents.iter().map(|d| Arc::new(d.to_api_json())).collect();
+            held = held.saturating_add(rows.iter().map(|r| json_size(r)).sum::<usize>());
+            if held > max_bytes {
+                return Err(invalid(format!(
+                    "the statement would hold more than {} MB of documents (limits.sql_max_mb). Narrow it with WHERE or select fewer tables.",
+                    max_bytes >> 20
+                )));
+            }
             let mut columns = vec!["id".to_string()];
             for row in &rows {
                 if let Value::Object(map) = row.as_ref() {
@@ -1688,6 +1697,18 @@ impl HexDBEngine {
             null: Arc::new(Value::Null),
         };
         ctx.query(&plan.root, None)
+    }
+}
+
+/// About how many bytes a value takes as JSON (without building the text).
+fn json_size(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(_) => 5,
+        Value::Number(_) => 12,
+        Value::String(s) => s.len() + 2,
+        Value::Array(items) => 2 + items.iter().map(|v| json_size(v) + 1).sum::<usize>(),
+        Value::Object(map) => 2 + map.iter().map(|(k, v)| k.len() + 4 + json_size(v)).sum::<usize>(),
     }
 }
 
