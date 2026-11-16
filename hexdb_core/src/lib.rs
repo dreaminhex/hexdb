@@ -47,6 +47,7 @@ pub mod analysis;
 pub mod advisor;
 pub mod schema;
 pub mod streams;
+pub mod egress;
 pub mod functions;
 pub mod triggers;
 pub mod sql;

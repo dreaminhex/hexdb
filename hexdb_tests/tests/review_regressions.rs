@@ -159,3 +159,56 @@ fn review255_role_fields_are_scoped_to_rows_the_role_allows() -> Result<()> {
     assert_eq!(w.status, StatusCode::FORBIDDEN, "Moving a document into tenant A with a hidden field set: {}", w.body);
     Ok(())
 }
+
+/// H255-02: a stream reader never sees a destination's credentials.
+#[test]
+fn review255_stream_reader_cannot_read_webhook_credentials() -> Result<()> {
+    let s = TestServer::start()?;
+    let r = s.request(Method::PUT, "/config", Some(&json!({"changes":{"streams.private_networks":true}})), &[])?;
+    assert!(r.status.is_success(), "{}", r.body);
+    let r = s.request(Method::POST, "/streams", Some(&json!({"name":"jobs","destinations":[{"url":"http://127.0.0.1:9/hook?key=SYNTHETIC_QUERY_SECRET","headers":{"Authorization":"Bearer SYNTHETIC_WEBHOOK_SECRET"}}]})), &[])?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let reader = s.user_with_roles("limited", json!([{"name":"reader","tessellations":["stream:jobs"]}]))?;
+    let a = s.request_as(Some(&reader), Method::GET, "/streams", None, &[])?;
+    let b = s.request_as(Some(&reader), Method::GET, "/streams/jobs", None, &[])?;
+    assert_eq!(a.status, StatusCode::OK);
+    assert_eq!(b.status, StatusCode::OK);
+    let both = format!("{} {}", a.body, b.body);
+    assert!(!both.contains("SYNTHETIC_WEBHOOK_SECRET") && !both.contains("SYNTHETIC_QUERY_SECRET"), "Read-only stream user received the destination's credentials: {}", both);
+    Ok(())
+}
+
+/// H255-03: a reader can't move a destination's (or source's) internal cursor.
+#[test]
+fn review255_reader_cannot_overwrite_internal_delivery_cursor() -> Result<()> {
+    let s = TestServer::start()?;
+    let r = s.request(Method::PUT, "/config", Some(&json!({"changes":{"streams.private_networks":true}})), &[])?;
+    assert!(r.status.is_success(), "{}", r.body);
+    let r = s.request(Method::POST, "/streams", Some(&json!({"name":"jobs","destinations":[{"url":"http://127.0.0.1:9/hook"}]})), &[])?;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    let reader = s.user_with_roles("limited", json!([{"name":"reader","tessellations":["stream:jobs"]}]))?;
+    for group in ["__destination:0", "__source:0"] {
+        let r = s.request_as(Some(&reader), Method::POST, &format!("/streams/jobs/groups/{}/commit", group), Some(&json!({"offset":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ"})), &[])?;
+        assert!(r.status.is_client_error(), "A reader overwrote the internal cursor {}: status {}", group, r.status);
+    }
+    // Nor skip a group of its own past messages that don't exist yet.
+    let r = s.request_as(Some(&reader), Method::POST, "/streams/jobs/groups/mine/commit", Some(&json!({"offset":"7ZZZZZZZZZZZZZZZZZZZZZZZZZ"})), &[])?;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    Ok(())
+}
+
+/// H255-07: a stream manager can't make the server POST to loopback or private addresses
+/// unless an administrator allows private networks.
+#[test]
+fn review255_stream_owner_cannot_post_to_loopback_by_default() -> Result<()> {
+    let s = TestServer::start()?;
+    let owner = s.user_with_roles("owner", json!([{"name":"owner","tessellations":["stream:jobs"]}]))?;
+    for url in ["http://127.0.0.1:9/internal", "http://localhost:9/internal", "http://[::1]:9/internal", "http://[::ffff:127.0.0.1]:9/internal", "http://169.254.169.254/latest", "http://10.0.0.1/x", "http://u:p@8.8.8.8/x"] {
+        let r = s.request_as(Some(&owner), Method::POST, "/streams", Some(&json!({"name":"jobs","destinations":[{"url":url}]})), &[])?;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}: {}", url, r.body);
+    }
+    // Only an administrator can allow them.
+    let r = s.request_as(Some(&owner), Method::PUT, "/config", Some(&json!({"changes":{"streams.private_networks":true}})), &[])?;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    Ok(())
+}

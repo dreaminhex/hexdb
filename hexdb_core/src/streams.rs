@@ -19,6 +19,16 @@
 // `_streams` and consumer offsets in `_stream_offsets`. Sources and
 // destinations run on the Overseer. Permissions use the name `stream:<name>`
 // in role grants: read to consume, write to publish, manage to configure.
+//
+// Destination URLs and header values are credentials for the receiver, so the
+// API never shows them: header values and the URL's password and query values
+// read as "********", and a configuration sent back with "********" keeps the
+// stored value. Destinations must be on the public internet unless an
+// administrator sets `streams.private_networks` (see `crate::egress`).
+//
+// Consumer groups named `__...` are reserved: sources and destinations keep
+// their positions as `__source:<n>` and `__destination:<n>`. A group's offset
+// only moves forward, and only to a message of the stream.
 
 use crate::{
     changes::ChangeKind,
@@ -137,7 +147,55 @@ fn offset_id(stream: &str, group: &str) -> Ulid {
     doc_id(&format!("{}\u{0}{}", stream, group))
 }
 
+/// True for the groups sources and destinations keep their positions in.
+pub fn is_reserved_group(group: &str) -> bool {
+    group.starts_with("__")
+}
+
+/// Commits run one at a time, so an offset never moves back.
+static COMMITS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The lattice config key that lets destinations reach private networks.
+pub const PRIVATE_NETWORKS: &str = "streams.private_networks";
+
 impl StreamConfig {
+    /// The configuration as the API shows it: destination header values and the
+    /// URL's password and query values replaced by `********`.
+    pub fn redacted(&self) -> StreamConfig {
+        let mut out = self.clone();
+        for d in &mut out.destinations {
+            d.url = crate::egress::redact_url(&d.url);
+            for value in d.headers.values_mut() {
+                *value = crate::egress::REDACTED.to_string();
+            }
+        }
+        out
+    }
+
+    /// Put back the stored secrets a client sent as `********` (it was shown the
+    /// redacted configuration): a destination URL equal to a stored one's redacted
+    /// form, and header values of that destination.
+    fn keep_secrets(&mut self, old: &StreamConfig) -> Result<()> {
+        for (i, d) in self.destinations.iter_mut().enumerate() {
+            let same = |o: &&StreamDestination| o.url == d.url || crate::egress::redact_url(&o.url) == d.url;
+            // The destination at the same place first, then any with that URL.
+            let stored = old.destinations.get(i).filter(same).or_else(|| old.destinations.iter().find(same));
+            if let Some(stored) = stored {
+                d.url = stored.url.clone();
+            }
+            for (name, value) in d.headers.iter_mut() {
+                if value != crate::egress::REDACTED {
+                    continue;
+                }
+                match stored.and_then(|s| s.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name))) {
+                    Some((_, v)) => *value = v.clone(),
+                    None => bail!(invalid(format!("destinations[{}].headers.{}: send its value (******** keeps a stored value only).", i, name))),
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         crate::catalog::validate_tessellation_name(&self.name).map_err(|e| invalid(e.to_string().replace("Tessellation", "Stream")))?;
         if self.description.len() > 500 {
@@ -159,6 +217,9 @@ impl StreamConfig {
             let url = reqwest::Url::parse(&d.url).map_err(|_| invalid(format!("destinations[{}]: '{}' isn't a URL.", i, d.url)))?;
             if !matches!(url.scheme(), "http" | "https") {
                 bail!(invalid(format!("destinations[{}]: the URL must be http or https.", i)));
+            }
+            if !url.username().is_empty() || url.password().is_some() {
+                bail!(invalid(format!("destinations[{}]: put credentials in headers, not in the URL.", i)));
             }
             if d.batch_size == 0 || d.batch_size > MAX_BATCH {
                 bail!(invalid(format!("destinations[{}]: batch_size must be 1-{}.", i, MAX_BATCH)));
@@ -217,8 +278,21 @@ impl HexDBEngine {
 
     /// Create or replace a stream's configuration.
     pub async fn save_stream(&self, mut config: StreamConfig, by: &str, create: bool) -> Result<StreamConfig> {
-        config.validate()?;
         let existing = self.get_stream(&config.name).await?;
+        if let (Some(old), false) = (&existing, create) {
+            config.keep_secrets(old)?;
+        }
+        config.validate()?;
+        let private_networks = self.config_value(PRIVATE_NETWORKS) == json!(true);
+        for (i, d) in config.destinations.iter().enumerate() {
+            let url = reqwest::Url::parse(&d.url).map_err(|_| invalid(format!("destinations[{}]: not a URL.", i)))?;
+            match crate::egress::check(&url, private_networks, PRIVATE_NETWORKS).await {
+                Ok(_) => {}
+                // A name that doesn't resolve yet is checked again before every delivery.
+                Err(e) if e.starts_with("Couldn't resolve") => {}
+                Err(e) => bail!(invalid(format!("destinations[{}]: {}", i, e))),
+            }
+        }
         match (&existing, create) {
             (Some(_), true) => bail!(EngineError::Conflict(format!("A stream named '{}' already exists.", config.name))),
             (None, false) => bail!(EngineError::NotFound(format!("Stream '{}' not found.", config.name))),
@@ -328,11 +402,27 @@ impl HexDBEngine {
         Ok(doc.data_json()["offset"].as_str().and_then(|s| Ulid::from_string(s).ok()))
     }
 
-    /// Commit a consumer group's offset (only forward).
+    /// Commit a consumer group's offset (only forward), for a consumer: the
+    /// group can't be a reserved one, and the offset must be a message of the
+    /// stream (or older than its retention, so already expired).
     pub async fn commit_offset(&self, name: &str, group: &str, offset: Ulid) -> Result<()> {
         if group.is_empty() || group.len() > 100 {
             bail!(invalid("group must be 1-100 characters."));
         }
+        if is_reserved_group(group) {
+            bail!(invalid("Group names starting with __ are reserved for the stream's own sources and destinations."));
+        }
+        let config = self.stream_or_404(name).await?;
+        let expired = config.retention_hours > 0 && (offset.timestamp_ms() as i64) < chrono::Utc::now().timestamp_millis() - config.retention_hours as i64 * 3_600_000;
+        if !expired && self.get_system_document(&messages_tessellation(name), offset).await?.is_none() {
+            bail!(invalid(format!("offset {} isn't a message of stream '{}'.", offset, name)));
+        }
+        self.advance_offset(name, group, offset).await
+    }
+
+    /// Move a group's offset forward (never back).
+    async fn advance_offset(&self, name: &str, group: &str, offset: Ulid) -> Result<()> {
+        let _one_at_a_time = COMMITS.lock().await;
         let current = self.group_offset(name, group).await?;
         if current.is_some_and(|c| c >= offset) {
             return Ok(());
@@ -507,11 +597,9 @@ async fn run_source(engine: Arc<HexDBEngine>, config: StreamConfig, index: usize
 async fn run_destination(engine: Arc<HexDBEngine>, config: StreamConfig, index: usize, key: String) {
     let destination = config.destinations[index].clone();
     let group = format!("__destination:{}", index);
-    let client = match crate::crypt::http_client().timeout(Duration::from_secs(30)).redirect(reqwest::redirect::Policy::none()).build() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    info!("📡 Stream '{}' delivers to {}.", config.name, destination.url);
+    let shown_url = crate::egress::redact_url(&destination.url);
+    info!("📡 Stream '{}' delivers to {}.", config.name, shown_url);
+    let Ok(url) = reqwest::Url::parse(&destination.url) else { return };
     loop {
         let offset = engine.group_offset(&config.name, &group).await.ok().flatten();
         let (messages, last) = match engine.read_stream(&config.name, offset, destination.batch_size).await {
@@ -522,20 +610,30 @@ async fn run_destination(engine: Arc<HexDBEngine>, config: StreamConfig, index: 
             engine.wait_for_messages(&config.name, offset, Duration::from_secs(5)).await;
             continue;
         }
-        let mut request = client.post(&destination.url).json(&messages).header("x-hexdb-stream", &config.name);
-        for (k, v) in &destination.headers {
-            request = request.header(k, v);
-        }
-        let sent = match request.send().await {
-            Ok(r) if r.status().is_success() => Ok(()),
-            Ok(r) => Err(format!("{} returned {}", destination.url, r.status())),
-            Err(e) => Err(format!("POST {}: {}", destination.url, e)),
+        // Checked before every delivery (DNS can change), and sent to the address checked.
+        let private_networks = engine.config_value(PRIVATE_NETWORKS) == json!(true);
+        let sent = match crate::egress::check(&url, private_networks, PRIVATE_NETWORKS).await {
+            Err(e) => Err(e),
+            Ok((host, addrs)) => match crate::egress::pinned_client(&host, addrs[0], Duration::from_secs(30)) {
+                Err(e) => Err(format!("POST {}: {}", shown_url, e.without_url())),
+                Ok(client) => {
+                    let mut request = client.post(url.clone()).json(&messages).header("x-hexdb-stream", &config.name);
+                    for (k, v) in &destination.headers {
+                        request = request.header(k, v);
+                    }
+                    match request.send().await {
+                        Ok(r) if r.status().is_success() => Ok(()),
+                        Ok(r) => Err(format!("{} returned {}", shown_url, r.status())),
+                        Err(e) => Err(format!("POST {}: {}", shown_url, e.without_url())),
+                    }
+                }
+            },
         };
         match sent {
             Ok(()) => {
                 let count = messages.len() as u64;
                 if let Some(last) = last.and_then(|l| Ulid::from_string(&l).ok()) {
-                    if let Err(e) = engine.commit_offset(&config.name, &group, last).await {
+                    if let Err(e) = engine.advance_offset(&config.name, &group, last).await {
                         warn!("⚠️ Couldn't commit stream '{}' delivery offset: {:#}", config.name, e);
                     }
                 }

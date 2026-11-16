@@ -105,6 +105,10 @@ function StreamDialog({ stream, open, onOpenChange, onSaved }: { stream: StreamC
             <p className="text-muted-foreground text-xs">
               Each: a webhook url, optional headers and batch_size. Retried until delivered. Example: <code>{EXAMPLE_DESTINATIONS.replace(/\s+/g, " ")}</code>
             </p>
+            <p className="text-muted-foreground text-xs">
+              Header values and URL query values show as <code>********</code>; leave them as they are to keep the stored value. Webhooks must be on
+              public addresses unless <code>streams.private_networks</code> is on in Configuration.
+            </p>
           </div>
           {error && <p className="text-destructive text-sm">{error}</p>}
           <DialogFooter>

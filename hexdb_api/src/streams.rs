@@ -2,7 +2,7 @@
 //
 //   GET    /streams                                   streams you can read
 //   POST   /streams                                   create (manage permission on stream:<name>)
-//   GET    /streams/{name}                            configuration, delivery status, consumer groups
+//   GET    /streams/{name}                            configuration (secrets redacted), delivery status, consumer groups
 //   PUT    /streams/{name}                            change the configuration
 //   DELETE /streams/{name}                            delete it with its messages
 //   POST   /streams/{name}/messages                   publish one message or an array (write)
@@ -43,7 +43,8 @@ fn parse_offset(text: Option<&str>) -> Result<Option<Ulid>, ApiError> {
 
 /// Streams the caller can read.
 pub async fn list(axum::extract::State(engine): Engine, Auth(principal): Auth) -> ApiResult {
-    let list: Vec<StreamConfig> = engine.list_streams().await?.into_iter().filter(|s| principal.can(Permission::Read, &streams::resource(&s.name))).collect();
+    let list: Vec<StreamConfig> =
+        engine.list_streams().await?.into_iter().filter(|s| principal.can(Permission::Read, &streams::resource(&s.name))).map(|s| s.redacted()).collect();
     Ok(Json(json!({ "streams": list })).into_response())
 }
 
@@ -70,7 +71,7 @@ pub async fn create(axum::extract::State(engine): Engine, Auth(principal): Auth,
     require_sources(&principal, &config)?;
     let saved = engine.save_stream(config, &principal.login, true).await?;
     engine.audit(&principal.login, "stream.create", &saved.name, json!({ "sources": saved.sources.len(), "destinations": saved.destinations.len() })).await;
-    Ok((StatusCode::CREATED, Json(json!(saved))).into_response())
+    Ok((StatusCode::CREATED, Json(json!(saved.redacted()))).into_response())
 }
 
 /// A stream's configuration, delivery status and consumer groups.
@@ -80,7 +81,7 @@ pub async fn get(Path(name): Path<String>, axum::extract::State(engine): Engine,
     let status = engine.stream_tasks.status.lock().unwrap().clone();
     let task = |kind: &str, i: usize| status.get(&format!("{}/{}/{}", name, kind, i)).cloned().unwrap_or_default();
     Ok(Json(json!({
-        "stream": config,
+        "stream": config.redacted(),
         "sources": (0..config.sources.len()).map(|i| task("source", i)).collect::<Vec<_>>(),
         "destinations": (0..config.destinations.len()).map(|i| task("destination", i)).collect::<Vec<_>>(),
         "groups": engine.stream_groups(&name).await?,
@@ -96,7 +97,7 @@ pub async fn update(Path(name): Path<String>, axum::extract::State(engine): Engi
     require_sources(&principal, &config)?;
     let saved = engine.save_stream(config, &principal.login, false).await?;
     engine.audit(&principal.login, "stream.update", &name, json!({})).await;
-    Ok(Json(json!(saved)).into_response())
+    Ok(Json(json!(saved.redacted())).into_response())
 }
 
 /// Delete a stream and its messages.
@@ -136,6 +137,7 @@ async fn start_offset(engine: &hexdb_core::HexDBEngine, name: &str, params: &Rea
     match parse_offset(params.after.as_deref())? {
         Some(offset) => Ok(Some(offset)),
         None => match params.group.as_deref().filter(|g| !g.is_empty()) {
+            Some(group) if streams::is_reserved_group(group) => Err(ApiError::invalid("Group names starting with __ are reserved for the stream's own sources and destinations.")),
             Some(group) => Ok(engine.group_offset(name, group).await?),
             None => Ok(None),
         },

@@ -60,10 +60,19 @@ fn streams_publish_consume_source_and_deliver() -> Result<()> {
         "description": "Orders over 100",
         "retention_hours": 24,
         "sources": [{ "tessellation": "orders", "ops": ["put"], "filter": { "total": { "$gt": 100 } } }],
-        "destinations": [{ "url": url, "batch_size": 10 }],
+        "destinations": [{ "url": url, "batch_size": 10, "headers": { "Authorization": "Bearer hook-secret" } }],
     });
+    // The webhook is on loopback: refused until an administrator allows private networks.
+    let res = server.request(Method::POST, "/streams", Some(&config), &[])?;
+    assert_eq!(res.status, 400, "{}", res.body);
+    assert!(res.body.to_string().contains("streams.private_networks"), "{}", res.body);
+    let res = server.request(Method::PUT, "/config", Some(&json!({ "changes": { "streams.private_networks": true } })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
     let res = server.request(Method::POST, "/streams", Some(&config), &[])?;
     assert_eq!(res.status, 201, "{}", res.body);
+    // Header values never come back, not even to an administrator.
+    assert_eq!(res.body["destinations"][0]["headers"]["Authorization"], "********");
+    assert!(!res.body.to_string().contains("hook-secret"));
     assert_eq!(server.request(Method::POST, "/streams", Some(&config), &[])?.status, 409);
     assert_eq!(server.request(Method::POST, "/streams", Some(&json!({ "name": "bad", "destinations": [{ "url": "ftp://x" }] })), &[])?.status, 400);
 
@@ -81,6 +90,16 @@ fn streams_publish_consume_source_and_deliver() -> Result<()> {
     // A consumer group keeps its place.
     let commit = server.request(Method::POST, "/streams/big-orders/groups/billing/commit", Some(&json!({ "offset": offsets[0] })), &[])?;
     assert_eq!(commit.status, 204, "{}", commit.body);
+    // Only to a message of the stream, and never into a reserved group.
+    let beyond = server.request(Method::POST, "/streams/big-orders/groups/billing/commit", Some(&json!({ "offset": "7ZZZZZZZZZZZZZZZZZZZZZZZZZ" })), &[])?;
+    assert_eq!(beyond.status, 400, "{}", beyond.body);
+    let reserved = server.request(Method::POST, "/streams/big-orders/groups/__destination:0/commit", Some(&json!({ "offset": offsets[1] })), &[])?;
+    assert_eq!(reserved.status, 400, "{}", reserved.body);
+    // An older offset doesn't move the group back.
+    let ahead = server.request(Method::POST, "/streams/big-orders/groups/second/commit", Some(&json!({ "offset": offsets[1] })), &[])?;
+    assert_eq!(ahead.status, 204, "{}", ahead.body);
+    server.request(Method::POST, "/streams/big-orders/groups/second/commit", Some(&json!({ "offset": offsets[0] })), &[])?;
+    assert_eq!(server.request(Method::GET, "/streams/big-orders/messages?group=second", None, &[])?.body["messages"].as_array().unwrap().len(), 0);
     let rest = server.request(Method::GET, "/streams/big-orders/messages?group=billing", None, &[])?;
     assert_eq!(rest.body["messages"].as_array().unwrap().len(), 1);
     assert_eq!(rest.body["messages"][0]["payload"]["n"], 2);
@@ -115,6 +134,15 @@ fn streams_publish_consume_source_and_deliver() -> Result<()> {
 
     // The destination got every message, in order.
     wait_until(Duration::from_secs(15), "webhook delivery", || Ok(delivered.lock().unwrap().len() >= 4))?;
+
+    // The configuration sent back as shown keeps the stored secret; a changed value replaces it.
+    let shown = server.request(Method::GET, "/streams/big-orders", None, &[])?.body["stream"].clone();
+    assert_eq!(shown["destinations"][0]["headers"]["Authorization"], "********");
+    let res = server.request(Method::PUT, "/streams/big-orders", Some(&shown), &[])?;
+    assert_eq!(res.status, 200, "{}", res.body);
+    let mut unknown = shown.clone();
+    unknown["destinations"][0]["headers"]["X-New"] = json!("********");
+    assert_eq!(server.request(Method::PUT, "/streams/big-orders", Some(&unknown), &[])?.status, 400, "a redacted value with nothing stored");
     let ns: Vec<Value> = delivered.lock().unwrap().iter().take(3).map(|m| m["payload"]["n"].clone()).collect();
     assert_eq!(ns, vec![json!(1), json!(2), json!(3)]);
     // The stream counts a delivery once the webhook's answer is back, a moment after the webhook has it.

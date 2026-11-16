@@ -1259,8 +1259,13 @@ websocat "ws://localhost:7700/streams/order-events/ws?group=billing" -H "Authori
 **Sources** turn a tessellation's committed changes into messages, optionally filtered and limited to some operations. They start at the stream's creation and keep their position across restarts.
 
 **Destinations** POST batches of messages to a webhook. Each destination has its own offset and retries until the webhook answers 2xx. Delivery is at-least-once, so receivers should be idempotent (use the offset).
+- A destination must resolve only to public addresses, checked when the stream is saved and again before each delivery (connecting to the checked address, without following redirects), so whoever manages a stream can't make the server call services inside your network. An administrator can set `streams.private_networks` in the lattice config for receivers on the same network.
+- Put credentials in `headers`, not in the URL (a URL with a user name or password is refused).
+- Header values, and the URL's query values, are never shown back, to anyone: they read as `********`. Sending a configuration back with `********` keeps the stored value, so a stream can be read, edited and saved; send a new value to change one.
 
 `GET /streams/{name}` shows the configuration, each source's and destination's deliveries and last error, and each consumer group's offset and pending count. `PUT` changes the configuration and `DELETE` removes the stream with its messages.
+
+**Consumer groups.** A commit moves a group's offset forward only, and only to a message of the stream (or one already past its retention). Group names starting with `__` are reserved: sources and destinations keep their own positions as `__source:<n>` and `__destination:<n>`.
 
 **Permissions** use the resource name `stream:<name>` in role grants:
 - `read` to consume;
@@ -2785,6 +2790,7 @@ hexdb config rollback 3 -m "bad key"
 | `ai.embeddings.model`, `base_url`, `api_key` | empty | Embedding model, API base URL and key (empty key with `same`: `ai.api_key`) |
 | `ai.embeddings.user_daily_tokens` | 200,000 | Tokens one user's similarity searches by text may use per day (0: no limit) |
 | `a2a.enabled` | false | Answer other agents over A2A (needs `ai.chat.enabled`; see [A2A](#a2a-agent2agent)) |
+| `streams.private_networks` | false | Let stream destinations reach private, loopback and link-local addresses (see [Streams](#15-streams)) |
 | `a2a.push_private_networks` | false | Let A2A webhooks use `http` and private addresses (see [A2A](#a2a-agent2agent)) |
 | `oauth.issuer`, `oauth.audience` | empty | Accept access tokens from this OpenID Connect provider for this audience (see [OAuth](#oauth-access-tokens)) |
 | `oauth.user_claim` | `email` | The token claim naming the HexDB user (login or email address) |
