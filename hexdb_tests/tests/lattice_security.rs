@@ -175,7 +175,16 @@ fn the_lattice_secret_rotates_one_hex_at_a_time() -> Result<()> {
     assert_eq!(leader.request_as(Some(&key), Method::GET, "/notes", None, &[])?.status, 200, "the key, on the Overseer");
     // The replica-only key is checked on the follower, which asks the Overseer to re-hash it.
     let follower = if std::ptr::eq(leader, &overseer) { &replica } else { &overseer };
-    assert_eq!(follower.request_as(Some(&replica_key), Method::GET, "/notes", None, &[])?.status, 200, "the replica-only key after rotation");
+    let rehashed = || overseer.log_tail(100_000).matches("Re-hashed API key").count() + replica.log_tail(100_000).matches("Re-hashed API key").count();
+    let before = rehashed();
+    // The follower may not know the new Overseer yet just after the restart: it asks again on
+    // the key's next use, until the Overseer has stored the new hash.
+    wait_until(Duration::from_secs(30), "the replica-only key to be re-hashed", || {
+        assert_eq!(follower.request_as(Some(&replica_key), Method::GET, "/notes", None, &[])?.status, 200, "the replica-only key after rotation");
+        Ok(rehashed() > before)
+    })
+    .map_err(|e| anyhow::anyhow!("{}:
+{}", e, follower.log_tail(40)))?;
     let third = overseer.insert("notes", &json!({ "step": 3 }))?;
     replicated(&replica, "notes", &third)?;
 

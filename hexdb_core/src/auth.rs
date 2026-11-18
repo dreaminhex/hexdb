@@ -512,6 +512,7 @@ pub async fn store_rehashed_key(engine: &HexDBEngine, id: Ulid, old_hash: &str, 
     }
     stored.secret_hash = new_hash.to_string();
     engine.put_system_document(API_KEYS_TESSELLATION, id, serde_json::to_value(&stored)?, None).await?;
+    tracing::info!("🔑 Re-hashed API key '{}' with the current lattice secret", stored.name);
     Ok(true)
 }
 
@@ -661,7 +662,9 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
                 // has the new secret), so a key used only for reads on
                 // replicas survives the old secret's removal.
                 // Asked again after 10 s until the Overseer confirms it stored the new hash (it
-                // can't while it still uses the old key), then left alone for 5 minutes.
+                // can't while it still uses the old key), then left alone for 5 minutes. No answer
+                // at all (no Overseer known yet, as just after a restart): asked again on the
+                // key's next use a second later, so the key isn't left on the old hash.
                 static ASKED: std::sync::Mutex<Vec<(Ulid, std::time::Instant, std::time::Duration)>> = std::sync::Mutex::new(Vec::new());
                 let due = {
                     let mut asked = ASKED.lock().unwrap();
@@ -671,14 +674,15 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
                 if due {
                     let body = serde_json::json!({ "id": id.to_string(), "old_hash": stored.secret_hash, "new_hash": new_hash, "key": key_fingerprint(&lattice_keys[0]) });
                     let ask = crate::replication::post_to_overseer_for(engine, "/lattice/rehash-key", &body, std::time::Duration::from_secs(2));
-                    let stored_there = match ask.await {
-                        Ok(answer) => serde_json::from_slice::<serde_json::Value>(&answer).ok().is_some_and(|v| v["stored"] == true),
+                    let wait = match ask.await {
+                        Ok(answer) if serde_json::from_slice::<serde_json::Value>(&answer).ok().is_some_and(|v| v["stored"] == true) => 300,
+                        Ok(_) => 10,
                         Err(e) => {
                             tracing::debug!("Couldn't ask the Overseer to re-hash an API key: {:#}", e);
-                            false
+                            1
                         }
                     };
-                    let wait = std::time::Duration::from_secs(if stored_there { 300 } else { 10 });
+                    let wait = std::time::Duration::from_secs(wait);
                     ASKED.lock().unwrap().push((id, std::time::Instant::now(), wait));
                 }
             }
