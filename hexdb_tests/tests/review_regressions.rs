@@ -302,6 +302,36 @@ fn sql_statements_have_a_memory_budget() -> Result<()> {
     Ok(())
 }
 
+/// H257-03: rows a statement builds (joined rows, results) have a budget too, not only its reads.
+#[test]
+fn sql_joins_and_results_have_a_memory_budget() -> Result<()> {
+    let s = TestServer::start_with(hexdb_tests::TestOptions { extra_toml: "
+[limits]
+sql_max_mb = 1
+".into(), ..Default::default() })?;
+    let pad = "x".repeat(200);
+    let docs: Vec<Value> = (0..100).map(|i| json!({"n": i, "pad": pad})).collect();
+    let r = s.request(Method::POST, "/notes/_bulk", Some(&json!(docs)), &[])?;
+    assert!(r.status.is_success(), "{}", r.body);
+    let sql = |q: &str| s.request(Method::POST, "/sql", Some(&json!({ "sql": q })), &[]);
+
+    // About 30 KB read: fine on its own.
+    let r = sql("SELECT * FROM notes")?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    // A million joined rows from it (counted to one value) are refused.
+    let r = sql("SELECT COUNT(*) AS c FROM notes a CROSS JOIN notes b CROSS JOIN notes c")?;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(r.body.to_string().contains("limits.sql_max_mb"), "{}", r.body);
+    // So are 10,000 results of 400 bytes each.
+    let r = sql("SELECT a.pad || b.pad AS both FROM notes a CROSS JOIN notes b")?;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert!(r.body.to_string().contains("limits.sql_max_mb"), "{}", r.body);
+    // A join within the budget still works.
+    let r = sql("SELECT COUNT(*) AS c FROM notes a JOIN notes b ON a.n = b.n")?;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    Ok(())
+}
+
 /// An answer given before the request's body was read (an upload refused at once) still reaches
 /// the client, and the client's next request on the same connection works.
 #[test]

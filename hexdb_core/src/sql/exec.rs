@@ -1601,6 +1601,9 @@ struct Ctx<'g> {
     cte_cache: RefCell<HashMap<usize, Arc<Output>>>,
     work: Cell<u64>,
     work_limit: u64,
+    /// Bytes of rows the statement has built (joined rows, results), against `build_limit`.
+    built: Cell<usize>,
+    build_limit: usize,
     now: chrono::DateTime<chrono::Utc>,
     null: Arc<Value>,
 }
@@ -1703,11 +1706,23 @@ impl HexDBEngine {
             cte_cache: RefCell::new(HashMap::new()),
             work: Cell::new(0),
             work_limit: (max_rows as u64).saturating_mul(WORK_PER_ROW),
+            built: Cell::new(0),
+            build_limit: max_bytes,
             now: chrono::Utc::now(),
             null: Arc::new(Value::Null),
         };
         ctx.query(&plan.root, None)
     }
+}
+
+/// About what a row of `width` bindings takes in memory (the values are shared with the reads).
+fn row_bytes(width: usize) -> usize {
+    std::mem::size_of::<Row>() + width * std::mem::size_of::<Arc<Value>>()
+}
+
+/// About what built values take in memory.
+fn values_bytes(values: &[Value]) -> usize {
+    values.iter().map(|v| std::mem::size_of::<Value>() + json_size(v)).sum()
 }
 
 /// Documents one SQL table read takes at a time (see `limits.sql_max_mb`).
@@ -1912,6 +1927,20 @@ impl<'g> Ctx<'g> {
         Ok(())
     }
 
+    /// Count `bytes` of rows built (a second budget the size of `limits.sql_max_mb`, besides the
+    /// documents read), so joins and results can't grow without bound.
+    fn hold(&self, bytes: usize) -> Result<()> {
+        let total = self.built.get().saturating_add(bytes);
+        self.built.set(total);
+        if total > self.build_limit {
+            return Err(invalid(format!(
+                "the statement would build more than {} MB of rows (limits.sql_max_mb). Narrow it with WHERE, join on equal fields or select fewer columns.",
+                self.build_limit >> 20
+            )));
+        }
+        Ok(())
+    }
+
     fn query(&self, node: &QueryNode, outer: Option<&Env>) -> Result<Output> {
         let mut out = match &node.body {
             SetNode::Select(select) => self.select(select, outer)?,
@@ -2019,14 +2048,19 @@ impl<'g> Ctx<'g> {
                     }
                     Source::Cte(i, rename) => {
                         let out = self.cte(*i)?;
-                        objects(&out, rename)?
+                        let built = objects(&out, rename)?;
+                        self.hold(built.0.iter().map(|v| json_size(v)).sum())?;
+                        built
                     }
                     Source::Derived(query, rename) => {
                         let out = self.query(query, None)?;
-                        objects(&out, rename)?
+                        let built = objects(&out, rename)?;
+                        self.hold(built.0.iter().map(|v| json_size(v)).sum())?;
+                        built
                     }
                 };
                 self.tick(values.len())?;
+                self.hold(values.len().saturating_mul(row_bytes(width)))?;
                 let mut column_sets = vec![Vec::new(); width];
                 column_sets[*binding] = columns;
                 let rows = values
@@ -2109,6 +2143,7 @@ impl<'g> Ctx<'g> {
 
         let mut out = Vec::new();
         let mut right_matched = vec![false; right.len()];
+        let row_cost = row_bytes(left.first().or(right.first()).map_or(0, Vec::len));
         if keys.is_empty() {
             self.tick(left.len().saturating_mul(right.len().max(1)))?;
             for l in &left {
@@ -2117,10 +2152,12 @@ impl<'g> Ctx<'g> {
                     if let Some(row) = matches(l, r)? {
                         any = true;
                         right_matched[j] = true;
+                        self.hold(row_cost)?;
                         out.push(row);
                     }
                 }
                 if !any && matches!(kind, JoinKind::Left | JoinKind::Full) {
+                    self.hold(row_cost)?;
                     out.push(l.clone());
                 }
             }
@@ -2153,12 +2190,14 @@ impl<'g> Ctx<'g> {
                             if let Some(row) = matches(l, &right[j])? {
                                 any = true;
                                 right_matched[j] = true;
+                                self.hold(row_cost)?;
                                 out.push(row);
                             }
                         }
                     }
                 }
                 if !any && matches!(kind, JoinKind::Left | JoinKind::Full) {
+                    self.hold(row_cost)?;
                     out.push(l.clone());
                 }
             }
@@ -2170,6 +2209,7 @@ impl<'g> Ctx<'g> {
                     for &b in left_bindings {
                         row[b] = self.null.clone();
                     }
+                    self.hold(row_cost)?;
                     out.push(row);
                 }
             }
@@ -2249,6 +2289,7 @@ impl<'g> Ctx<'g> {
             for (e, _, _) in &s.order {
                 keys.push(self.eval(e, env)?);
             }
+            self.hold(values_bytes(&values) + values_bytes(&keys))?;
             Ok((values, keys))
         };
 
@@ -2265,6 +2306,7 @@ impl<'g> Ctx<'g> {
                 let g = match index.get(&key) {
                     Some(&g) => g,
                     None => {
+                        self.hold(row_bytes(width) + key.len())?;
                         groups.push((row.clone(), s.aggregates.iter().map(Accumulator::new).collect()));
                         index.insert(key, groups.len() - 1);
                         groups.len() - 1
