@@ -89,6 +89,55 @@ fn sign_in_throttling_and_audit_events_span_the_lattice() -> Result<()> {
     Ok(())
 }
 
+/// H257-02: a TOTP code signs in once across the lattice, whichever hex it's used on first.
+#[test]
+fn a_one_time_code_signs_in_once_across_the_lattice() -> Result<()> {
+    use hexdb_core::mfa::code_for;
+    const PASSWORD: &str = "Sturdy test passphrase 2026";
+    let ports = [TestServer::free_port()?, TestServer::free_port()?];
+    let overseer = TestServer::start_with(pair_options(ports, 0, 4096, ""))?;
+    let replica = TestServer::start_with(pair_options(ports, 1, 1024, ""))?;
+    let now = || chrono::Utc::now().timestamp();
+    let sign_in = |server: &TestServer, login: &str, code: Option<&str>| -> Result<(u16, Value)> {
+        let mut body = json!({ "login": login, "password": PASSWORD, "return_token": true });
+        if let Some(code) = code {
+            body["code"] = json!(code);
+        }
+        let res = server.request_as(None, Method::POST, "/auth/login", Some(&body), &[])?;
+        Ok((res.status.as_u16(), res.body))
+    };
+    // Two users with MFA on (enabling uses the current step), one for each direction.
+    let mut secrets = Vec::new();
+    for login in ["ada", "bob"] {
+        let user = json!({ "login": login, "password": PASSWORD, "email_address": format!("{}@example.com", login), "roles": [{ "name": "reader", "tessellations": ["*"] }] });
+        let created = overseer.request(Method::POST, "/users", Some(&user), &[])?;
+        assert_eq!(created.status, 201, "{}", created.body);
+        let session = sign_in(&overseer, login, None)?.1["token"].as_str().unwrap().to_string();
+        let setup = overseer.request_as(Some(&session), Method::POST, "/auth/mfa/setup", Some(&json!({ "password": PASSWORD })), &[])?;
+        let secret = setup.body["secret"].as_str().unwrap().to_string();
+        let enabled = overseer.request_as(Some(&session), Method::POST, "/auth/mfa/enable", Some(&json!({ "code": code_for(&secret, now()).unwrap() })), &[])?;
+        assert_eq!(enabled.status, 200, "{}", enabled.body);
+        secrets.push(secret);
+    }
+    // Changes arrive in order: once this note is on the replica, so is MFA.
+    let marker = overseer.insert("notes", &json!({ "after": "mfa" }))?;
+    replicated(&replica, "notes", &marker)?;
+
+    // Used on the replica first: the Overseer refuses it, and so does the replica.
+    let code = code_for(&secrets[0], now() + 30).unwrap();
+    let (status, body) = sign_in(&replica, "ada", Some(&code))?;
+    assert_eq!(status, 200, "{}
+{}", body, replica.log_tail(30));
+    assert_eq!(sign_in(&overseer, "ada", Some(&code))?.0, 401, "replayed on the Overseer");
+    assert_eq!(sign_in(&replica, "ada", Some(&code))?.0, 401, "replayed on the replica");
+
+    // Used on the Overseer first: the replica refuses it, even before the change reaches it.
+    let code = code_for(&secrets[1], now() + 30).unwrap();
+    assert_eq!(sign_in(&overseer, "bob", Some(&code))?.0, 200);
+    assert_eq!(sign_in(&replica, "bob", Some(&code))?.0, 401, "replayed on the replica");
+    Ok(())
+}
+
 #[test]
 fn the_lattice_secret_rotates_one_hex_at_a_time() -> Result<()> {
     let (old, new) = (secret(7), secret(8));

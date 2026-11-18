@@ -211,6 +211,21 @@ pub struct Queues {
     /// added to the index by its next operation, so a move never waits for the
     /// dead-letter queue's own lock (two queues can be each other's target).
     arrived: Mutex<HashMap<String, Vec<(i64, Ulid)>>>,
+    /// Dead letters whose move is still committing (see `Moving`): a receive that doesn't find
+    /// one yet keeps looking for as long as it's here, however long the commit takes.
+    moving: Mutex<std::collections::HashSet<Ulid>>,
+}
+
+/// Marks a dead letter as moving until dropped: when its commit is done, failed or abandoned.
+struct Moving<'a> {
+    queues: &'a Queues,
+    id: Ulid,
+}
+
+impl Drop for Moving<'_> {
+    fn drop(&mut self) {
+        self.queues.moving.lock().unwrap().remove(&self.id);
+    }
 }
 
 impl Queues {
@@ -488,8 +503,9 @@ impl HexDBEngine {
                 break;
             }
             let Some(doc) = self.get_system_document(&tess, id).await? else {
-                // A dead letter whose move hasn't committed yet: look again shortly.
-                if state.arriving.get(&id).is_some_and(|until| now < *until) {
+                // A dead letter whose move hasn't committed yet: look again shortly, for as long as
+                // the move is in flight (and a little after, for a commit that just landed).
+                if self.queues.moving.lock().unwrap().contains(&id) || state.arriving.get(&id).is_some_and(|until| now < *until) {
                     Self::set_ready(&mut state, id, Some(now + 500));
                     continue;
                 }
@@ -555,8 +571,13 @@ impl HexDBEngine {
         };
         // Into the dead-letter queue's index at its next operation (a stale entry, if this
         // commit doesn't happen, is dropped when its document isn't found).
+        self.queues.moving.lock().unwrap().insert(id);
+        let moving = Moving { queues: &self.queues, id };
         self.queues.arrived.lock().unwrap().entry(target.name.clone()).or_default().push((now, id));
         self.commit_system(vec![moved], vec![source]).await?;
+        drop(moving);
+        // Announced again once stored, in case a receive saw the first announcement too early.
+        self.queues.arrived.lock().unwrap().entry(target.name.clone()).or_default().push((now, id));
         self.queues.notifier(&target.name).notify_waiters();
         Ok(())
     }
@@ -817,6 +838,37 @@ mod tests {
         e.shutdown().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
         assert_eq!(got.len(), 1, "the dead letter was stranded");
+    }
+
+    /// H257-04: a move that commits long after the arrival's grace still delivers.
+    #[tokio::test]
+    async fn review257_delayed_dead_letter_commit_still_arrives() {
+        let (e, dir) = crate::engine::test_engine().await;
+        e.save_queue(config("dead", None), "test", true).await.unwrap();
+        assert!(e.receive_messages("dead", 1, None, Duration::ZERO).await.unwrap().is_empty(), "index loaded");
+        let id = Ulid::generate();
+        let now = now_ms();
+        e.queues.moving.lock().unwrap().insert(id);
+        let moving = Moving { queues: &e.queues, id };
+        e.queues.arrived.lock().unwrap().entry("dead".into()).or_default().push((now, id));
+        assert!(e.receive_messages("dead", 1, None, Duration::ZERO).await.unwrap().is_empty());
+        // The grace runs out while the move is still committing.
+        {
+            let state = e.queues.state("dead");
+            let mut state = state.lock().await;
+            for until in state.arriving.values_mut() {
+                *until = now - 1;
+            }
+        }
+        assert!(e.receive_messages("dead", 1, None, Duration::ZERO).await.unwrap().is_empty());
+        let stored = Stored { body: json!("late"), sent_at: now, sent_by: "t".into(), ready_at: now, lease: None, receives: 0, dead_from: Some("jobs".into()) };
+        let doc = crate::document::Document { id, tessellation: messages_tessellation("dead"), data: crate::document::infer_fields_from_json(&serde_json::to_value(&stored).unwrap()), ttl: None };
+        e.commit_system(vec![doc], Vec::new()).await.unwrap();
+        drop(moving);
+        let got = e.receive_messages("dead", 1, None, Duration::from_secs(3)).await.unwrap();
+        e.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(got.len(), 1, "a late commit must still deliver");
     }
 
     #[tokio::test]

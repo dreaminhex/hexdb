@@ -392,6 +392,17 @@ pub async fn rehash_key(method: Method, uri: Uri, headers: HeaderMap, axum::extr
     Ok(Json(serde_json::json!({ "stored": stored })).into_response())
 }
 
+/// `POST /lattice/mfa-step` `{"user", "step"}`: a replica's sign-in used this TOTP step;
+/// `{"used": true}` if it's the first use (it's recorded), false if it was used before.
+pub async fn mfa_step(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let body: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let id = body["user"].as_str().and_then(|s| ulid::Ulid::from_string(s).ok()).ok_or_else(|| ApiError::invalid("user is required."))?;
+    let step = body["step"].as_i64().ok_or_else(|| ApiError::invalid("step is required."))?;
+    let used = hexdb_core::users::consume_mfa_step(&engine, id, step).await?;
+    Ok(Json(serde_json::json!({ "used": used })).into_response())
+}
+
 /// Count a sharing link download made on a replica.
 pub async fn share_download(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, &body)?;

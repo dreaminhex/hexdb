@@ -126,6 +126,28 @@ fn indexed_queries_return_exactly_what_scans_return() -> Result<()> {
     Ok(())
 }
 
+/// H257-07: an expired document that hasn't been swept yet no longer holds its unique value.
+#[test]
+fn an_expired_document_releases_its_unique_value() -> Result<()> {
+    let server = TestServer::start()?;
+    server.insert("claims", &json!({ "code": "seed" }))?;
+    let res = create_index(&server, "claims", json!({ "fields": ["code"], "unique": true }))?;
+    assert_eq!(res.status.as_u16(), 201, "{}", res.body);
+    let old = server.insert_with_query("claims", "?ttl=1", &json!({ "code": "X1" }))?;
+    let dup = server.request(Method::POST, "/claims", Some(&json!({ "code": "X1" })), &[])?;
+    assert_eq!(dup.status.as_u16(), 409, "a live holder still blocks: {}", dup.body);
+
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let new = server.insert("claims", &json!({ "code": "X1" }))?;
+    assert_ne!(new, old);
+    let res = server.request(Method::GET, &format!("/claims/{}", old), None, &[])?;
+    assert_eq!(res.status.as_u16(), 404, "the expired holder is gone: {}", res.body);
+    assert_eq!(server.count("claims")?, 2);
+    let dup = server.request(Method::POST, "/claims", Some(&json!({ "code": "X1" })), &[])?;
+    assert_eq!(dup.status.as_u16(), 409, "the new holder blocks: {}", dup.body);
+    Ok(())
+}
+
 #[test]
 fn unique_indexes_reject_duplicates() -> Result<()> {
     let server = TestServer::start()?;

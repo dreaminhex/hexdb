@@ -435,13 +435,14 @@ impl Scope {
         let refuse = |path: &str| -> Result<()> {
             Err(EngineError::Forbidden(format!("'{}' is protected for your role in this document, and this change would let your role see more of it.", path)).into())
         };
+        // Paths through arrays count as reads do: a value anywhere at the path.
         for path in &was.hidden {
-            if get_path(&old, path).is_some() && get_path(after, path).is_some() && !now.hidden.iter().any(|h| is_within(path, h)) {
+            if exists_at(&old, path) && exists_at(after, path) && !now.hidden.iter().any(|h| is_within(path, h)) {
                 return refuse(path);
             }
         }
         for (path, mask) in &was.masked {
-            if get_path(&old, path).is_none() || get_path(after, path).is_none() || now.hidden.iter().any(|h| is_within(path, h)) {
+            if !exists_at(&old, path) || !exists_at(after, path) || now.hidden.iter().any(|h| is_within(path, h)) {
                 continue;
             }
             let shown = now.mask_of(path);
@@ -604,6 +605,20 @@ fn crosses_array(json: &Value, path: &str) -> bool {
         }
     }
     false
+}
+
+/// True if a value is at `path` anywhere, through arrays (as reads remove and mask them).
+fn exists_at(json: &Value, path: &str) -> bool {
+    fn walk(value: &Value, parts: &[&str]) -> bool {
+        match (value, parts) {
+            (_, []) => true,
+            (Value::Array(items), parts) => items.iter().any(|item| walk(item, parts)),
+            (Value::Object(map), [first, rest @ ..]) => map.get(*first).is_some_and(|next| walk(next, rest)),
+            _ => false,
+        }
+    }
+    let parts: Vec<&str> = path.split('.').collect();
+    walk(json, &parts)
 }
 
 fn get_path<'a>(json: &'a Value, path: &str) -> Option<&'a Value> {
@@ -928,6 +943,19 @@ mod tests {
         // H256-01: moving A's row to B (only `tenant` changes) would show its hidden secret: refused.
         assert!(write.check_change(Some(&a), &json!({ "tenant": "B", "secret": "s", "card": "4111111111111111" }), ["tenant"]).is_err());
         assert!(write.check_replace(&json!({ "tenant": "B", "card": "************1111" }), Some(&a)).is_err());
+        // H257-01: the same through an array (`contacts.secret` in each element).
+        let arr = doc(json!({ "tenant": "A", "contacts": [{ "secret": "s" }] }));
+        let p2 = principal(
+            vec![
+                ("a-redacted", vec![Action::Read, Action::Write], json!({ "orders": { "filter": { "tenant": "A" }, "hide": ["contacts.secret"] } })),
+                ("b-full", vec![Action::Read, Action::Write], json!({ "orders": { "filter": { "tenant": "B" } } })),
+            ],
+            json!({}),
+        );
+        let w2 = p2.scope("orders", Action::Write);
+        assert!(w2.check_change(Some(&arr), &json!({ "tenant": "B", "contacts": [{ "secret": "s" }] }), ["tenant"]).is_err());
+        assert!(w2.check_replace(&json!({ "tenant": "B", "contacts": [{}] }), Some(&arr)).is_err());
+        assert!(w2.check_change(Some(&arr), &json!({ "tenant": "B", "contacts": [] }), ["tenant", "contacts"]).is_err(), "contacts is protected inside, so it can't be written");
         // A move that keeps the protection is fine, and so is one that drops the protected value.
         assert!(write.check_change(Some(&a), &json!({ "tenant": "A", "secret": "s", "card": "4111111111111111", "n": 1 }), ["n"]).is_ok());
         // A full replace of A keeps its hidden secret.

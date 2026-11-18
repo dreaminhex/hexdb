@@ -529,14 +529,39 @@ fn second_factor_matches(engine: &HexDBEngine, id: Ulid, user: &mut StoredUser, 
     Ok(false)
 }
 
+/// Record that a sign-in used TOTP step `step` (on the Overseer, the one writer): true only if
+/// it's newer than every step this user has used, so each code signs in once across the lattice.
+pub async fn consume_mfa_step(engine: &HexDBEngine, id: Ulid, step: i64) -> Result<bool> {
+    let _lock = engine.users_lock.lock().await;
+    let Some((_, mut user)) = find_by_id(engine, &id.to_string()).await? else { return Ok(false) };
+    let last = engine.mfa_steps.lock().unwrap().get(&id).copied().unwrap_or(0).max(user.mfa_last_step);
+    if step <= last {
+        return Ok(false);
+    }
+    engine.mfa_steps.lock().unwrap().insert(id, step);
+    user.mfa_last_step = step;
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    Ok(true)
+}
+
 /// The second factor at sign-in. `Ok(true)` if the code is valid (and the
 /// user record was updated where possible), `Ok(false)` if it isn't.
 pub(crate) async fn verify_sign_in_code(engine: &HexDBEngine, id: Ulid, code: &str) -> Result<bool> {
     let _lock = engine.users_lock.lock().await;
     let Some((_, mut user)) = find_by_id(engine, &id.to_string()).await? else { return Ok(false) };
     let backup_before = user.mfa_backup_codes.len();
+    let step_before = user.mfa_last_step;
     if !second_factor_matches(engine, id, &mut user, code)? {
         return Ok(false);
+    }
+    // A replica can't record the code's step for the lattice: the Overseer does, and the code
+    // signs in only if it hadn't been used (here or on any other hex). No Overseer: no sign-in.
+    if !engine.is_writable() && user.mfa_last_step != step_before {
+        let body = serde_json::json!({ "user": id.to_string(), "step": user.mfa_last_step });
+        let answer = crate::replication::post_to_overseer_for(engine, "/lattice/mfa-step", &body, std::time::Duration::from_secs(5))
+            .await
+            .map_err(|_| EngineError::Unavailable("The Overseer can't be reached to confirm the one-time code; try again in a moment.".into()))?;
+        return Ok(serde_json::from_slice::<serde_json::Value>(&answer).ok().is_some_and(|v| v["used"] == true));
     }
     if engine.is_writable() {
         engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;

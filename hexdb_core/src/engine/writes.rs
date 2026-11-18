@@ -1260,7 +1260,22 @@ impl HexDBEngine {
                 items.push(item);
             }
             if !replicated {
-                self.check_unique(&items)?;
+                // A unique key held by a document whose TTL has passed is free: that document goes
+                // in this commit (taking its index entry with it), so the key's next owner can claim it.
+                let now = Utc::now().timestamp_millis();
+                while let Some((tess, other, message)) = self.unique_conflict(&items)? {
+                    let key = DocKey::new(&tess, other);
+                    let expired = match state.hex.meta(&key) {
+                        Some(meta) => !meta.tombstone && meta.is_expired(now),
+                        None => matches!(self.sst.lookup(&tess, &other).await, Some(crate::sst::DiskLookup::Live { entry, .. }) if entry.is_expired(now)),
+                    };
+                    if !expired || items.iter().any(|i| i.key == key) {
+                        return Err(EngineError::Conflict(message).into());
+                    }
+                    let item = BatchItem { key, op: WalOp::Delete { tessellation: tess, id: other }, expected_seq: None };
+                    prepared.push(prepare(&item)?);
+                    items.push(item);
+                }
             }
             let (deltas, created) = self.count_deltas(&state, &prepared).await;
             let origin = crate::access::current_trigger();
@@ -1434,7 +1449,9 @@ impl HexDBEngine {
     }
 
     /// Fail with a conflict if a write would break a unique index.
-    fn check_unique(&self, items: &[BatchItem]) -> Result<()> {
+    /// The first unique-index conflict a batch would make: (tessellation, the document holding the
+    /// key, the error to give). Errors for a document with too many keys to check.
+    fn unique_conflict(&self, items: &[BatchItem]) -> Result<Option<(String, Ulid, String)>> {
         let indexes = self.indexes.read().unwrap();
         let mut changing: std::collections::HashMap<&str, HashSet<Ulid>> = std::collections::HashMap::new();
         for item in items {
@@ -1456,14 +1473,14 @@ impl HexDBEngine {
                     .into());
                 }
                 if let Some(other) = index.unique_conflict(doc, &changing[doc.tessellation.as_str()]) {
-                    return Err(EngineError::Conflict(format!(
+                    let message = format!(
                         "Unique index '{}' on '{}': document {} already has this {}.",
                         index.def.name,
                         doc.tessellation,
                         other,
                         index.def.fields.join(" + ")
-                    ))
-                    .into());
+                    );
+                    return Ok(Some((doc.tessellation.clone(), other, message)));
                 }
                 for key in index.unique_keys(doc) {
                     if !claimed.insert((doc.tessellation.clone(), index.def.name.clone(), key)) {
@@ -1478,7 +1495,7 @@ impl HexDBEngine {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Sequence number of a document's newest version (0 if it never existed).
