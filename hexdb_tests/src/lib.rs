@@ -182,6 +182,8 @@ pub struct TestOptions {
     pub previous_encryption_keys: Vec<String>,
     /// Extra environment variables for the server process (e.g. debug hooks).
     pub env: Vec<(String, String)>,
+    /// Run this `hexdb_api` binary instead of [`server_bin`] (the benchmark compares versions).
+    pub server_bin: Option<PathBuf>,
 }
 
 /// A self-signed certificate for localhost and 127.0.0.1: (PEM cert, PEM key).
@@ -391,7 +393,11 @@ admin_email = "admin@example.com"
         use std::io::Write;
         writeln!(log, "\n===== launch {} =====", self.launches)?;
 
-        let mut cmd = Command::new(server_bin()?);
+        let bin = match &self.options.server_bin {
+            Some(path) => path.clone(),
+            None => server_bin()?,
+        };
+        let mut cmd = Command::new(bin);
         cmd.arg("--config")
             .arg(&config_path)
             .current_dir(self.dir())
@@ -453,6 +459,11 @@ admin_email = "admin@example.com"
             }
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// The server process's ID while it runs.
+    pub fn pid(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
     }
 
     /// True if this test's server wrote its runtime file for this port.

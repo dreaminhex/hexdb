@@ -3,6 +3,9 @@
 //!
 //!   cargo run --release -p hexdb_bench            everything (about 5 minutes)
 //!   cargo run --release -p hexdb_bench -- quick   smaller data sets, no failover
+//!   cargo run --release -p hexdb_bench -- compare <A/hexdb_api> <B/hexdb_api> [rounds]
+//!                                                 two versions on this machine, alternating
+//!                                                 (p50/p95/p99, throughput, RSS; see compare.rs)
 //!
 //! HEXDB_BENCH_LABEL (for example "debian-docker") names the environment in the
 //! report and in its file name, so runs on several systems don't overwrite each other.
@@ -12,6 +15,8 @@
 //! servers in temporary directories for the rest (reads, writes, queries,
 //! storage, crash recovery, failover). The report is printed and written to
 //! bench/results/.
+
+mod compare;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
@@ -710,6 +715,10 @@ fn failover(report: &mut Report, interval: Option<u64>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("compare") {
+        return compare::run(&args[1..]);
+    }
     let quick = std::env::args().any(|a| a == "quick");
     let mut report = Report { text: String::new() };
     let started = Instant::now();

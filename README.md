@@ -70,7 +70,7 @@ Measured with `cargo run --release -p hexdb_bench` on one laptop (Intel Core i9-
 | **Failover**, discovery every second | new Overseer takes writes after 2.5 s | 2.8 s |
 | **Failover**, default 10 s discovery | 31 s | 30 s |
 
-Writes are slower in the Linux column because Docker on Windows keeps its data on WSL2's virtual disk, which adds to every fsync. Ubuntu 24.04 in the same setup measured within a few percent of Debian. The full reports, with how each number is taken, are in [bench/results](bench/results): [Windows](bench/results/windows-full.md), [Debian](bench/results/debian-docker-full.md) and [Ubuntu](bench/results/ubuntu-docker-full.md). Run the benchmark to measure your own hardware.
+Writes are slower in the Linux column because Docker on Windows keeps its data on WSL2's virtual disk, which adds to every fsync. Ubuntu 24.04 in the same setup measured within a few percent of Debian. The full reports, with how each number is taken, are in [bench/results](bench/results): [Windows](bench/results/windows-full.md), [Debian](bench/results/debian-docker-full.md) and [Ubuntu](bench/results/ubuntu-docker-full.md). Run the benchmark to measure your own hardware. To compare two versions on one machine, `cargo run --release -p hexdb_bench -- compare <old hexdb_api> <new hexdb_api> [rounds]` runs each in turn, alternating which goes first, and reports p50/p95/p99 latencies, throughput with its range across rounds, and the server's memory.
 
 Some results don't depend on the machine:
 
