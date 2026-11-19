@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HexDB packages</title>
+<meta name="description" content="The signed APT repository for HexDB on Debian and Ubuntu.">
+<meta name="theme-color" content="#0e1016">
+<link rel="icon" type="image/png" sizes="32x32" href="icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
+<style>
+  :root {
+    --bg: #0e1016;
+    --card: #161922;
+    --border: #262a36;
+    --text: #f4f5f7;
+    --muted: #a3a8b5;
+    --orange: #ff6a00;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--orange); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  header, main, footer { max-width: 48rem; margin: 0 auto; padding: 0 1.5rem; }
+  header { display: flex; align-items: center; justify-content: space-between; padding-top: 1.5rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+  header img { height: 2rem; width: auto; display: block; }
+  header nav a { color: var(--muted); margin-left: 1.25rem; font-size: 0.9rem; }
+  header nav a:hover { color: var(--text); text-decoration: none; }
+  main { padding-top: 3rem; padding-bottom: 3rem; }
+  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 0.75rem; letter-spacing: -0.02em; }
+  h2 { font-size: 1.1rem; margin: 0 0 0.75rem; }
+  .lead { color: var(--muted); margin: 0 0 2.5rem; max-width: 38rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  .card p { color: var(--muted); margin: 0.75rem 0 0; font-size: 0.95rem; }
+  .tag { display: inline-block; font-size: 0.75rem; color: var(--orange); border: 1px solid rgba(255, 106, 0, 0.4); border-radius: 999px; padding: 0.05rem 0.6rem; margin-left: 0.5rem; vertical-align: middle; }
+  pre { margin: 0; background: #0a0c11; border: 1px solid var(--border); border-radius: 8px; padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  code { font: 0.85rem/1.7 ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace; color: #e6e7eb; }
+  .prompt { color: var(--orange); user-select: none; }
+  ul { margin: 0.5rem 0 0; padding-left: 1.2rem; color: var(--muted); font-size: 0.95rem; }
+  li { margin: 0.25rem 0; }
+  footer { border-top: 1px solid var(--border); padding-top: 1.5rem; padding-bottom: 2rem; color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<header>
+  <a href="https://hexdb.app" aria-label="HexDB home"><img src="hexdb-logo-sm.webp" alt="HexDB" width="700" height="190"></a>
+  <nav>
+    <a href="https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md">Manual</a>
+    <a href="https://github.com/dreaminhex/hexdb/releases">Releases</a>
+    <a href="https://github.com/dreaminhex/hexdb">GitHub</a>
+  </nav>
+</header>
+<main>
+  <h1>HexDB packages</h1>
+  <p class="lead">The signed APT repository for <a href="https://hexdb.app">HexDB</a>, the encrypted, replicated document database. Install it on Debian or Ubuntu and get updates with the rest of your system.</p>
+
+  <section class="card">
+    <h2>Debian and Ubuntu <span class="tag">amd64</span><span class="tag">arm64</span></h2>
+    <pre><code><span class="prompt">$ </span>curl -fsSL https://dreaminhex.github.io/hexdb/apt/hexdb.gpg | sudo tee /usr/share/keyrings/hexdb.gpg &gt; /dev/null
+<span class="prompt">$ </span>echo "deb [signed-by=/usr/share/keyrings/hexdb.gpg] https://dreaminhex.github.io/hexdb/apt stable main" | sudo tee /etc/apt/sources.list.d/hexdb.list
+<span class="prompt">$ </span>sudo apt update &amp;&amp; sudo apt install hexdb
+<span class="prompt">$ </span>sudo systemctl enable --now hexdb</code></pre>
+    <p>Packages are signed; the key is also available as <a href="apt/hexdb.asc">ASCII armor</a>. The repository keeps the five newest versions.</p>
+  </section>
+
+  <section class="card">
+    <h2>Other ways to install</h2>
+    <ul>
+      <li>Windows and macOS installers, and the Linux and macOS install script: <a href="https://github.com/dreaminhex/hexdb#readme">README</a></li>
+      <li>Docker: <code>ghcr.io/dreaminhex/hexdb</code>, or <code>:&lt;version&gt;-slim</code> for the server only</li>
+      <li>Kubernetes: the Helm chart at <code>oci://ghcr.io/dreaminhex/charts/hexdb</code></li>
+      <li>Hosted lattices, run for you: <a href="https://hexdb.app">HexDB Enterprise</a></li>
+    </ul>
+  </section>
+</main>
+<footer>
+  HexDB is open source under the Apache 2.0 license. &middot; <a href="https://hexdb.app">hexdb.app</a>
+</footer>
+</body>
+</html>

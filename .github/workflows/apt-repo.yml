@@ -35,8 +35,7 @@ jobs:
       # Only the site's landing page (the root of https://dreaminhex.github.io/hexdb/).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          sparse-checkout: packaging/apt-index.html
-          sparse-checkout-cone-mode: false
+          sparse-checkout: packaging/pages
           path: source
           persist-credentials: false
       - name: Update the APT repository on the gh-pages branch
@@ -60,7 +59,7 @@ jobs:
           fi
           cd site
           touch .nojekyll
-          cp ../source/packaging/apt-index.html index.html
+          cp ../source/packaging/pages/* .
           pool=apt/pool/main/h/hexdb
           mkdir -p "$pool"
           cp ../debs/*.deb "$pool/"
