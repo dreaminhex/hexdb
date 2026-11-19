@@ -295,8 +295,9 @@ fn sql_statements_have_a_memory_budget() -> Result<()> {
     let docs: Vec<Value> = (0..400).map(|i| json!({"n": i, "pad": big})).collect();
     let r = s.request(Method::POST, "/notes/_bulk", Some(&json!(docs)), &[])?;
     assert!(r.status.is_success(), "{}", r.body);
-    // A join loads both sides in memory: about 3 MB here.
-    let r = s.request(Method::POST, "/sql", Some(&json!({"sql":"SELECT a.n FROM notes a JOIN notes b ON a.n = b.n"})), &[])?;
+    // A join holding whole documents (`*`) loads both sides in memory: about 3 MB here. (One that
+    // reads only `n` holds just that, and fits.)
+    let r = s.request(Method::POST, "/sql", Some(&json!({"sql":"SELECT * FROM notes a JOIN notes b ON a.n = b.n"})), &[])?;
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
     assert!(r.body.to_string().contains("limits.sql_max_mb"), "{}", r.body);
     Ok(())
