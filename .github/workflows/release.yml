@@ -48,7 +48,7 @@ jobs:
     steps:
       - name: Wait for CI on ${{ github.sha }}
         run: |
-          for i in $(seq 1 110); do
+          for _ in $(seq 1 110); do
             runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --json status,conclusion,event)
             if echo "$runs" | jq -e 'map(select(.event == "push" and .conclusion == "success")) | length > 0' >/dev/null; then
               echo "CI passed on $GITHUB_SHA"; exit 0

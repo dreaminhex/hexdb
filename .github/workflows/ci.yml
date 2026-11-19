@@ -93,7 +93,8 @@ jobs:
         run: npm audit --audit-level=moderate
       - name: npm audit (driver, VS Code extension, plugins)
         run: |
-          for dir in drivers/node extensions/vscode $(dirname $(ls plugins/*/*/package-lock.json)); do
+          for lock in drivers/node/package-lock.json extensions/vscode/package-lock.json plugins/*/*/package-lock.json; do
+            dir=$(dirname "$lock")
             echo "== $dir"
             (cd "$dir" && npm audit --omit=dev --audit-level=moderate)
           done
