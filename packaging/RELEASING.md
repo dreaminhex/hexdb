@@ -67,7 +67,7 @@ The `helm` job ([helm-chart.yml](../.github/workflows/helm-chart.yml)) packages 
 
 ### APT repository
 
-The `apt` job ([apt-repo.yml](../.github/workflows/apt-repo.yml)) adds the release's `.deb` packages to a signed repository and pushes it to the `gh-pages` branch, served by GitHub Pages at https://dreaminhex.github.io/hexdb/apt. If it fails, fix it and run **Actions > APT repository > Run workflow** with the release's tag: it takes the packages from the published release, so the release doesn't have to run again.
+The `apt` job ([apt-repo.yml](../.github/workflows/apt-repo.yml)) adds the release's `.deb` packages to a signed repository and pushes it to the `gh-pages` branch, served by GitHub Pages at https://dreaminhex.github.io/hexdb/apt. It also publishes the site's landing page, [apt-index.html](apt-index.html), at https://dreaminhex.github.io/hexdb/. If it fails, fix it and run **Actions > APT repository > Run workflow** with the release's tag: it takes the packages from the published release, so the release doesn't have to run again.
 
 1. Create a signing key, on any machine with GnuPG (Git Bash has `gpg`):
 
