@@ -33,7 +33,6 @@ use crate::engine::{DocumentQuery, EngineError, HexDBEngine};
 use crate::filter::{Filter, SortKey};
 use anyhow::{anyhow, bail, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -374,7 +373,7 @@ fn seal(engine: &HexDBEngine, key: &str, value: &str, actor: &str) -> SealedSecr
     SealedSecret {
         sealed: STANDARD.encode(engine.lattice_keys.seal(value.as_bytes(), secret_aad(key).as_bytes())),
         fingerprint: engine.lattice_keys.fingerprint(value.as_bytes()),
-        updated: Utc::now().timestamp_millis(),
+        updated: jiff::Timestamp::now().as_millisecond(),
         updated_by: actor.to_string(),
     }
 }
@@ -799,7 +798,7 @@ impl HexDBEngine {
         next.format = FORMAT;
         next.version = head.version + 1;
         next.parent = head.version;
-        next.time = Utc::now().timestamp_millis();
+        next.time = jiff::Timestamp::now().as_millisecond();
         next.author = actor.to_string();
         next.comment = comment;
         next.rollback_of = None;
@@ -826,7 +825,7 @@ impl HexDBEngine {
             format: FORMAT,
             version: newest + 1,
             parent: newest,
-            time: Utc::now().timestamp_millis(),
+            time: jiff::Timestamp::now().as_millisecond(),
             author: actor.to_string(),
             comment,
             rollback_of: Some(version),
@@ -933,7 +932,11 @@ pub fn spawn_config_task(engine: std::sync::Arc<HexDBEngine>, shutdown_rx: watch
                         debug!("🛑 Configuration task is shutting down...");
                         break;
                     }
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => engine.refresh_lattice_config().await,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        engine.refresh_lattice_config().await;
+                        // The partition map travels the same way (a system tessellation).
+                        engine.refresh_partition_map().await;
+                    }
                 }
             }
         }

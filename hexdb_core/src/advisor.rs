@@ -115,7 +115,7 @@ impl QueryStats {
         stats.returned += returned as u64;
         stats.millis += millis;
         stats.indexes.extend(indexes.iter().cloned());
-        stats.last_seen = chrono::Utc::now().timestamp_millis();
+        stats.last_seen = jiff::Timestamp::now().as_millisecond();
     }
 
     pub fn shapes(&self, tess: &str) -> Vec<ShapeStats> {
@@ -137,7 +137,7 @@ impl QueryStats {
 
     /// Restore saved shapes, dropping those not seen recently.
     pub(crate) fn restore(&self, saved: HashMap<String, Vec<ShapeStats>>) {
-        let cutoff = chrono::Utc::now().timestamp_millis() - SHAPE_RETENTION_MS;
+        let cutoff = jiff::Timestamp::now().as_millisecond() - SHAPE_RETENTION_MS;
         let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
         for (tess, shapes) in saved {
             let kept: HashMap<Shape, ShapeStats> = shapes.into_iter().filter(|s| s.last_seen >= cutoff).map(|s| (s.shape.clone(), s)).collect();

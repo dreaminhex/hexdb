@@ -2524,6 +2524,18 @@ recent_changes = 20000
 
 What slicing doesn't change: the Overseer still keeps everything (it runs every write, transaction and unique index), so a lattice can't hold more than the Overseer can. It saves space on the replicas, not on the Overseer.
 
+### Partitioning (preview)
+
+Partitioned writes will split the 64 slices among several groups of hexes, each with its own Overseer, so a lattice's storage and write throughput grow with the number of groups (the design is in `design/partitioning.md`). 2.6 lays the groundwork only: every lattice is one partition, and nothing behaves differently.
+
+```toml
+[partitioning]
+enabled = false   # the default
+```
+
+- **The partition map** says which partition owns each slice, and which hexes form each partition's group. Every change gets a higher epoch. A lattice that never changed it has the implicit map: partition 0, every slice, epoch 1. Upgrading writes nothing. `GET /partitions` (administrators) shows the map this hex routes by: `epoch`, each partition's `slices` and `hexes`, `this_hex`, and `sends_epochs`.
+- **Routing.** With `enabled = true`, a hex that forwards a request to the Overseer also sends the epoch of the map it routed by, covered by the lattice signature, once every live hex runs 2.6 or later (older ones would reject the signature). A hex whose map has another epoch refuses the request before running it, with 421 `partition_epoch`; the forwarding hex reloads its map and sends the request again (up to three times). A forwarded file upload can't be sent twice, so the 421 goes back to the client, which can send it again: nothing was written.
+
 ### Adding a hex
 
 On the Dashboard, "Add a hex" (administrators, password required) shows:
@@ -2993,6 +3005,7 @@ role = "oracle"
 | `limits.*` | see above | Request and connection limits |
 | `replication.min_acks`, `ack_timeout_ms`, `forward_writes`, `quorum` | 0, 5000, true, 0 | See [Durability options](#durability-options) |
 | `replication.slicing`, `slice_copies`, `recent_changes` | true, 1, 20000 | See [Slicing](#slicing) |
+| `partitioning.enabled` | false | See [Partitioning (preview)](#partitioning-preview) |
 | `plugins.enabled`, `registry` | true, `plugins.json` | Plugin loading |
 | `functions.scripts`, `python`, `node` | true, `python3`/`python`, `node` | Script runtimes |
 | `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Pre-1.6 query advisor key, used only while the lattice configuration's `ai.provider` is `none` |

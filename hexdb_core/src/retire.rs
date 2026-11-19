@@ -192,7 +192,7 @@ impl HexDBEngine {
         if leaders == 0 && hex.role != ROLE_ORACLE {
             bail!(crate::engine::EngineError::Invalid("Retiring it would leave no active hex that can be the Overseer: add a hex first.".into()));
         }
-        let doc = json!({ "id": hex.id, "name": hex.name, "retired_by": by, "retired_at": chrono::Utc::now().timestamp_millis() });
+        let doc = json!({ "id": hex.id, "name": hex.name, "retired_by": by, "retired_at": jiff::Timestamp::now().as_millisecond() });
         self.put_system_document(RETIRING_TESSELLATION, id, doc, None).await?;
         RETIRING.write().unwrap().insert(hex.id.clone());
         info!("🌅 '{}' is retiring: its slices move to the other hexes before it can be removed.", hex.name);

@@ -123,7 +123,7 @@ impl HexDBEngine {
         let pending = PendingSchema {
             schema: input,
             based_on: info.schemas.last().map_or(0, |s| s.version),
-            saved: chrono::Utc::now().timestamp_millis(),
+            saved: jiff::Timestamp::now().as_millisecond(),
             saved_by: by.user_id.clone(),
             saved_by_login: by.login.clone(),
         };
@@ -346,7 +346,7 @@ impl HexDBEngine {
             if jobs.get(tess).is_some_and(|j| j.state == "running" && j.version == current.version) {
                 return;
             }
-            jobs.insert(tess.to_string(), MigrationStatus { version: current.version, state: "running".into(), started: chrono::Utc::now().timestamp_millis(), ..Default::default() });
+            jobs.insert(tess.to_string(), MigrationStatus { version: current.version, state: "running".into(), started: jiff::Timestamp::now().as_millisecond(), ..Default::default() });
         }
         let update = |f: &dyn Fn(&mut MigrationStatus)| {
             if let Some(job) = self.schema_jobs.lock().unwrap().get_mut(tess) {
@@ -428,7 +428,7 @@ impl HexDBEngine {
         let summary = self.schema_migration(tess).unwrap_or_default();
         update(&|j| {
             j.state = if j.failed > 0 { "failed".into() } else { "done".into() };
-            j.finished = Some(chrono::Utc::now().timestamp_millis());
+            j.finished = Some(jiff::Timestamp::now().as_millisecond());
         });
         info!(
             "📐 Schema migration of '{}' to version {}: {} migrated, {} already current, {} didn't fit.",

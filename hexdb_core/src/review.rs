@@ -26,7 +26,6 @@ use crate::audit::{AuditEvent, AuditQuery};
 use crate::network::discovery::{ROLE_ORACLE, ROLE_OVERSEER};
 use crate::HexDBEngine;
 use anyhow::{anyhow, Result};
-use chrono::{TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -169,7 +168,7 @@ impl HexDBEngine {
     /// administrator's login. A scheduled review covers the time since the
     /// last one; one asked for covers the last `security.review.interval_hours`.
     pub async fn run_security_review(&self, trigger: &str) -> Result<Review> {
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let interval = self.review_interval_hours() * HOUR_MS;
         let last_to = if trigger == "schedule" { self.security_reviews(1).await?.first().map(|r| r.window_to) } else { None };
         let from = last_to.filter(|t| now - t <= BASELINE_DAYS * 24 * HOUR_MS).unwrap_or(now - interval);
@@ -223,7 +222,7 @@ impl HexDBEngine {
             }
             review.alerts = self.send_alert(&crate::alerts::Alert::from_review(self, &review), None).await;
         }
-        review.finished = Utc::now().timestamp_millis();
+        review.finished = jiff::Timestamp::now().as_millisecond();
         if let Err(e) = self.store_review(&review).await {
             warn!("⚠️ Couldn't keep the security review: {:#}", e);
         }
@@ -321,7 +320,7 @@ type Refusals = (usize, HashMap<String, usize>);
 
 /// The window summed up for the model: counts and the events that matter, never documents.
 pub(crate) fn summarize(events: &[AuditEvent], earlier: &[AuditEvent], from: i64, to: i64) -> Value {
-    let iso = |ms: i64| Utc.timestamp_millis_opt(ms).single().map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap_or_default();
+    let iso = |ms: i64| crate::clock::from_millis(ms).map(crate::clock::rfc3339_secs).unwrap_or_default();
     let top = |counts: HashMap<String, usize>, n: usize| -> Vec<Value> {
         let mut list: Vec<(String, usize)> = counts.into_iter().collect();
         list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -338,8 +337,8 @@ pub(crate) fn summarize(events: &[AuditEvent], earlier: &[AuditEvent], from: i64
     for e in events {
         *by_action.entry(e.action.clone()).or_default() += 1;
         *by_outcome.entry(e.outcome.clone()).or_default() += 1;
-        if let Some(t) = Utc.timestamp_millis_opt(e.time).single() {
-            by_hour[t.hour() as usize] += 1;
+        if let Some(t) = crate::clock::from_millis(e.time) {
+            by_hour[crate::clock::utc(t).hour() as usize] += 1;
         }
         if e.action.starts_with("auth.login") && e.outcome != "ok" {
             let c = failed_by_client.entry(e.client.clone()).or_default();
@@ -405,7 +404,7 @@ fn email_subject(review: &Review) -> String {
 }
 
 fn email_text(review: &Review) -> String {
-    let iso = |ms: i64| Utc.timestamp_millis_opt(ms).single().map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+    let iso = |ms: i64| crate::clock::from_millis(ms).map(|t| crate::clock::format(t, "%Y-%m-%d %H:%M UTC")).unwrap_or_default();
     let mut text = format!(
         "The AI security review of hex '{}' found something worth a look in the audit trail from {} to {} ({} events).\n\n{}\n",
         review.hex,
@@ -441,7 +440,7 @@ pub fn spawn_review_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<
                 }
                 let interval = engine.review_interval_hours() * HOUR_MS;
                 let last = engine.security_reviews(1).await.ok().and_then(|r| r.into_iter().next()).map(|r| r.started);
-                if last.is_some_and(|t| Utc::now().timestamp_millis() - t < interval) {
+                if last.is_some_and(|t| jiff::Timestamp::now().as_millisecond() - t < interval) {
                     continue;
                 }
                 last_attempt = Some(std::time::Instant::now());

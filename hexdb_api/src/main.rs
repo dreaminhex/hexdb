@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn server() -> anyhow::Result<()> {
-    let started_at = chrono::Utc::now().timestamp_millis();
+    let started_at = jiff::Timestamp::now().as_millisecond();
     // Several TLS crypto providers are compiled in; choose one explicitly.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config_arg = parse_args()?;
@@ -295,7 +295,7 @@ async fn server() -> anyhow::Result<()> {
 
     // Remember the peers found at startup.
     {
-        let now = chrono::Utc::now();
+        let now = hexdb_core::clock::UtcTime::now();
         let mut known = engine.peers.lock().await;
         *known = peers
             .into_iter()

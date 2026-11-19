@@ -11,7 +11,7 @@ use crate::{
     changes::{Change, ChangeKind, HistoryExpired},
     wal::{self, WalOp},
 };
-use chrono::{TimeZone, Utc};
+use crate::clock::UtcTime;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
@@ -76,7 +76,7 @@ impl HexDBEngine {
         let mut changes: Vec<Change> = ops
             .into_iter()
             .filter_map(|h| {
-                let timestamp = Utc.timestamp_millis_opt(h.time).single().unwrap_or_else(Utc::now);
+                let timestamp = UtcTime::from_millis(h.time).unwrap_or_else(UtcTime::now);
                 let (kind, tessellation, id, document) = match h.op {
                     WalOp::Put(doc) => (ChangeKind::Put, doc.tessellation.clone(), Some(doc.id), Some(doc)),
                     WalOp::Delete { tessellation, id } => (ChangeKind::Delete, tessellation, Some(id), None),
@@ -92,7 +92,7 @@ impl HexDBEngine {
             catalog.dropped.iter().filter(|(_, seq)| **seq > after && **seq <= last).map(|(n, s)| (n.clone(), *s)).collect()
         };
         for (tessellation, seq) in drops {
-            changes.push(Change { seq, timestamp: Utc::now(), kind: ChangeKind::DropTessellation, tessellation, id: None, document: None, created: false, origin: None, commit_last: 0 });
+            changes.push(Change { seq, timestamp: UtcTime::now(), kind: ChangeKind::DropTessellation, tessellation, id: None, document: None, created: false, origin: None, commit_last: 0 });
         }
         changes.sort_by_key(|c| c.seq);
         // Whole WAL records (commits) were read; `changes_after` trims to the limit between commits.

@@ -27,7 +27,7 @@ use crate::{
     wal::WalOp,
 };
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use crate::clock::UtcTime;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -46,8 +46,8 @@ pub(crate) mod quotas;
 pub struct UploadOptions {
     /// The declared content type (used when sniffing finds nothing better).
     pub content_type: Option<String>,
-    pub created_at: Option<DateTime<Utc>>,
-    pub modified_at: Option<DateTime<Utc>>,
+    pub created_at: Option<UtcTime>,
+    pub modified_at: Option<UtcTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,11 +184,11 @@ fn not_found(message: impl Into<String>) -> anyhow::Error {
 }
 
 fn now_text() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    crate::clock::rfc3339_millis(jiff::Timestamp::now())
 }
 
-fn time_text(at: DateTime<Utc>) -> String {
-    at.to_rfc3339_opts(SecondsFormat::Millis, true)
+fn time_text(at: UtcTime) -> String {
+    crate::clock::rfc3339_millis(at.0)
 }
 
 fn caller_login() -> String {
@@ -502,7 +502,7 @@ impl HexDBEngine {
             "path": format!("{}{}", map.get("path").and_then(Value::as_str).unwrap_or("/"), map.get("name").and_then(Value::as_str).unwrap_or("")),
             "offset": map.get("offset").cloned().unwrap_or(json!(0)),
             "size": map.get("size").cloned().unwrap_or(Value::Null),
-            "expires_at": ttl.and_then(DateTime::from_timestamp_millis).map(time_text),
+            "expires_at": ttl.and_then(UtcTime::from_millis).map(time_text),
         })
     }
 
@@ -528,7 +528,7 @@ impl HexDBEngine {
             "by": caller_login(), "started_at": now_text(),
         });
         let Value::Object(map) = map else { unreachable!() };
-        let ttl = Utc::now().timestamp_millis() + 24 * 3_600_000;
+        let ttl = jiff::Timestamp::now().as_millisecond() + 24 * 3_600_000;
         self.ensure_system_tessellation(UPLOADS_TESSELLATION)?;
         let doc = document(UPLOADS_TESSELLATION, id, map.clone(), Some(ttl));
         let items = vec![BatchItem { key: DocKey::new(UPLOADS_TESSELLATION, id), op: WalOp::Put(doc), expected_seq: Some(0) }];
@@ -659,7 +659,7 @@ impl HexDBEngine {
         let path = map.get("path").and_then(Value::as_str).unwrap_or("/").to_string();
         let declared = map.get("declared_type").and_then(Value::as_str).map(String::from);
         let content_type = map.get("content_type").and_then(Value::as_str).map(String::from).unwrap_or_else(|| files::sniff_type(&head, &name, declared.as_deref()));
-        let parse = |k: &str| map.get(k).and_then(Value::as_str).and_then(|t| DateTime::parse_from_rfc3339(t).ok()).map(|t| t.with_timezone(&Utc));
+        let parse = |k: &str| map.get(k).and_then(Value::as_str).and_then(crate::clock::parse_rfc3339).map(UtcTime);
         let options = UploadOptions { content_type: declared.clone(), modified_at: parse("modified_at"), created_at: parse("created_at") };
         let staged = Staged { manifest, size, sha256: hex::encode(sha.finalize()), content_type, compressed };
         let result = self.commit_file(tess, &path, &name, &options, staged, pins, None).await?;
@@ -718,12 +718,12 @@ impl HexDBEngine {
     fn trim_versions(&self, mut versions: Vec<Value>) -> Vec<Value> {
         versions.truncate(self.config.files.max_versions);
         if self.config.files.version_days > 0 {
-            let cutoff = Utc::now() - chrono::Duration::days(self.config.files.version_days as i64);
+            let cutoff = UtcTime::now().minus(jiff::SignedDuration::from_secs((self.config.files.version_days as i64).saturating_mul(86_400)));
             versions.retain(|v| {
                 v.get("uploaded_at")
                     .and_then(Value::as_str)
-                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-                    .is_none_or(|t| t.with_timezone(&Utc) >= cutoff)
+                    .and_then(crate::clock::parse_rfc3339)
+                    .is_none_or(|t| UtcTime(t) >= cutoff)
             });
         }
         versions
@@ -1278,7 +1278,7 @@ impl HexDBEngine {
                     map.insert("from".into(), json!(tess));
                     map.insert("trashed_at".into(), json!(now_text()));
                     map.insert("trashed_by".into(), json!(caller_login()));
-                    let expires = Utc::now().timestamp_millis() + (self.config.files.trash_days.max(1) as i64) * 86_400_000;
+                    let expires = jiff::Timestamp::now().as_millisecond() + (self.config.files.trash_days.max(1) as i64) * 86_400_000;
                     let doc = document(TRASH_TESSELLATION, id, map, Some(expires));
                     added.push(BatchItem { key: DocKey::new(TRASH_TESSELLATION, id), op: WalOp::Put(doc), expected_seq: None });
                 }
@@ -1930,8 +1930,8 @@ pub fn spawn_rescan_task(engine: Arc<HexDBEngine>, shutdown_rx: tokio::sync::wat
                 let Some(fingerprint) = scanner.fingerprint().await else { continue };
                 let age_ok = finished_at
                     .as_deref()
-                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-                    .is_none_or(|t| Utc::now().signed_duration_since(t) >= chrono::Duration::hours(hours as i64));
+                    .and_then(crate::clock::parse_rfc3339)
+                    .is_none_or(|t| jiff::Timestamp::now().duration_since(t) >= jiff::SignedDuration::from_secs((hours as i64).saturating_mul(3600)));
                 if !(requested || interrupted || (last.as_deref() != Some(fingerprint.as_str()) && age_ok)) {
                     continue;
                 }

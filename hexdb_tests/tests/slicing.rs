@@ -255,3 +255,38 @@ fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     wait_until(Duration::from_secs(90), "the remaining replica to keep everything", || Ok(kept(follower)? == (64, 260)))?;
     Ok(())
 }
+
+/// Partitioning stage 1 (`partitioning.enabled`): one partition, the implicit map at
+/// epoch 1, and writes a replica forwards carry the epoch under the lattice
+/// signature. Nothing else changes; an epoch header from a client is ignored.
+#[test]
+fn partition_epochs_ride_on_forwarded_writes_without_changing_anything() -> Result<()> {
+    let ports = [TestServer::free_port()?, TestServer::free_port()?];
+    let opts = |i: usize, ram: u64| TestOptions { extra_toml: "\n[partitioning]\nenabled = true\n".into(), ..hex(&ports, i, ram) };
+    let overseer = TestServer::start_with(opts(0, 4096))?;
+    let replica = TestServer::start_with(opts(1, 1024))?;
+    wait_until(Duration::from_secs(30), "the replica to send partition epochs", || {
+        let p = replica.request(Method::GET, "/partitions", None, &[])?.body;
+        Ok(p["sends_epochs"] == true && status(&replica)?["hex_type"] != "Overseer")
+    })?;
+
+    let map = replica.request(Method::GET, "/partitions", None, &[])?.body;
+    assert_eq!(map["enabled"], true);
+    assert_eq!(map["epoch"], 1, "{}", map);
+    assert_eq!(map["partitions"].as_array().map(Vec::len), Some(1), "{}", map);
+    assert_eq!(map["partitions"][0]["slices"].as_array().map(Vec::len), Some(64), "{}", map);
+    assert_eq!(map["this_hex"], 0, "{}", map);
+
+    // A write through the replica reaches the Overseer with the epoch, which matches.
+    let res = replica.request(Method::POST, "/orders", Some(&json!({ "n": 1 })), &[])?;
+    assert_eq!(res.status, 201, "{}", res.body);
+    let id = res.body["id"].as_str().unwrap_or_default().to_string();
+    assert!(overseer.get_doc("orders", &id)?.is_some());
+
+    // A client can't send an epoch itself: without the lattice signature the header is dropped.
+    for server in [&overseer, &replica] {
+        let res = server.request(Method::POST, "/orders", Some(&json!({ "n": 2 })), &[("x-hexdb-partition-epoch", "99")])?;
+        assert_eq!(res.status, 201, "{}", res.body);
+    }
+    Ok(())
+}

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 const PASSWORD: &str = "Sturdy test passphrase 2026";
 
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    jiff::Timestamp::now().as_second()
 }
 
 fn sign_in(server: &TestServer, code: Option<&str>) -> Result<(u16, Value)> {

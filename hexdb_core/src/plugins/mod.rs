@@ -61,7 +61,7 @@ pub use access::{login_for, AccessConfig};
 
 use crate::engine::HexDBEngine;
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -274,7 +274,7 @@ pub struct PluginStatus {
     pub skipped: u64,
     pub restarts: u64,
     pub last_error: Option<String>,
-    pub started_at: Option<DateTime<Utc>>,
+    pub started_at: Option<UtcTime>,
     /// A process plugin that runs in the sandbox.
     pub sandboxed: bool,
 }
@@ -504,7 +504,7 @@ async fn run_plugin(engine: Arc<HexDBEngine>, manifest: Manifest, dir: PathBuf, 
         first = false;
         engine.plugins.update(&id, |p| {
             p.state = "running".into();
-            p.started_at = Some(Utc::now());
+            p.started_at = Some(UtcTime::now());
         });
         let result = tokio::select! {
             _ = shutdown_rx.changed() => return,

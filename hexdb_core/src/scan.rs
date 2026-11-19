@@ -17,7 +17,7 @@
 
 use crate::config::ScanConfig;
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +36,7 @@ pub struct ScanReport {
     /// Engines that skipped it, and why.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
-    pub scanned_at: DateTime<Utc>,
+    pub scanned_at: UtcTime,
 }
 
 impl ScanReport {
@@ -438,7 +438,7 @@ impl Scanner {
 
     /// Scan `size` bytes read from `pieces` (the file's content in order).
     pub async fn scan(&self, size: u64, mut pieces: mpsc::Receiver<std::io::Result<Arc<Vec<u8>>>>) -> Result<ScanReport, ScanUnavailable> {
-        let mut report = ScanReport { status: "clean".into(), detections: Vec::new(), engines: Vec::new(), skipped: Vec::new(), scanned_at: Utc::now() };
+        let mut report = ScanReport { status: "clean".into(), detections: Vec::new(), engines: Vec::new(), skipped: Vec::new(), scanned_at: UtcTime::now() };
         if size > self.max_bytes {
             report.status = "not_scanned".into();
             report.skipped.push(format!("larger than files.scan.max_size_mb ({} MB)", self.max_bytes / (1024 * 1024)));

@@ -129,7 +129,7 @@ fn join(group: SocketAddrV4) -> std::io::Result<UdpSocket> {
 }
 
 fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// The next valid packet and where it came from (`None`: something else arrived).

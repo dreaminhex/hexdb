@@ -136,7 +136,7 @@ impl OAuth {
             return Ok(None);
         }
         let hash = *blake3::hash(token.as_bytes()).as_bytes();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let cached = self.verified.lock().unwrap().get(&hash).cloned();
         let (user_id, subject) = match cached {
             Some((user_id, exp)) if exp + LEEWAY > now && self.current_for(&settings).await => (user_id, None),

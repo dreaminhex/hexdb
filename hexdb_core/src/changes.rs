@@ -13,7 +13,7 @@
 // has completed, and are then published together, in order.
 
 use crate::document::Document;
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
@@ -39,7 +39,7 @@ pub enum ChangeKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Change {
     pub seq: u64,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTime,
     pub kind: ChangeKind,
     pub tessellation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,7 +277,7 @@ mod tests {
     use super::*;
 
     fn change(seq: u64) -> Change {
-        Change { seq, timestamp: Utc::now(), kind: ChangeKind::Delete, tessellation: "t".into(), id: Some(Ulid::generate()), document: None, created: false, origin: None, commit_last: 0 }
+        Change { seq, timestamp: UtcTime::now(), kind: ChangeKind::Delete, tessellation: "t".into(), id: Some(Ulid::generate()), document: None, created: false, origin: None, commit_last: 0 }
     }
 
     fn seqs(changes: &[Arc<Change>]) -> Vec<u64> {

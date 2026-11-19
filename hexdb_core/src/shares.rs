@@ -29,7 +29,6 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -143,7 +142,7 @@ fn is_zero(v: &f64) -> bool {
 
 impl Share {
     pub fn expired(&self) -> bool {
-        self.expires_at.is_some_and(|t| t <= Utc::now().timestamp_millis()) || self.max_downloads.is_some_and(|m| self.downloads >= m)
+        self.expires_at.is_some_and(|t| t <= jiff::Timestamp::now().as_millisecond()) || self.max_downloads.is_some_and(|m| self.downloads >= m)
     }
 
     /// The link for its owner and administrators (never the password hash).
@@ -236,7 +235,7 @@ impl HexDBEngine {
         if days < 0.0 || (max_days > 0.0 && (days == 0.0 || days > max_days)) {
             return Err(invalid(if max_days > 0.0 { format!("Links expire within {} days here.", max_days) } else { "expires_in_days can't be negative.".to_string() }));
         }
-        let expires_at = (days > 0.0).then(|| Utc::now().timestamp_millis() + (days * 86_400_000.0) as i64);
+        let expires_at = (days > 0.0).then(|| jiff::Timestamp::now().as_millisecond() + (days * 86_400_000.0) as i64);
         let password = input.password.as_deref().filter(|p| !p.is_empty());
         if self.config_value("sharing.require_password") == json!(true) && password.is_none() {
             return Err(invalid("Links here need a password (sharing.require_password)."));
@@ -258,7 +257,7 @@ impl HexDBEngine {
         let target = file_id.clone().or_else(|| folder.clone()).unwrap_or_default();
         for _ in 0..8 {
             let nonce = hex::encode(crate::crypt::random_bytes(3));
-            let code = mar62(&key, Utc::now().timestamp_nanos_opt().unwrap_or_default() as i128, &nonce, &[&input.tessellation, &target]);
+            let code = mar62(&key, i128::from(i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap_or_default()), &nonce, &[&input.tessellation, &target]);
             let id = code_id(&code).ok_or_else(|| anyhow!("MAR-62 produced an invalid code"))?;
             if self.get_system_document(SHARES_TESSELLATION, id).await?.is_some() {
                 continue;
@@ -271,7 +270,7 @@ impl HexDBEngine {
                 name: name.clone(),
                 created_by_id: principal.user_id.clone(),
                 created_by: principal.login.clone(),
-                created_at: Utc::now().timestamp_millis(),
+                created_at: jiff::Timestamp::now().as_millisecond(),
                 expires_at,
                 password_hash: password.map(crate::crypt::create_hash),
                 max_downloads: input.max_downloads,
@@ -377,7 +376,7 @@ impl HexDBEngine {
 
     /// A token that unlocks a password-protected link for an hour.
     pub fn share_unlock_token(&self, code: &str) -> Result<String> {
-        let claims = json!({ "c": code, "e": Utc::now().timestamp() + UNLOCK_MINUTES * 60 }).to_string();
+        let claims = json!({ "c": code, "e": jiff::Timestamp::now().as_second() + UNLOCK_MINUTES * 60 }).to_string();
         let key = token_keys(self)?.into_iter().next().ok_or_else(|| anyhow!("no lattice key"))?;
         let mac = blake3::keyed_hash(&key, claims.as_bytes());
         Ok(format!("{}.{}", URL_SAFE_NO_PAD.encode(claims), URL_SAFE_NO_PAD.encode(mac.as_bytes())))
@@ -390,7 +389,7 @@ impl HexDBEngine {
         let Ok(mac): Result<[u8; 32], _> = mac.try_into() else { return false };
         let signed = token_keys(self).unwrap_or_default().iter().any(|k| blake3::keyed_hash(k, &claims) == blake3::Hash::from(mac));
         let Ok(claims) = serde_json::from_slice::<Value>(&claims) else { return false };
-        signed && claims["c"] == code && claims["e"].as_i64().is_some_and(|e| e > Utc::now().timestamp())
+        signed && claims["c"] == code && claims["e"].as_i64().is_some_and(|e| e > jiff::Timestamp::now().as_second())
     }
 
     /// Refuse while this address has made too many bad link attempts (the sign-in limits).

@@ -139,7 +139,7 @@ impl HexDBEngine {
 
     /// When the first change after `after` was committed: a replica at `after`
     /// is behind by that change's age. None when nothing is published after it.
-    pub async fn change_time_after(&self, after: u64) -> Option<chrono::DateTime<chrono::Utc>> {
+    pub async fn change_time_after(&self, after: u64) -> Option<crate::clock::UtcTime> {
         if after >= self.changes.published_seq() {
             return None;
         }

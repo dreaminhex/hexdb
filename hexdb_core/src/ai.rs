@@ -21,7 +21,6 @@
 
 use crate::engine::{EngineError, HexDBEngine};
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::time::{Duration, Instant};
@@ -484,7 +483,7 @@ impl HexDBEngine {
 
     /// This month's usage document (zeros when there is none).
     pub async fn ai_month_usage(&self) -> Result<Value> {
-        let (id, month) = month_key(Utc::now());
+        let (id, month) = month_key(jiff::Timestamp::now());
         let stored = self.get_system_document(AI_USAGE_TESSELLATION, id).await?.map(|d| d.data_json());
         Ok(stored.unwrap_or_else(|| json!({ "month": month, "input_tokens": 0, "output_tokens": 0, "calls": 0, "failures": 0, "features": {} })))
     }
@@ -502,7 +501,7 @@ impl HexDBEngine {
 
     /// Add a call to the month's usage: stored on the Overseer, sent there from a replica.
     pub async fn record_ai_usage(&self, feature: &str, input_tokens: u64, output_tokens: u64, ok: bool) {
-        let entry = UsageEntry { feature: feature.to_string(), input_tokens, output_tokens, ok, time: Utc::now().timestamp_millis() };
+        let entry = UsageEntry { feature: feature.to_string(), input_tokens, output_tokens, ok, time: jiff::Timestamp::now().as_millisecond() };
         let outcome = if self.is_writable() {
             self.store_ai_usage(&entry).await
         } else {
@@ -522,7 +521,7 @@ impl HexDBEngine {
     pub async fn store_ai_usage(&self, entry: &UsageEntry) -> Result<()> {
         static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let _guard = LOCK.lock().await;
-        let when = chrono::DateTime::from_timestamp_millis(entry.time).unwrap_or_else(Utc::now);
+        let when = crate::clock::from_millis(entry.time).unwrap_or_else(jiff::Timestamp::now);
         let (id, month) = month_key(when);
         let mut doc = self
             .get_system_document(AI_USAGE_TESSELLATION, id)
@@ -557,7 +556,8 @@ pub struct UsageEntry {
 }
 
 /// The usage document's ID and label for a month.
-fn month_key(when: chrono::DateTime<Utc>) -> (Ulid, String) {
+fn month_key(when: jiff::Timestamp) -> (Ulid, String) {
+    let when = crate::clock::utc(when);
     let (year, month) = (when.year() as u128, when.month() as u128);
     (Ulid::from(year * 100 + month), format!("{:04}-{:02}", year, month))
 }
@@ -1076,11 +1076,11 @@ async fn call_chat_completions(provider: &Provider, request: &AiRequest, max_tok
 
 /// When the monthly budget resets: the first of next month (UTC), as "November 1", and the seconds until then.
 pub fn next_month_utc() -> (String, u64) {
-    use chrono::{Datelike, TimeZone, Utc};
-    let now = Utc::now();
-    let (year, month) = if now.month() == 12 { (now.year() + 1, 1) } else { (now.year(), now.month() + 1) };
-    let first = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single().unwrap_or(now);
-    (first.format("%B %-d").to_string(), (first - now).num_seconds().max(1) as u64)
+    let now = jiff::Timestamp::now();
+    let today = crate::clock::utc(now);
+    let (year, month) = if today.month() == 12 { (today.year() + 1, 1) } else { (today.year(), today.month() + 1) };
+    let first = jiff::civil::Date::new(year, month, 1).ok().and_then(|d| crate::clock::from_utc(d.to_datetime(jiff::civil::Time::midnight()))).unwrap_or(now);
+    (crate::clock::format(first, "%B %-d"), first.duration_since(now).as_secs().max(1) as u64)
 }
 
 #[cfg(test)]
@@ -1089,9 +1089,9 @@ mod tests {
 
     #[test]
     fn months_have_stable_ids() {
-        let a = chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z").unwrap().with_timezone(&Utc);
-        let b = chrono::DateTime::parse_from_rfc3339("2026-10-31T23:59:59Z").unwrap().with_timezone(&Utc);
-        let c = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        let a = crate::clock::parse_rfc3339("2026-10-01T00:00:00Z").unwrap();
+        let b = crate::clock::parse_rfc3339("2026-10-31T23:59:59Z").unwrap();
+        let c = crate::clock::parse_rfc3339("2026-11-01T00:00:00Z").unwrap();
         assert_eq!(month_key(a), month_key(b));
         assert_ne!(month_key(a).0, month_key(c).0);
         assert_eq!(month_key(a).1, "2026-10");

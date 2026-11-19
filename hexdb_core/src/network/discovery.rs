@@ -30,7 +30,7 @@
 
 use crate::network::lattice_auth::LatticeKeys;
 use crate::{HexConfig, HexDBEngine};
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, sync::Arc, time::Duration};
 use ulid::Ulid;
@@ -212,7 +212,7 @@ fn default_preference() -> String {
 pub struct LatticeMember {
     #[serde(flatten)]
     pub hex: PeerHex,
-    pub last_seen: DateTime<Utc>,
+    pub last_seen: UtcTime,
     /// "active", or "lost" when it hasn't answered for a few rounds.
     pub status: String,
     /// Consecutive rounds, run on time, in which it didn't answer.
@@ -261,7 +261,7 @@ pub async fn local_identity(engine: &HexDBEngine) -> PeerHex {
         ("leading".to_string(), engine.changes.published_seq(), None)
     } else {
         let status = engine.replication.lock().unwrap();
-        (status.state.clone(), status.applied_seq, status.lag_ms(chrono::Utc::now()))
+        (status.state.clone(), status.applied_seq, status.lag_ms(crate::clock::UtcTime::now()))
     };
     let (slices_held, replication_source) = {
         let status = engine.replication.lock().unwrap();
@@ -490,14 +490,14 @@ const STUCK_AFTER_SECONDS: i64 = 60;
 pub fn spawn_discovery_lifeline(engine: Arc<HexDBEngine>, listener: std::net::TcpListener) -> anyhow::Result<()> {
     tokio::spawn(async {
         loop {
-            HEARTBEAT.store(Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
+            HEARTBEAT.store(jiff::Timestamp::now().as_second(), std::sync::atomic::Ordering::Relaxed);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
     listener.set_nonblocking(true)?;
-    let now = Utc::now();
-    LISTENING_SINCE_NS.store(now.timestamp_nanos_opt().unwrap_or_else(|| now.timestamp_millis().saturating_mul(1_000_000)), std::sync::atomic::Ordering::Relaxed);
-    LISTENING_SINCE.store(now.timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
+    let now = jiff::Timestamp::now();
+    LISTENING_SINCE_NS.store(i64::try_from(now.as_nanosecond()).unwrap_or_else(|_| now.as_millisecond().saturating_mul(1_000_000)), std::sync::atomic::Ordering::Relaxed);
+    LISTENING_SINCE.store(now.as_millisecond(), std::sync::atomic::Ordering::Relaxed);
     std::thread::Builder::new().name("hexdb-lifeline".into()).spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
@@ -529,7 +529,7 @@ pub fn spawn_discovery_lifeline(engine: Arc<HexDBEngine>, listener: std::net::Tc
 /// False once the main runtime's heartbeat is a minute old (see `spawn_discovery_lifeline`).
 fn main_runtime_alive() -> bool {
     let beat = HEARTBEAT.load(std::sync::atomic::Ordering::Relaxed);
-    beat == 0 || Utc::now().timestamp() - beat < STUCK_AFTER_SECONDS
+    beat == 0 || jiff::Timestamp::now().as_second() - beat < STUCK_AFTER_SECONDS
 }
 
 /// Discovery addresses to probe: configured seeds, plus local ports if enabled.
@@ -918,8 +918,8 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: 
     let found = discover_peers_with(&engine.config, &engine.id.to_string(), &engine.name, learned).await;
     // Probing itself took far longer than its timeout allows: this hex was starved while asking.
     let on_time = on_time && started.elapsed() <= PROBE_TIMEOUT * 2 + Duration::from_secs(1);
-    let now = Utc::now();
-    let forget_after = chrono::Duration::from_std(interval * FORGET_AFTER_ROUNDS).unwrap_or_default();
+    let now = UtcTime::now();
+    let forget_after = jiff::SignedDuration::try_from(interval * FORGET_AFTER_ROUNDS).unwrap_or_default();
 
     let live: Vec<PeerHex> = {
         let mut members = engine.peers.lock().await;
@@ -949,7 +949,7 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: 
             }
         }
         count_misses(&mut members, &answered, &seen_by_others, on_time);
-        members.retain(|m| now - m.last_seen <= forget_after);
+        members.retain(|m| now.since(m.last_seen) <= forget_after);
         let active: Vec<PeerHex> = members.iter().filter(|m| m.status == "active").map(|m| m.hex.clone()).collect();
         // The count the quorum check uses while the list is busy.
         engine.active_peers_seen.store(active.len(), std::sync::atomic::Ordering::Relaxed);
@@ -1002,7 +1002,7 @@ mod tests {
     fn a_peer_others_still_see_is_not_lost_yet() {
         let mut overseer = hex("o", ROLE_OVERSEER, "auto", 1024);
         overseer.ip = "10.0.0.1:7702".into();
-        let mut members = vec![LatticeMember { hex: overseer, last_seen: Utc::now(), status: "active".into(), missed: 0 }];
+        let mut members = vec![LatticeMember { hex: overseer, last_seen: UtcTime::now(), status: "active".into(), missed: 0 }];
         let seen: std::collections::HashSet<String> = ["10.0.0.1:7702".to_string()].into();
         for _ in 0..5 {
             count_misses(&mut members, &[], &seen, true);
@@ -1014,7 +1014,7 @@ mod tests {
         count_misses(&mut members, &[], &Default::default(), true);
         assert_eq!(members[0].status, "lost");
         // Alone (no other hex to ask), three missed rounds are enough; starved rounds count none.
-        let mut alone = vec![LatticeMember { hex: hex("p", ROLE_HARVESTER, "auto", 1024), last_seen: Utc::now(), status: "active".into(), missed: 0 }];
+        let mut alone = vec![LatticeMember { hex: hex("p", ROLE_HARVESTER, "auto", 1024), last_seen: UtcTime::now(), status: "active".into(), missed: 0 }];
         for _ in 0..4 {
             count_misses(&mut alone, &[], &Default::default(), false);
         }

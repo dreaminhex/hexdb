@@ -12,7 +12,6 @@
 use async_graphql::{
     Context, EmptySubscription, ErrorExtensions, InputObject, Json, Object, Schema, SimpleObject, ID,
 };
-use chrono::{DateTime, Utc};
 use hexdb_core::{
     metrics::collect,
     users::{self, RoleGrant, RoleView, UserView},
@@ -128,13 +127,13 @@ fn existing_tessellation(engine: &HexDBEngine, tess: &str) -> GqlResult<()> {
 }
 
 fn millis_to_rfc3339(millis: i64) -> Option<String> {
-    DateTime::<Utc>::from_timestamp_millis(millis).map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    hexdb_core::clock::from_millis(millis).map(hexdb_core::clock::rfc3339_millis)
 }
 
 fn expiry(ttl: Option<u64>) -> Option<i64> {
     ttl.map(|secs| {
         let millis = secs.min(i64::MAX as u64 / 1000) as i64 * 1000;
-        Utc::now().timestamp_millis().saturating_add(millis)
+        jiff::Timestamp::now().as_millisecond().saturating_add(millis)
     })
 }
 

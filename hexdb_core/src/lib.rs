@@ -1,4 +1,5 @@
 pub mod access;
+pub mod clock;
 pub mod config;
 pub mod logging;
 pub mod engine;
@@ -52,6 +53,7 @@ pub mod functions;
 pub mod triggers;
 pub mod sql;
 pub mod slicing;
+pub mod partitioning;
 pub mod updates;
 pub mod compress;
 pub mod erasure;

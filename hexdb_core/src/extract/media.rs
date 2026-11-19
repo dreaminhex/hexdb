@@ -548,8 +548,9 @@ pub(crate) fn matroska(ctx: &mut Ctx) -> anyhow::Result<bool> {
                         0x4461 if value.len() == 8 => {
                             // Nanoseconds since 2001-01-01T00:00:00Z.
                             let ns = i64::from_be_bytes(value.try_into().unwrap());
-                            if let Some(at) = chrono::DateTime::from_timestamp(978_307_200 + ns / 1_000_000_000, 0) {
-                                raw.insert("date_utc".into(), json!(at.to_rfc3339()));
+                            if let Some(at) = crate::clock::from_secs(978_307_200 + ns / 1_000_000_000) {
+                                // RFC 3339 in whole seconds with a "+00:00" offset, as written before 2.6.
+                                raw.insert("date_utc".into(), json!(crate::clock::rfc3339_secs(at).replace('Z', "+00:00")));
                             }
                         }
                         _ => {}

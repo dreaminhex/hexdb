@@ -2,7 +2,7 @@
 // Log records go to stdout (pretty, for operators) and into an in-memory ring
 // buffer (structured, for the /logs API and the admin UI's Logs page).
 
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
@@ -21,7 +21,7 @@ pub const LOG_CAPACITY: usize = 5_000;
 pub struct LogRecord {
     /// Monotonic per-process sequence number; use it to page and to poll for new records.
     pub seq: u64,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTime,
     /// ERROR, WARN, INFO, DEBUG, or TRACE.
     pub level: String,
     /// Module that emitted the record, e.g. `hexdb_core::network::discovery`.
@@ -71,7 +71,7 @@ impl LogBuffer {
         }
     }
 
-    pub fn push(&self, timestamp: DateTime<Utc>, level: &Level, target: &str, message: String, fields: BTreeMap<String, String>) {
+    pub fn push(&self, timestamp: UtcTime, level: &Level, target: &str, message: String, fields: BTreeMap<String, String>) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let seq = inner.next_seq;
         inner.next_seq += 1;
@@ -197,7 +197,7 @@ impl<S: Subscriber> Layer<S> for BufferLayer {
         let mut collector = FieldCollector::default();
         event.record(&mut collector);
         let meta = event.metadata();
-        log_buffer().push(Utc::now(), meta.level(), meta.target(), collector.message, collector.fields);
+        log_buffer().push(UtcTime::now(), meta.level(), meta.target(), collector.message, collector.fields);
     }
 }
 
@@ -230,7 +230,7 @@ mod tests {
     use super::*;
 
     fn push(buffer: &LogBuffer, level: Level, target: &str, message: &str) {
-        buffer.push(Utc::now(), &level, target, message.to_string(), BTreeMap::new());
+        buffer.push(UtcTime::now(), &level, target, message.to_string(), BTreeMap::new());
     }
 
     #[test]

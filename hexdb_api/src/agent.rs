@@ -371,14 +371,14 @@ fn counters() -> &'static Mutex<Counters> {
 }
 
 fn today() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+    hexdb_core::clock::format(jiff::Timestamp::now(), "%Y-%m-%d")
 }
 
 /// Seconds until the daily allowances reset (midnight UTC).
 fn until_tomorrow_utc() -> u64 {
-    let now = chrono::Utc::now();
-    let midnight = (now.date_naive() + chrono::Days::new(1)).and_hms_opt(0, 0, 0).map(|t| t.and_utc()).unwrap_or(now);
-    (midnight - now).num_seconds().max(1) as u64
+    let now = jiff::Timestamp::now();
+    let midnight = hexdb_core::clock::utc(now).date().tomorrow().ok().and_then(|d| hexdb_core::clock::from_utc(d.to_datetime(jiff::civil::Time::midnight()))).unwrap_or(now);
+    midnight.duration_since(now).as_secs().max(1) as u64
 }
 
 /// "in about 5 hours", "in about 40 minutes".

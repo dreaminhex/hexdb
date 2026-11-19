@@ -31,7 +31,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::{DateTime, Utc};
+use hexdb_core::clock::UtcTime;
 use hexdb_core::{engine::HexDBEngine, engine::UploadOptions, Permission};
 use serde::Deserialize;
 use serde_json::json;
@@ -163,13 +163,13 @@ pub struct RestoreParams {
     pub path: Option<String>,
 }
 
-fn parse_time(text: &str, what: &str) -> Result<DateTime<Utc>, ApiError> {
+fn parse_time(text: &str, what: &str) -> Result<UtcTime, ApiError> {
     if let Ok(millis) = text.parse::<i64>() {
-        return DateTime::from_timestamp_millis(millis).ok_or_else(|| ApiError::invalid(format!("{}: out of range.", what)));
+        return UtcTime::from_millis(millis).ok_or_else(|| ApiError::invalid(format!("{}: out of range.", what)));
     }
-    DateTime::parse_from_rfc3339(text)
-        .map(|t| t.with_timezone(&Utc))
-        .map_err(|_| ApiError::invalid(format!("{}: expected an RFC 3339 time or epoch milliseconds.", what)))
+    hexdb_core::clock::parse_rfc3339(text)
+        .map(UtcTime)
+        .ok_or_else(|| ApiError::invalid(format!("{}: expected an RFC 3339 time or epoch milliseconds.", what)))
 }
 
 /// Upload a file's content to `folder/name`.
@@ -296,8 +296,8 @@ pub(crate) async fn serve(engine: Arc<HexDBEngine>, tess: &str, id: &str, params
     set(&mut response_headers, header::CONTENT_TYPE, content.content_type.clone());
     let kind = if !params.download && shown_inline(&content.content_type) { "inline" } else { "attachment" };
     set(&mut response_headers, header::CONTENT_DISPOSITION, disposition(kind, &content.name));
-    if let Some(modified) = content.modified_at.as_deref().and_then(|t| DateTime::parse_from_rfc3339(t).ok()) {
-        set(&mut response_headers, header::LAST_MODIFIED, modified.with_timezone(&Utc).format("%a, %d %b %Y %H:%M:%S GMT").to_string());
+    if let Some(modified) = content.modified_at.as_deref().and_then(hexdb_core::clock::parse_rfc3339) {
+        set(&mut response_headers, header::LAST_MODIFIED, hexdb_core::clock::format(modified, "%a, %d %b %Y %H:%M:%S GMT"));
     }
     set(&mut response_headers, header::HeaderName::from_static("x-hexdb-version"), content.version.to_string());
 

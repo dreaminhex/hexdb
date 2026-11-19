@@ -53,7 +53,7 @@ fn stop_requested(storage_dir: &Path) -> bool {
 }
 
 fn say(message: &str) {
-    eprintln!("{} [supervisor] {}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"), message);
+    eprintln!("{} [supervisor] {}", hexdb_core::clock::format(jiff::Timestamp::now(), "%Y-%m-%dT%H:%M:%S%.3fZ"), message);
 }
 
 pub async fn supervise(server: &Path, config: Option<&Path>, storage_dir: &Path, log_path: &Path) -> Result<()> {

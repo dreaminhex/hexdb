@@ -215,7 +215,7 @@ pub struct Extracted {
 impl Extracted {
     /// The `extract` status object stored on the file's document.
     pub fn status(&self) -> Value {
-        json!({ "version": VERSION, "extractors": self.extractors, "errors": self.errors, "at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true) })
+        json!({ "version": VERSION, "extractors": self.extractors, "errors": self.errors, "at": crate::clock::rfc3339_millis(jiff::Timestamp::now()) })
     }
 }
 

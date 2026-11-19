@@ -36,6 +36,9 @@ pub struct HexConfig {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub replication: ReplicationConfig,
+    /// Partitioned writes (see `crate::partitioning`).
+    #[serde(default)]
+    pub partitioning: PartitioningConfig,
     /// Binary file storage (see `crate::files`).
     #[serde(default)]
     pub files: FilesConfig,
@@ -232,6 +235,15 @@ impl TlsConfig {
     pub fn enabled(&self) -> bool {
         !self.cert_file.is_empty() && !self.key_file.is_empty()
     }
+}
+
+/// Partitioned writes (`[partitioning]`; see `crate::partitioning`). Off by default.
+/// In 2.6 a lattice is one partition either way; turned on, forwarded requests carry
+/// the partition map's epoch once every hex runs 2.6 or later.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct PartitioningConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// How writes are replicated and where they may be made.
@@ -802,6 +814,7 @@ impl Default for HexConfig {
             tls: TlsConfig::default(),
             limits: LimitsConfig::default(),
             replication: ReplicationConfig::default(),
+            partitioning: PartitioningConfig::default(),
             files: FilesConfig::default(),
             analyzers: Default::default(),
             ai: Default::default(),

@@ -31,7 +31,6 @@
 use super::HexDBEngine;
 use crate::{catalog::Catalog, wal};
 use anyhow::{Context, Result};
-use chrono::Utc;
 use serde::Serialize;
 use std::{
     fs,
@@ -219,11 +218,11 @@ impl HexDBEngine {
             .map_err(|_| anyhow::anyhow!("WAL writer stopped during the backup"))?
             .map_err(|e| anyhow::anyhow!("WAL rotation failed: {}", e))?;
 
-        let created = Utc::now().timestamp_millis();
+        let created = jiff::Timestamp::now().as_millisecond();
         let name = match name.map(str::trim).filter(|n| !n.is_empty()) {
             Some(n) if valid_name(n) => n.to_string(),
             Some(_) => return Err(invalid("A backup name may only contain letters, digits, '-' and '_' (up to 100).".into())),
-            None => format!("hexdb-{}-{}", Utc::now().format("%Y%m%d-%H%M%S"), sequence),
+            None => format!("hexdb-{}-{}", crate::clock::format(jiff::Timestamp::now(), "%Y%m%d-%H%M%S"), sequence),
         };
         let dest = root.join(&name);
         if dest.exists() {

@@ -65,7 +65,7 @@ async fn compaction_drops_deleted_and_expired_documents() -> Result<()> {
 
     let deleted = engine.insert_json("t", json!({ "name": "deleted" }), None).await?.id;
     let expiring = engine
-        .insert_json("t", json!({ "name": "expiring" }), Some(chrono::Utc::now().timestamp_millis() + 200))
+        .insert_json("t", json!({ "name": "expiring" }), Some(jiff::Timestamp::now().as_millisecond() + 200))
         .await?
         .id;
     let kept = engine.insert_json("t", json!({ "name": "kept" }), None).await?.id;
@@ -106,7 +106,7 @@ async fn a_replica_behind_is_behind_by_its_next_change() -> Result<()> {
     let a = engine.change_time_after(start).await.expect("a change after start");
     let b = engine.change_time_after(first).await.expect("a change after the first insert");
     assert!(b > a, "the later change was committed later");
-    assert!((b - a).num_milliseconds() >= 15);
+    assert!(b.since(a).as_millis() >= 15);
     // Caught up: nothing after the head.
     assert_eq!(engine.change_time_after(engine.changes.published_seq()).await, None);
     engine.shutdown().await
@@ -288,7 +288,7 @@ async fn counts_stay_exact_through_every_kind_of_write() -> Result<()> {
     check("a transaction").await?;
 
     // A document that expires: counted until it does, then not.
-    let soon = chrono::Utc::now().timestamp_millis() + 1500;
+    let soon = jiff::Timestamp::now().as_millisecond() + 1500;
     engine.insert_json("items", json!({ "short": true }), Some(soon)).await?;
     check("an expiring insert").await?;
     tokio::time::sleep(Duration::from_millis(1700)).await;

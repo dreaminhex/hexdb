@@ -368,7 +368,7 @@ pub async fn login(
 ) -> ApiResult {
     let Json(input) = body?;
     let signed_in = core_auth::login(&engine, &input.login, &input.password, input.code.as_deref(), &client).await?;
-    let max_age = signed_in.claims.exp - chrono::Utc::now().timestamp();
+    let max_age = signed_in.claims.exp - jiff::Timestamp::now().as_second();
     let mut body = json!({
         "user": me_json(&signed_in.principal),
         "expires_at": signed_in.claims.exp,
@@ -466,7 +466,7 @@ pub async fn change_password(
         // The new session must be issued strictly after the cut-off (milliseconds).
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let (token, claims) = core_auth::issue_session(&engine.config.session_key()?, &principal.user_id, engine.live().session_hours);
-        let max_age = claims.exp - chrono::Utc::now().timestamp();
+        let max_age = claims.exp - jiff::Timestamp::now().as_second();
         response.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&engine, &token, max_age));
         info!(%client, "🔑 '{}' changed their password.", principal.login);
     }
@@ -527,7 +527,7 @@ pub async fn mfa_enable(
     if matches!(principal.credential, core_auth::Credential::Session { .. }) {
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let (token, claims) = core_auth::issue_session(&engine.config.session_key()?, &principal.user_id, engine.live().session_hours);
-        let max_age = claims.exp - chrono::Utc::now().timestamp();
+        let max_age = claims.exp - jiff::Timestamp::now().as_second();
         response.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&engine, &token, max_age));
     }
     Ok(response)

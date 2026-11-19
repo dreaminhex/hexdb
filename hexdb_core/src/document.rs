@@ -11,7 +11,6 @@
 // are valid RFC 3339 timestamps, and the original text is kept.
 
 use base64::{engine::general_purpose, Engine as _};
-use chrono::DateTime;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
@@ -202,10 +201,10 @@ impl<'de> Deserialize<'de> for Inferred {
                 Ok(Inferred(FieldValue::Float(f)))
             }
             fn visit_str<E>(self, s: &str) -> Result<Inferred, E> {
-                Ok(Inferred(if DateTime::parse_from_rfc3339(s).is_ok() { FieldValue::DateTime(s.to_string()) } else { FieldValue::String(s.to_string()) }))
+                Ok(Inferred(if crate::clock::is_rfc3339(s) { FieldValue::DateTime(s.to_string()) } else { FieldValue::String(s.to_string()) }))
             }
             fn visit_string<E>(self, s: String) -> Result<Inferred, E> {
-                Ok(Inferred(if DateTime::parse_from_rfc3339(&s).is_ok() { FieldValue::DateTime(s) } else { FieldValue::String(s) }))
+                Ok(Inferred(if crate::clock::is_rfc3339(&s) { FieldValue::DateTime(s) } else { FieldValue::String(s) }))
             }
             fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Inferred, A::Error> {
                 let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
@@ -300,10 +299,10 @@ impl Document {
         let mut map = Map::new();
         map.insert("id".into(), Value::String(self.id.to_string()));
         if let Some(ttl) = self.ttl {
-            if let Some(at) = DateTime::from_timestamp_millis(ttl) {
+            if let Some(at) = crate::clock::from_millis(ttl) {
                 map.insert(
                     "_expires_at".into(),
-                    Value::String(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+                    Value::String(crate::clock::rfc3339_millis(at)),
                 );
             }
         }
@@ -331,7 +330,7 @@ impl FieldValue {
             Value::Null => FieldValue::Null,
             Value::Bool(b) => FieldValue::Boolean(*b),
             Value::String(s) => {
-                if DateTime::parse_from_rfc3339(s).is_ok() {
+                if crate::clock::is_rfc3339(s) {
                     FieldValue::DateTime(s.clone())
                 } else {
                     FieldValue::String(s.clone())

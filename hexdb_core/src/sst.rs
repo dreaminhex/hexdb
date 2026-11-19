@@ -418,7 +418,7 @@ impl SstFile {
         encrypt: bool,
     ) -> Result<SstFile> {
         entries.sort_by_key(|e| e.id);
-        let created = chrono::Utc::now().timestamp_millis();
+        let created = jiff::Timestamp::now().as_millisecond();
         let max_seq = entries.iter().map(|e| e.seq).max().unwrap_or(0).max(seq_floor);
 
         let tmp = path.with_extension("tmp");

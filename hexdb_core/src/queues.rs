@@ -40,7 +40,6 @@
 
 use crate::engine::{EngineError, HexDBEngine};
 use anyhow::{bail, Result};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -87,7 +86,7 @@ fn invalid(message: impl Into<String>) -> anyhow::Error {
 }
 
 fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// A queue's configuration.

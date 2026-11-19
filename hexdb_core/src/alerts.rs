@@ -28,7 +28,6 @@
 use crate::review::Review;
 use crate::HexDBEngine;
 use anyhow::{anyhow, bail, Result};
-use chrono::{TimeZone, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -77,7 +76,7 @@ pub struct Alert {
 
 impl Alert {
     pub fn from_review(engine: &HexDBEngine, review: &Review) -> Alert {
-        let iso = |ms: i64| Utc.timestamp_millis_opt(ms).single().map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+        let iso = |ms: i64| crate::clock::from_millis(ms).map(|t| crate::clock::format(t, "%Y-%m-%d %H:%M UTC")).unwrap_or_default();
         let count = review.findings.len();
         let title = format!("HexDB security review of '{}': {} severity, {} finding{}", engine.config.network.lattice_name, review.severity, count, if count == 1 { "" } else { "s" });
         let mut text = format!("{} to {}, {} audit events. {}", iso(review.window_from), iso(review.window_to), review.events, review.summary.trim());
@@ -345,7 +344,7 @@ impl HexDBEngine {
             "chat" => webhook_urls(&secret("alerts.chat.webhook_urls").unwrap_or_default())?.iter().map(|url| chat(alert, url)).collect(),
             "webhook" => {
                 let url = self.alert_text("alerts.webhook.url");
-                vec![webhook(alert, &url, secret("alerts.webhook.signing_secret").as_deref(), Utc::now().timestamp())]
+                vec![webhook(alert, &url, secret("alerts.webhook.signing_secret").as_deref(), jiff::Timestamp::now().as_second())]
             }
             other => bail!("unknown alert channel '{}' (one of {})", other, CHANNELS.join(", ")),
         })

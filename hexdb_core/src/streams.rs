@@ -325,7 +325,7 @@ impl HexDBEngine {
                 config.created_by = old.created_by.clone();
             }
             (None, true) => {
-                config.created = chrono::Utc::now().timestamp_millis();
+                config.created = jiff::Timestamp::now().as_millisecond();
                 config.created_by = by.to_string();
             }
         }
@@ -335,7 +335,7 @@ impl HexDBEngine {
         for i in 0..config.sources.len() {
             let group = format!("__source:{}", i);
             if self.get_system_document(STREAM_OFFSETS_TESSELLATION, offset_id(&config.name, &group)).await?.is_none() {
-                let data = json!({ "stream": config.name, "group": group, "history_id": self.history_id(), "seq": now, "updated": chrono::Utc::now().timestamp_millis() });
+                let data = json!({ "stream": config.name, "group": group, "history_id": self.history_id(), "seq": now, "updated": jiff::Timestamp::now().as_millisecond() });
                 self.put_system_document(STREAM_OFFSETS_TESSELLATION, offset_id(&config.name, &group), data, None).await?;
             }
         }
@@ -370,7 +370,7 @@ impl HexDBEngine {
         if messages.is_empty() || messages.len() > MAX_BATCH {
             bail!(invalid(format!("Publish 1-{} messages at a time.", MAX_BATCH)));
         }
-        let ttl = (config.retention_hours > 0).then(|| chrono::Utc::now().timestamp_millis() + config.retention_hours as i64 * 3_600_000);
+        let ttl = (config.retention_hours > 0).then(|| jiff::Timestamp::now().as_millisecond() + config.retention_hours as i64 * 3_600_000);
         let tess = messages_tessellation(name);
         let mut ids = Vec::with_capacity(messages.len());
         let mut docs = Vec::with_capacity(messages.len());
@@ -437,7 +437,7 @@ impl HexDBEngine {
             bail!(invalid("Group names starting with __ are reserved for the stream's own sources and destinations."));
         }
         let config = self.stream_or_404(name).await?;
-        let expired = config.retention_hours > 0 && (offset.timestamp_ms() as i64) < chrono::Utc::now().timestamp_millis() - config.retention_hours as i64 * 3_600_000;
+        let expired = config.retention_hours > 0 && (offset.timestamp_ms() as i64) < jiff::Timestamp::now().as_millisecond() - config.retention_hours as i64 * 3_600_000;
         if !expired && self.get_system_document(&messages_tessellation(name), offset).await?.is_none() {
             bail!(invalid(format!("offset {} isn't a message of stream '{}'.", offset, name)));
         }
@@ -452,7 +452,7 @@ impl HexDBEngine {
         if current.is_some_and(|c| c >= offset) {
             return Ok(());
         }
-        let data = json!({ "stream": name, "group": group, "offset": offset.to_string(), "updated": chrono::Utc::now().timestamp_millis() });
+        let data = json!({ "stream": name, "group": group, "offset": offset.to_string(), "updated": jiff::Timestamp::now().as_millisecond() });
         self.put_system_document(STREAM_OFFSETS_TESSELLATION, offset_id(name, group), data, None).await
     }
 
@@ -609,7 +609,7 @@ async fn run_source(engine: Arc<HexDBEngine>, config: StreamConfig, index: usize
         }
         // Save the position (after the last relevant change) at most once a second.
         if pending.is_empty() && relevant != saved_cursor && (change.is_none() || saved_at.elapsed() >= Duration::from_secs(1)) {
-            let data = json!({ "stream": config.name, "group": group, "history_id": engine.history_id(), "seq": relevant, "updated": chrono::Utc::now().timestamp_millis() });
+            let data = json!({ "stream": config.name, "group": group, "history_id": engine.history_id(), "seq": relevant, "updated": jiff::Timestamp::now().as_millisecond() });
             if let Err(e) = engine.put_system_document(STREAM_OFFSETS_TESSELLATION, offset_id(&config.name, &group), data, None).await {
                 debug!("Couldn't save stream source position: {:#}", e);
             }

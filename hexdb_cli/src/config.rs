@@ -47,7 +47,7 @@ fn shown(value: Option<&Value>, secret: bool) -> String {
 }
 
 fn when(ms: Option<i64>) -> String {
-    ms.and_then(chrono::DateTime::from_timestamp_millis).map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(|| "-".into())
+    ms.and_then(hexdb_core::clock::from_millis).map(|t| hexdb_core::clock::format(t, "%Y-%m-%d %H:%M:%S UTC")).unwrap_or_else(|| "-".into())
 }
 
 pub async fn get(target: &Target<'_>, key: Option<&str>, json_out: bool) -> Result<()> {

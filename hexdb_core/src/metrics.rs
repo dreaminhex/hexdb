@@ -6,7 +6,7 @@
 // by external systems.
 
 use crate::HexDBEngine;
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use serde::Serialize;
 use ulid::Ulid;
 
@@ -15,7 +15,7 @@ use ulid::Ulid;
 pub struct HexMeta {
     pub id: Ulid,
     pub name: String,
-    pub start_datetime: DateTime<Utc>,
+    pub start_datetime: UtcTime,
     pub uptime_seconds: u64,
     pub version: String,
     pub status: String,
@@ -145,7 +145,7 @@ pub struct LatticeHex {
     /// Highest sequence number the hex has applied.
     pub last_seq: u64,
     /// When discovery last heard from it (None for this hex).
-    pub last_seen: Option<DateTime<Utc>>,
+    pub last_seen: Option<UtcTime>,
     pub is_self: bool,
     /// leading (Overseer), streaming, syncing, waiting, or error.
     pub replication_state: String,
@@ -192,8 +192,8 @@ pub struct NetworkMetrics {
 
 /// Collects metrics from the HexDB engine and returns a `HexMeta` structure.
 pub async fn collect(engine: &HexDBEngine) -> HexMeta {
-    let now = Utc::now();
-    let uptime = (now - engine.start_datetime).num_seconds().max(0);
+    let now = UtcTime::now();
+    let uptime = now.since(engine.start_datetime).as_secs().max(0);
     let stats = engine.stats().await;
 
     let mut tessellations = Vec::new();
@@ -404,7 +404,7 @@ pub const HISTORY_RETENTION_SECONDS: u64 = 6 * 60 * 60;
 /// One point-in-time metrics sample.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct MetricsSample {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: UtcTime,
     /// Visible documents per user tessellation.
     pub documents: std::collections::BTreeMap<String, usize>,
     pub memory_bytes: usize,
@@ -447,7 +447,7 @@ impl MetricsHistory {
 
     /// Replace the series (at startup), dropping samples older than the retention.
     pub fn restore(&self, mut samples: Vec<MetricsSample>) {
-        let cutoff = Utc::now() - chrono::Duration::seconds(HISTORY_RETENTION_SECONDS as i64);
+        let cutoff = UtcTime::now().minus(jiff::SignedDuration::from_secs(HISTORY_RETENTION_SECONDS as i64));
         samples.retain(|s| s.timestamp >= cutoff);
         let skip = samples.len().saturating_sub(self.capacity);
         *self.samples.lock().unwrap() = samples.into_iter().skip(skip).collect();
@@ -459,7 +459,7 @@ impl MetricsHistory {
     }
 
     /// Samples taken at or after `since`, oldest first.
-    pub fn since(&self, since: DateTime<Utc>) -> Vec<MetricsSample> {
+    pub fn since(&self, since: UtcTime) -> Vec<MetricsSample> {
         self.samples.lock().unwrap().iter().filter(|s| s.timestamp >= since).cloned().collect()
     }
 }
@@ -474,7 +474,7 @@ pub async fn sample(engine: &HexDBEngine) -> MetricsSample {
         }
     }
     MetricsSample {
-        timestamp: Utc::now(),
+        timestamp: UtcTime::now(),
         documents,
         memory_bytes: stats.memory_bytes,
         disk_bytes: stats.disk_bytes,
@@ -501,7 +501,7 @@ mod tests {
 
     fn at(seconds: i64) -> MetricsSample {
         MetricsSample {
-            timestamp: DateTime::from_timestamp(seconds, 0).unwrap(),
+            timestamp: UtcTime::from_secs(seconds).unwrap(),
             documents: Default::default(),
             memory_bytes: 0,
             disk_bytes: 0,
@@ -518,8 +518,8 @@ mod tests {
         for s in 0..5 {
             history.push(at(s * 10));
         }
-        let all = history.since(DateTime::from_timestamp(0, 0).unwrap());
-        assert_eq!(all.iter().map(|s| s.timestamp.timestamp()).collect::<Vec<_>>(), vec![20, 30, 40]);
-        assert_eq!(history.since(DateTime::from_timestamp(35, 0).unwrap()).len(), 1);
+        let all = history.since(UtcTime::from_secs(0).unwrap());
+        assert_eq!(all.iter().map(|s| s.timestamp.secs()).collect::<Vec<_>>(), vec![20, 30, 40]);
+        assert_eq!(history.since(UtcTime::from_secs(35).unwrap()).len(), 1);
     }
 }

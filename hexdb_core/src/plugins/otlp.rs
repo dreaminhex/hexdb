@@ -28,8 +28,8 @@ fn attr(key: &str, value: &str) -> Value {
     json!({ "key": key, "value": { "stringValue": value } })
 }
 
-fn nanos(t: chrono::DateTime<chrono::Utc>) -> String {
-    t.timestamp_nanos_opt().unwrap_or_default().to_string()
+fn nanos(t: crate::clock::UtcTime) -> String {
+    i64::try_from(t.0.as_nanosecond()).unwrap_or_default().to_string()
 }
 
 fn resource(engine: &HexDBEngine, config: &OtlpConfig) -> Value {

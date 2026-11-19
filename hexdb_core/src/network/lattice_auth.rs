@@ -54,7 +54,7 @@ fn parse_mac(hex: &str) -> Option<blake3::Hash> {
 }
 
 fn fresh(ts: i64) -> bool {
-    (chrono::Utc::now().timestamp() - ts).abs() <= MAX_SKEW_SECONDS
+    (jiff::Timestamp::now().as_second() - ts).abs() <= MAX_SKEW_SECONDS
 }
 
 fn new_nonce() -> String {
@@ -137,7 +137,7 @@ impl LatticeKeys {
 
     /// A hello signed with key `index` (0 is the current key).
     pub fn hello_with(&self, index: usize) -> (String, String) {
-        let ts = chrono::Utc::now().timestamp();
+        let ts = jiff::Timestamp::now().as_second();
         let nonce = new_nonce();
         let tag = mac(&self.sets[index].discovery, &[b"hello", ts.to_string().as_bytes(), nonce.as_bytes()]);
         (format!("HEXDB_HELLO2 {} {} {}", ts, nonce, tag.to_hex()), nonce)
@@ -202,7 +202,7 @@ impl LatticeKeys {
 
     /// The signature header value for a request, with key `index`.
     pub fn sign_request_with(&self, index: usize, method: &str, path_and_query: &str, body: &[u8]) -> String {
-        let ts = chrono::Utc::now().timestamp();
+        let ts = jiff::Timestamp::now().as_second();
         let nonce = new_nonce();
         let body_hash = blake3::hash(body);
         let tag = mac(
@@ -360,7 +360,7 @@ mod tests {
         let body_sig = keys.sign_request("POST", "/lattice/revoke", b"{\"a\":1}");
         assert!(!keys.verify_request(&body_sig, "POST", "/lattice/revoke", b"{\"a\":2}", &NonceCache::default()), "other body");
 
-        let old = format!("{}.{}.{}", chrono::Utc::now().timestamp() - 600, "0".repeat(32), "0".repeat(64));
+        let old = format!("{}.{}.{}", jiff::Timestamp::now().as_second() - 600, "0".repeat(32), "0".repeat(64));
         assert!(!keys.verify_request(&old, "GET", "/x", b"", &NonceCache::default()));
         assert!(!keys.verify_request("garbage", "GET", "/x", b"", &NonceCache::default()));
     }

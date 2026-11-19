@@ -20,7 +20,6 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
-use chrono::{DateTime, Utc};
 use crate::auth::{Auth, MaybeAuth};
 use hexdb_core::{
     constant_time_eq, Action, Permission,
@@ -195,7 +194,7 @@ impl WriteParams {
     fn expiry(&self) -> Option<i64> {
         self.ttl.map(|secs| {
             let millis = secs.min(i64::MAX as u64 / 1000) as i64 * 1000;
-            Utc::now().timestamp_millis().saturating_add(millis)
+            jiff::Timestamp::now().as_millisecond().saturating_add(millis)
         })
     }
 }
@@ -404,8 +403,8 @@ pub(crate) fn no_content(replayed: bool) -> Response {
 }
 
 fn millis_to_rfc3339(millis: i64) -> Value {
-    DateTime::from_timestamp_millis(millis)
-        .map(|t| Value::String(t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)))
+    hexdb_core::clock::from_millis(millis)
+        .map(|t| Value::String(hexdb_core::clock::rfc3339_millis(t)))
         .unwrap_or(Value::Null)
 }
 
@@ -503,7 +502,7 @@ pub async fn health(State(engine): Engine, MaybeAuth(principal): MaybeAuth) -> J
         "name": engine.name,
         "hex_type": engine.role(),
         "version": engine.version,
-        "uptime_seconds": (Utc::now() - engine.start_datetime).num_seconds().max(0),
+        "uptime_seconds": hexdb_core::clock::UtcTime::now().since(engine.start_datetime).as_secs().max(0),
     });
     if !notice.is_empty() {
         body["notice"] = Value::String(notice.to_string());
@@ -1936,6 +1935,22 @@ fn settings_json(engine: &HexDBEngine) -> Result<Value, ApiError> {
 }
 
 /// Runtime settings, and the effective configuration with secrets hidden (admins).
+/// The partition map this hex routes by (administrators). In 2.6 every lattice is one
+/// partition; see `hexdb_core::partitioning`.
+pub async fn get_partitions(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_admin()?;
+    let map = engine.partition_map();
+    Ok(Json(json!({
+        "enabled": engine.config.partitioning.enabled,
+        "epoch": map.epoch,
+        "partitions": map.partitions.iter().map(|p| json!({ "id": p.id, "slices": hexdb_core::slicing::list(p.slices), "hexes": p.hexes })).collect::<Vec<_>>(),
+        "this_hex": map.partition_of_hex(&engine.id.to_string()),
+        "sends_epochs": engine.sends_partition_epochs().await,
+        "rejected_versions": engine.rejected_partition_maps(),
+    }))
+    .into_response())
+}
+
 pub async fn get_settings(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     principal.require_admin()?;
     Ok(Json(settings_json(&engine)?).into_response())
@@ -2079,7 +2094,7 @@ pub async fn status_history(
     principal.require_action(Action::Status)?;
     let Query(params) = params?;
     let minutes = params.minutes.unwrap_or(60).clamp(1, 360);
-    let since = Utc::now() - chrono::Duration::minutes(minutes);
+    let since = hexdb_core::clock::UtcTime::now().minus(jiff::SignedDuration::from_mins(minutes));
     Ok(Json(json!({
         "interval_seconds": hexdb_core::metrics::HISTORY_INTERVAL_SECONDS,
         "samples": engine.history.since(since),

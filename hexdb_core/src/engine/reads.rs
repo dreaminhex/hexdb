@@ -23,7 +23,6 @@
 
 use super::{HexDBEngine, TessellationStats};
 use crate::{document::Document, hex::DocKey};
-use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use ulid::Ulid;
@@ -187,7 +186,7 @@ impl HexDBEngine {
 
     /// Visible documents in a tessellation: the cached count, or a fresh one.
     pub(crate) async fn cached_count(&self, tess: &str) -> usize {
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let generation = {
             let counts = self.counts.lock().unwrap();
             if let Some(c) = counts.cached.get(tess) {
@@ -208,7 +207,7 @@ impl HexDBEngine {
 
     /// Statistics for a tessellation, from the cache when it's still valid.
     pub(crate) async fn cached_stats(&self, tess: &str) -> TessellationStats {
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let generation = self.tess_generation(tess);
         if let Some(cached) = self.stats_cache.lock().unwrap().get(tess) {
             if cached.generation == generation && now < cached.valid_until {
@@ -232,7 +231,7 @@ impl HexDBEngine {
         let mut out = Vec::new();
         let mut cursor = after;
         while out.len() < limit {
-            let now = Utc::now().timestamp_millis();
+            let now = jiff::Timestamp::now().as_millisecond();
             let memory = self.state.lock().await.hex.ids_after(tess, cursor, BATCH);
             let disk = self.sst.entries_after(tess, cursor, BATCH);
             let disk = disk.await;

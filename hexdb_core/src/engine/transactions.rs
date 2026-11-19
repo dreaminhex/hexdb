@@ -176,7 +176,7 @@ impl TxOperation {
             Some(v) => {
                 let secs = v.as_u64().ok_or_else(|| at("ttl must be a number of seconds."))?;
                 let millis = secs.min(i64::MAX as u64 / 1000) as i64 * 1000;
-                Some(chrono::Utc::now().timestamp_millis().saturating_add(millis))
+                Some(jiff::Timestamp::now().as_millisecond().saturating_add(millis))
             }
         };
         if ttl.is_some() && matches!(kind, TxOpKind::Get | TxOpKind::Check | TxOpKind::Delete | TxOpKind::DeleteWhere) {

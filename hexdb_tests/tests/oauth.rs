@@ -67,7 +67,7 @@ impl Provider {
     }
 
     fn token_with(&self, header: Value, overrides: Value) -> String {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let mut claims = json!({ "iss": self.issuer, "aud": AUDIENCE, "sub": "user-123", "email": "ada@example.com", "iat": now, "exp": now + 600 });
         for (k, v) in overrides.as_object().unwrap() {
             match v {
@@ -128,10 +128,10 @@ fn provider_tokens_authenticate_as_existing_users() -> Result<()> {
     // a forged signature, and unsigned or shared-secret algorithms.
     let forged = {
         let mut parts: Vec<String> = provider.token(json!({})).split('.').map(String::from).collect();
-        parts[1] = URL_SAFE_NO_PAD.encode(json!({ "iss": provider.issuer, "aud": AUDIENCE, "email": "admin@example.com", "exp": chrono::Utc::now().timestamp() + 600 }).to_string());
+        parts[1] = URL_SAFE_NO_PAD.encode(json!({ "iss": provider.issuer, "aud": AUDIENCE, "email": "admin@example.com", "exp": jiff::Timestamp::now().as_second() + 600 }).to_string());
         parts.join(".")
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for (why, bad) in [
         ("audience", provider.token(json!({ "aud": "api://other" }))),
         ("issuer", provider.token(json!({ "iss": "https://evil.example.com" }))),

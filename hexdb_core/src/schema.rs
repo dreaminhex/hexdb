@@ -569,7 +569,7 @@ pub fn new_version(current: &[SchemaVersion], input: SchemaInput) -> Result<Sche
     }
     Ok(SchemaVersion {
         version: previous.map(|p| p.version + 1).unwrap_or(1),
-        created: chrono::Utc::now().timestamp_millis(),
+        created: jiff::Timestamp::now().as_millisecond(),
         fields: input.fields,
         additional_fields: input.additional_fields,
         migration: input.migration,

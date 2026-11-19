@@ -97,7 +97,7 @@ fn a_one_time_code_signs_in_once_across_the_lattice() -> Result<()> {
     let ports = [TestServer::free_port()?, TestServer::free_port()?];
     let overseer = TestServer::start_with(pair_options(ports, 0, 4096, ""))?;
     let replica = TestServer::start_with(pair_options(ports, 1, 1024, ""))?;
-    let now = || chrono::Utc::now().timestamp();
+    let now = || jiff::Timestamp::now().as_second();
     let sign_in = |server: &TestServer, login: &str, code: Option<&str>| -> Result<(u16, Value)> {
         let mut body = json!({ "login": login, "password": PASSWORD, "return_token": true });
         if let Some(code) = code {

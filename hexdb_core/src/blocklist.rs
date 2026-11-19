@@ -8,7 +8,6 @@
 
 use crate::engine::{EngineError, HexDBEngine};
 use anyhow::Result;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use ulid::Ulid;
@@ -122,7 +121,7 @@ impl HexDBEngine {
         if self.blocklist().await?.len() >= MAX_ENTRIES {
             return Err(EngineError::Invalid(format!("The blocklist holds at most {} entries; remove some, or block a wider range.", MAX_ENTRIES)).into());
         }
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let expires_at = match input.expires_in_hours {
             Some(h) if !(h > 0.0 && h.is_finite()) => return Err(EngineError::Invalid("expires_in_hours must be a positive number.".into()).into()),
             Some(h) => Some(now + (h * 3_600_000.0) as i64),

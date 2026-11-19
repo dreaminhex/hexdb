@@ -26,7 +26,7 @@ use crate::{
     HexConfig,
 };
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use rand::seq::IndexedRandom;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -240,7 +240,7 @@ pub struct HexDBEngine {
     /// Lattice role (Overseer, Harvester or Replicant); changes when the lattice re-elects.
     role: std::sync::RwLock<String>,
     pub version: String,
-    pub start_datetime: DateTime<Utc>,
+    pub start_datetime: UtcTime,
     /// Other hexes in the lattice, as last seen by discovery.
     pub peers: Arc<Mutex<Vec<LatticeMember>>>,
     /// This hex's identity as of the last discovery round, for answering
@@ -357,6 +357,8 @@ pub struct HexDBEngine {
     live: std::sync::RwLock<crate::settings::LiveSettings>,
     /// The lattice configuration in effect (see `crate::lattice_config`).
     pub(crate) lattice_config: crate::lattice_config::LatticeConfigState,
+    /// The partition map this hex routes by (see `crate::partitioning`).
+    pub(crate) partitions: crate::partitioning::PartitionState,
     /// Bytes the data directory uses (refreshed by the metrics task and after flushes).
     pub(crate) disk_used: AtomicU64,
     /// Set once indexes are loaded at startup; snapshots are saved only after.
@@ -479,7 +481,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: jiff::Timestamp::now().as_millisecond(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
                 );
                 catalog_changed = true;
             }
@@ -525,7 +527,7 @@ impl HexDBEngine {
             if !catalog.tessellations.contains_key(&tess) {
                 catalog.tessellations.insert(
                     tess.clone(),
-                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
+                    TessellationInfo { kind: Catalog::default_kind(&tess).into(), created: jiff::Timestamp::now().as_millisecond(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
                 );
                 catalog_changed = true;
             }
@@ -567,7 +569,7 @@ impl HexDBEngine {
             name: identity.name,
             role: std::sync::RwLock::new(identity.hex_type),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            start_datetime: Utc::now(),
+            start_datetime: UtcTime::now(),
             peers: Arc::new(Mutex::new(Vec::new())),
             identity_cache: std::sync::RwLock::new(None),
             learned_peers: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -635,6 +637,7 @@ impl HexDBEngine {
             indexes_loaded: std::sync::atomic::AtomicBool::new(false),
             live: std::sync::RwLock::new(live_settings),
             lattice_config: Default::default(),
+            partitions: Default::default(),
             disk_used: AtomicU64::new(0),
             replica_progress: std::sync::Mutex::new(HashMap::new()),
             progress_notify: tokio::sync::Notify::new(),
@@ -648,6 +651,7 @@ impl HexDBEngine {
         engine.refresh_seal_policy().await;
         // The configuration first: vector indexes need the embedding model.
         engine.refresh_lattice_config().await;
+        engine.refresh_partition_map().await;
         engine.rebuild_indexes().await?;
         engine.load_metrics_history();
         engine.refresh_disk_usage().await;
@@ -965,7 +969,7 @@ impl HexDBEngine {
         if !catalog.tessellations.contains_key(name) {
             catalog.tessellations.insert(
                 name.to_string(),
-                TessellationInfo { kind: "system".into(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
+                TessellationInfo { kind: "system".into(), created: jiff::Timestamp::now().as_millisecond(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
             );
             catalog.save(&self.storage_dir, &self.keys)?;
         }
@@ -1003,7 +1007,7 @@ impl HexDBEngine {
         }
         catalog.tessellations.insert(
             name.to_string(),
-            TessellationInfo { kind: kind.to_string(), created: Utc::now().timestamp_millis(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
+            TessellationInfo { kind: kind.to_string(), created: jiff::Timestamp::now().as_millisecond(), indexes: Vec::new(), schemas: Vec::new(), pending_schema: None, quota: None },
         );
         catalog.save(&self.storage_dir, &self.keys)?;
         info!("🧩 Created tessellation '{}' ({}).", name, kind);
@@ -1058,7 +1062,7 @@ impl HexDBEngine {
                 created: false,
                 origin: None,
                 seq: drop_seq,
-                timestamp: Utc::now(),
+                timestamp: UtcTime::now(),
                 kind: crate::changes::ChangeKind::DropTessellation,
                 tessellation: name.to_string(),
                 id: None,
@@ -1144,7 +1148,7 @@ impl HexDBEngine {
 
     /// The newest version of every document in a tessellation.
     async fn versions(&self, tess: &str) -> HashMap<Ulid, Version> {
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let state = self.state.lock().await;
         let disk = self.sst.latest_entries(tess).await;
         let memory = state.hex.entries_in(tess);
@@ -1179,7 +1183,7 @@ impl HexDBEngine {
     /// Read the newest version of a document. Returns the document (if visible)
     /// and the sequence number of the version seen (0 if none).
     pub(crate) async fn read_latest(&self, key: &DocKey) -> Result<(Option<Document>, u64)> {
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         {
             let mut state = self.state.lock().await;
             if let Some(meta) = state.hex.meta(key) {
@@ -1268,7 +1272,7 @@ impl HexDBEngine {
         const BATCH: usize = 1024;
         let mut out = Vec::with_capacity(keys.len());
         for chunk in keys.chunks(BATCH) {
-            let now = Utc::now().timestamp_millis();
+            let now = jiff::Timestamp::now().as_millisecond();
             // Per key: a cached document, bytes to parse, or "ask read_latest".
             enum Found {
                 Doc(Option<Arc<Document>>),
@@ -1421,7 +1425,7 @@ impl HexDBEngine {
     pub async fn compact(&self) -> Result<CompactionStats> {
         let stats = self
             .sst
-            .compact(self.wal_floor.load(Ordering::SeqCst), Utc::now().timestamp_millis())
+            .compact(self.wal_floor.load(Ordering::SeqCst), jiff::Timestamp::now().as_millisecond())
             .await?;
         if stats.files_merged > 0 {
             info!(
@@ -1434,7 +1438,7 @@ impl HexDBEngine {
 
     /// Evict expired documents from memory. Returns how many were evicted.
     pub async fn sweep_expired(&self) -> usize {
-        let removed = self.state.lock().await.hex.evict_expired_clean(Utc::now().timestamp_millis());
+        let removed = self.state.lock().await.hex.evict_expired_clean(jiff::Timestamp::now().as_millisecond());
         if removed > 0 {
             info!("🧹 TTL sweep evicted {} expired documents from memory.", removed);
         }

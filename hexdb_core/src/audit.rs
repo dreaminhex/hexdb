@@ -21,7 +21,6 @@ use crate::{
     index::{IndexDef, IndexKind},
 };
 use anyhow::Result;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::{info, warn};
@@ -59,7 +58,7 @@ pub struct AuditEvent {
 impl AuditEvent {
     pub fn new(actor: &str, action: &str, target: &str) -> Self {
         AuditEvent {
-            time: Utc::now().timestamp_millis(),
+            time: jiff::Timestamp::now().as_millisecond(),
             actor: if actor.is_empty() { "-".into() } else { actor.to_string() },
             action: action.to_string(),
             target: target.to_string(),

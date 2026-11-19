@@ -25,6 +25,7 @@
 // are reached by their alias.
 
 use super::{column_type, compare_values, field_compare, in_list, invalid, like, negate, parse_number, unsupported, Cond, Params};
+use crate::clock::{Civil, Item};
 use crate::engine::{DocumentQuery, HexDBEngine};
 use crate::filter::{compare, sort_order, Filter};
 use anyhow::Result;
@@ -1619,7 +1620,7 @@ struct Ctx<'g> {
     /// Bytes of rows the statement has built (joined rows, results), against `build_limit`.
     built: Cell<usize>,
     build_limit: usize,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
     null: Arc<Value>,
 }
 
@@ -1727,7 +1728,7 @@ impl HexDBEngine {
             work_limit: (max_rows as u64).saturating_mul(WORK_PER_ROW),
             built: Cell::new(0),
             build_limit: max_bytes,
-            now: chrono::Utc::now(),
+            now: jiff::Timestamp::now(),
             null: Arc::new(Value::Null),
         };
         ctx.query(&plan.root, None)
@@ -2791,48 +2792,65 @@ fn like_match(value: &str, pattern: &str, escape: Option<char>) -> bool {
     parts[p..].iter().all(|x| *x == P::Any)
 }
 
-fn parse_datetime(v: &Value) -> Result<Option<chrono::NaiveDateTime>> {
+/// A date or time as SQL reads it: RFC 3339 (converted to UTC), then these
+/// patterns without a zone, then a bare date (chrono's parsing rules, as
+/// before 2.6; see `clock`).
+fn parse_datetime(v: &Value) -> Result<Option<Civil>> {
+    use crate::clock::Item::{Day, Fraction, Hour, Literal, Minute, Month, Second, Space, Year};
+    const DATE: [Item; 5] = [Year, Literal('-'), Month, Literal('-'), Day];
+    const PATTERNS: [&[Item]; 4] = [
+        // %Y-%m-%dT%H:%M:%S%.f
+        &[Year, Literal('-'), Month, Literal('-'), Day, Literal('T'), Hour, Literal(':'), Minute, Literal(':'), Second, Fraction],
+        // %Y-%m-%d %H:%M:%S%.f
+        &[Year, Literal('-'), Month, Literal('-'), Day, Space, Hour, Literal(':'), Minute, Literal(':'), Second, Fraction],
+        // %Y-%m-%dT%H:%M
+        &[Year, Literal('-'), Month, Literal('-'), Day, Literal('T'), Hour, Literal(':'), Minute],
+        // %Y-%m-%d %H:%M
+        &[Year, Literal('-'), Month, Literal('-'), Day, Space, Hour, Literal(':'), Minute],
+    ];
     let s = match v {
         Value::Null => return Ok(None),
         Value::String(s) => s.trim(),
         other => return Err(invalid(format!("{} isn't a date or time.", other))),
     };
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-        return Ok(Some(dt.with_timezone(&chrono::Utc).naive_utc()));
+    if let Some(dt) = crate::clock::parse_rfc3339_utc(s) {
+        return Ok(Some(dt));
     }
-    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"] {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, format) {
+    for pattern in PATTERNS {
+        if let Some(dt) = Civil::parse_naive(s, pattern) {
             return Ok(Some(dt));
         }
     }
-    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-        return Ok(d.and_hms_opt(0, 0, 0));
+    if let Some(d) = Civil::parse_naive_date(s, &DATE) {
+        return Ok(Some(d));
     }
     Err(invalid(format!("'{}' isn't a date or time HexDB can read (use ISO 8601, like 2026-10-19 or 2026-10-19T14:30:00Z).", s)))
 }
 
 fn extract(part: DatePart, v: &Value) -> Result<Value> {
-    use chrono::{Datelike, Timelike};
-    let Some(dt) = parse_datetime(v)? else { return Ok(Value::Null) };
+    let Some(c) = parse_datetime(v)? else { return Ok(Value::Null) };
+    let dt = c.datetime;
     Ok(match part {
         DatePart::Year => json!(dt.year()),
         DatePart::Quarter => json!((dt.month() - 1) / 3 + 1),
         DatePart::Month => json!(dt.month()),
-        DatePart::Week => json!(dt.iso_week().week()),
+        DatePart::Week => json!(dt.date().iso_week_date().week()),
         DatePart::Day => json!(dt.day()),
-        DatePart::DayOfWeek => json!(dt.weekday().num_days_from_sunday()),
-        DatePart::DayOfYear => json!(dt.ordinal()),
+        DatePart::DayOfWeek => json!(c.weekday_from_sunday()),
+        DatePart::DayOfYear => json!(dt.day_of_year()),
         DatePart::Hour => json!(dt.hour()),
         DatePart::Minute => json!(dt.minute()),
         DatePart::Second => {
-            let s = dt.second() as f64 + dt.nanosecond() as f64 / 1e9;
+            // A leap second counts as :59 plus 1.x seconds, as before 2.6.
+            let nanos = c.nanosecond() + if c.leap { 1_000_000_000 } else { 0 };
+            let s = dt.second() as f64 + nanos as f64 / 1e9;
             if s.fract() == 0.0 {
                 json!(dt.second())
             } else {
                 float(s)
             }
         }
-        DatePart::Epoch => json!(dt.and_utc().timestamp()),
+        DatePart::Epoch => json!(c.unix_secs()),
     })
 }
 
@@ -2873,17 +2891,17 @@ fn cast(v: &Value, to: CastTo) -> Result<Value> {
             _ => return Err(fail()),
         },
         CastTo::Date => match parse_datetime(v)? {
-            Some(dt) => Value::String(dt.format("%Y-%m-%d").to_string()),
+            Some(dt) => Value::String(dt.format("%Y-%m-%d")),
             None => Value::Null,
         },
         CastTo::Timestamp => match parse_datetime(v)? {
-            Some(dt) => Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string()),
+            Some(dt) => Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.fZ")),
             None => Value::Null,
         },
     })
 }
 
-fn call(func: Func, args: &[Value], now: chrono::DateTime<chrono::Utc>) -> Result<Value> {
+fn call(func: Func, args: &[Value], now: jiff::Timestamp) -> Result<Value> {
     let arg = |i: usize| args.get(i).unwrap_or(&Value::Null);
     let any_null = args.iter().any(Value::is_null);
     let int_arg = |i: usize, what: &str| -> Result<i64> {
@@ -2893,9 +2911,9 @@ fn call(func: Func, args: &[Value], now: chrono::DateTime<chrono::Utc>) -> Resul
         }
     };
     Ok(match func {
-        Func::Now => Value::String(now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()),
-        Func::CurrentDate => Value::String(now.format("%Y-%m-%d").to_string()),
-        Func::CurrentTime => Value::String(now.format("%H:%M:%S").to_string()),
+        Func::Now => Value::String(crate::clock::format(now, "%Y-%m-%dT%H:%M:%S%.3fZ")),
+        Func::CurrentDate => Value::String(crate::clock::format(now, "%Y-%m-%d")),
+        Func::CurrentTime => Value::String(crate::clock::format(now, "%H:%M:%S")),
         Func::Pi => float(std::f64::consts::PI),
         Func::Concat => Value::String(args.iter().map(text).collect()),
         Func::Coalesce => args.iter().find(|v| !v.is_null()).cloned().unwrap_or(Value::Null),
@@ -3007,7 +3025,7 @@ fn call(func: Func, args: &[Value], now: chrono::DateTime<chrono::Utc>) -> Resul
         }
         Func::DayName | Func::MonthName => match parse_datetime(arg(0))? {
             None => Value::Null,
-            Some(dt) => Value::String(dt.format(if func == Func::DayName { "%A" } else { "%B" }).to_string()),
+            Some(dt) => Value::String(dt.format(if func == Func::DayName { "%A" } else { "%B" })),
         },
         Func::Power => float(number(arg(0), "POWER")?.unwrap_or(0.0).powf(number(arg(1), "POWER")?.unwrap_or(0.0))),
         Func::Sqrt => {

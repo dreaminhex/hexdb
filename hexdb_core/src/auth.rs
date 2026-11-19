@@ -65,7 +65,6 @@ use crate::{
 };
 use anyhow::Result;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -420,17 +419,17 @@ pub fn issue_session(key: &[u8; 32], user_id: &str, hours: u64) -> (String, Sess
 
 /// A session token, marked when it's issued to a trigger's script.
 pub fn issue_session_for(key: &[u8; 32], user_id: &str, hours: u64, trigger: Option<String>) -> (String, SessionClaims) {
-    issue_session_until(key, user_id, Utc::now().timestamp() + (hours.clamp(1, 24 * 30) as i64) * 3600, trigger)
+    issue_session_until(key, user_id, jiff::Timestamp::now().as_second() + (hours.clamp(1, 24 * 30) as i64) * 3600, trigger)
 }
 
 /// A session token that expires at `expires` (epoch seconds), e.g. one script run's.
 pub fn issue_session_until(key: &[u8; 32], user_id: &str, expires: i64, trigger: Option<String>) -> (String, SessionClaims) {
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let claims = SessionClaims {
         sub: user_id.to_string(),
         sid: Ulid::generate().to_string(),
-        iat: now.timestamp_millis(),
-        exp: expires.clamp(now.timestamp() + 1, now.timestamp() + 30 * 24 * 3600),
+        iat: now.as_millisecond(),
+        exp: expires.clamp(now.as_second() + 1, now.as_second() + 30 * 24 * 3600),
         trg: trigger,
     };
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap_or_default());
@@ -453,7 +452,7 @@ pub fn verify_session(key: &[u8; 32], token: &str) -> Option<SessionClaims> {
     }
     let payload = URL_SAFE_NO_PAD.decode(signed.strip_prefix(SESSION_PREFIX)?).ok()?;
     let claims: SessionClaims = serde_json::from_slice(&payload).ok()?;
-    (claims.exp > Utc::now().timestamp()).then_some(claims)
+    (claims.exp > jiff::Timestamp::now().as_second()).then_some(claims)
 }
 
 // ---------------------------------------------------------------------------
@@ -565,7 +564,7 @@ pub async fn create_api_key(engine: &HexDBEngine, owner: &Principal, name: &str,
     engine.ensure_writable()?;
     let id = Ulid::generate();
     let secret = URL_SAFE_NO_PAD.encode(random_bytes(32));
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let stored = StoredApiKey {
         name: name.to_string(),
         user_id: owner.user_id.clone(),
@@ -724,7 +723,7 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
                 }
             }
         }
-        if stored.expires > 0 && stored.expires <= Utc::now().timestamp() {
+        if stored.expires > 0 && stored.expires <= jiff::Timestamp::now().as_second() {
             return Ok(None);
         }
         let Some((user_id, user)) = users::find_by_id(engine, &stored.user_id).await? else { return Ok(None) };
@@ -821,7 +820,7 @@ pub async fn login(engine: &HexDBEngine, login: &str, password: &str, code: Opti
             .await;
         return Err(unauthorized("This account is locked. Ask an administrator to unlock it."));
     }
-    if user.password_expiration > 0 && user.password_expiration <= Utc::now().timestamp() {
+    if user.password_expiration > 0 && user.password_expiration <= jiff::Timestamp::now().as_second() {
         return Err(unauthorized("This password has expired. Ask an administrator to reset it."));
     }
     if user.use_mfa && user.mfa_secret.is_some() {
@@ -870,7 +869,7 @@ pub async fn revoke_session(engine: &HexDBEngine, session_id: &str, expires_at: 
     let id = Ulid::from_string(session_id).map_err(|_| EngineError::Invalid("bad session ID".into()))?;
     let ttl = Some(expires_at.saturating_mul(1000));
     engine
-        .put_system_document(REVOKED_SESSIONS_TESSELLATION, id, serde_json::json!({ "revoked": Utc::now().timestamp() }), ttl)
+        .put_system_document(REVOKED_SESSIONS_TESSELLATION, id, serde_json::json!({ "revoked": jiff::Timestamp::now().as_second() }), ttl)
         .await
 }
 
@@ -925,7 +924,7 @@ pub(crate) async fn lattice_blocked(engine: &HexDBEngine, keys: &[&str]) -> Opti
     }
     let window_ms = engine.login_throttle.window.as_millis() as i64;
     let max = engine.login_throttle.max_failures;
-    let now = Utc::now().timestamp_millis();
+    let now = jiff::Timestamp::now().as_millisecond();
     let mut wait: Option<Duration> = None;
     for key in keys {
         let Ok(Some(doc)) = engine.get_system_document(THROTTLE_TESSELLATION, throttle_id(key)).await else { continue };
@@ -978,7 +977,7 @@ pub async fn record_throttle(engine: &HexDBEngine, fail: &[&str], clear: &[&str]
     let _lock = engine.users_lock.lock().await;
     let window_ms = engine.login_throttle.window.as_millis() as i64;
     let cap = engine.login_throttle.max_failures * 4;
-    let now = Utc::now().timestamp_millis();
+    let now = jiff::Timestamp::now().as_millisecond();
     for key in fail {
         let id = throttle_id(key);
         let mut times: Vec<i64> = match engine.get_system_document(THROTTLE_TESSELLATION, id).await? {
@@ -1158,7 +1157,7 @@ mod tests {
         assert!(verify_session(&key, "").is_none());
 
         // An expired (but correctly signed) token is refused.
-        let expired = SessionClaims { exp: Utc::now().timestamp() - 1, ..claims };
+        let expired = SessionClaims { exp: jiff::Timestamp::now().as_second() - 1, ..claims };
         let payload = format!("{}{}", SESSION_PREFIX, URL_SAFE_NO_PAD.encode(serde_json::to_vec(&expired).unwrap()));
         let token = format!("{}.{}", payload, URL_SAFE_NO_PAD.encode(mac(&key, payload.as_bytes()).as_bytes()));
         assert!(verify_session(&key, &token).is_none());

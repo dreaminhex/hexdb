@@ -36,7 +36,6 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use chrono::{SecondsFormat, Utc};
 use hexdb_core::{Action, Principal};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -189,7 +188,7 @@ fn error(id: &Value, code: i64, message: &str) -> Value {
 }
 
 fn now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    hexdb_core::clock::rfc3339_millis(jiff::Timestamp::now())
 }
 
 /// `POST /a2a`: one JSON-RPC request.

@@ -31,7 +31,8 @@ use crate::{
     filter::{Filter, SortKey},
 };
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, TimeZone, Timelike, Utc};
+use jiff::civil;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -396,9 +397,9 @@ impl Cron {
         })
     }
 
-    fn day_matches(&self, date: DateTime<Utc>) -> bool {
-        let dom = self.days.contains(&date.day());
-        let dow = self.weekdays.contains(&date.weekday().num_days_from_sunday());
+    fn day_matches(&self, date: civil::Date) -> bool {
+        let dom = self.days.contains(&(date.day() as u32));
+        let dow = self.weekdays.contains(&(date.weekday().to_sunday_zero_offset() as u32));
         match (self.any_day, self.any_weekday) {
             (true, true) => true,
             (true, false) => dow,
@@ -409,21 +410,23 @@ impl Cron {
     }
 
     /// The first time strictly after `after` that matches (within 5 years).
-    pub fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let start = after.with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
-        let mut day = Utc.with_ymd_and_hms(start.year(), start.month(), start.day(), 0, 0, 0).single()?;
+    pub fn next_after(&self, after: Timestamp) -> Option<Timestamp> {
+        // In UTC, so calendar and clock arithmetic agree (no DST).
+        let now = crate::clock::utc(after);
+        let start = now.date().to_datetime(civil::Time::new(now.hour(), now.minute(), 0, 0).ok()?).checked_add(jiff::SignedDuration::from_mins(1)).ok()?;
+        let mut day = start.date();
         for _ in 0..(366 * 5) {
-            if self.months.contains(&day.month()) && self.day_matches(day) {
+            if self.months.contains(&(day.month() as u32)) && self.day_matches(day) {
                 for &h in &self.hours {
                     for &m in &self.minutes {
-                        let t = day.with_hour(h)?.with_minute(m)?;
+                        let t = day.to_datetime(civil::Time::new(h as i8, m as i8, 0, 0).ok()?);
                         if t >= start {
-                            return Some(t);
+                            return crate::clock::from_utc(t);
                         }
                     }
                 }
             }
-            day += ChronoDuration::days(1);
+            day = day.tomorrow().ok()?;
         }
         None
     }
@@ -441,10 +444,10 @@ impl ScheduleDef {
     }
 
     /// When it runs next, after `now`.
-    pub fn next_after(&self, now: DateTime<Utc>) -> i64 {
+    pub fn next_after(&self, now: Timestamp) -> i64 {
         match (&self.every_seconds, &self.cron) {
-            (Some(s), _) => now.timestamp_millis() + *s as i64 * 1000,
-            (None, Some(c)) => Cron::parse(c).ok().and_then(|c| c.next_after(now)).map(|t| t.timestamp_millis()).unwrap_or(i64::MAX),
+            (Some(s), _) => crate::clock::unix_millis(now) + *s as i64 * 1000,
+            (None, Some(c)) => Cron::parse(c).ok().and_then(|c| c.next_after(now)).map(crate::clock::unix_millis).unwrap_or(i64::MAX),
             _ => i64::MAX,
         }
     }
@@ -484,7 +487,7 @@ impl HexDBEngine {
             bail!(EngineError::NotFound(format!("Function '{}' not found.", def.name)));
         }
         def.created_by = by.to_string();
-        def.updated = Utc::now().timestamp_millis();
+        def.updated = jiff::Timestamp::now().as_millisecond();
         self.put_system_document(FUNCTIONS_TESSELLATION, doc_id("function", &def.name), serde_json::to_value(&def)?, None).await?;
         Ok(def)
     }
@@ -561,7 +564,7 @@ impl HexDBEngine {
         // A session for the caller, only for this run: it expires a minute after the
         // script's timeout, and is revoked when the run ends, however it ends (see `ScriptRun`).
         // Inside a trigger, the session is marked so the script's writes don't fire triggers.
-        let expires = Utc::now().timestamp() + def.timeout_seconds as i64 + 60;
+        let expires = jiff::Timestamp::now().as_second() + def.timeout_seconds as i64 + 60;
         let (token, claims) = crate::auth::issue_session_until(&self.config.session_key()?, &principal.user_id, expires, crate::access::current_trigger());
         let mut run = ScriptRun { engine: self, dir: dir.clone(), sid: claims.sid.clone(), exp: claims.exp, child: None, pid: None, job: None, finished: false };
         std::fs::write(dir.join(file), code)?;
@@ -702,7 +705,7 @@ impl HexDBEngine {
         }
         schedule.run_as = owner.user_id.clone();
         schedule.run_as_login = owner.login.clone();
-        schedule.next_run = schedule.next_after(Utc::now());
+        schedule.next_run = schedule.next_after(Timestamp::now());
         self.put_schedule(&schedule).await?;
         Ok(schedule)
     }
@@ -732,10 +735,10 @@ impl HexDBEngine {
             crate::access::as_caller(principal.clone(), self.run_function(&def, &principal, &schedule.params)).await
         }
         .await;
-        schedule.last_run = Utc::now().timestamp_millis();
+        schedule.last_run = jiff::Timestamp::now().as_millisecond();
         schedule.last_duration_ms = started.elapsed().as_millis() as u64;
         schedule.runs += 1;
-        schedule.next_run = schedule.next_after(Utc::now());
+        schedule.next_run = schedule.next_after(Timestamp::now());
         match &result {
             Ok(_) => {
                 schedule.last_status = "ok".into();
@@ -753,7 +756,7 @@ impl HexDBEngine {
             updated.last_run = schedule.last_run;
             updated.last_duration_ms = schedule.last_duration_ms;
             updated.runs = schedule.runs;
-            updated.next_run = updated.next_after(Utc::now());
+            updated.next_run = updated.next_after(Timestamp::now());
             updated.last_status = schedule.last_status.clone();
             updated.last_error = schedule.last_error.clone();
             self.put_schedule(&updated).await?;
@@ -844,7 +847,7 @@ impl Drop for ScriptRun<'_> {
 
 /// Revoke the sessions of abandoned script runs (kept refused here until they expire).
 async fn revoke_abandoned_sessions(engine: &HexDBEngine) {
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let pending: Vec<(String, i64)> = {
         let mut abandoned = ABANDONED_SESSIONS.lock().unwrap();
         abandoned.retain(|_, (exp, _)| *exp > now);
@@ -878,7 +881,7 @@ pub fn spawn_scheduler(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()
                     continue;
                 }
                 let Ok(schedules) = engine.list_schedules().await else { continue };
-                let now = Utc::now().timestamp_millis();
+                let now = jiff::Timestamp::now().as_millisecond();
                 for schedule in schedules.into_iter().filter(|s| s.enabled && s.next_run <= now) {
                     if !running.lock().unwrap().insert(schedule.name.clone()) {
                         continue;
@@ -917,7 +920,7 @@ mod tests {
 
     #[test]
     fn cron_finds_the_next_time() {
-        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let t = |s: &str| crate::clock::parse_rfc3339(s).unwrap();
         let every15 = Cron::parse("*/15 * * * *").unwrap();
         assert_eq!(every15.next_after(t("2026-01-01T10:07:30Z")), Some(t("2026-01-01T10:15:00Z")));
         let weekdays9 = Cron::parse("0 9 * * 1-5").unwrap();

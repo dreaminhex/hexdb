@@ -26,7 +26,7 @@ use crate::{
     wal::{WalOp, WalRecord},
 };
 use anyhow::{anyhow, bail, Result};
-use chrono::Utc;
+use crate::clock::UtcTime;
 use futures::future::BoxFuture;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -1091,7 +1091,7 @@ impl HexDBEngine {
     }
 
     pub(crate) fn idempotency_item(&self, k: &IdempotencyKey, result: &impl Serialize, expected_seq: u64) -> Result<BatchItem> {
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let mut data = CompactFields::new();
         data.insert("key".into(), FieldValue::String(k.key.clone()));
         data.insert("fingerprint".into(), FieldValue::String(k.fingerprint.clone()));
@@ -1262,7 +1262,7 @@ impl HexDBEngine {
             if !replicated {
                 // A unique key held by a document whose TTL has passed is free: that document goes
                 // in this commit (taking its index entry with it), so the key's next owner can claim it.
-                let now = Utc::now().timestamp_millis();
+                let now = jiff::Timestamp::now().as_millisecond();
                 while let Some((tess, other, message)) = self.unique_conflict(&items)? {
                     let key = DocKey::new(&tess, other);
                     let expired = match state.hex.meta(&key) {
@@ -1280,7 +1280,7 @@ impl HexDBEngine {
             let (deltas, created) = self.count_deltas(&state, &prepared).await;
             let origin = crate::access::current_trigger();
             let count = items.len() as u64;
-            let now = Utc::now();
+            let now = UtcTime::now();
             let changes: Vec<Change> = items
                 .iter()
                 .enumerate()
@@ -1308,7 +1308,7 @@ impl HexDBEngine {
 
             // Queue to the WAL first so nothing is applied if the WAL is unavailable.
             let created_seqs = created.iter().map(|i| first + *i as u64).collect();
-            let ack = self.wal.append(WalRecord { seq: first, op, time: Utc::now().timestamp_millis(), created: created_seqs, origin }).await?;
+            let ack = self.wal.append(WalRecord { seq: first, op, time: jiff::Timestamp::now().as_millisecond(), created: created_seqs, origin }).await?;
             state.next_seq += count;
             let changes = (changes, count);
             for (i, (key, bytes, ttl)) in prepared.iter().enumerate() {
@@ -1542,7 +1542,7 @@ impl HexDBEngine {
         let counted = self.counted_tessellations();
         let mut deltas: HashMap<String, super::reads::CountDelta> = HashMap::new();
         let mut created = Vec::new();
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         // A batch may hold several versions of one document (replication).
         let mut within: HashMap<&DocKey, bool> = HashMap::new();
         for (i, (key, bytes, ttl)) in prepared.iter().enumerate() {

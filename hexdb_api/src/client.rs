@@ -123,12 +123,19 @@ pub async fn resolve_client(
     }
     let forwarded_for = request.headers().get(FORWARDED_FOR_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
     let signature = request.headers().get(FORWARD_SIGNATURE_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+    // The partition epoch the sender routed by (2.6 and later, with partitioning on); covered by the signature.
+    let epoch = request.headers().get(hexdb_core::partitioning::PARTITION_EPOCH_HEADER).map(|v| v.to_str().ok().and_then(|v| v.parse::<u64>().ok()));
     if let (Some(client), Some(signature)) = (forwarded_for, signature) {
         let target = request.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_default();
         let method = request.method().as_str().to_string();
-        if engine.lattice_keys.verify_request(&signature, &method, &signed_target(&target, &client), b"", &engine.lattice_nonces) {
+        // A header that isn't a number can't match any signature.
+        let valid = epoch != Some(None) && engine.lattice_keys.verify_request(&signature, &method, &signed_target(&target, &client, epoch.flatten()), b"", &engine.lattice_nonces);
+        if valid {
             address = client;
             request.extensions_mut().insert(Forwarded);
+            if let Some(Some(epoch)) = epoch {
+                request.extensions_mut().insert(crate::forward::PartitionEpoch(epoch));
+            }
             request.extensions_mut().insert(crate::forward::ForwardSignature(signature));
         } else {
             tracing::warn!("🚫 Ignoring a forwarded-request header without a valid lattice signature.");
@@ -136,6 +143,7 @@ pub async fn resolve_client(
     }
     request.headers_mut().remove(FORWARDED_FOR_HEADER);
     request.headers_mut().remove(FORWARD_SIGNATURE_HEADER);
+    request.headers_mut().remove(hexdb_core::partitioning::PARTITION_EPOCH_HEADER);
     request.extensions_mut().insert(ClientIp(address));
     request.extensions_mut().insert(ViaHttps(https || engine.config.tls.enabled()));
     let mut response = next.run(request).await;

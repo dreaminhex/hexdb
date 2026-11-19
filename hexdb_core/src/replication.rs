@@ -66,7 +66,7 @@ use crate::{
     network::discovery::{LatticeMember, ROLE_OVERSEER},
 };
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Utc};
+use crate::clock::UtcTime;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -206,7 +206,7 @@ pub struct ReplicationStatus {
     pub source_seq: u64,
     /// Documents copied by the last full sync.
     pub synced_documents: u64,
-    pub last_sync: Option<DateTime<Utc>>,
+    pub last_sync: Option<UtcTime>,
     pub last_error: Option<String>,
     /// The slices this hex keeps (all of them unless it's a sliced replica).
     pub slices_held: crate::slicing::SliceMask,
@@ -221,7 +221,7 @@ pub struct ReplicationStatus {
     /// When the oldest change this hex hasn't applied was committed on the
     /// Overseer, as of the last batch (None when it was caught up). `lag_ms` is its age.
     #[serde(skip)]
-    pub pending_since: Option<DateTime<Utc>>,
+    pub pending_since: Option<UtcTime>,
 }
 
 /// The Overseer answered 503: it's still collecting slices after a failover.
@@ -294,7 +294,7 @@ impl ReplicationStatus {
 
     /// How far behind the Overseer this hex is in time: the age of the oldest
     /// change it hasn't applied, 0 when caught up. Known only while streaming.
-    pub fn lag_ms(&self, now: DateTime<Utc>) -> Option<u64> {
+    pub fn lag_ms(&self, now: UtcTime) -> Option<u64> {
         if self.state != "streaming" {
             return None;
         }
@@ -303,8 +303,8 @@ impl ReplicationStatus {
 }
 
 /// Milliseconds from `at` to `now` (0 if `at` is in the future, as clocks differ a little between hexes).
-pub fn age_ms(at: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
-    u64::try_from((now - at).num_milliseconds()).unwrap_or(0)
+pub fn age_ms(at: UtcTime, now: UtcTime) -> u64 {
+    u64::try_from(now.since(at).as_millis()).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +418,7 @@ pub struct ChangeBatch {
     /// When the first change after `last_seq` was committed (None when there's
     /// none yet), so the replica knows how far behind it is in time (2.3.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_since: Option<DateTime<Utc>>,
+    pub pending_since: Option<UtcTime>,
 }
 
 impl HexDBEngine {
@@ -863,7 +863,7 @@ impl Follower {
             s.applied_seq = meta.seq;
             s.source_seq = s.source_seq.max(meta.seq);
             s.synced_documents = copied;
-            s.last_sync = Some(Utc::now());
+            s.last_sync = Some(UtcTime::now());
             s.slices_held = slices;
             s.history = Some(meta.source_id.clone());
         });
@@ -1334,13 +1334,13 @@ mod tests {
 
     #[test]
     fn lag_in_time_is_the_age_of_the_oldest_unapplied_change() {
-        let now = Utc::now();
+        let now = UtcTime::now();
         let mut status = ReplicationStatus { state: "streaming".into(), ..Default::default() };
         assert_eq!(status.lag_ms(now), Some(0), "caught up");
-        status.pending_since = Some(now - chrono::Duration::milliseconds(7));
+        status.pending_since = Some(now.minus(jiff::SignedDuration::from_millis(7)));
         assert_eq!(status.lag_ms(now), Some(7));
         // Another hex's clock a little ahead counts as no lag, not an underflow.
-        status.pending_since = Some(now + chrono::Duration::milliseconds(5));
+        status.pending_since = Some(now.plus(jiff::SignedDuration::from_millis(5)));
         assert_eq!(status.lag_ms(now), Some(0));
         // Unknown unless streaming (a full sync, an Overseer, waiting).
         status.state = "syncing".into();

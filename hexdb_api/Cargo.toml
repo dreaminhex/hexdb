@@ -22,7 +22,7 @@ hyper = { version = "1", features = ["server"] }
 serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
 base64 = "0.23.1"
 serde = { version = "1.0.219", features = ["derive"] }
-chrono = "0.4.41"
+jiff = { version = "0.2.46", default-features = false, features = ["std"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
 ulid = "3.0.0"
 futures = "0.3"

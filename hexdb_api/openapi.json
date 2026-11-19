@@ -1371,6 +1371,38 @@
         }
       }
     },
+    "/partitions": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "The partition map this hex routes by: epoch, partitions and their slices (admins)",
+        "operationId": "get_partitions",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/config": {
       "get": {
         "tags": [

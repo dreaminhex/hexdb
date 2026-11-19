@@ -180,7 +180,7 @@ pub(super) enum Feed {
     /// Every current document of the plugin's tessellations (as `snapshot` events), then the changes.
     Snapshot { then: ChangeReader, tessellations: Vec<String>, after: Option<ulid::Ulid> },
     Logs { after: u64, level: Option<tracing::Level>, targets: Vec<String> },
-    Metrics { last: Option<chrono::DateTime<chrono::Utc>> },
+    Metrics { last: Option<crate::clock::UtcTime> },
     /// Source plugins receive nothing.
     Nothing,
 }
@@ -254,7 +254,7 @@ impl Feed {
             }
             // At the snapshot's position: a plugin that fails during it gets the whole snapshot again.
             let seq = then.cursor;
-            let now = chrono::Utc::now();
+            let now = crate::clock::UtcTime::now();
             let payloads = page
                 .documents
                 .iter()

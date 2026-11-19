@@ -112,7 +112,7 @@ async fn fetch(url: &str) -> anyhow::Result<(String, String)> {
 
 /// Check once and remember the answer; announce a release newer than this hex's version.
 pub async fn check_now(engine: &HexDBEngine, config: &UpdatesConfig) -> ReleaseCheck {
-    let mut result = ReleaseCheck { enabled: true, checked: Some(chrono::Utc::now().timestamp_millis()), ..Default::default() };
+    let mut result = ReleaseCheck { enabled: true, checked: Some(jiff::Timestamp::now().as_millisecond()), ..Default::default() };
     match fetch(&config.url).await {
         Ok((latest, url)) => {
             result.latest = Some(latest.clone());
@@ -335,7 +335,7 @@ fn finish(state: &str, error: Option<String>) {
     update_rollout(|r| {
         r.state = state.into();
         r.error = error;
-        r.finished = Some(chrono::Utc::now().timestamp_millis());
+        r.finished = Some(jiff::Timestamp::now().as_millisecond());
     });
 }
 
@@ -418,7 +418,7 @@ pub async fn start_rollout(engine: Arc<HexDBEngine>, config: UpdatesConfig, by: 
         state: "running".into(),
         target: target.clone(),
         started_by: by.to_string(),
-        started: chrono::Utc::now().timestamp_millis(),
+        started: jiff::Timestamp::now().as_millisecond(),
         finished: None,
         steps: hexes.iter().map(|h| RolloutStep { hex: h.name.clone(), id: h.id.clone(), from: h.version.clone(), state: "waiting".into() }).collect(),
         error: None,

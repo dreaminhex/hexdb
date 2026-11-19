@@ -344,7 +344,7 @@ pub async fn elect(method: Method, uri: Uri, headers: HeaderMap, axum::extract::
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST: AtomicI64 = AtomicI64::new(0);
     verify_signature(&engine, &headers, &method, &uri, &body)?;
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = jiff::Timestamp::now().as_millisecond();
     if now - LAST.swap(now, Ordering::Relaxed) >= 300 {
         tokio::spawn(async move { hexdb_core::network::discovery::elect_now(&engine).await });
     }

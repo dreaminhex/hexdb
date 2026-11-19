@@ -8,7 +8,12 @@
 //
 // The Overseer believes the forwarded client address only with a valid
 // lattice signature over the method, path and address, so a client can't
-// claim another address by sending the header itself. Reads, sign-in and
+// claim another address by sending the header itself. With
+// `partitioning.enabled` (once every hex runs 2.6 or later), the signature also
+// covers the epoch of the partition map the request was routed by; a hex whose
+// map has another epoch refuses it untouched (421 `partition_epoch`), and the
+// forwarding hex reloads its map and sends it again (see crate::partitioning
+// in hexdb_core). Reads, sign-in and
 // sign-out, this hex's own maintenance and settings (flush, compact, scrub,
 // backup, shutdown, `PUT /settings`), analyzer previews and hex-to-hex
 // endpoints are always handled locally. GraphQL requests are forwarded only when they
@@ -40,7 +45,11 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use hexdb_core::{engine::HexDBEngine, network::discovery::ROLE_OVERSEER};
+use hexdb_core::{
+    engine::HexDBEngine,
+    network::discovery::ROLE_OVERSEER,
+    partitioning::{EPOCH_MISMATCH_CODE, PARTITION_EPOCH_HEADER},
+};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -125,9 +134,61 @@ async fn checked_answer(engine: &HexDBEngine, overseer: &hexdb_core::network::di
     Ok((status, out_headers, Answer::Checked(body)))
 }
 
-/// What the forwarding signature covers.
-pub fn signed_target(path_and_query: &str, client: &str) -> String {
-    format!("{}#forwarded-for={}", path_and_query, client)
+/// What the forwarding signature covers. The partition epoch only when one is sent,
+/// so hexes before 2.6 (which never get one) check the same text as before.
+pub fn signed_target(path_and_query: &str, client: &str, epoch: Option<u64>) -> String {
+    match epoch {
+        Some(epoch) => format!("{}#forwarded-for={}#partition-epoch={}", path_and_query, client, epoch),
+        None => format!("{}#forwarded-for={}", path_and_query, client),
+    }
+}
+
+/// The partition epoch a forwarded request was routed by (set when its signature checked out).
+#[derive(Clone, Copy, Debug)]
+pub struct PartitionEpoch(pub u64);
+
+/// Signs a forwarded request into `headers`: the client address, the signature and,
+/// when this hex sends them, the partition epoch. Returns the signature.
+async fn sign_forward(engine: &HexDBEngine, method: &str, path_and_query: &str, client: &str, headers: &mut HeaderMap) -> String {
+    let epoch = if engine.sends_partition_epochs().await { Some(engine.partition_map().epoch) } else { None };
+    let signature = engine.lattice_keys.sign_request(method, &signed_target(path_and_query, client, epoch), b"");
+    if let (Ok(c), Ok(s)) = (HeaderValue::from_str(client), HeaderValue::from_str(&signature)) {
+        headers.insert(HeaderName::from_static(FORWARDED_FOR_HEADER), c);
+        headers.insert(HeaderName::from_static(FORWARD_SIGNATURE_HEADER), s);
+    }
+    match epoch {
+        Some(epoch) => {
+            headers.insert(HeaderName::from_static(PARTITION_EPOCH_HEADER), HeaderValue::from(epoch));
+        }
+        None => {
+            headers.remove(PARTITION_EPOCH_HEADER);
+        }
+    }
+    signature
+}
+
+/// A forwarded request routed by another partition map than this hex's: refused before
+/// anything runs, so the sender can reload its map and send it again. A hex that may be
+/// behind reads its map first.
+async fn epoch_mismatch(engine: &HexDBEngine, sent: Option<PartitionEpoch>) -> Option<Response> {
+    let PartitionEpoch(theirs) = sent?;
+    if engine.partition_map().epoch != theirs {
+        engine.refresh_partition_map().await;
+    }
+    let ours = engine.partition_map().epoch;
+    (ours != theirs).then(|| {
+        crate::handlers::ApiError::new(
+            StatusCode::MISDIRECTED_REQUEST,
+            EPOCH_MISMATCH_CODE,
+            format!("This request was routed by partition map epoch {}; this hex is at epoch {}. Send it again.", theirs, ours),
+        )
+        .into_response()
+    })
+}
+
+/// True if an answer is the refusal above.
+fn is_epoch_mismatch(status: StatusCode, body: &[u8]) -> bool {
+    status == StatusCode::MISDIRECTED_REQUEST && serde_json::from_slice::<serde_json::Value>(body).ok().is_some_and(|v| v["error"]["code"] == EPOCH_MISMATCH_CODE)
 }
 
 fn handled_locally(method: &Method, path: &str) -> bool {
@@ -163,6 +224,7 @@ fn answers_without_data(path: &str) -> bool {
                 | "/auth/logout"
                 | "/auth/me"
                 | "/settings"
+                | "/partitions"
                 | "/shutdown"
                 | "/flush"
                 | "/compact"
@@ -207,7 +269,7 @@ const HOP_BY_HOP: &[&str] = &[
 fn copy_headers(from: &HeaderMap, to: &mut HeaderMap) {
     for (name, value) in from {
         let n = name.as_str();
-        if HOP_BY_HOP.contains(&n) || n == FORWARDED_FOR_HEADER || n == FORWARD_SIGNATURE_HEADER {
+        if HOP_BY_HOP.contains(&n) || n == FORWARDED_FOR_HEADER || n == FORWARD_SIGNATURE_HEADER || n == PARTITION_EPOCH_HEADER {
             continue;
         }
         to.append(name.clone(), value.clone());
@@ -238,11 +300,9 @@ async fn forward_upload(engine: &Arc<HexDBEngine>, overseer: hexdb_core::network
     let url = format!("{}{}", hexdb_core::replication::peer_base_url(&overseer), path_and_query);
     let mut headers = HeaderMap::new();
     copy_headers(&parts.headers, &mut headers);
-    let signature = engine.lattice_keys.sign_request(parts.method.as_str(), &signed_target(&path_and_query, &client), b"");
-    if let (Ok(c), Ok(s)) = (HeaderValue::from_str(&client), HeaderValue::from_str(&signature)) {
-        headers.insert(HeaderName::from_static(FORWARDED_FOR_HEADER), c);
-        headers.insert(HeaderName::from_static(FORWARD_SIGNATURE_HEADER), s);
-    }
+    // A streamed upload can't be sent twice: a `partition_epoch` refusal goes back to the client,
+    // which can send it again (nothing was written).
+    let signature = sign_forward(engine, parts.method.as_str(), &path_and_query, &client, &mut headers).await;
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::PUT);
     debug!("↪️ Streaming {} {} to the Overseer '{}'.", parts.method, parts.uri.path(), overseer.name);
     let streamed = reqwest::Body::wrap_stream(body.into_data_stream());
@@ -288,7 +348,7 @@ async fn forward_to_oracle(engine: &Arc<HexDBEngine>, oracle: &hexdb_core::netwo
     let path_and_query = parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| parts.uri.path().to_string());
     let mut headers = HeaderMap::new();
     copy_headers(&parts.headers, &mut headers);
-    let signature = engine.lattice_keys.sign_request(parts.method.as_str(), &signed_target(&path_and_query, &client), b"");
+    let signature = engine.lattice_keys.sign_request(parts.method.as_str(), &signed_target(&path_and_query, &client, None), b"");
     if let (Ok(c), Ok(s)) = (HeaderValue::from_str(&client), HeaderValue::from_str(&signature)) {
         headers.insert(HeaderName::from_static(FORWARDED_FOR_HEADER), c);
         headers.insert(HeaderName::from_static(FORWARD_SIGNATURE_HEADER), s);
@@ -335,6 +395,10 @@ async fn forward_to_oracle(engine: &Arc<HexDBEngine>, oracle: &hexdb_core::netwo
 /// Forward writes to the Overseer when this hex is a replica.
 pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
+    let sent = request.extensions().get::<PartitionEpoch>().copied();
+    if let Some(refused) = epoch_mismatch(&engine, sent).await {
+        return refused;
+    }
     // AI questions go to the lattice's Oracle while one is live; the Oracle
     // answers them itself (see crate::oracle). One already passed on isn't passed again.
     if crate::oracle::is_ai_question(request.method(), &path) {
@@ -441,11 +505,7 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     let timeout = if crate::server::is_long_running(&path) { Duration::from_secs(3600) } else { Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1)) };
     let mut headers = HeaderMap::new();
     copy_headers(&parts.headers, &mut headers);
-    let signature = engine.lattice_keys.sign_request(parts.method.as_str(), &signed_target(&path_and_query, &client), b"");
-    if let (Ok(c), Ok(s)) = (HeaderValue::from_str(&client), HeaderValue::from_str(&signature)) {
-        headers.insert(HeaderName::from_static(FORWARDED_FOR_HEADER), c);
-        headers.insert(HeaderName::from_static(FORWARD_SIGNATURE_HEADER), s);
-    }
+    let mut signature = sign_forward(&engine, parts.method.as_str(), &path_and_query, &client, &mut headers).await;
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::POST);
     // A write the Overseer makes idempotent carries a key (the client's, or one added
     // here), so it can be sent again after an error that leaves open whether the
@@ -459,6 +519,9 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     // A read (a sliced replica forwards those too) changes nothing, so it's always safe to send again.
     let read = matches!(parts.method, Method::GET | Method::HEAD);
     let mut overseer = overseer;
+    // Refusals for a stale partition map, answered so far (each is sent again with the reloaded map).
+    let mut epoch_refusals = 0;
+    let (status, out_headers, answer) = loop {
     let response = loop {
         debug!("↪️ Forwarding {} {} to the Overseer '{}'.", parts.method, path, overseer.name);
         let url = format!("{}{}", hexdb_core::replication::peer_base_url(&overseer), path_and_query);
@@ -489,6 +552,23 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     let (status, out_headers, answer) = match checked_answer(&engine, &overseer, &signature, response, incoming.as_deref()).await {
         Ok(answer) => answer,
         Err(refused) => return refused.into_response(),
+    };
+    if status != StatusCode::MISDIRECTED_REQUEST || epoch_refusals >= 3 {
+        break (status, out_headers, answer);
+    }
+    let body = match answer {
+        Answer::Checked(body) => body,
+        Answer::Unchecked(response) => response.bytes().await.unwrap_or_default(),
+    };
+    if !is_epoch_mismatch(status, &body) {
+        break (status, out_headers, Answer::Checked(body));
+    }
+    // Refused untouched for a stale partition map: reload it and send again, a few times at most.
+    epoch_refusals += 1;
+    debug!("The Overseer '{}' routes by another partition map epoch; reloading this hex's and sending {} {} again.", overseer.name, parts.method, path);
+    engine.refresh_partition_map().await;
+    signature = sign_forward(&engine, parts.method.as_str(), &path_and_query, &client, &mut headers).await;
+    tokio::time::sleep(Duration::from_millis(100 * epoch_refusals)).await;
     };
     // Other answers stream through, so a forwarded download isn't held in memory.
     let body = match answer {
@@ -531,5 +611,17 @@ mod tests {
         for (method, path) in [(Method::POST, "/orders"), (Method::PUT, "/config"), (Method::DELETE, "/orders/01J0"), (Method::POST, "/transactions")] {
             assert!(!handled_locally(&method, path), "{} {}", method, path);
         }
+    }
+
+    #[test]
+    fn the_signature_covers_the_epoch_only_when_one_is_sent() {
+        // Hexes before 2.6 check exactly this text.
+        assert_eq!(signed_target("/orders?x=1", "10.0.0.1", None), "/orders?x=1#forwarded-for=10.0.0.1");
+        assert_ne!(signed_target("/orders", "10.0.0.1", Some(1)), signed_target("/orders", "10.0.0.1", Some(2)));
+        assert_ne!(signed_target("/orders", "10.0.0.1", Some(1)), signed_target("/orders", "10.0.0.1", None));
+        let refusal = serde_json::json!({ "error": { "code": EPOCH_MISMATCH_CODE, "message": "" } }).to_string();
+        assert!(is_epoch_mismatch(StatusCode::MISDIRECTED_REQUEST, refusal.as_bytes()));
+        assert!(!is_epoch_mismatch(StatusCode::MISDIRECTED_REQUEST, br#"{"error":{"code":"sliced_replica"}}"#));
+        assert!(!is_epoch_mismatch(StatusCode::CONFLICT, refusal.as_bytes()));
     }
 }

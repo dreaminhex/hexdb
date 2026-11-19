@@ -76,7 +76,7 @@ impl Blocklist {
 
     /// True if requests from `ip` are refused.
     pub fn blocks(&self, ip: IpAddr) -> bool {
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         self.entries.read().unwrap().iter().any(|(cidr, expires)| expires.is_none_or(|at| at > now) && cidr.contains(ip))
     }
 }

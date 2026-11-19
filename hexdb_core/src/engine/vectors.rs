@@ -349,7 +349,7 @@ impl HexDBEngine {
     /// Embed a query text as the calling user, within their daily allowance.
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         let user = crate::access::caller().map(|p| p.login.clone()).unwrap_or_else(|| "system".into());
-        let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let day = crate::clock::format(jiff::Timestamp::now(), "%Y-%m-%d");
         let cap = self.config_value("ai.embeddings.user_daily_tokens").as_u64().unwrap_or(0);
         let key = (user, day.clone());
         if cap > 0 && self.embeddings.spent.lock().unwrap().get(&key).copied().unwrap_or(0) >= cap {

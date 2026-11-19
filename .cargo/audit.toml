@@ -16,7 +16,7 @@ ignore = [
     # rules in memory; HexDB never decodes untrusted bincode with it.
     "RUSTSEC-2025-0141",
     # chrono: unmaintained (2026-09-14), not vulnerable; no patched version exists.
-    # HexDB and many of its dependencies use it for timestamps. Owner: HexDB
-    # maintainers. Move HexDB's own code to jiff in 2.6; review by 2027-03-31.
+    # HexDB's own code moved to jiff in 2.6; chrono remains only via nom-exif (EXIF
+    # parsing). Owner: HexDB maintainers. Review by 2027-03-31.
     "RUSTSEC-2026-0543",
 ]

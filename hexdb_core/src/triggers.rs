@@ -39,7 +39,6 @@ use crate::{
     filter::Filter,
 };
 use anyhow::{anyhow, bail, Result};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::{sync::Arc, time::Duration};
@@ -200,7 +199,7 @@ impl HexDBEngine {
         }
         trigger.run_as = by.user_id.clone();
         trigger.run_as_login = by.login.clone();
-        trigger.updated = Utc::now().timestamp_millis();
+        trigger.updated = jiff::Timestamp::now().as_millisecond();
         self.put_system_document(TRIGGERS_TESSELLATION, doc_id(&trigger.name), serde_json::to_value(&trigger)?, None).await?;
         Ok(trigger)
     }
@@ -268,7 +267,7 @@ impl HexDBEngine {
         let mut statuses = self.trigger_status.lock().unwrap();
         let status = statuses.entry(trigger.name.clone()).or_default();
         status.runs += 1;
-        status.last_run = Some(Utc::now().timestamp_millis());
+        status.last_run = Some(jiff::Timestamp::now().as_millisecond());
         status.last_ms = started.elapsed().as_millis() as u64;
         match &result {
             Ok(_) => status.last_error = None,

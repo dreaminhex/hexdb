@@ -79,7 +79,7 @@ pub fn install_panic_hook(storage_dir: &Path) {
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "(no message)".into());
         let record = PanicRecord {
-            at: chrono::Utc::now().timestamp_millis(),
+            at: jiff::Timestamp::now().as_millisecond(),
             // Panic messages can quote data; keep them short.
             message: message.chars().take(2000).collect(),
             location: info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default(),
@@ -123,7 +123,7 @@ pub(crate) fn task_panicked(name: &str, message: &str) {
     let task = tasks.entry(name.to_string()).or_insert_with(|| TaskHealth { name: name.to_string(), ..Default::default() });
     task.restarts += 1;
     task.last_panic = Some(message.chars().take(500).collect());
-    task.last_panic_at = Some(chrono::Utc::now().timestamp_millis());
+    task.last_panic_at = Some(jiff::Timestamp::now().as_millisecond());
 }
 
 pub(crate) fn task_stopped(name: &str) {
@@ -146,7 +146,7 @@ pub fn detect(storage_dir: &Path, recovery_ms: u64) -> Option<CrashReport> {
         .and_then(|bytes| serde_json::from_slice::<PanicRecord>(&bytes).ok())
         .filter(|p| p.at >= previous.started_at);
     Some(CrashReport {
-        detected_at: chrono::Utc::now().timestamp_millis(),
+        detected_at: jiff::Timestamp::now().as_millisecond(),
         previous_started_at: previous.started_at,
         previous_pid: previous.pid,
         previous_version: previous.version.clone(),
@@ -206,7 +206,7 @@ mod tests {
         }
         let dir = Dir(root);
         assert!(detect(dir.path(), 5).is_none(), "a clean start");
-        let previous = RuntimeInfo::for_current_process("127.0.0.1:7700", chrono::Utc::now().timestamp_millis() - 1000, false).unwrap();
+        let previous = RuntimeInfo::for_current_process("127.0.0.1:7700", jiff::Timestamp::now().as_millisecond() - 1000, false).unwrap();
         previous.write(dir.path()).unwrap();
         let old_panic = PanicRecord { at: previous.started_at - 60_000, message: "older".into(), location: String::new(), thread: String::new() };
         crate::runtime::write_private_file(&panic_path(dir.path()), &serde_json::to_vec(&old_panic).unwrap()).unwrap();

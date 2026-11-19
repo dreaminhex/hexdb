@@ -46,7 +46,6 @@ use crate::{
     wal::WalOp,
 };
 use anyhow::Result;
-use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -101,7 +100,7 @@ pub(crate) fn is_restoring() -> bool {
 }
 
 fn now_text() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    crate::clock::rfc3339_millis(jiff::Timestamp::now())
 }
 
 fn caller_login() -> String {
@@ -981,7 +980,7 @@ impl HexDBEngine {
         }
         let ctx = context();
         let batch = ctx.batch.unwrap_or_else(Ulid::generate);
-        let now = Utc::now().timestamp_millis();
+        let now = jiff::Timestamp::now().as_millisecond();
         let (at, by) = (now_text(), caller_login());
         let trash_days = self.config.storage.trash_days as i64;
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();

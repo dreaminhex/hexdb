@@ -21,7 +21,6 @@ use crate::{
     Document, HexDBEngine,
 };
 use anyhow::{anyhow, bail, Result};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -351,7 +350,7 @@ pub(crate) async fn find_for_login(engine: &HexDBEngine, login: &str) -> Result<
 pub(crate) async fn record_login(engine: &HexDBEngine, id: Ulid, client: &str) -> Result<()> {
     let _lock = engine.users_lock.lock().await;
     let Some((_, mut user)) = find_by_id(engine, &id.to_string()).await? else { return Ok(()) };
-    user.last_login = Utc::now().timestamp();
+    user.last_login = jiff::Timestamp::now().as_second();
     user.login_ips.retain(|ip| ip != client);
     user.login_ips.insert(0, client.to_string());
     user.login_ips.truncate(10);
@@ -382,8 +381,8 @@ pub async fn change_own_password(engine: &HexDBEngine, user_id: &str, current: &
     }
     validate_password_for(new, &user.login)?;
     user.password_hash = create_hash(new);
-    user.last_password_change = Utc::now().timestamp();
-    user.sessions_valid_after = Utc::now().timestamp_millis();
+    user.last_password_change = jiff::Timestamp::now().as_second();
+    user.sessions_valid_after = jiff::Timestamp::now().as_millisecond();
     engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
     info!("🔑 '{}' changed their password; other sessions were signed out.", user.login);
     Ok(())
@@ -401,12 +400,12 @@ pub async fn recover_password(engine: &HexDBEngine, login: &str, password_hash: 
     engine.ensure_writable()?;
     let _lock = engine.users_lock.lock().await;
     let (id, mut user) = find_user(engine, login).await?.ok_or_else(|| not_found(login))?;
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     user.password_hash = password_hash.to_string();
-    user.last_password_change = now.timestamp();
+    user.last_password_change = now.as_second();
     user.password_attempts = 0;
     user.is_locked = false;
-    user.sessions_valid_after = now.timestamp_millis();
+    user.sessions_valid_after = now.as_millisecond();
     if turn_off_mfa {
         user.use_mfa = false;
         user.mfa_secret = None;
@@ -451,7 +450,7 @@ pub async fn mfa_enable(engine: &HexDBEngine, user_id: &str, code: &str) -> Resu
     let _lock = engine.users_lock.lock().await;
     let (id, mut user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;
     let secret = user.mfa_pending_secret.clone().ok_or_else(|| invalid("Start with POST /auth/mfa/setup."))?;
-    let step = crate::mfa::verify_totp(&secret, code, Utc::now().timestamp(), 0)
+    let step = crate::mfa::verify_totp(&secret, code, jiff::Timestamp::now().as_second(), 0)
         .ok_or_else(|| invalid("That code isn't valid. Check the time on your device and try the current code."))?;
     let (codes, hashes) = crate::mfa::new_backup_codes();
     user.use_mfa = true;
@@ -460,7 +459,7 @@ pub async fn mfa_enable(engine: &HexDBEngine, user_id: &str, code: &str) -> Resu
     user.mfa_backup_codes = hashes;
     user.mfa_last_step = step;
     // Other sessions were signed in with the password alone.
-    user.sessions_valid_after = Utc::now().timestamp_millis();
+    user.sessions_valid_after = jiff::Timestamp::now().as_millisecond();
     engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
     info!("🔐 '{}' turned on multi-factor authentication.", user.login);
     Ok(codes)
@@ -509,7 +508,7 @@ fn second_factor_matches(engine: &HexDBEngine, id: Ulid, user: &mut StoredUser, 
         let steps = engine.mfa_steps.lock().unwrap();
         steps.get(&id).copied().unwrap_or(0).max(user.mfa_last_step)
     };
-    if let Some(step) = crate::mfa::verify_totp(&secret, code, Utc::now().timestamp(), last) {
+    if let Some(step) = crate::mfa::verify_totp(&secret, code, jiff::Timestamp::now().as_second(), last) {
         engine.mfa_steps.lock().unwrap().insert(id, step);
         user.mfa_last_step = step;
         return Ok(true);
@@ -680,7 +679,7 @@ pub async fn create_user(engine: &HexDBEngine, input: NewUser, idem: Option<Idem
         return Err(EngineError::Conflict(format!("A user with login '{}' already exists.", input.login)).into());
     }
 
-    let now = Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let user = StoredUser {
         login: input.login,
         email_address: input.email_address,
@@ -745,10 +744,10 @@ pub async fn update_user(
     if let Some(password) = changes.password {
         validate_password_for(&password, &user.login)?;
         user.password_hash = create_hash(&password);
-        user.last_password_change = Utc::now().timestamp();
+        user.last_password_change = jiff::Timestamp::now().as_second();
         user.password_attempts = 0;
         // A reset signs the user out everywhere.
-        user.sessions_valid_after = Utc::now().timestamp_millis();
+        user.sessions_valid_after = jiff::Timestamp::now().as_millisecond();
     }
     if let Some(email) = changes.email_address {
         validate_email(&email)?;
@@ -760,7 +759,7 @@ pub async fn update_user(
     }
     if let Some(locked) = changes.is_locked {
         if locked && !user.is_locked {
-            user.sessions_valid_after = Utc::now().timestamp_millis();
+            user.sessions_valid_after = jiff::Timestamp::now().as_millisecond();
         }
         user.is_locked = locked;
     }
@@ -1146,7 +1145,7 @@ async fn grant_file_permissions(engine: &HexDBEngine) -> Result<()> {
             updated += 1;
         }
     }
-    let note = serde_json::json!({ "name": "file-permissions", "time": chrono::Utc::now().timestamp_millis(), "roles_updated": updated });
+    let note = serde_json::json!({ "name": "file-permissions", "time": jiff::Timestamp::now().as_millisecond(), "roles_updated": updated });
     engine.put_system_document(MIGRATIONS_TESSELLATION, marker, note, None).await?;
     if updated > 0 {
         info!("✅ Gave {} custom role(s) with 'write' the new 'upload', 'delete' and 'restore' permissions.", updated);
