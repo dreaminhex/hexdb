@@ -83,7 +83,8 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, archive: tar.gz }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, archive: tar.gz }
           - { os: macos-latest, target: aarch64-apple-darwin, archive: tar.gz }
-          - { os: macos-15-intel, target: x86_64-apple-darwin, archive: tar.gz }
+          # Intel macOS is cross-compiled on Apple Silicon: the Intel runners took 40+ minutes.
+          - { os: macos-latest, target: x86_64-apple-darwin, archive: tar.gz }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, archive: zip }
     runs-on: ${{ matrix.os }}
     steps:
@@ -112,6 +113,17 @@ jobs:
             cargo zigbuild --locked --release --target "$TARGET.2.28" -p hexdb_api -p hexdb_cli -p hexdb_odbc
           else
             cargo build --locked --release --target "$TARGET" -p hexdb_api -p hexdb_cli -p hexdb_odbc
+          fi
+      # The cross-compiled Intel binary is started once under Rosetta, where the runner has it.
+      - name: Smoke test (Intel macOS)
+        if: matrix.target == 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          file target/x86_64-apple-darwin/release/hexdb_api | grep -q x86_64
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 target/x86_64-apple-darwin/release/hexdb_api --version
+          else
+            echo "Rosetta isn't available on this runner; skipped running the binary."
           fi
       - name: Package
         shell: bash
