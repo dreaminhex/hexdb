@@ -32,6 +32,13 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ inputs.tag }}
     steps:
+      # Only the site's landing page (the root of https://dreaminhex.github.io/hexdb/).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: packaging/apt-index.html
+          sparse-checkout-cone-mode: false
+          path: source
+          persist-credentials: false
       - name: Update the APT repository on the gh-pages branch
         if: env.APT_GPG_PRIVATE_KEY != ''
         run: |
@@ -53,6 +60,7 @@ jobs:
           fi
           cd site
           touch .nojekyll
+          cp ../source/packaging/apt-index.html index.html
           pool=apt/pool/main/h/hexdb
           mkdir -p "$pool"
           cp ../debs/*.deb "$pool/"
