@@ -7,7 +7,9 @@
 //! - `ECHO_ACK=1` acknowledges each change (`{"ack": <seq>}` on stdout) once it's in the file;
 //! - `ECHO_FAIL_AT=<n>` with `ECHO_FAIL_MARKER=<file>`: the first time (no marker yet), it
 //!   fails on its n-th line without writing it, after `ECHO_FAIL_DELAY_MS` (default 0),
-//!   like a plugin whose destination failed after it read the change.
+//!   like a plugin whose destination failed after it read the change;
+//! - `ECHO_PAUSE_FILE=<file>`: while that file exists, it holds the change it read (neither
+//!   written nor acknowledged), like a plugin whose destination is down.
 
 use std::io::{BufRead, Write};
 
@@ -24,9 +26,13 @@ fn main() {
     let fail_at: Option<usize> = std::env::var("ECHO_FAIL_AT").ok().and_then(|v| v.parse().ok());
     let marker = std::env::var("ECHO_FAIL_MARKER").ok();
     let delay = std::env::var("ECHO_FAIL_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0u64);
+    let pause = std::env::var("ECHO_PAUSE_FILE").ok();
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(out).expect("open ECHO_OUT");
     for (i, line) in std::io::stdin().lock().lines().enumerate() {
         let line = line.expect("stdin");
+        while pause.as_ref().is_some_and(|p| std::path::Path::new(p).exists()) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         if let (Some(n), Some(marker)) = (fail_at, &marker) {
             if i + 1 == n && !std::path::Path::new(marker).exists() {
                 std::fs::write(marker, "failed once").expect("marker");

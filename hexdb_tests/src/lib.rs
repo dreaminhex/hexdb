@@ -474,9 +474,14 @@ admin_email = "admin@example.com"
     }
 
     /// Sign in as the test administrator and send that session with every
-    /// request. Replicas only have users after their first sync, so retry.
+    /// request. Replicas only have users after their first sync: wait until the
+    /// hex is ready (its data copied) first, so early attempts don't fail and
+    /// trip the sign-in throttle (429); then retry what still fails.
     fn sign_in(&mut self) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline && !self.anon.get(self.url("/ready")).send().is_ok_and(|r| r.status().is_success()) {
+            thread::sleep(Duration::from_millis(100));
+        }
         loop {
             let res = self
                 .anon

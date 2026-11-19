@@ -451,3 +451,56 @@ fn process_plugins_get_undelivered_changes_again() -> Result<()> {
     assert_eq!(delivered("acker").lines().filter(|l| l.contains(&first)).count(), 1, "{}", delivered("acker"));
     Ok(())
 }
+
+/// A plugin whose sink is down when the Overseer hands over gets every change it hadn't
+/// acknowledged from the new Overseer, once the sink is back (none skipped, no resync needed).
+#[test]
+fn a_takeover_with_a_stopped_sink_delivers_every_unacknowledged_change() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    let toml_path = |p: &Path| p.display().to_string().replace('\\', "/");
+    let echo = toml_path(Path::new(env!("CARGO_BIN_EXE_plugin_echo")));
+    let (out, paused) = (root.join("sink.ndjson"), root.join("sink.paused"));
+    write(
+        &root.join("sink/plugin.toml"),
+        &format!(
+            "id = \"@test/sink\"\nname = \"sink\"\ncommand = ['{echo}']\ntessellations = [\"orders\"]\nacks = true\n[env]\nECHO_OUT = '{}'\nECHO_ACK = '1'\nECHO_PAUSE_FILE = '{}'\n",
+            toml_path(&out),
+            toml_path(&paused)
+        ),
+    )?;
+    write(&root.join("plugins.json"), &json!({ "@test/sink": { "path": "./sink", "sandbox": false } }).to_string())?;
+    let ports = [TestServer::free_port()?, TestServer::free_port()?];
+    let options = |i: usize, ram: u64| TestOptions {
+        lattice: Some(format!("plugin-takeover-{}", ports[0])),
+        discovery_port: Some(ports[i]),
+        peers: vec![format!("127.0.0.1:{}", ports[1 - i])],
+        ram_mb: Some(ram),
+        discovery_interval_seconds: Some(1),
+        extra_toml: format!("\n[plugins]\nregistry = '{}'\n", toml_path(&root.join("plugins.json"))),
+        ..Default::default()
+    };
+    let mut first = TestServer::start_with(options(0, 4096))?;
+    let second = TestServer::start_with(options(1, 1024))?;
+    let delivered = || std::fs::read_to_string(&out).unwrap_or_default();
+    let role = |s: &TestServer| -> Result<String> { Ok(s.request(Method::GET, "/status", None, &[])?.body["hex_type"].as_str().unwrap_or_default().to_string()) };
+    let plugin_state = |s: &TestServer| -> Result<String> {
+        let list = s.request(Method::GET, "/plugins", None, &[])?.body;
+        Ok(list["plugins"][0]["state"].as_str().unwrap_or_default().to_string())
+    };
+
+    let acked = first.insert("orders", &json!({ "n": 1 }))?;
+    wait_until(Duration::from_secs(20), "the first change to be delivered", || Ok(delivered().contains(&acked)))?;
+    // The sink goes down: the plugin holds what it reads, acknowledging nothing.
+    write(&paused, "down")?;
+    let held: Vec<String> = (2..=4).map(|n| first.insert("orders", &json!({ "n": n }))).collect::<Result<_>>()?;
+    wait_until(Duration::from_secs(20), "the replica to have them", || Ok(held.iter().all(|id| second.get_doc("orders", id).ok().flatten().is_some())))?;
+
+    // The Overseer hands over; the new one runs the plugin; then the sink comes back.
+    first.stop()?;
+    wait_until(Duration::from_secs(60), "the new Overseer's plugin", || Ok(role(&second)? == "Overseer" && plugin_state(&second)? == "running"))?;
+    std::fs::remove_file(&paused)?;
+    wait_until(Duration::from_secs(30), "every unacknowledged change", || Ok(held.iter().all(|id| delivered().contains(id.as_str()))))
+        .map_err(|e| anyhow::anyhow!("{}\nplugin: {}\ndelivered:\n{}", e, plugin_state(&second).unwrap_or_default(), delivered()))?;
+    Ok(())
+}
