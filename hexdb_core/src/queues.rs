@@ -194,11 +194,19 @@ struct QueueState {
     loaded: bool,
     /// (ready_at, id) for every message.
     ready: BTreeSet<(i64, Ulid)>,
-    /// When each message is next ready (to update `ready`).
-    at: HashMap<Ulid, i64>,
+    /// Each message's place in `ready`, and what stats need of it.
+    at: HashMap<Ulid, Slot>,
     /// Messages moved in from another queue (dead letters), until when they may still be
     /// committing: one not found yet is tried again rather than forgotten.
     arriving: HashMap<Ulid, i64>,
+}
+
+/// A message in a queue's index.
+#[derive(Clone, Copy)]
+struct Slot {
+    ready_at: i64,
+    sent_at: i64,
+    leased: bool,
 }
 
 /// Queue state on this hex.
@@ -363,8 +371,7 @@ impl HexDBEngine {
                 let page = self.list_documents(&tess, after, 1000).await?;
                 for doc in &page.documents {
                     if let Ok(stored) = serde_json::from_value::<Stored>(doc.data_json()) {
-                        state.ready.insert((stored.ready_at, doc.id));
-                        state.at.insert(doc.id, stored.ready_at);
+                        Self::index(state, doc.id, &stored);
                     }
                 }
                 match page.next {
@@ -377,14 +384,24 @@ impl HexDBEngine {
         Ok(())
     }
 
+    /// Move a message in the index (keeping what else it knows of it), or take it out.
     fn set_ready(state: &mut QueueState, id: Ulid, ready_at: Option<i64>) {
-        if let Some(old) = state.at.remove(&id) {
-            state.ready.remove(&(old, id));
+        let old = state.at.remove(&id);
+        if let Some(old) = old {
+            state.ready.remove(&(old.ready_at, id));
         }
         if let Some(at) = ready_at {
+            let slot = old.map_or(Slot { ready_at: at, sent_at: at, leased: false }, |o| Slot { ready_at: at, ..o });
             state.ready.insert((at, id));
-            state.at.insert(id, at);
+            state.at.insert(id, slot);
         }
+    }
+
+    /// Index a message as stored.
+    fn index(state: &mut QueueState, id: Ulid, stored: &Stored) {
+        Self::set_ready(state, id, None);
+        state.ready.insert((stored.ready_at, id));
+        state.at.insert(id, Slot { ready_at: stored.ready_at, sent_at: stored.sent_at, leased: stored.lease.is_some() });
     }
 
     async fn put_message(&self, tess: &str, id: Ulid, stored: &Stored, retention_hours: u64) -> Result<()> {
@@ -439,7 +456,7 @@ impl HexDBEngine {
                 });
             }
             self.commit_system(docs, Vec::new()).await?;
-            Self::set_ready(&mut state, id, Some(stored.ready_at));
+            Self::index(&mut state, id, &stored);
             ids.push(Some(id.to_string()));
         }
         state.loaded = true;
@@ -521,7 +538,7 @@ impl HexDBEngine {
             };
             // The stored message decides: leased or delayed after all, it waits.
             if stored.ready_at > now {
-                Self::set_ready(&mut state, id, Some(stored.ready_at));
+                Self::index(&mut state, id, &stored);
                 continue;
             }
             // Received too often without an ack: off to the dead-letter queue.
@@ -535,7 +552,7 @@ impl HexDBEngine {
             stored.receives += 1;
             stored.ready_at = now + visibility_ms;
             self.put_message(&tess, id, &stored, config.retention_hours).await?;
-            Self::set_ready(&mut state, id, Some(stored.ready_at));
+            Self::index(&mut state, id, &stored);
             out.push(Received { id: id.to_string(), receipt: format!("{}.{}", id, nonce), body: stored.body, receives: stored.receives, sent_at: stored.sent_at });
         }
         state.loaded = true;
@@ -632,7 +649,7 @@ impl HexDBEngine {
                     stored.lease = None;
                 }
                 self.put_message(&tess, id, &stored, config.retention_hours).await?;
-                Self::set_ready(&mut state, id, Some(stored.ready_at));
+                Self::index(&mut state, id, &stored);
                 done += 1;
             }
         }
@@ -644,26 +661,42 @@ impl HexDBEngine {
         Ok(done)
     }
 
-    /// How many messages are ready, leased (in flight) and delayed.
+    /// How many messages are ready, leased (in flight) and delayed. The Overseer counts its
+    /// in-memory index; a replica, which has none, reads the messages (as does the Overseer
+    /// while an operation holds the index for long).
     pub async fn queue_stats(&self, name: &str) -> Result<Value> {
         let config = self.queue_or_404(name).await?;
         let tess = messages_tessellation(name);
         let (mut ready, mut leased, mut delayed, mut oldest) = (0u64, 0u64, 0u64, None::<i64>);
-        if self.tessellation_exists(&tess) {
+        let mut count = |slot: Slot, now: i64| {
+            if slot.ready_at <= now {
+                ready += 1;
+            } else if slot.leased {
+                leased += 1;
+            } else {
+                delayed += 1;
+            }
+            oldest = Some(oldest.map_or(slot.sent_at, |o| o.min(slot.sent_at)));
+        };
+        // The index, unless an operation holds it for long (a slow commit): then the messages.
+        let state = self.queues.state(name);
+        let locked = if self.is_writable() { tokio::time::timeout(Duration::from_millis(250), state.lock()).await.ok() } else { None };
+        if let Some(mut state) = locked {
+            self.load_queue(name, &mut state).await?;
+            let now = now_ms();
+            // Past retention: gone (or about to be), whether or not a receive has noticed yet.
+            let kept_since = now - config.retention_hours as i64 * 3_600_000;
+            for slot in state.at.values().filter(|s| s.sent_at > kept_since) {
+                count(*slot, now);
+            }
+        } else if self.tessellation_exists(&tess) {
             let now = now_ms();
             let mut after = None;
             loop {
                 let page = self.list_documents(&tess, after, 1000).await?;
                 for doc in &page.documents {
                     let Ok(stored) = serde_json::from_value::<Stored>(doc.data_json()) else { continue };
-                    if stored.ready_at <= now {
-                        ready += 1;
-                    } else if stored.lease.is_some() {
-                        leased += 1;
-                    } else {
-                        delayed += 1;
-                    }
-                    oldest = Some(oldest.map_or(stored.sent_at, |o| o.min(stored.sent_at)));
+                    count(Slot { ready_at: stored.ready_at, sent_at: stored.sent_at, leased: stored.lease.is_some() }, now);
                 }
                 match page.next {
                     Some(next) => after = Some(next),
@@ -691,6 +724,27 @@ mod tests {
         config.dead_letter = None;
         config.visibility_seconds = 0;
         assert!(config.validate().is_err());
+    }
+
+    /// Stats come from the Overseer's index, and agree with the messages after a reload.
+    #[tokio::test]
+    async fn stats_count_ready_in_flight_and_delayed_messages() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        let config = QueueConfig { name: "jobs".into(), description: String::new(), visibility_seconds: 60, max_receives: 5, dead_letter: None, retention_hours: 1, created: 0, created_by: String::new() };
+        engine.save_queue(config, "t", true).await.unwrap();
+        let send = |delay: u64| NewQueueMessage { body: json!({}), delay_seconds: delay, dedupe_key: None };
+        let before = now_ms();
+        engine.send_messages("jobs", vec![send(0), send(0), send(0), send(600)], "t").await.unwrap();
+        engine.receive_messages("jobs", 1, None, Duration::ZERO).await.unwrap();
+        let check = |stats: Value| {
+            assert_eq!((stats["ready"].as_u64(), stats["in_flight"].as_u64(), stats["delayed"].as_u64()), (Some(2), Some(1), Some(1)), "{stats}");
+            assert!(stats["oldest_sent_at"].as_i64().is_some_and(|t| t >= before && t <= now_ms()), "{stats}");
+        };
+        check(engine.queue_stats("jobs").await.unwrap());
+        engine.queues.reset();
+        check(engine.queue_stats("jobs").await.unwrap());
+        engine.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

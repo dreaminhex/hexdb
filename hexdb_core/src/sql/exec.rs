@@ -59,6 +59,8 @@ pub struct General {
     ctes: Vec<QueryNode>,
     scans: Vec<ScanSpec>,
     tables: Vec<String>,
+    /// The top-level fields the statement reads from documents (None: all of them, for `*`).
+    fields: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +332,9 @@ struct Compiler<'p> {
     scans: Vec<ScanSpec>,
     tables: Vec<String>,
     depth: usize,
+    /// Top-level fields column references name, and whether any `*` reads whole documents.
+    fields: HashSet<String>,
+    wildcard: bool,
 }
 
 /// Aggregates collected while compiling one SELECT's items, HAVING and ORDER BY.
@@ -349,10 +354,13 @@ impl General {
             scans: Vec::new(),
             tables: Vec::new(),
             depth: 0,
+            fields: HashSet::new(),
+            wildcard: false,
         };
         let root = compiler.query(query)?;
         compiler.params.check_all_used()?;
-        Ok(General { root, subqueries: compiler.subqueries, ctes: compiler.ctes, scans: compiler.scans, tables: compiler.tables })
+        let fields = (!compiler.wildcard).then_some(compiler.fields);
+        Ok(General { root, subqueries: compiler.subqueries, ctes: compiler.ctes, scans: compiler.scans, tables: compiler.tables, fields })
     }
 
     /// Every tessellation the statement reads.
@@ -600,6 +608,7 @@ impl<'p> Compiler<'p> {
                     if bindings.is_empty() {
                         return Err(invalid("SELECT * needs a FROM clause."));
                     }
+                    self.wildcard = true;
                     OutItem::Wildcard(None)
                 }
                 SelectItem::QualifiedWildcard(kind, options) => {
@@ -612,6 +621,7 @@ impl<'p> Compiler<'p> {
                         .iter()
                         .position(|b| *b == qualifier)
                         .ok_or_else(|| invalid(format!("'{}' isn't a table or alias in FROM.", qualifier)))?;
+                    self.wildcard = true;
                     OutItem::Wildcard(Some(index))
                 }
                 SelectItem::UnnamedExpr(expr) => OutItem::Expr(self.expr(expr, Some(&mut aggs))?, self.default_name(expr)),
@@ -758,6 +768,7 @@ impl<'p> Compiler<'p> {
                     let mut on: Option<Ex> = None;
                     for name in names {
                         let column = ident_name(name)?;
+                        self.fields.insert(column.clone());
                         let (Some(&l), Some(&r)) = (left_bindings.last(), right_bindings.first()) else {
                             return Err(invalid("USING needs a table on each side."));
                         };
@@ -1151,6 +1162,9 @@ impl<'p> Compiler<'p> {
             for (s, scope) in self.scopes.iter().enumerate().rev() {
                 if let Some(b) = scope.iter().position(|b| *b == names[0]) {
                     self.note_scope(s);
+                    if let Some(field) = names.get(1) {
+                        self.fields.insert(field.clone());
+                    }
                     return Ok(ColRef { depth: self.scopes.len() - 1 - s, binding: Some(b), path: names[1..].to_vec() });
                 }
             }
@@ -1163,6 +1177,7 @@ impl<'p> Compiler<'p> {
             return Err(invalid(format!("'{}' needs a FROM clause.", names.join("."))));
         }
         let binding = if scope.len() == 1 { Some(0) } else { None };
+        self.fields.insert(names[0].clone());
         Ok(ColRef { depth: 0, binding, path: names.to_vec() })
     }
 
@@ -1663,7 +1678,11 @@ impl HexDBEngine {
                 let fetched = page.documents.len();
                 after = page.documents.last().map(|d| d.id);
                 for doc in page.documents {
-                    let row = doc.to_api_json();
+                    let mut row = doc.to_api_json();
+                    // Only the fields the statement reads are held.
+                    if let (Some(fields), Value::Object(map)) = (&plan.fields, &mut row) {
+                        map.retain(|k, _| fields.contains(k));
+                    }
                     held = held.saturating_add(json_size(&row));
                     rows.push(Arc::new(row));
                 }

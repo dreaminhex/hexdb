@@ -423,9 +423,23 @@ impl HexDBEngine {
             })?;
             Some((index.def.name.clone(), index.ordered_page(key.descending, after, size)?))
         };
+        // A range on the sort field: start at its bound, and stop past the other. A comparison
+        // matches only values of its own type, so leaving the start bound's type is past it too.
+        let bound = |b: Option<(&serde_json::Value, bool)>| {
+            b.and_then(|(v, inclusive)| crate::index::KeyPart::from_scalar(v).filter(|p| *p != crate::index::KeyPart::Null).map(|p| (p, inclusive)))
+        };
+        let (lower, upper) = filter.range_on(&key.field);
+        let (from, to) = if key.descending { (bound(upper), bound(lower)) } else { (bound(lower), bound(upper)) };
+        let beyond = if key.descending { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
+        let past_range = |part: &crate::index::KeyPart| {
+            from.as_ref().is_some_and(|(p, _)| std::mem::discriminant(p) != std::mem::discriminant(part))
+                || to.as_ref().is_some_and(|(p, inclusive)| part.cmp(p) == beyond || (!inclusive && part == p))
+        };
+        // Just before the start bound: before every ID of an inclusive bound's key, after an exclusive one's.
+        let start = from.as_ref().map(|(p, inclusive)| (p.clone(), if *inclusive { ulid::Ulid::nil() } else { ulid::Ulid::from(u128::MAX) }));
         let want = query.offset.saturating_add(query.limit);
         let mut size = want.saturating_add(16).clamp(64, 4096);
-        let Some((name, first)) = page(None, size) else { return Ok(None) };
+        let Some((name, first)) = page(start.as_ref(), size) else { return Ok(None) };
         let path: Vec<String> = key.field.split('.').map(String::from).collect();
         let ties_matter = query.sort.len() > 1;
         let mut seen = HashSet::new();
@@ -436,7 +450,7 @@ impl HexDBEngine {
         // A page shorter than asked for was the end of the index.
         let mut exhausted = first.len() < size;
         let mut entries = first.into_iter();
-        let mut cursor = None;
+        let mut cursor = start;
         loop {
             let (part, id) = match entries.next() {
                 Some(entry) => entry,
@@ -453,6 +467,9 @@ impl HexDBEngine {
                     }
                 }
             };
+            if past_range(&part) {
+                break;
+            }
             index_entries += 1;
             cursor = Some((part.clone(), id));
             if documents.len() >= want && (!ties_matter || last_part.as_ref() != Some(&part)) {
@@ -502,5 +519,57 @@ impl HexDBEngine {
         };
         let plan = indexes.by_tessellation.get(tess).and_then(|list| plan(list, &filter));
         (filter, plan)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::engine::DocumentQuery;
+    use crate::filter::{Filter, SortKey};
+    use serde_json::{json, Value};
+
+    /// A range on the sort field seeks to its bound and stops past the other, instead of
+    /// walking the index from one end (and gives the same pages as before).
+    #[tokio::test]
+    async fn sorted_pages_seek_to_a_range_on_the_sort_field() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        let mut docs: Vec<Value> = (0..1500).map(|n| json!({ "rank": n })).collect();
+        docs.extend([json!({ "rank": "zzz" }), json!({ "rank": "aaa" }), json!({ "other": 1 })]);
+        engine.insert_documents("players", docs, None, None).await.unwrap();
+        engine.create_index("players", crate::IndexDef { fields: vec!["rank".into()], ..Default::default() }).await.unwrap();
+
+        let run = |filter: Value, descending: bool, limit: usize| {
+            let engine = &engine;
+            async move {
+                let query = DocumentQuery {
+                    filter: Filter::parse(&filter).unwrap(),
+                    sort: vec![SortKey { field: "rank".into(), descending }],
+                    limit,
+                    with_total: false,
+                    ..Default::default()
+                };
+                let page = engine.query_documents("players", &query).await.unwrap();
+                let ranks: Vec<Value> = page.documents.iter().map(|d| d.to_api_json()["rank"].clone()).collect();
+                (ranks, page.index_entries)
+            }
+        };
+        let cases = [
+            (json!({ "rank": { "$gte": 1490 } }), false, 5, json!([1490, 1491, 1492, 1493, 1494])),
+            (json!({ "rank": { "$gt": 1490 } }), false, 2, json!([1491, 1492])),
+            (json!({ "rank": { "$lte": 10 } }), true, 3, json!([10, 9, 8])),
+            (json!({ "rank": { "$lt": 10 } }), true, 3, json!([9, 8, 7])),
+            // Past the numbers' end: stops at the strings rather than reading them.
+            (json!({ "rank": { "$gte": 1497 } }), false, 100, json!([1497, 1498, 1499])),
+            (json!({ "rank": { "$gte": 5, "$lte": 7 } }), false, 100, json!([5, 6, 7])),
+            (json!({ "rank": { "$gt": 3, "$lt": 6 } }), true, 100, json!([5, 4])),
+            (json!({ "$and": [{ "rank": { "$gte": 1498 } }, { "rank": { "$ne": 1499 } }] }), false, 100, json!([1498])),
+        ];
+        for (filter, descending, limit, expected) in cases {
+            let (ranks, entries) = run(filter.clone(), descending, limit).await;
+            assert_eq!(json!(ranks), expected, "{filter}");
+            assert!(entries <= 8, "{filter}: walked {entries} index entries");
+        }
+        engine.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

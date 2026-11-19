@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -152,8 +153,31 @@ pub fn is_reserved_group(group: &str) -> bool {
     group.starts_with("__")
 }
 
-/// Commits run one at a time, so an offset never moves back.
-static COMMITS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// A lock per group being committed, so its offset never moves back; other groups don't wait.
+static COMMITS: std::sync::LazyLock<std::sync::Mutex<HashMap<Ulid, Arc<tokio::sync::Mutex<()>>>>> = std::sync::LazyLock::new(Default::default);
+
+/// Holds a group's commit lock entry; the last holder removes it.
+struct GroupLock {
+    key: Ulid,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl GroupLock {
+    fn new(key: Ulid) -> Self {
+        let lock = COMMITS.lock().unwrap().entry(key).or_default().clone();
+        GroupLock { key, lock }
+    }
+}
+
+impl Drop for GroupLock {
+    fn drop(&mut self) {
+        let mut map = COMMITS.lock().unwrap();
+        // Clones are made under the map's lock, so two counts means only the map and this one.
+        if Arc::strong_count(&self.lock) == 2 {
+            map.remove(&self.key);
+        }
+    }
+}
 
 /// The lattice config key that lets destinations reach private networks.
 pub const PRIVATE_NETWORKS: &str = "streams.private_networks";
@@ -422,7 +446,8 @@ impl HexDBEngine {
 
     /// Move a group's offset forward (never back).
     async fn advance_offset(&self, name: &str, group: &str, offset: Ulid) -> Result<()> {
-        let _one_at_a_time = COMMITS.lock().await;
+        let group_lock = GroupLock::new(offset_id(name, group));
+        let _one_at_a_time = group_lock.lock.lock().await;
         let current = self.group_offset(name, group).await?;
         if current.is_some_and(|c| c >= offset) {
             return Ok(());
@@ -600,6 +625,9 @@ async fn run_destination(engine: Arc<HexDBEngine>, config: StreamConfig, index: 
     let shown_url = crate::egress::redact_url(&destination.url);
     info!("📡 Stream '{}' delivers to {}.", config.name, shown_url);
     let Ok(url) = reqwest::Url::parse(&destination.url) else { return };
+    // The client for the last address checked, kept (with its connections) while the host
+    // still resolves to it and the address still passes the check.
+    let mut pinned: Option<(SocketAddr, reqwest::Client)> = None;
     loop {
         let offset = engine.group_offset(&config.name, &group).await.ok().flatten();
         let (messages, last) = match engine.read_stream(&config.name, offset, destination.batch_size).await {
@@ -612,22 +640,30 @@ async fn run_destination(engine: Arc<HexDBEngine>, config: StreamConfig, index: 
         }
         // Checked before every delivery (DNS can change), and sent to the address checked.
         let private_networks = engine.config_value(PRIVATE_NETWORKS) == json!(true);
-        let sent = match crate::egress::check(&url, private_networks, PRIVATE_NETWORKS).await {
+        let client = match crate::egress::check(&url, private_networks, PRIVATE_NETWORKS).await {
             Err(e) => Err(e),
+            Ok((_, addrs)) if pinned.as_ref().is_some_and(|(addr, _)| addrs.contains(addr)) => Ok(pinned.as_ref().unwrap().1.clone()),
             Ok((host, addrs)) => match crate::egress::pinned_client(&host, addrs[0], Duration::from_secs(30)) {
-                Err(e) => Err(format!("POST {}: {}", shown_url, e.without_url())),
                 Ok(client) => {
-                    let mut request = client.post(url.clone()).json(&messages).header("x-hexdb-stream", &config.name);
-                    for (k, v) in &destination.headers {
-                        request = request.header(k, v);
-                    }
-                    match request.send().await {
-                        Ok(r) if r.status().is_success() => Ok(()),
-                        Ok(r) => Err(format!("{} returned {}", shown_url, r.status())),
-                        Err(e) => Err(format!("POST {}: {}", shown_url, e.without_url())),
-                    }
+                    pinned = Some((addrs[0], client.clone()));
+                    Ok(client)
                 }
+                Err(e) => Err(format!("POST {}: {}", shown_url, e.without_url())),
             },
+        };
+        let sent = match client {
+            Err(e) => Err(e),
+            Ok(client) => {
+                let mut request = client.post(url.clone()).json(&messages).header("x-hexdb-stream", &config.name);
+                for (k, v) in &destination.headers {
+                    request = request.header(k, v);
+                }
+                match request.send().await {
+                    Ok(r) if r.status().is_success() => Ok(()),
+                    Ok(r) => Err(format!("{} returned {}", shown_url, r.status())),
+                    Err(e) => Err(format!("POST {}: {}", shown_url, e.without_url())),
+                }
+            }
         };
         match sent {
             Ok(()) => {

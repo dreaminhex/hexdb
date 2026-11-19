@@ -57,6 +57,9 @@ pub(crate) enum Op {
     Not(Vec<Op>),
 }
 
+/// One end of a range: the value, and whether it's included.
+pub(crate) type Bound<'a> = (&'a Value, bool);
+
 /// One sort key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SortKey {
@@ -73,6 +76,34 @@ impl Filter {
     /// A filter that matches every document.
     pub fn all() -> Filter {
         Filter(Node::And(Vec::new()))
+    }
+
+    /// A lower and an upper bound (value, inclusive) every match has at `path`, from range
+    /// conditions the whole filter requires (top-level `$gt`, `$gte`, `$lt`, `$lte`).
+    pub(crate) fn range_on(&self, path: &str) -> (Option<Bound<'_>>, Option<Bound<'_>>) {
+        fn conjuncts<'a>(node: &'a Node, out: &mut Vec<&'a Node>) {
+            match node {
+                Node::And(nodes) => nodes.iter().for_each(|n| conjuncts(n, out)),
+                node => out.push(node),
+            }
+        }
+        let mut nodes = Vec::new();
+        conjuncts(&self.0, &mut nodes);
+        let (mut lower, mut upper) = (None, None);
+        for node in nodes {
+            let Node::Field { path: p, ops } = node else { continue };
+            if p.len() != path.split('.').count() || !p.iter().zip(path.split('.')).all(|(a, b)| a == b) {
+                continue;
+            }
+            for op in ops {
+                match op {
+                    Op::Cmp(Ordering::Greater, inclusive, v) if lower.is_none() => lower = Some((v, *inclusive)),
+                    Op::Cmp(Ordering::Less, inclusive, v) if upper.is_none() => upper = Some((v, *inclusive)),
+                    _ => {}
+                }
+            }
+        }
+        (lower, upper)
     }
 
     /// A filter that matches no document.

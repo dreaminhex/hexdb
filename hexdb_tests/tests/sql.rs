@@ -487,3 +487,30 @@ fn big_reads_are_refused_not_cut_short() -> Result<()> {
     assert_eq!(narrowed.as_array().unwrap().len(), 2);
     Ok(())
 }
+
+/// Only the fields a statement reads are held, so a narrow query over wide documents fits a
+/// budget `SELECT *` doesn't; and projection doesn't change what columns mean.
+#[test]
+fn statements_hold_only_the_fields_they_read() -> Result<()> {
+    let server = TestServer::start_with(TestOptions { extra_toml: "\n[limits]\nsql_max_mb = 1\n".into(), ..TestOptions::default() })?;
+    let pad = "x".repeat(4000);
+    let notes: Vec<Value> = (0..400).map(|i| json!({ "n": i, "kind": if i % 2 == 0 { "even" } else { "odd" }, "pad": pad, "meta": { "k": i } })).collect();
+    assert!(server.request(Method::POST, "/notes/_bulk", Some(&json!(notes)), &[])?.status.is_success());
+    let tags: Vec<Value> = (0..4).map(|i| json!({ "n": i, "tag": format!("t{}", i) })).collect();
+    assert!(server.request(Method::POST, "/tags/_bulk", Some(&json!(tags)), &[])?.status.is_success());
+
+    // About 1.6 MB of documents: a join holding them whole is over the budget; one holding
+    // only the fields it reads isn't.
+    let res = sql(&server, json!({ "sql": "SELECT * FROM notes x JOIN tags t ON x.n = t.n" }))?;
+    assert_eq!(res.status.as_u16(), 400, "{}", res.body);
+    assert!(res.body.to_string().contains("sql_max_mb"), "{}", res.body);
+    assert_eq!(q(&server, "SELECT kind, COUNT(*) AS c FROM notes GROUP BY kind ORDER BY kind")?, json!([["even", 200], ["odd", 200]]));
+    assert_eq!(q(&server, "SELECT x.n, x.meta.k AS k FROM notes x JOIN tags t ON x.n = t.n WHERE x.n = 3")?, json!([[3, 3]]));
+    assert_eq!(q(&server, "SELECT t.tag, x.kind FROM tags t JOIN notes x ON x.n = t.n WHERE t.n < 2 ORDER BY t.tag")?, json!([["t0", "even"], ["t1", "odd"]]));
+    assert_eq!(q(&server, "SELECT tag FROM tags JOIN notes USING (n) WHERE kind = 'odd' ORDER BY tag")?, json!([["t1"], ["t3"]]));
+    // An unqualified field both tables have is still ambiguous.
+    let res = sql(&server, json!({ "sql": "SELECT n FROM tags JOIN notes ON tags.n = notes.n" }))?;
+    assert_eq!(res.status.as_u16(), 400, "{}", res.body);
+    assert!(res.body.to_string().contains("ambiguous"), "{}", res.body);
+    Ok(())
+}
