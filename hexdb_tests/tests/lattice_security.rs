@@ -185,6 +185,10 @@ fn the_lattice_secret_rotates_one_hex_at_a_time() -> Result<()> {
     })
     .map_err(|e| anyhow::anyhow!("{}:
 {}", e, follower.log_tail(40)))?;
+    // Both keys now show they're on the current secret: safe to drop the old one.
+    let keys = leader.request(Method::GET, "/auth/keys?all=true", None, &[])?.body;
+    let flags: Vec<Value> = keys["keys"].as_array().unwrap().iter().filter(|k| k["name"] == "test").map(|k| k["current_secret"].clone()).collect();
+    assert_eq!(flags, vec![json!(true), json!(true)], "{}", keys);
     let third = overseer.insert("notes", &json!({ "step": 3 }))?;
     replicated(&replica, "notes", &third)?;
 

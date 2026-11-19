@@ -239,6 +239,21 @@ fn default_type() -> String {
     "stream".into()
 }
 
+/// Answer a plugin waiting for a resync (`state` "needs_resync"): `from` "end" continues from the
+/// end of the history now; "snapshot" first sends every current document of its tessellations.
+pub async fn resync_plugin(engine: &HexDBEngine, id: &str, from: &str) -> Result<()> {
+    engine.ensure_writable()?;
+    if !engine.plugins.list().iter().any(|p| p.id == id) {
+        bail!(crate::engine::EngineError::NotFound(format!("Plugin '{}' not found.", id)));
+    }
+    let snapshot = match from {
+        "end" => false,
+        "snapshot" => true,
+        _ => bail!(crate::engine::EngineError::Invalid("from must be \"end\" or \"snapshot\".".into())),
+    };
+    feeds::resolve_resync(engine, id, snapshot).await
+}
+
 /// A plugin's state, for `GET /plugins` and the dashboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginStatus {
@@ -251,7 +266,8 @@ pub struct PluginStatus {
     /// "process", "webhook" or "builtin" (empty if the manifest couldn't be read).
     pub runtime: String,
     pub path: String,
-    /// running, standby (this hex isn't the Overseer), disabled, invalid, or error.
+    /// running, standby (this hex isn't the Overseer), disabled, invalid, error, or needs_resync
+    /// (the history no longer reaches its position: see `resync_plugin`).
     pub state: String,
     pub delivered: u64,
     pub last_seq: u64,
@@ -748,7 +764,7 @@ fn note_delivered(engine: &HexDBEngine, id: &str, batch: &feeds::Batch) {
 /// stops: the saved position is the delivered one.
 async fn run_once(engine: &Arc<HexDBEngine>, manifest: &Manifest, dir: &Path) -> Result<()> {
     let id = manifest.id.clone();
-    let mut feed = feeds::Feed::open(engine, manifest).await;
+    let Some(mut feed) = feeds::Feed::open(engine, manifest).await else { return Ok(()) };
     let mut checkpoint = Checkpoint { saved: feed.position().unwrap_or_default(), at: std::time::Instant::now() };
 
     if let Some(command) = &manifest.command {

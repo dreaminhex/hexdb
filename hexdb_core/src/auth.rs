@@ -470,6 +470,11 @@ pub struct ApiKeyInfo {
     pub created: i64,
     /// Epoch seconds, or 0 for no expiry.
     pub expires: i64,
+    /// Whether the key is hashed with the current lattice secret: false while it's still on a
+    /// previous one (it stops working when that one is removed); null if not known yet (a key
+    /// from before 2.5.9 that hasn't been used on the Overseer since).
+    #[serde(default)]
+    pub current_secret: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -482,6 +487,25 @@ struct StoredApiKey {
     created: i64,
     #[serde(default)]
     expires: i64,
+    /// The fingerprint of the lattice secret the hash was made with (see `key_fingerprint`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hashed_with: Option<String>,
+}
+
+/// Changes to stored API keys (re-hashing, noting their secret, revoking) one at a time, each on
+/// the key as it is then: a revoked key is never written back.
+static API_KEY_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Note the lattice secret a key from before 2.5.9 is hashed with, if it's still that key.
+async fn note_key_secret(engine: &HexDBEngine, id: Ulid, secret_hash: &str, fingerprint: String) -> Result<()> {
+    let _one_at_a_time = API_KEY_WRITES.lock().await;
+    let Some(doc) = engine.get_system_document(API_KEYS_TESSELLATION, id).await? else { return Ok(()) };
+    let mut stored: StoredApiKey = serde_json::from_value(doc.data_json())?;
+    if stored.hashed_with.is_some() || !crate::crypt::constant_time_eq(stored.secret_hash.as_bytes(), secret_hash.as_bytes()) {
+        return Ok(());
+    }
+    stored.hashed_with = Some(fingerprint);
+    engine.put_system_document(API_KEYS_TESSELLATION, id, serde_json::to_value(&stored)?, None).await
 }
 
 fn api_key_hash_with(lattice_key: &[u8; 32], secret: &str) -> String {
@@ -501,6 +525,7 @@ pub async fn store_rehashed_key(engine: &HexDBEngine, id: Ulid, old_hash: &str, 
     if key != key_fingerprint(&engine.config.lattice_key()?) {
         return Ok(false);
     }
+    let _one_at_a_time = API_KEY_WRITES.lock().await;
     let Some(doc) = engine.get_system_document(API_KEYS_TESSELLATION, id).await? else { return Ok(false) };
     let Ok(mut stored) = serde_json::from_value::<StoredApiKey>(doc.data_json()) else { return Ok(false) };
     // Already moved (another hex asked first): done.
@@ -511,6 +536,7 @@ pub async fn store_rehashed_key(engine: &HexDBEngine, id: Ulid, old_hash: &str, 
         return Ok(false);
     }
     stored.secret_hash = new_hash.to_string();
+    stored.hashed_with = Some(key.to_string());
     engine.put_system_document(API_KEYS_TESSELLATION, id, serde_json::to_value(&stored)?, None).await?;
     tracing::info!("🔑 Re-hashed API key '{}' with the current lattice secret", stored.name);
     Ok(true)
@@ -547,6 +573,7 @@ pub async fn create_api_key(engine: &HexDBEngine, owner: &Principal, name: &str,
         secret_hash: api_key_hash(engine, &secret)?,
         created: now,
         expires: expires_in_days.map(|d| now + d.clamp(1, 3650) as i64 * 86_400).unwrap_or(0),
+        hashed_with: Some(key_fingerprint(&engine.config.lattice_key()?)),
     };
     engine.put_system_document(API_KEYS_TESSELLATION, id, serde_json::to_value(&stored)?, None).await?;
     info!("🔑 API key '{}' created for '{}'.", name, owner.login);
@@ -558,6 +585,7 @@ pub async fn create_api_key(engine: &HexDBEngine, owner: &Principal, name: &str,
         login: stored.login,
         created: stored.created,
         expires: stored.expires,
+        current_secret: Some(true),
     };
     Ok((format!("{}{}_{}", API_KEY_PREFIX, id, secret), info))
 }
@@ -568,6 +596,7 @@ pub async fn list_api_keys(engine: &HexDBEngine, user_id: Option<&str>) -> Resul
         return Ok(Vec::new());
     }
     let page = engine.list_documents(API_KEYS_TESSELLATION, None, usize::MAX).await?;
+    let current = key_fingerprint(&engine.config.lattice_key()?);
     Ok(page
         .documents
         .iter()
@@ -580,6 +609,7 @@ pub async fn list_api_keys(engine: &HexDBEngine, user_id: Option<&str>) -> Resul
                 login: k.login,
                 created: k.created,
                 expires: k.expires,
+                current_secret: k.hashed_with.as_ref().map(|f| *f == current),
             })
         })
         .collect())
@@ -588,6 +618,7 @@ pub async fn list_api_keys(engine: &HexDBEngine, user_id: Option<&str>) -> Resul
 /// Delete an API key. Non-admins may only delete their own. Returns false if missing.
 pub async fn revoke_api_key(engine: &HexDBEngine, by: &Principal, key_id: &str) -> Result<bool> {
     let Ok(id) = Ulid::from_string(key_id) else { return Ok(false) };
+    let _one_at_a_time = API_KEY_WRITES.lock().await;
     let Some(doc) = engine.get_system_document(API_KEYS_TESSELLATION, id).await? else { return Ok(false) };
     let stored: StoredApiKey = serde_json::from_value(doc.data_json())?;
     if stored.user_id != by.user_id && !by.is_admin() {
@@ -649,6 +680,12 @@ pub async fn authenticate(engine: &HexDBEngine, token: &str) -> Result<Option<Pr
         else {
             return Ok(None);
         };
+        if matched == 0 && stored.hashed_with.is_none() && engine.is_writable() {
+            // A key from before 2.5.9: note the secret it's hashed with (once), for rotation status.
+            if let Err(e) = note_key_secret(engine, id, &stored.secret_hash, key_fingerprint(&lattice_keys[0])).await {
+                tracing::debug!("Couldn't note an API key's lattice secret: {:#}", e);
+            }
+        }
         if matched > 0 {
             let new_hash = api_key_hash_with(&lattice_keys[0], secret);
             if engine.is_writable() {

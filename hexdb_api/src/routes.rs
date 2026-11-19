@@ -131,6 +131,7 @@ pub fn app_router(
         .route("/triggers", get(crate::triggers::list).post(crate::triggers::create))
         .route("/triggers/{name}", get(crate::triggers::get).put(crate::triggers::update).delete(crate::triggers::delete))
         .route("/plugins", get(plugins))
+        .route("/plugins/{id}/resync", post(crate::handlers::plugin_resync))
         .route("/changes", get(crate::changes::changes))
         .route("/changes/stream", get(crate::changes::change_stream))
         .route("/changes/ws", get(crate::changes::change_socket))

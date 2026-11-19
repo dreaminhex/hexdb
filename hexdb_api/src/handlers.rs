@@ -2103,6 +2103,17 @@ pub struct LogParams {
 }
 
 /// Loaded plugins and their delivery state: `{"plugins": [...], "registry"}`.
+/// `POST /plugins/{id}/resync` `{"from": "end" | "snapshot"}`: let a plugin that's waiting for a
+/// resync (the history no longer reaches its position) continue.
+pub async fn plugin_resync(Path(id): Path<String>, State(engine): Engine, Auth(principal): Auth, body: axum::body::Bytes) -> ApiResult {
+    principal.require_action(Action::Plugins)?;
+    let body: Value = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let from = body["from"].as_str().ok_or_else(|| ApiError::invalid("from is required: \"end\" or \"snapshot\"."))?;
+    hexdb_core::plugins::resync_plugin(&engine, &id, from).await?;
+    engine.audit(&principal.login, "plugin.resync", &id, json!({ "from": from })).await;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 pub async fn plugins(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     principal.require_action(Action::Plugins)?;
     Ok(Json(json!({

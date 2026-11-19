@@ -243,6 +243,8 @@ docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
   -e HEXDB_STORAGE__ENCRYPTION_KEY="base64:..." hexdb
 ```
 
+Since 2.5.9 each release also has a slim image, `ghcr.io/dreaminhex/hexdb:<version>-slim` (`docker build --target slim .`): the server, the CLI and the admin UI only, without Python, Node.js, Tesseract, ffmpeg or curl. Script functions are turned off in it (`functions.scripts = false`), and OCR and the thumbnails only ffmpeg makes aren't available; everything else is the same. It's less than half the size and has far fewer operating-system packages to patch (see [packaging/trivy-triage.md](packaging/trivy-triage.md)). Use it unless you need those features.
+
 The server writes only its volume, so it also runs with a read-only root file system, no Linux capabilities and no privilege escalation; the parser sandbox (with its seccomp filter) works under Docker's default seccomp profile:
 
 ```bash
@@ -1861,7 +1863,9 @@ A plugin's saved position is where it starts again after a restart, so it only m
 - A restarted plugin continues from there, reading older changes from the change history.
 - A change may be delivered twice after a crash, so make consumers idempotent (use `seq`).
 - A new plugin starts at the current end of the feed, and that starting point is saved at once, so a plugin that fails before its first delivery still gets everything from then on.
-- After a failover or handover, the new Overseer has a history of its own. A plugin continues from where the new Overseer's history holds the old one up to its position (some changes may come again: deduplicate on `seq`). Only when the new Overseer doesn't continue that history, or no longer keeps that far back, does the plugin start at its end, and HexDB logs a warning.
+- After a failover or handover, the new Overseer has a history of its own. A plugin continues from where the new Overseer's history holds the old one up to its position (some changes may come again: deduplicate on `seq`). When the new Overseer doesn't continue that history, or no longer keeps that far back (the same for a plugin that was stopped longer than the history kept), the plugin doesn't skip what it missed: it waits, delivering nothing, with `state` `needs_resync` in `GET /plugins` and the reason in `last_error`, until an administrator chooses with `POST /plugins/{id}/resync`:
+  - `{"from": "end"}` continues from the end of the history now; the changes it missed stay missed.
+  - `{"from": "snapshot"}` first sends every current document of the plugin's tessellations, as changes with `"event": "snapshot"` and `"op": "put"`, then continues from there. A plugin that fails during the snapshot gets all of it again; deleted documents aren't sent, so a destination that keeps them should delete what the snapshot doesn't mention.
 
 Logs and metrics are delivered from the moment the plugin starts.
 
@@ -2388,7 +2392,7 @@ Hexes authenticate each other with the lattice key: `network.lattice_secret`, or
 
 1. On each hex in turn, set the new `lattice_secret` and add the old one to `network.previous_lattice_secrets`. Use the word `derived` for the key derived from the storage key, when moving from no secret to an explicit one. Restart that hex.
 2. Hexes sign with the current key and accept any listed key. A hex whose request isn't accepted retries with its previous keys, so mixed hexes keep talking.
-3. Once every hex has the new secret, remove `previous_lattice_secrets`. An API key is re-hashed with the new key the first time it's used after step 2, on any hex: the Overseer stores the new hash itself, and a replica asks the Overseer to (which it does only once it has the new secret too). If no Overseer answers (one is restarting), the replica asks again the next time the key is used. The hex that stores a new hash logs `Re-hashed API key '<name>' with the current lattice secret`. A key not re-hashed between steps 2 and 3 stops working when the old secret is removed. Sessions signed with an old key end when it's removed.
+3. Once every hex has the new secret, remove `previous_lattice_secrets`. An API key is re-hashed with the new key the first time it's used after step 2, on any hex: the Overseer stores the new hash itself, and a replica asks the Overseer to (which it does only once it has the new secret too). If no Overseer answers (one is restarting), the replica asks again the next time the key is used. The hex that stores a new hash logs `Re-hashed API key '<name>' with the current lattice secret`. A key not re-hashed between steps 2 and 3 stops working when the old secret is removed. Before step 3, list every key as an administrator (`GET /auth/keys?all=true`): each shows `current_secret`, `false` for a key still on the old secret (use it once, anywhere, to move it) and `null` for a key from before 2.5.9 not used on the Overseer since. Sessions signed with an old key end when it's removed.
 
 ### Local files
 
