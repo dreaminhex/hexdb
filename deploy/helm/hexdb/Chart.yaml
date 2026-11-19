@@ -8,8 +8,9 @@ appVersion: "2.2.0"
 home: https://hexdb.app
 sources:
   - https://github.com/dreaminhex/hexdb
-icon: https://cdn.jsdelivr.net/gh/dreaminhex/hexdb@main/hexdb_admin/public/favicon-192.png
+icon: https://hexdb.app/icon-512.png
 keywords:
+  - hexdb
   - database
   - document-database
   - vector-search
@@ -22,5 +23,7 @@ maintainers:
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
+    - name: Website
+      url: https://hexdb.app
     - name: Manual
       url: https://github.com/dreaminhex/hexdb/blob/main/MANUAL.md

@@ -11,7 +11,7 @@
 
   <name>HexDB JDBC driver</name>
   <description>A JDBC 4.2 driver for HexDB's read-only SQL: joins, subqueries and expressions, with no dependencies.</description>
-  <url>https://github.com/dreaminhex/hexdb</url>
+  <url>https://hexdb.app</url>
 
   <licenses>
     <license>

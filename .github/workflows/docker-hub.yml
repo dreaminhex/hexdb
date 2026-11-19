@@ -73,5 +73,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.NAMESPACE }}/hexdb
-          short-description: "Encrypted, replicated document and file database: REST, GraphQL, SQL, vector search and MCP."
+          short-description: "HexDB: encrypted, replicated document and file database. REST, GraphQL, SQL, vector search, MCP."
           readme-filepath: docker/README.md
