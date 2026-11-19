@@ -145,7 +145,15 @@ Each stage ships off by default, behind `partitioning.enabled`, and is useful al
 4. Rebalancing: adding and removing partitions on a live lattice.
 5. Consistent backups and restore, then hosting integration.
 
-## Open questions for review
+## Decisions (2026-11-19)
+
+1. One partition per hex.
+2. Stage 2 ships without cross-partition transactions: they're refused with a clear error until stage 3.
+3. The partition key is the document hash; per-tessellation keys come later.
+4. Unique indexes stay global, at the cost of a two-partition write per unique field.
+5. The smallest partitioned plan is 2 partitions x 3 hexes (6 machines).
+
+## Open questions for review (answered above)
 
 1. Is one partition per hex acceptable, or should a hex be able to host several (fewer machines for small lattices, more complex accounting)?
 2. Should stage 2 ship without cross-partition transactions (refused with a clear error), or wait for stage 3?
