@@ -66,24 +66,20 @@ COPY prebuilt/ui /usr/share/hexdb/ui
 
 FROM ${BINARIES}-binaries AS binaries
 
-# Node.js for JavaScript and TypeScript functions and plugins: the official build, since
-# TypeScript functions need type stripping (22.6 or later) and Debian's is older.
-FROM node:24-bookworm-slim AS node
-
-# Trixie: Tesseract 5.5 with English for OCR, and dav1d for the small ffmpeg's AV1 decoding; HexDB
-# finds both programs on its own (files.tesseract, files.ffmpeg). Binaries built on bookworm run here.
-FROM debian:trixie-slim
+# The slim image (docker build --target slim): the server, the CLI and the admin UI only. No
+# script runtimes (script functions are refused), no OCR and no ffmpeg (thumbnails HexDB makes
+# itself still work), so far fewer packages, and fewer findings to triage.
+FROM debian:trixie-slim AS slim
 RUN apt-get update \
- && apt-get upgrade -y  && apt-get install -y --no-install-recommends ca-certificates curl python3 tesseract-ocr tesseract-ocr-eng libdav1d7 \
+ && apt-get upgrade -y && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home-dir /var/lib/hexdb --shell /usr/sbin/nologin hexdb \
  && mkdir -p /var/lib/hexdb /etc/hexdb \
  && chown hexdb:hexdb /var/lib/hexdb
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY --from=node /usr/local/LICENSE /usr/share/doc/nodejs/LICENSE
-COPY --from=binaries /usr/local/bin/ /usr/local/bin/
+COPY --from=binaries /usr/local/bin/hexdb_api /usr/local/bin/hexdb /usr/local/bin/
 COPY --from=binaries /usr/share/hexdb/ui /usr/share/hexdb/ui
 COPY docker/hexdb.toml /etc/hexdb/hexdb.toml
+RUN printf '\n[functions]\nscripts = false   # this image has no script runtimes\n' >> /etc/hexdb/hexdb.toml
 COPY LICENSE THIRD-PARTY-NOTICES.md /usr/share/doc/hexdb/
 COPY plugins /usr/share/hexdb/plugins
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/hexdb-entrypoint
@@ -93,5 +89,23 @@ WORKDIR /var/lib/hexdb
 VOLUME /var/lib/hexdb
 EXPOSE 7700 7702
 ENV HEXDB_CONFIG=/etc/hexdb/hexdb.toml
-HEALTHCHECK --interval=15s --timeout=3s --start-period=20s CMD curl -fsS http://127.0.0.1:7700/health || exit 1
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s CMD hexdb health --url 127.0.0.1:7700 > /dev/null || exit 1
 ENTRYPOINT ["hexdb-entrypoint"]
+
+# Node.js for JavaScript and TypeScript functions and plugins: the official build, since
+# TypeScript functions need type stripping (22.6 or later) and Debian's is older.
+FROM node:24-bookworm-slim AS node
+
+# The full image (the default): the slim one plus Python and Node.js for script functions and
+# plugins, Tesseract 5.5 with English for OCR, and the small ffmpeg with dav1d for AV1. HexDB
+# finds the programs on its own (files.tesseract, files.ffmpeg). Binaries built on bookworm run here.
+FROM slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl python3 tesseract-ocr tesseract-ocr-eng libdav1d7 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/LICENSE /usr/share/doc/nodejs/LICENSE
+COPY --from=binaries /usr/local/bin/ffmpeg /usr/local/bin/
+COPY --from=binaries /usr/share/doc/ffmpeg /usr/share/doc/ffmpeg
+COPY docker/hexdb.toml /etc/hexdb/hexdb.toml
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s CMD curl -fsS http://127.0.0.1:7700/health || exit 1

@@ -360,50 +360,81 @@ jobs:
       - name: Tags
         id: tags
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      # Before publishing: the amd64 image runs its programs and every script runtime,
-      # and has no critical vulnerability with a fix available.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
-        with:
-          context: .
-          platforms: linux/amd64
-          build-args: BINARIES=prebuilt
-          load: true
-          tags: hexdb:smoke
-      - name: Smoke test
-        run: sh docker/smoke.sh hexdb:smoke
-      - name: Scan
-        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2 image --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress hexdb:smoke
-      # The gate above only stops fixable critical findings; the full scan is kept for triage.
-      - name: Full scan
-        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" aquasec/trivy:0.76.2 image --format json --output /out/trivy-image.json --no-progress hexdb:smoke
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: trivy-image
-          path: trivy-image.json
+      # Built once, for both architectures, and pushed by digest only (no tag yet). That exact
+      # image is tested and scanned on each architecture, then the same digest gets the version
+      # tags: what's published is what was tested.
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         id: push
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           build-args: BINARIES=prebuilt
-          push: true
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hexdb,push-by-digest=true,name-canonical=true,push=true
           # An SBOM and build provenance (SLSA) attached to the image.
           sbom: true
           provenance: mode=max
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/hexdb:${{ github.ref_name }}
-            ghcr.io/${{ github.repository_owner }}/hexdb:${{ steps.tags.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/hexdb:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=HexDB: a document database with REST, GraphQL, SQL, replication and an admin UI
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+      # The slim image (no script runtimes, OCR or ffmpeg), the same way.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        id: push-slim
+        with:
+          context: .
+          target: slim
+          platforms: linux/amd64,linux/arm64
+          build-args: BINARIES=prebuilt
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hexdb,push-by-digest=true,name-canonical=true,push=true
+          sbom: true
+          provenance: mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=HexDB (slim: the server only, without script runtimes, OCR or ffmpeg)
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version=${{ steps.tags.outputs.version }}
+      # Each architecture (arm64 emulated): its programs and script runtimes run, the server starts
+      # and runs a script function in each runtime through the API, and there's no critical
+      # vulnerability with a fix available.
+      - name: Smoke test and scan both architectures
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/hexdb@${{ steps.push.outputs.digest }}
+          SLIM: ghcr.io/${{ github.repository_owner }}/hexdb@${{ steps.push-slim.outputs.digest }}
+        run: |
+          set -eu
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --quiet --platform "$platform" "$IMAGE"
+            DOCKER_DEFAULT_PLATFORM="$platform" sh docker/smoke.sh "$IMAGE"
+            python3 docker/smoke_server.py "$IMAGE" "$platform"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2 image --platform "$platform" --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress "$IMAGE"
+            # Slim: the server starts and answers; scripts are refused.
+            docker pull --quiet --platform "$platform" "$SLIM"
+            python3 docker/smoke_server.py "$SLIM" "$platform" --slim
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2 image --platform "$platform" --exit-code 1 --severity CRITICAL --ignore-unfixed --no-progress "$SLIM"
+          done
+      # The gate above only stops fixable critical findings; the full scan is kept for triage
+      # (see packaging/trivy-triage.md).
+      - name: Full scan
+        run: docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" aquasec/trivy:0.76.2 image --platform linux/amd64 --format json --output /out/trivy-image.json --no-progress "ghcr.io/${{ github.repository_owner }}/hexdb@${{ steps.push.outputs.digest }}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: trivy-image
+          path: trivy-image.json
+      - name: Tag the tested image
+        env:
+          REPO: ghcr.io/${{ github.repository_owner }}/hexdb
+          DIGEST: ${{ steps.push.outputs.digest }}
+          SLIM_DIGEST: ${{ steps.push-slim.outputs.digest }}
+          VERSION: ${{ steps.tags.outputs.version }}
+        run: |
+          docker buildx imagetools create -t "$REPO:$GITHUB_REF_NAME" -t "$REPO:$VERSION" -t "$REPO:latest" "$REPO@$DIGEST"
+          docker buildx imagetools create -t "$REPO:$VERSION-slim" -t "$REPO:slim" "$REPO@$SLIM_DIGEST"
       # Signed by digest, keyless (Sigstore, this workflow's GitHub identity). Check with:
       #   cosign verify ghcr.io/<owner>/hexdb@<digest> --certificate-identity-regexp 'https://github.com/<owner>/hexdb/' --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
-      - name: Sign the image
-        run: cosign sign --yes "ghcr.io/${{ github.repository_owner }}/hexdb@${{ steps.push.outputs.digest }}"
+      - name: Sign the images
+        run: cosign sign --yes "ghcr.io/${{ github.repository_owner }}/hexdb@${{ steps.push.outputs.digest }}" "ghcr.io/${{ github.repository_owner }}/hexdb@${{ steps.push-slim.outputs.digest }}"
 
   docker-hub:
     # The image built above, copied to Docker Hub (see docker-hub.yml, which can also be run by hand).

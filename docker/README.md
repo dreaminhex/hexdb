@@ -17,6 +17,8 @@ docker logs hexdb | grep -A2 "first administrator"   # the generated admin passw
 
 Open http://localhost:7700/ui/ and sign in. Keep the encryption key: the data can't be read without it.
 
+A slim image, `ghcr.io/dreaminhex/hexdb:<version>-slim`, has the server, the CLI and the admin UI only: no script runtimes (script functions are off), OCR or ffmpeg, and far fewer packages to patch.
+
 The server writes only its volume, so it also runs with a read-only root file system and no Linux capabilities:
 
 ```bash
