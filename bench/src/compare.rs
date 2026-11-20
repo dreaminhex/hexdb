@@ -19,7 +19,6 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Documents loaded per round.
@@ -217,14 +216,14 @@ fn memory(pid: u32) -> (f64, f64) {
     #[cfg(windows)]
     {
         let script = format!("$p = Get-Process -Id {}; \"$($p.WorkingSet64) $($p.PeakWorkingSet64)\"", pid);
-        let out = Command::new("powershell").args(["-NoProfile", "-Command", &script]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        let out = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &script]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
         let mut parts = out.split_whitespace().map(|v| v.parse::<f64>().unwrap_or(0.0));
         (parts.next().unwrap_or(0.0), parts.next().unwrap_or(0.0))
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         // ps reports the resident set in KB; the peak isn't available, so it's the same value.
-        let out = Command::new("ps").args(["-o", "rss=", "-p", &pid.to_string()]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &pid.to_string()]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
         let rss = out.trim().parse::<f64>().unwrap_or(0.0) * 1024.0;
         (rss, rss)
     }
