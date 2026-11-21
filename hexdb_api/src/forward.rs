@@ -553,14 +553,16 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
         Ok(answer) => answer,
         Err(refused) => return refused.into_response(),
     };
-    if status != StatusCode::MISDIRECTED_REQUEST || epoch_refusals >= 3 {
+    if status != StatusCode::MISDIRECTED_REQUEST || epoch_refusals >= 3 || !headers.contains_key(PARTITION_EPOCH_HEADER) {
         break (status, out_headers, answer);
     }
-    let body = match answer {
-        Answer::Checked(body) => body,
-        Answer::Unchecked(response) => response.bytes().await.unwrap_or_default(),
+    // Only a refusal signed for this very request proves nothing ran; without that
+    // proof, only a read or a keyed write (the Overseer replays it) is sent again.
+    let (body, verified) = match answer {
+        Answer::Checked(body) => (body, overseer.signs_forwarded),
+        Answer::Unchecked(response) => (response.bytes().await.unwrap_or_default(), false),
     };
-    if !is_epoch_mismatch(status, &body) {
+    if !is_epoch_mismatch(status, &body) || !(verified || read || resendable) {
         break (status, out_headers, Answer::Checked(body));
     }
     // Refused untouched for a stale partition map: reload it and send again, a few times at most.

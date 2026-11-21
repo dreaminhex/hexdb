@@ -2534,7 +2534,7 @@ enabled = false   # the default
 ```
 
 - **The partition map** says which partition owns each slice, and which hexes form each partition's group. Every change gets a higher epoch. A lattice that never changed it has the implicit map: partition 0, every slice, epoch 1. Upgrading writes nothing. `GET /status/partitions` (administrators) shows the map this hex routes by: `epoch`, each partition's `slices` and `hexes`, `this_hex`, and `sends_epochs`.
-- **Routing.** With `enabled = true`, a hex that forwards a request to the Overseer also sends the epoch of the map it routed by, covered by the lattice signature, once every live hex runs 2.6 or later (older ones would reject the signature). A hex whose map has another epoch refuses the request before running it, with 421 `partition_epoch`; the forwarding hex reloads its map and sends the request again (up to three times). A forwarded file upload can't be sent twice, so the 421 goes back to the client, which can send it again: nothing was written.
+- **Routing.** With `enabled = true`, a hex that forwards a request to the Overseer also sends the epoch of the map it routed by, covered by the lattice signature, once every live hex runs 2.6 or later (older ones would reject the signature). A hex whose map has another epoch refuses the request before running it, with 421 `partition_epoch`; the forwarding hex reloads its map and sends the request again (up to three times), if the refusal is signed for that request or the request is a read or a write with an idempotency key. Otherwise the 421 goes back to the client. A forwarded file upload can't be sent twice, so the 421 goes back to the client, which can send it again: nothing was written.
 
 ### Adding a hex
 
