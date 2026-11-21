@@ -133,21 +133,24 @@ impl PartitionMap {
     }
 
     /// The newest valid map among stored versions; the implicit map if there are none.
-    /// An invalid version is skipped (and named in the error list), never applied.
+    /// An invalid version is skipped (and named in the error list), never applied, and
+    /// so is an epoch two different versions claim: no hex can know which one is meant.
     pub fn newest(versions: impl IntoIterator<Item = serde_json::Value>) -> (PartitionMap, Vec<String>) {
-        let mut best: Option<PartitionMap> = None;
+        let mut by_epoch: std::collections::BTreeMap<u64, Vec<PartitionMap>> = std::collections::BTreeMap::new();
         let mut errors = Vec::new();
         for doc in versions {
             match serde_json::from_value::<PartitionMap>(doc).map_err(anyhow::Error::from).and_then(|m| m.validate().map(|_| m)) {
-                Ok(map) => {
-                    if best.as_ref().is_none_or(|b| map.epoch > b.epoch) {
-                        best = Some(map);
-                    }
-                }
+                Ok(map) => by_epoch.entry(map.epoch).or_default().push(map),
                 Err(e) => errors.push(format!("{:#}", e)),
             }
         }
-        (best.unwrap_or_default(), errors)
+        for (epoch, maps) in by_epoch.into_iter().rev() {
+            if maps.iter().all(|m| *m == maps[0]) {
+                return (maps.into_iter().next().unwrap_or_default(), errors);
+            }
+            errors.push(format!("epoch {} has {} different versions; none is applied", epoch, maps.len()));
+        }
+        (PartitionMap::default(), errors)
     }
 }
 
@@ -194,16 +197,26 @@ impl HexDBEngine {
         if *self.partitions.seen.lock().unwrap() == Some(generation) {
             return;
         }
-        let query = DocumentQuery { filter: Filter::all(), sort: Vec::new(), offset: 0, limit: 10_000, after: None, with_total: false };
-        let page = match self.query_documents(PARTITIONS_TESSELLATION, &query).await {
-            Ok(page) => page,
-            Err(e) => {
-                warn!("⚠️ Couldn't read the partition map: {:#}", e);
-                return;
+        // Every version, page by page: the newest can be anywhere in ID order.
+        let mut versions = Vec::new();
+        let mut after = None;
+        loop {
+            let query = DocumentQuery { filter: Filter::all(), sort: Vec::new(), offset: 0, limit: 10_000, after, with_total: false };
+            let page = match self.query_documents(PARTITIONS_TESSELLATION, &query).await {
+                Ok(page) => page,
+                Err(e) => {
+                    warn!("⚠️ Couldn't read the partition map: {:#}", e);
+                    return;
+                }
+            };
+            versions.extend(page.documents.iter().map(|d| d.data_json()));
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
             }
-        };
+        }
         *self.partitions.seen.lock().unwrap() = Some(generation);
-        let (newest, errors) = PartitionMap::newest(page.documents.iter().map(|d| d.data_json()));
+        let (newest, errors) = PartitionMap::newest(versions);
         for e in &errors {
             warn!("⚠️ Ignoring an invalid partition map version: {}", e);
         }
@@ -275,9 +288,19 @@ mod tests {
         assert!(errors.is_empty());
         let v2 = json!({ "epoch": 2, "partitions": [{ "id": 0, "slices": u64::MAX }] });
         let broken = json!({ "epoch": 9, "partitions": [{ "id": 0, "slices": 1 }] });
-        let (map, errors) = PartitionMap::newest(vec![PartitionMap::default().to_document(), broken, v2]);
+        let (map, errors) = PartitionMap::newest(vec![PartitionMap::default().to_document(), broken, v2.clone()]);
         assert_eq!(map.epoch, 2);
         assert_eq!(errors.len(), 1);
+
+        // Two different versions at one epoch: that epoch is refused, the one below applies.
+        let v3a = json!({ "epoch": 3, "partitions": [{ "id": 0, "slices": u64::MAX }] });
+        let v3b = json!({ "epoch": 3, "partitions": [{ "id": 0, "slices": u64::MAX, "hexes": ["h1"] }] });
+        let (map, errors) = PartitionMap::newest(vec![v2.clone(), v3a.clone(), v3b]);
+        assert_eq!(map.epoch, 2);
+        assert!(errors.iter().any(|e| e.contains("epoch 3")), "{:?}", errors);
+        // The same version stored twice is no conflict.
+        let (map, errors) = PartitionMap::newest(vec![v2, v3a.clone(), v3a]);
+        assert_eq!((map.epoch, errors.len()), (3, 0));
     }
 
     #[test]
