@@ -773,6 +773,9 @@ async fn run() -> Result<()> {
                 "Backed up {} file(s), {} bytes, up to sequence {} to {}",
                 info["files"], info["bytes"], info["sequence"], info["path"].as_str().unwrap_or_default()
             );
+            if info["complete"] == false {
+                println!("This hex keeps only part of the lattice ({} of 64 slices, or isn't caught up): back up the Overseer for all of it.", info["slices"]);
+            }
             println!("To restore: stop the server, point storage.path at that folder (same encryption keys), and start it.");
             Ok(())
         }

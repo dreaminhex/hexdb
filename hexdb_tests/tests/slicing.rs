@@ -196,6 +196,11 @@ fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     })?;
     let (a, b) = (kept(&first)?, kept(&second)?);
     assert!(a.1 < 200 && b.1 < 200, "each replica keeps part: {:?} {:?}", a, b);
+    // A sliced replica's backup says it holds only part of the lattice.
+    let backup = second.request(Method::POST, "/backup", None, &[])?;
+    assert_eq!(backup.status, 201, "{}", backup.body);
+    assert_eq!(backup.body["complete"], false, "{}", backup.body);
+    assert_eq!(backup.body["slices"].as_u64(), Some(b.0), "{}", backup.body);
     assert_eq!(kept(&overseer)?.1, 200, "the Overseer keeps everything");
 
     // New writes land on the replica that keeps their slice.

@@ -852,7 +852,11 @@ export function OverviewPage() {
     setBackingUp(true)
     try {
       const result = await api.backup()
-      toast.success(`Backed up ${formatNumber(result.files)} files (${formatBytes(result.bytes)}) to ${result.path}.`)
+      if (result.complete) {
+        toast.success(`Backed up ${formatNumber(result.files)} files (${formatBytes(result.bytes)}) to ${result.path}.`)
+      } else {
+        toast.warning(`Backed up this hex's part of the lattice (${result.slices} of 64 slices) to ${result.path}. Back up the Overseer for all of it.`)
+      }
     } catch (e) {
       toast.error(`Backup failed: ${errorMessage(e)}`)
     } finally {

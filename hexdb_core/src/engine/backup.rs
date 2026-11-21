@@ -56,6 +56,14 @@ pub struct BackupInfo {
     pub linked: usize,
     pub bytes: u64,
     pub millis: u64,
+    /// The hex's role when the backup fixed its position.
+    pub role: String,
+    /// How many of the 64 slices of user data the hex held.
+    pub slices: u32,
+    /// True if the backup holds the whole lattice's data up to `sequence`: an Overseer
+    /// not rebuilding, or a replica keeping every slice and caught up. A sliced or
+    /// lagging replica's backup is only part of it (see `crate::slicing`).
+    pub complete: bool,
 }
 
 #[derive(Default)]
@@ -213,6 +221,18 @@ impl HexDBEngine {
             let catalog: Catalog = self.catalog.lock().unwrap().clone();
             (state.next_seq.saturating_sub(1), rotation, catalog)
         };
+        // What the backup covers, at that position.
+        let role = self.role();
+        let (slices, complete) = {
+            let r = self.replication.lock().unwrap();
+            let complete = !self.is_oracle()
+                && if self.is_writable() {
+                    r.rebuilding.is_none()
+                } else {
+                    r.state == "streaming" && r.slices_held == crate::slicing::ALL_SLICES && r.lag() == 0
+                };
+            (crate::slicing::count(r.slices_held), complete)
+        };
         let new_segment = rotation
             .await
             .map_err(|_| anyhow::anyhow!("WAL writer stopped during the backup"))?
@@ -254,6 +274,9 @@ impl HexDBEngine {
                 "sequence": sequence,
                 "hex": self.id.to_string(),
                 "version": self.version,
+                "role": role,
+                "slices": slices,
+                "complete": complete,
             }),
         };
         let result = tokio::task::spawn_blocking(move || job.run())
@@ -269,6 +292,9 @@ impl HexDBEngine {
                 linked: stats.linked,
                 bytes: stats.bytes,
                 millis: started.elapsed().as_millis() as u64,
+                role: role.clone(),
+                slices,
+                complete,
             });
 
         match result {
@@ -277,6 +303,9 @@ impl HexDBEngine {
                     "📦 Backed up {} file(s) ({} linked, {} bytes) up to sequence {} to {} in {} ms.",
                     info.files, info.linked, info.bytes, info.sequence, info.path, info.millis
                 );
+                if !info.complete {
+                    info!("📦 That backup holds only this {}'s part of the lattice ({} of 64 slices, or not caught up): back up the Overseer for all of it.", info.role, info.slices);
+                }
                 Ok(info)
             }
             Err(e) => {

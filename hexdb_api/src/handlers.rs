@@ -603,7 +603,7 @@ pub async fn backup(State(engine): Engine, Auth(principal): Auth, body: Option<J
             let result = engine.backup(request.name.as_deref()).await;
             let event = hexdb_core::audit::AuditEvent::new(&login, "maintenance.backup", &engine.name);
             let event = match &result {
-                Ok(info) => event.details(json!({ "name": info.name, "sequence": info.sequence, "files": info.files })),
+                Ok(info) => event.details(json!({ "name": info.name, "sequence": info.sequence, "files": info.files, "complete": info.complete })),
                 Err(e) => event.outcome("failed").details(json!({ "name": request.name, "error": format!("{:#}", e) })),
             };
             engine.record_audit(event).await;
