@@ -69,7 +69,7 @@ ROUTES = [
     ("get", "/audit", "Server", "The audit trail, newest first (audit permission)", {"parameters": [param(n, "query") for n in ("actor", "action", "target", "outcome", "since", "until", "limit", "offset")], "responses": ok()}),
     ("get", "/settings", "Server", "Runtime settings and the effective configuration (admins)", {"responses": ok()}),
     ("put", "/settings", "Server", "Change settings (admins)", {"requestBody": body(description="{\"limits.max_document_kb\": 2048, ...}; null removes an override"), "responses": ok()}),
-    ("get", "/partitions", "Server", "The partition map this hex routes by: epoch, partitions and their slices (admins)", {"responses": ok()}),
+    ("get", "/status/partitions", "Server", "The partition map this hex routes by: epoch, partitions and their slices (admins)", {"responses": ok()}),
     ("get", "/config", "Configuration", "The lattice configuration: newest version, schema, and each hex's applied version (admins; secrets never returned)", {"responses": ok()}),
     ("put", "/config", "Configuration", "Change lattice settings; a new version (admins)", {"requestBody": body({"type": "object", "properties": {"changes": {"type": "object", "description": "setting key -> value; null clears"}, "comment": {"type": "string"}, "base_version": {"type": "integer"}}, "required": ["changes"]}), "responses": ok()}),
     ("get", "/config/history", "Configuration", "Configuration versions, newest first, with what each changed (admins)", {"parameters": [param(n, "query") for n in ("limit", "offset")], "responses": ok()}),

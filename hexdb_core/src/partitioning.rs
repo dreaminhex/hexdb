@@ -167,7 +167,7 @@ impl HexDBEngine {
         self.partitions.map.read().unwrap().clone()
     }
 
-    /// Stored map versions that failed validation, for `GET /partitions`.
+    /// Stored map versions that failed validation, for `GET /status/partitions`.
     pub fn rejected_partition_maps(&self) -> Vec<String> {
         self.partitions.rejected.lock().unwrap().clone()
     }

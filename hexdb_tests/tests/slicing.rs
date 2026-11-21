@@ -266,11 +266,11 @@ fn partition_epochs_ride_on_forwarded_writes_without_changing_anything() -> Resu
     let overseer = TestServer::start_with(opts(0, 4096))?;
     let replica = TestServer::start_with(opts(1, 1024))?;
     wait_until(Duration::from_secs(30), "the replica to send partition epochs", || {
-        let p = replica.request(Method::GET, "/partitions", None, &[])?.body;
+        let p = replica.request(Method::GET, "/status/partitions", None, &[])?.body;
         Ok(p["sends_epochs"] == true && status(&replica)?["hex_type"] != "Overseer")
     })?;
 
-    let map = replica.request(Method::GET, "/partitions", None, &[])?.body;
+    let map = replica.request(Method::GET, "/status/partitions", None, &[])?.body;
     assert_eq!(map["enabled"], true);
     assert_eq!(map["epoch"], 1, "{}", map);
     assert_eq!(map["partitions"].as_array().map(Vec::len), Some(1), "{}", map);

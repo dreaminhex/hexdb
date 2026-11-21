@@ -224,7 +224,7 @@ fn answers_without_data(path: &str) -> bool {
                 | "/auth/logout"
                 | "/auth/me"
                 | "/settings"
-                | "/partitions"
+                | "/status/partitions"
                 | "/shutdown"
                 | "/flush"
                 | "/compact"

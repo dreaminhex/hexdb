@@ -70,7 +70,7 @@ pub fn app_router(
         .route("/deletes/{batch}", get(get_delete).delete(purge_delete))
         .route("/deletes/{batch}/restore", post(restore_delete))
         .route("/settings", get(get_settings).put(put_settings))
-        .route("/partitions", get(get_partitions))
+        .route("/status/partitions", get(get_partitions))
         .route("/config", get(crate::config::get_config).put(crate::config::put_config))
         .route("/config/history", get(crate::config::config_history))
         .route("/config/versions/{version}", get(crate::config::config_version))
