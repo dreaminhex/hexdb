@@ -1,5 +1,5 @@
 //! Sliced replicas (`replication.slicing`): placement, rebalancing when a
-//! hex joins, reads through a replica, and a failover rebuilt from the slices
+//! hex joins, reads (and downloads) through a replica, and a failover rebuilt from the slices
 //! the replicas kept.
 
 use anyhow::{bail, Result};
@@ -219,6 +219,18 @@ fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     drop(feed);
     let ws = second.request(Method::GET, "/changes/ws", None, &[])?;
     assert_eq!(ws.status, 421, "{}", ws.body);
+    // A download by path streams through from the Overseer, whole or a range.
+    assert_eq!(overseer.request(Method::POST, "/tessellations", Some(&json!({ "name": "media", "kind": "files" })), &[])?.status, 201);
+    let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    assert!(overseer.send_bytes(Method::PUT, "/media/_files/big.bin", big.clone(), &[])?.status.is_success());
+    let (code, headers, whole) = second.get_bytes("/media/_files/big.bin", &[])?;
+    assert_eq!((code.as_u16(), whole.len()), (200, big.len()));
+    assert!(whole == big, "the same bytes");
+    assert_eq!(headers.get("content-length").and_then(|v| v.to_str().ok()), Some("3000000"));
+    assert!(headers.get("x-hexdb-forwarded-to").is_some(), "streamed from the Overseer");
+    let (code, _, part) = second.get_bytes("/media/_files/big.bin", &[("range", "bytes=1000000-1000999")])?;
+    assert_eq!(code.as_u16(), 206);
+    assert!(part == big[1_000_000..1_001_000], "the requested range");
 
     // A failover: both replicas have applied everything before the Overseer goes.
     let published = status(&overseer)?["replication"]["applied_seq"].as_u64().unwrap_or(0);
@@ -244,7 +256,7 @@ fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     })?;
     let leader = leader.unwrap();
     let follower = if std::ptr::eq(leader, &first) { &second } else { &first };
-    assert_eq!(kept(leader)?, (64, 250));
+    assert_eq!(kept(leader)?, (64, 251), "250 items and the file");
     for n in [0, 124, 249] {
         let res = leader.request(Method::POST, "/items/_query", Some(&json!({ "filter": { "n": n } })), &[])?;
         assert_eq!(res.body["documents"].as_array().map(|d| d.len()), Some(1), "n = {}: {}", n, res.body);
@@ -252,7 +264,7 @@ fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
 
     // Writes work again, and the last replica (alone now) keeps everything.
     seed(leader, 250, 10)?;
-    wait_until(Duration::from_secs(90), "the remaining replica to keep everything", || Ok(kept(follower)? == (64, 260)))?;
+    wait_until(Duration::from_secs(90), "the remaining replica to keep everything", || Ok(kept(follower)? == (64, 261)))?;
     Ok(())
 }
 

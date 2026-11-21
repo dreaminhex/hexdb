@@ -317,20 +317,29 @@ async fn forward_upload(engine: &Arc<HexDBEngine>, overseer: hexdb_core::network
         Ok(answer) => answer,
         Err(refused) => return refused.into_response(),
     };
-    let body = match answer {
-        Answer::Checked(body) => body,
-        Answer::Unchecked(response) => match response.bytes().await {
-            Ok(body) => body,
-            Err(e) => return crate::handlers::ApiError::new(StatusCode::BAD_GATEWAY, "overseer_unreachable", format!("The Overseer's response was cut off: {}", e)).into_response(),
-        },
+    respond(status, out_headers, answer, &overseer)
+}
+
+/// The Overseer's answer for the client. One that wasn't checked (a download, say)
+/// streams through as it comes, with its length, so it's never held in memory here.
+fn respond(status: StatusCode, headers: HeaderMap, answer: Answer, overseer: &hexdb_core::network::discovery::PeerHex) -> Response {
+    let (body, length) = match answer {
+        Answer::Checked(body) => (Body::from(body), None),
+        Answer::Unchecked(response) => {
+            let length = response.headers().get(header::CONTENT_LENGTH).cloned();
+            (Body::from_stream(response.bytes_stream()), length)
+        }
     };
-    let mut out = Response::new(Body::from(body));
+    let mut out = Response::new(body);
     *out.status_mut() = status;
-    *out.headers_mut() = out_headers;
+    *out.headers_mut() = headers;
     if let Ok(name) = HeaderValue::from_str(&overseer.name) {
         out.headers_mut().insert(HeaderName::from_static(FORWARDED_TO_HEADER), name);
     }
-    out.headers_mut().remove(header::CONTENT_LENGTH);
+    match length {
+        Some(length) => out.headers_mut().insert(header::CONTENT_LENGTH, length),
+        None => out.headers_mut().remove(header::CONTENT_LENGTH),
+    };
     out
 }
 
@@ -572,19 +581,7 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     signature = sign_forward(&engine, parts.method.as_str(), &path_and_query, &client, &mut headers).await;
     tokio::time::sleep(Duration::from_millis(100 * epoch_refusals)).await;
     };
-    // Other answers stream through, so a forwarded download isn't held in memory.
-    let body = match answer {
-        Answer::Checked(body) => Body::from(body),
-        Answer::Unchecked(response) => Body::from_stream(response.bytes_stream()),
-    };
-    let mut out = Response::new(body);
-    *out.status_mut() = status;
-    *out.headers_mut() = out_headers;
-    if let Ok(name) = HeaderValue::from_str(&overseer.name) {
-        out.headers_mut().insert(HeaderName::from_static(FORWARDED_TO_HEADER), name);
-    }
-    out.headers_mut().remove(header::CONTENT_LENGTH);
-    out
+    respond(status, out_headers, answer, &overseer)
 }
 
 /// Writes the Overseer makes idempotent with an `Idempotency-Key` header: documents
