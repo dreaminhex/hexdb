@@ -125,7 +125,7 @@ fn one_round(bin: &Path, orders: &[Vec<u8>], out: &mut Samples) -> Result<()> {
     let per_thread = concurrent(8, |t, lat| {
         for d in orders.iter().skip(t * 250).take(250) {
             let s = Instant::now();
-            http.send(reqwest::Method::POST, "/concurrent", Some(d.clone()))?;
+            http.expect(reqwest::Method::POST, "/concurrent", Some(d.clone()), 201)?;
             lat.push(s.elapsed());
         }
         Ok(())
@@ -141,14 +141,18 @@ fn one_round(bin: &Path, orders: &[Vec<u8>], out: &mut Samples) -> Result<()> {
         .iter()
         .filter_map(|d| d["id"].as_str().map(String::from))
         .collect();
+    // Each of the 8 clients reads its own 125; fewer would credit reads that weren't made.
+    if ids.len() < 1000 {
+        bail!("expected 1,000 document IDs to read, got {}", ids.len());
+    }
     for id in ids.iter().cycle().take(3000) {
-        out.time("Read by ID", || http.send(reqwest::Method::GET, &format!("/orders/{}", id), None))?;
+        out.time("Read by ID", || http.expect(reqwest::Method::GET, &format!("/orders/{}", id), None, 200))?;
     }
     let started = Instant::now();
     let per_thread = concurrent(8, |t, lat| {
         for id in ids.iter().skip(t * 125).take(125).cycle().take(500) {
             let s = Instant::now();
-            http.send(reqwest::Method::GET, &format!("/orders/{}", id), None)?;
+            http.expect(reqwest::Method::GET, &format!("/orders/{}", id), None, 200)?;
             lat.push(s.elapsed());
         }
         Ok(())

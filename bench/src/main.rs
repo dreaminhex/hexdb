@@ -210,6 +210,14 @@ impl Http {
         let status = response.status().as_u16();
         Ok((status, response.bytes()?.to_vec()))
     }
+    /// `send`, failing unless the answer has the `expected` status, so an error is never timed as work.
+    fn expect(&self, method: reqwest::Method, path: &str, body: Option<Vec<u8>>, expected: u16) -> Result<Vec<u8>> {
+        let (status, bytes) = self.send(method, path, body)?;
+        if status != expected {
+            bail!("{} returned {} (expected {}): {}", path, status, expected, String::from_utf8_lossy(&bytes));
+        }
+        Ok(bytes)
+    }
     fn json(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value> {
         let (status, bytes) = self.send(method, path, body.map(|b| serde_json::to_vec(b).unwrap_or_default()))?;
         let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
@@ -484,7 +492,7 @@ fn server_reads_and_writes(report: &mut Report, orders: &[Vec<u8>]) -> Result<()
                 let http = &http;
                 scope.spawn(move || -> Result<()> {
                     for d in orders.iter().skip(t * 250).take(250) {
-                        http.send(reqwest::Method::POST, "/concurrent", Some(d.clone()))?;
+                        http.expect(reqwest::Method::POST, "/concurrent", Some(d.clone()), 201)?;
                     }
                     Ok(())
                 })
@@ -505,11 +513,15 @@ fn server_reads_and_writes(report: &mut Report, orders: &[Vec<u8>]) -> Result<()
         .iter()
         .filter_map(|d| d["id"].as_str().map(String::from))
         .collect();
+    // Each of the 8 clients below reads its own 125; fewer would credit reads that weren't made.
+    if ids.len() < 1000 {
+        bail!("expected 1,000 document IDs to read, got {}", ids.len());
+    }
     let mut samples = Vec::new();
     for _ in 0..3 {
         for id in &ids {
             let started = Instant::now();
-            http.send(reqwest::Method::GET, &format!("/orders/{}", id), None)?;
+            http.expect(reqwest::Method::GET, &format!("/orders/{}", id), None, 200)?;
             samples.push(started.elapsed());
         }
     }
@@ -519,16 +531,23 @@ fn server_reads_and_writes(report: &mut Report, orders: &[Vec<u8>]) -> Result<()
         format!("{} / {} ({} reads/s)", ms(percentile(&mut samples, 0.5)), ms(percentile(&mut samples, 0.99)), rate(samples.len() as f64, total)),
     );
     let started = Instant::now();
-    std::thread::scope(|scope| {
-        for t in 0..8 {
-            let (http, ids) = (&http, &ids);
-            scope.spawn(move || {
-                for id in ids.iter().skip(t * 125).take(125).cycle().take(500) {
-                    let _ = http.send(reqwest::Method::GET, &format!("/orders/{}", id), None);
-                }
-            });
+    std::thread::scope(|scope| -> Result<()> {
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let (http, ids) = (&http, &ids);
+                scope.spawn(move || -> Result<()> {
+                    for id in ids.iter().skip(t * 125).take(125).cycle().take(500) {
+                        http.expect(reqwest::Method::GET, &format!("/orders/{}", id), None, 200)?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().map_err(|_| anyhow::anyhow!("thread panicked"))??;
         }
-    });
+        Ok(())
+    })?;
     report.row("Reads by ID, 8 concurrent clients", format!("{} reads/s", rate(4000.0, started.elapsed())));
 
     // Queries.
@@ -634,7 +653,7 @@ fn crash_recovery(report: &mut Report, orders: &[Vec<u8>]) -> Result<()> {
         let http = Http::new(&server)?;
         for chunk in orders.chunks(1000) {
             let body = format!("[{}]", chunk.iter().map(|d| String::from_utf8_lossy(d).into_owned()).collect::<Vec<_>>().join(","));
-            http.send(reqwest::Method::POST, "/orders/_bulk", Some(body.into_bytes()))?;
+            http.expect(reqwest::Method::POST, "/orders/_bulk", Some(body.into_bytes()), 201)?;
         }
         let unflushed = http.status()?["storage"]["unflushed_entries"].as_u64().unwrap_or(0);
         server.crash_and_restart()?;
