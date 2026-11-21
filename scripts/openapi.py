@@ -115,7 +115,7 @@ ROUTES = [
     ("get", "/plugins", "Server", "Plugins and their delivery state (plugins permission)", {"responses": ok()}),
     ("post", "/flush", "Server", "Flush memory to SSTables (maintenance permission)", {"responses": ok()}),
     ("post", "/compact", "Server", "Compact SSTables (maintenance permission)", {"responses": ok()}),
-    ("post", "/backup", "Server", "Write a consistent backup while running (maintenance permission)", {"requestBody": body({"type": "object", "properties": {"name": {"type": "string"}}}), "responses": ok("Created", status="201")}),
+    ("post", "/backup", "Server", "Write a consistent backup while running (maintenance permission): of the whole lattice (default; a replica without all of it passes it to the Overseer) or, with scope=hex, of what this hex holds", {"parameters": [param("scope", "query", "lattice (default) or hex", {"type": "string", "enum": ["lattice", "hex"]})], "requestBody": body({"type": "object", "properties": {"name": {"type": "string"}}}), "responses": ok("Created", status="201")}),
     ("get", "/backups", "Server", "Backups in the backup directory (maintenance permission)", {"responses": ok()}),
     ("post", "/shutdown", "Server", "Shut down gracefully (shutdown token or admin)", {"responses": {"202": {"description": "Shutting down"}}}),
     ("get", "/openapi.json", "Server", "This description", {"security": [], "responses": ok()}),

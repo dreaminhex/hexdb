@@ -203,6 +203,8 @@ pub(crate) fn is_long_running(path: &str) -> bool {
         || path == "/ai/chat"
         // A security review waits for the AI's answer.
         || path == "/security/reviews"
+        // A backup takes as long as copying the data needs (it runs as a task of its own).
+        || path == "/backup"
         // File uploads and downloads take as long as the file needs.
         || path.contains("/_files/")
         || path.contains("/_uploads/")

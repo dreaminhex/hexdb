@@ -149,6 +149,10 @@ enum Commands {
         /// List existing backups instead of making one
         #[arg(long)]
         list: bool,
+        /// Back up only what this hex holds (a sliced replica's part), instead of the
+        /// whole lattice (which a replica without all of it passes to the Overseer)
+        #[arg(long)]
+        hex: bool,
         /// Server address, e.g. 127.0.0.1:7700. Defaults to network.api_endpoint from the config.
         #[arg(short, long)]
         url: Option<String>,
@@ -757,7 +761,7 @@ async fn run() -> Result<()> {
             let (base, config) = base_url(config_path, url)?;
             files::ls(&config, &base, token, &tessellation, &folder, search.as_deref()).await
         }
-        Commands::Backup { name, list, url } => {
+        Commands::Backup { name, list, hex, url } => {
             let (base, config) = base_url(config_path, url)?;
             if token.is_none() {
                 bail!("`hexdb backup` needs credentials: set HEXDB_TOKEN (or pass --token) to an API key with the maintenance permission.");
@@ -767,14 +771,18 @@ async fn run() -> Result<()> {
                 return Ok(());
             }
             let body = serde_json::json!({ "name": name });
-            let text = request_text(&config, &base, reqwest::Method::POST, "/backup", token, Some(&body)).await?;
+            let path = if hex { "/backup?scope=hex" } else { "/backup" };
+            let text = request_text(&config, &base, reqwest::Method::POST, path, token, Some(&body)).await?;
             let info: serde_json::Value = serde_json::from_str(&text)?;
             println!(
                 "Backed up {} file(s), {} bytes, up to sequence {} to {}",
                 info["files"], info["bytes"], info["sequence"], info["path"].as_str().unwrap_or_default()
             );
             if info["complete"] == false {
-                println!("This hex keeps only part of the lattice ({} of 64 slices, or isn't caught up): back up the Overseer for all of it.", info["slices"]);
+                println!(
+                    "This hex keeps only part of the lattice ({} of 64 slices; {} file chunk(s) missing): leave out --hex for all of it.",
+                    info["slices"], info["missing_file_chunks"]
+                );
             }
             println!("To restore: stop the server, point storage.path at that folder (same encryption keys), and start it.");
             Ok(())

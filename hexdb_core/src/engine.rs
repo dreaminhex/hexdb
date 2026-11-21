@@ -42,6 +42,7 @@ use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
 pub(crate) mod backup;
+pub use backup::BackupScope;
 pub mod deletes;
 mod files;
 pub use files::{ai_files::AiTask, spawn_rescan_task, ExtractQueue, FileContent, FileSync, UploadOptions, UploadResult};
@@ -256,6 +257,9 @@ pub struct HexDBEngine {
     catalog: std::sync::Mutex<Catalog>,
     wal: WalWriter,
     flush_lock: Mutex<()>,
+    /// Held by file garbage collection and by a backup, so a backup's file content
+    /// is exactly what its documents reference (see `engine::backup`).
+    file_gc_lock: Mutex<()>,
     flush_needed: Notify,
     /// Sequence numbers below this are no longer in the WAL.
     wal_floor: AtomicU64,
@@ -581,6 +585,7 @@ impl HexDBEngine {
             catalog: std::sync::Mutex::new(catalog),
             wal,
             flush_lock: Mutex::new(()),
+            file_gc_lock: Mutex::new(()),
             flush_needed: Notify::new(),
             wal_floor: AtomicU64::new(wal_floor),
             ram_budget,

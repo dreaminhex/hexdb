@@ -14,8 +14,14 @@
 //   4. File content: sealed pack files are hard-linked (or copied) into
 //      `blobs/vertex-<n>/`, and each vertex's active pack is copied up to its
 //      current length. Chunks are durable before the documents that use them
-//      commit, so every file in the backup has its content. Garbage collection
-//      waits while the packs are copied.
+//      commit, and file garbage collection is held off for the whole backup, so
+//      every chunk present when the backup starts is still there to copy.
+//   5. Coverage: the backup records whether it holds the whole lattice (an
+//      Overseer not rebuilding, or a replica keeping every slice and caught up)
+//      and how many chunks its file documents reference that this hex lacks (a
+//      replica's file content can lag). A lattice backup (the default scope)
+//      refuses to run unless both are complete; the API forwards it to the
+//      Overseer from a hex that isn't. A hex backup records them and runs anyway.
 //
 // Restoring is starting a hex on the backup folder (with the same encryption
 // keys): recovery replays the copied WAL segments on top of the SSTables, as
@@ -43,6 +49,24 @@ const METADATA_FILES: &[&str] = &["settings.hxe", "metrics-history.hxe", "query-
 /// Describes a backup (plaintext; no names or data).
 pub const BACKUP_MANIFEST: &str = "backup.json";
 
+/// What a backup must cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupScope {
+    /// The whole lattice's data: refused on a hex that doesn't hold all of it.
+    Lattice,
+    /// Whatever this hex holds (a sliced replica's part, say).
+    Hex,
+}
+
+impl BackupScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackupScope::Lattice => "lattice",
+            BackupScope::Hex => "hex",
+        }
+    }
+}
+
 /// What a backup wrote.
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
@@ -64,6 +88,11 @@ pub struct BackupInfo {
     /// not rebuilding, or a replica keeping every slice and caught up. A sliced or
     /// lagging replica's backup is only part of it (see `crate::slicing`).
     pub complete: bool,
+    /// `lattice` or `hex` (see `BackupScope`).
+    pub scope: String,
+    /// Chunks the backed-up file documents reference that weren't on this hex
+    /// (always 0 in a lattice backup; it refuses to run otherwise).
+    pub missing_file_chunks: usize,
 }
 
 #[derive(Default)]
@@ -205,14 +234,29 @@ impl HexDBEngine {
         self.config.backup_dir()
     }
 
+    /// How many of the 64 slices this hex holds, and whether it holds the whole
+    /// lattice's documents: an Overseer not rebuilding, or a replica keeping every
+    /// slice and caught up. (File content is checked separately, by a backup.)
+    pub fn backup_coverage(&self) -> (u32, bool) {
+        let r = self.replication.lock().unwrap();
+        let complete = !self.is_oracle()
+            && if self.is_writable() {
+                r.rebuilding.is_none()
+            } else {
+                r.state == "streaming" && r.slices_held == crate::slicing::ALL_SLICES && r.lag() == 0
+            };
+        (crate::slicing::count(r.slices_held), complete)
+    }
+
     /// Write a consistent backup of this hex's data (see the module comment).
-    pub async fn backup(&self, name: Option<&str>) -> Result<BackupInfo> {
+    pub async fn backup(&self, name: Option<&str>, scope: BackupScope) -> Result<BackupInfo> {
         let started = std::time::Instant::now();
         let root = self.backup_dir();
         if root.starts_with(&self.storage_dir) {
             return Err(invalid(format!("storage.backup_path must be outside the data directory ({}).", self.storage_dir.display())));
         }
         let _flush = self.flush_lock.lock().await;
+        let _gc = self.file_gc_lock.lock().await;
 
         // Fix the backup's position: rotate the WAL and capture the catalog.
         let (sequence, rotation, mut catalog) = {
@@ -223,16 +267,23 @@ impl HexDBEngine {
         };
         // What the backup covers, at that position.
         let role = self.role();
-        let (slices, complete) = {
-            let r = self.replication.lock().unwrap();
-            let complete = !self.is_oracle()
-                && if self.is_writable() {
-                    r.rebuilding.is_none()
-                } else {
-                    r.state == "streaming" && r.slices_held == crate::slicing::ALL_SLICES && r.lag() == 0
-                };
-            (crate::slicing::count(r.slices_held), complete)
-        };
+        let (slices, documents_complete) = self.backup_coverage();
+        if scope == BackupScope::Lattice && !documents_complete {
+            return Err(crate::engine::EngineError::Unavailable(format!(
+                "This {} doesn't hold the whole lattice right now ({} of 64 slices, or not caught up), so it can't take a lattice backup. Send it to the Overseer, or ask for scope=hex.",
+                role, slices
+            ))
+            .into());
+        }
+        let missing_file_chunks = self.missing_file_chunks().await?;
+        if scope == BackupScope::Lattice && missing_file_chunks > 0 {
+            return Err(crate::engine::EngineError::Unavailable(format!(
+                "{} chunk(s) of file content aren't on this hex yet, so a lattice backup here would miss them. Try again shortly.",
+                missing_file_chunks
+            ))
+            .into());
+        }
+        let complete = documents_complete && missing_file_chunks == 0;
         let new_segment = rotation
             .await
             .map_err(|_| anyhow::anyhow!("WAL writer stopped during the backup"))?
@@ -277,6 +328,8 @@ impl HexDBEngine {
                 "role": role,
                 "slices": slices,
                 "complete": complete,
+                "scope": scope.as_str(),
+                "missing_file_chunks": missing_file_chunks,
             }),
         };
         let result = tokio::task::spawn_blocking(move || job.run())
@@ -295,6 +348,8 @@ impl HexDBEngine {
                 role: role.clone(),
                 slices,
                 complete,
+                scope: scope.as_str().to_string(),
+                missing_file_chunks,
             });
 
         match result {
@@ -304,7 +359,10 @@ impl HexDBEngine {
                     info.files, info.linked, info.bytes, info.sequence, info.path, info.millis
                 );
                 if !info.complete {
-                    info!("📦 That backup holds only this {}'s part of the lattice ({} of 64 slices, or not caught up): back up the Overseer for all of it.", info.role, info.slices);
+                    info!(
+                        "📦 That backup holds only this {}'s part of the lattice ({} of 64 slices; {} file chunk(s) missing): take a lattice backup for all of it.",
+                        info.role, info.slices, info.missing_file_chunks
+                    );
                 }
                 Ok(info)
             }

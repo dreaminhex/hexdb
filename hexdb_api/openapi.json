@@ -3506,8 +3506,23 @@
         "tags": [
           "Server"
         ],
-        "summary": "Write a consistent backup while running (maintenance permission)",
+        "summary": "Write a consistent backup while running (maintenance permission): of the whole lattice (default; a replica without all of it passes it to the Overseer) or, with scope=hex, of what this hex holds",
         "operationId": "post_backup",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "description": "lattice (default) or hex",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "lattice",
+                "hex"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "required": true,
           "description": "",

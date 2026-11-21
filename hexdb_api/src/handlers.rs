@@ -589,9 +589,28 @@ pub struct BackupRequest {
     pub name: Option<String>,
 }
 
-/// Write a consistent backup of this hex's data while it keeps running.
-pub async fn backup(State(engine): Engine, Auth(principal): Auth, body: Option<Json<BackupRequest>>) -> ApiResult {
+/// `?scope=` for `POST /backup`.
+#[derive(Debug, Default, Deserialize)]
+pub struct BackupQuery {
+    /// `lattice` (default): the whole lattice's data, on a hex that holds it (any
+    /// other hex forwards the request to the Overseer); `hex`: what this hex holds.
+    pub scope: Option<String>,
+}
+
+/// The scope a `POST /backup` asks for. Err: an unknown one.
+pub fn backup_scope(scope: Option<&str>) -> Result<hexdb_core::engine::BackupScope, ApiError> {
+    match scope.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("lattice") => Ok(hexdb_core::engine::BackupScope::Lattice),
+        Some("hex") => Ok(hexdb_core::engine::BackupScope::Hex),
+        Some(other) => Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_request", format!("Unknown backup scope '{}': use 'lattice' or 'hex'.", other))),
+    }
+}
+
+/// Write a consistent backup while the hex keeps running: of the whole lattice
+/// (default) or of what this hex holds (`?scope=hex`).
+pub async fn backup(State(engine): Engine, Auth(principal): Auth, Query(query): Query<BackupQuery>, body: Option<Json<BackupRequest>>) -> ApiResult {
     principal.require_action(Action::Maintenance)?;
+    let scope = backup_scope(query.scope.as_deref())?;
     let request = body.map(|Json(b)| b).unwrap_or_default();
     // A task of its own, not the request's: if the request times out or the caller
     // goes away, the backup still finishes with flushes and compaction held off,
@@ -600,11 +619,11 @@ pub async fn backup(State(engine): Engine, Auth(principal): Auth, body: Option<J
         let engine = engine.clone();
         let login = principal.login.clone();
         tokio::spawn(async move {
-            let result = engine.backup(request.name.as_deref()).await;
+            let result = engine.backup(request.name.as_deref(), scope).await;
             let event = hexdb_core::audit::AuditEvent::new(&login, "maintenance.backup", &engine.name);
             let event = match &result {
-                Ok(info) => event.details(json!({ "name": info.name, "sequence": info.sequence, "files": info.files, "complete": info.complete })),
-                Err(e) => event.outcome("failed").details(json!({ "name": request.name, "error": format!("{:#}", e) })),
+                Ok(info) => event.details(json!({ "name": info.name, "scope": info.scope, "sequence": info.sequence, "files": info.files, "complete": info.complete })),
+                Err(e) => event.outcome("failed").details(json!({ "name": request.name, "scope": scope.as_str(), "error": format!("{:#}", e) })),
             };
             engine.record_audit(event).await;
             result

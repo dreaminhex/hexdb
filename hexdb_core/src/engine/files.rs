@@ -1560,9 +1560,9 @@ impl HexDBEngine {
         Ok(report)
     }
 
-    /// Remove chunks no file document (current, earlier version or trashed) references.
-    pub async fn collect_file_garbage(&self) -> Result<SweepReport> {
-        let mark = self.blobs.begin_mark();
+    /// The manifests and thumbnails every file document on this hex references
+    /// (current, earlier versions, trashed, unfinished uploads, quarantined).
+    async fn file_references(&self) -> Result<(HashSet<ChunkId>, HashSet<ChunkId>)> {
         let mut manifests = HashSet::new();
         let mut thumbnails = HashSet::new();
         let holders: Vec<String> = self
@@ -1588,6 +1588,31 @@ impl HexDBEngine {
                 }
             }
         }
+        Ok((manifests, thumbnails))
+    }
+
+    /// How many chunks the file documents on this hex reference that this hex doesn't
+    /// hold (a manifest that's missing counts once: its chunks can't be listed).
+    /// The caller holds `file_gc_lock`, so nothing it finds present goes away.
+    pub(crate) async fn missing_file_chunks(&self) -> Result<usize> {
+        let (manifests, thumbnails) = self.file_references().await?;
+        let mut missing = thumbnails.iter().filter(|t| !self.blobs.contains(t)).count();
+        for manifest in manifests {
+            if !self.blobs.contains(&manifest) {
+                missing += 1;
+                continue;
+            }
+            let bytes = self.read_file_chunk(manifest).await.map_err(|e| anyhow!("Can't read a file's chunk list: {:#}", e))?;
+            missing += Manifest::decode(&bytes)?.chunks.iter().filter(|(id, _)| !self.blobs.contains(id)).count();
+        }
+        Ok(missing)
+    }
+
+    /// Remove chunks no file document (current, earlier version or trashed) references.
+    pub async fn collect_file_garbage(&self) -> Result<SweepReport> {
+        let _gc = self.file_gc_lock.lock().await;
+        let mark = self.blobs.begin_mark();
+        let (manifests, thumbnails) = self.file_references().await?;
         let mut live: HashSet<ChunkId> = thumbnails;
         for manifest in manifests {
             live.insert(manifest);

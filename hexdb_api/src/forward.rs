@@ -191,6 +191,16 @@ fn is_epoch_mismatch(status: StatusCode, body: &[u8]) -> bool {
     status == StatusCode::MISDIRECTED_REQUEST && serde_json::from_slice::<serde_json::Value>(body).ok().is_some_and(|v| v["error"]["code"] == EPOCH_MISMATCH_CODE)
 }
 
+/// A `POST /backup` of the whole lattice (the default scope) that this hex can't
+/// take, being a replica without all of it: the Overseer takes it instead.
+fn lattice_backup_elsewhere(engine: &HexDBEngine, request: &Request) -> bool {
+    if request.method() != Method::POST || request.uri().path() != "/backup" || engine.is_writable() {
+        return false;
+    }
+    let scope = axum::extract::Query::<crate::handlers::BackupQuery>::try_from_uri(request.uri()).ok().and_then(|q| q.0.scope);
+    matches!(crate::handlers::backup_scope(scope.as_deref()), Ok(hexdb_core::engine::BackupScope::Lattice)) && !engine.backup_coverage().1
+}
+
 fn handled_locally(method: &Method, path: &str) -> bool {
     // A rolling update runs on the Overseer, so it's the one that can say how it's going.
     // Quarantine lives on the Overseer (it scans every upload), so reads of it go there too.
@@ -430,7 +440,8 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
         }
     }
     // A sliced replica only has some of the data: everything that reads it goes to the Overseer.
-    let partial = !engine.is_writable() && engine.is_partial_replica() && !answers_without_data(&path);
+    // So does a lattice backup sent to a replica that doesn't hold the whole lattice.
+    let partial = (!engine.is_writable() && engine.is_partial_replica() && !answers_without_data(&path)) || lattice_backup_elsewhere(&engine, &request);
     // An Overseer handing its role over passes writes on to the next one.
     let writing_here = engine.is_writable() && !hexdb_core::updates::stepping_down();
     let mut request = request;

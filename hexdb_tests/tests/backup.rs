@@ -61,6 +61,7 @@ fn a_backup_taken_while_running_restores_to_its_point_in_time() -> Result<()> {
     assert_eq!(res.status.as_u16(), 201, "{}", res.body);
     assert!(res.body["sequence"].as_u64().unwrap() > 0);
     assert_eq!((res.body["complete"].as_bool(), res.body["slices"].as_u64()), (Some(true), Some(64)), "a lone hex has everything: {}", res.body);
+    assert_eq!((res.body["scope"].as_str(), res.body["missing_file_chunks"].as_u64()), (Some("lattice"), Some(0)), "{}", res.body);
     let path = res.body["path"].as_str().unwrap().to_string();
     assert!(Path::new(&path).join("backup.json").is_file());
 

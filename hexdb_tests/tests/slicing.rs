@@ -34,6 +34,20 @@ fn hex(ports: &[u16], i: usize, ram_mb: u64) -> TestOptions {
     }
 }
 
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 fn status(server: &TestServer) -> Result<Value> {
     Ok(server.request(Method::GET, "/status", None, &[])?.body)
 }
@@ -196,11 +210,6 @@ fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     })?;
     let (a, b) = (kept(&first)?, kept(&second)?);
     assert!(a.1 < 200 && b.1 < 200, "each replica keeps part: {:?} {:?}", a, b);
-    // A sliced replica's backup says it holds only part of the lattice.
-    let backup = second.request(Method::POST, "/backup", None, &[])?;
-    assert_eq!(backup.status, 201, "{}", backup.body);
-    assert_eq!(backup.body["complete"], false, "{}", backup.body);
-    assert_eq!(backup.body["slices"].as_u64(), Some(b.0), "{}", backup.body);
     assert_eq!(kept(&overseer)?.1, 200, "the Overseer keeps everything");
 
     // New writes land on the replica that keeps their slice.
@@ -236,6 +245,29 @@ fn sliced_replicas_split_rebalance_and_rebuild_after_failover() -> Result<()> {
     let (code, _, part) = second.get_bytes("/media/_files/big.bin", &[("range", "bytes=1000000-1000999")])?;
     assert_eq!(code.as_u16(), 206);
     assert!(part == big[1_000_000..1_001_000], "the requested range");
+
+    // A backup of the lattice sent to a sliced replica is taken by the Overseer: complete,
+    // and it restores every document and the file into an empty hex.
+    let backup = second.request(Method::POST, "/backup", Some(&json!({ "name": "whole" })), &[])?;
+    assert_eq!(backup.status, 201, "{}", backup.body);
+    assert_eq!((backup.body["scope"].as_str(), backup.body["complete"].as_bool()), (Some("lattice"), Some(true)), "{}", backup.body);
+    assert_eq!(backup.body["role"], "Overseer", "{}", backup.body);
+    assert_eq!(backup.body["missing_file_chunks"], 0, "{}", backup.body);
+    // Only what this replica holds, when asked for.
+    let local = second.request(Method::POST, "/backup?scope=hex", None, &[])?;
+    assert_eq!(local.status, 201, "{}", local.body);
+    assert_eq!((local.body["scope"].as_str(), local.body["complete"].as_bool()), (Some("hex"), Some(false)), "{}", local.body);
+    assert_eq!(local.body["slices"].as_u64(), Some(kept(&second)?.0), "{}", local.body);
+    assert_eq!(second.request(Method::POST, "/backup?scope=all", None, &[])?.status, 400);
+    let mut restored = TestServer::start()?;
+    restored.stop()?;
+    std::fs::remove_dir_all(restored.data_dir())?;
+    copy_dir(std::path::Path::new(backup.body["path"].as_str().unwrap_or_default()), &restored.data_dir())?;
+    restored.launch()?;
+    assert_eq!(restored.request(Method::GET, "/items/count", None, &[])?.body["count"], 250);
+    let (code, _, content) = restored.get_bytes("/media/_files/big.bin", &[])?;
+    assert_eq!(code.as_u16(), 200);
+    assert!(content == big, "the file's content came along");
 
     // A failover: both replicas have applied everything before the Overseer goes.
     let published = status(&overseer)?["replication"]["applied_seq"].as_u64().unwrap_or(0);
