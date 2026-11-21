@@ -47,6 +47,13 @@ fn a_backup_taken_while_running_restores_to_its_point_in_time() -> Result<()> {
     for i in 0..20 {
         source.insert("orders", &json!({ "n": 100 + i, "status": "late" }))?;
     }
+    // A file with two versions.
+    assert_eq!(source.request(Method::POST, "/tessellations", Some(&json!({ "name": "media", "kind": "files" })), &[])?.status.as_u16(), 201);
+    let (v1, v2) = (vec![7u8; 300_000], vec![9u8; 200_000]);
+    let first_upload = source.send_bytes(Method::PUT, "/media/_files/docs/plan.bin", v1.clone(), &[])?;
+    assert!(first_upload.status.is_success(), "{}", first_upload.body);
+    let file_id = first_upload.body["id"].as_str().unwrap().to_string();
+    assert_eq!(source.send_bytes(Method::PUT, "/media/_files/docs/plan.bin", v2.clone(), &[])?.body["version"], 2);
     let orders_at_backup = ids(&source, "orders")?;
     let notes_at_backup = ids(&source, "notes")?;
 
@@ -71,6 +78,11 @@ fn a_backup_taken_while_running_restores_to_its_point_in_time() -> Result<()> {
     let res = source.request(Method::POST, "/backup", None, &[])?;
     assert_eq!(res.status.as_u16(), 201, "{}", res.body);
     assert!(res.body["name"].as_str().unwrap().starts_with("hexdb-"));
+    // Every backup is audited, the refused ones with their error.
+    let audit = source.request(Method::GET, "/audit?action=maintenance.backup", None, &[])?.body;
+    let events = audit["events"].as_array().unwrap();
+    assert_eq!(events.len(), 4, "{}", audit);
+    assert_eq!(events.iter().filter(|e| e["outcome"] == "failed" && e["details"]["error"].is_string()).count(), 2, "{}", audit);
 
     // A fresh server started on the backup has exactly the data at that point.
     let mut restored = TestServer::start()?;
@@ -83,6 +95,11 @@ fn a_backup_taken_while_running_restores_to_its_point_in_time() -> Result<()> {
     let q = restored.request(Method::POST, "/orders/_query", Some(&json!({ "filter": { "status": "late" } })), &[])?;
     assert_eq!(q.body["total"], 20);
     assert_eq!(q.body["plan"]["indexes"], json!(["status"]), "the index definition came along");
+    // Both versions of the file, byte for byte.
+    let (status, _, current) = restored.get_bytes(&format!("/media/{}/content", file_id), &[])?;
+    assert_eq!((status.as_u16(), current == v2), (200, true));
+    let (status, _, older) = restored.get_bytes(&format!("/media/{}/content?version=1", file_id), &[])?;
+    assert_eq!((status.as_u16(), older == v1), (200, true));
     // And it takes writes of its own.
     restored.insert("orders", &json!({ "n": 999 }))?;
     assert_eq!(ids(&restored, "orders")?.len(), orders_at_backup.len() + 1);

@@ -593,10 +593,24 @@ pub struct BackupRequest {
 pub async fn backup(State(engine): Engine, Auth(principal): Auth, body: Option<Json<BackupRequest>>) -> ApiResult {
     principal.require_action(Action::Maintenance)?;
     let request = body.map(|Json(b)| b).unwrap_or_default();
-    let info = engine.backup(request.name.as_deref()).await?;
-    engine
-        .audit(&principal.login, "maintenance.backup", &engine.name, json!({ "name": info.name, "sequence": info.sequence, "files": info.files }))
-        .await;
+    // A task of its own, not the request's: if the request times out or the caller
+    // goes away, the backup still finishes with flushes and compaction held off,
+    // and the audit log records how it ended.
+    let job = {
+        let engine = engine.clone();
+        let login = principal.login.clone();
+        tokio::spawn(async move {
+            let result = engine.backup(request.name.as_deref()).await;
+            let event = hexdb_core::audit::AuditEvent::new(&login, "maintenance.backup", &engine.name);
+            let event = match &result {
+                Ok(info) => event.details(json!({ "name": info.name, "sequence": info.sequence, "files": info.files })),
+                Err(e) => event.outcome("failed").details(json!({ "name": request.name, "error": format!("{:#}", e) })),
+            };
+            engine.record_audit(event).await;
+            result
+        })
+    };
+    let info = job.await.map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", format!("The backup task failed: {}", e)))??;
     Ok((StatusCode::CREATED, Json(json!(info))).into_response())
 }
 
