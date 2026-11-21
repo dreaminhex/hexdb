@@ -74,13 +74,14 @@ spec:
               value: {{ .Values.admin.login | quote }}
             - name: HEXDB_SECURITY__ADMIN_EMAIL
               value: {{ .Values.admin.email | quote }}
-            {{- if .Values.admin.password }}
+            # From the chart's Secret or existingSecret (optional there: without the key,
+            # HexDB generates a password and prints it once in the first hex's log).
             - name: HEXDB_SECURITY__ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "hexdb.secretName" . }}
                   key: admin-password
-            {{- end }}
+                  optional: true
             - name: HEXDB_MEMORY__RAM_MB
               value: {{ .Values.ramMb | quote }}
             - name: HEXDB_STORAGE__DISK_MB

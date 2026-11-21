@@ -1109,7 +1109,12 @@ Sign in and change this password, then delete this file.
             info!("✅ Admin user '{}' added with the configured password.", login);
         }
     } else if !configured_password.is_empty() {
-        warn!("⚠️ security.admin_password is set but users already exist, so it is ignored. Remove it from the configuration.");
+        if std::env::var("HEXDB_SECURITY__ADMIN_PASSWORD").is_ok_and(|v| !v.trim().is_empty()) {
+            // From a secret store (the Helm chart always passes one): nothing to clean up.
+            info!("🔐 The first administrator's password from the environment is ignored: users already exist.");
+        } else {
+            warn!("⚠️ security.admin_password is set but users already exist, so it is ignored. Remove it from the configuration.");
+        }
     }
     Ok(())
 }

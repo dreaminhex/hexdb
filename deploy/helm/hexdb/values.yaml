@@ -20,11 +20,15 @@ latticeName: hexdb
 # storage encryption key and lattice secret on first install, kept on upgrades.
 # Back the key up: without it the data can't be read. To bring your own, create
 # a Secret with the keys "encryption-key" and "lattice-secret" (each
-# base64:<32 bytes>, e.g. from `hexdb secret`) and name it here.
+# base64:<32 bytes>, e.g. from `hexdb secret`), plus "admin-password" for the
+# first administrator, and name it here.
 existingSecret: ""
 
-# The first administrator. With an empty password HexDB generates one and
-# prints it in the first hex's log: kubectl logs <release>-hexdb-0 | grep password
+# The first administrator. With an empty password the chart generates one into
+# its Secret (kept on upgrades), so it never appears in a log:
+#   kubectl get secret <release>-hexdb -o jsonpath='{.data.admin-password}' | base64 -d
+# Only an existingSecret without "admin-password" leaves HexDB to generate one,
+# which it prints once in the first hex's log.
 admin:
   login: hexdbadmin
   email: admin@hexdb.local

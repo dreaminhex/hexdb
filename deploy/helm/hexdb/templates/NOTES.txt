@@ -5,8 +5,13 @@ The admin UI and API:
   open http://localhost:7700/ui/
 {{- if not .Values.admin.password }}
 
-The first administrator ({{ .Values.admin.login }}) gets a generated password, printed once by the hex that creates it:
-  kubectl -n {{ .Release.Namespace }} logs {{ include "hexdb.fullname" . }}-0 | grep -A2 "first administrator"
+The first administrator ({{ .Values.admin.login }}) gets the password in the Secret:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "hexdb.secretName" . }} -o jsonpath='{.data.admin-password}' | base64 -d
+{{- if .Values.existingSecret }}
+  (Without an "admin-password" key there, HexDB generates one and prints it once in {{ include "hexdb.fullname" . }}-0's log.)
+{{- else }}
+  (A lattice installed with an earlier chart had its password printed in the log instead; this one applies only to a new lattice.)
+{{- end }}
 {{- end }}
 {{- if not .Values.existingSecret }}
 
