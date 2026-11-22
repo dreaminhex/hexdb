@@ -55,6 +55,8 @@ path = "./no-ui"
 admin_login = "admin"
 admin_password = "${password}"
 admin_email = "admin@example.com"
+# The drivers' tests sign in with this password again and again.
+change_first_password = false
 `,
   )
   const bin = process.env.HEXDB_SERVER_BIN || join(root, "target", "debug", exe)
