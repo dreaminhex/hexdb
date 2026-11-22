@@ -43,7 +43,10 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 use ulid::Ulid;
 
@@ -198,6 +201,9 @@ struct QueueState {
     /// Messages moved in from another queue (dead letters), until when they may still be
     /// committing: one not found yet is tried again rather than forgotten.
     arriving: HashMap<Ulid, i64>,
+    /// Bumped whenever the index changes (shared with `Queues::versions`, so stats can
+    /// tell their last counts are still current without taking the lock).
+    version: Arc<AtomicU64>,
 }
 
 /// A message in a queue's index.
@@ -221,7 +227,18 @@ pub struct Queues {
     /// Dead letters whose move is still committing (see `Moving`): a receive that doesn't find
     /// one yet keeps looking for as long as it's here, however long the commit takes.
     moving: Mutex<std::collections::HashSet<Ulid>>,
+    /// Each queue's last counts: when they were taken, at which index version.
+    stats: Mutex<HashMap<String, (std::time::Instant, u64, Value)>>,
+    /// Each queue's index version (see `QueueState::version`).
+    versions: Mutex<HashMap<String, Arc<AtomicU64>>>,
 }
+
+/// Counts this recent, of an index that hasn't changed since, are answered again instead of
+/// counted (dashboards polling an idle or slow queue cost one count a second, however many).
+const STATS_FRESH: Duration = Duration::from_secs(1);
+/// While an operation holds a queue's index for long, counts up to this old are answered
+/// (with their `as_of`) instead of reading every message.
+const STATS_STALE_OK: Duration = Duration::from_secs(60);
 
 /// Marks a dead letter as moving until dropped: when its commit is done, failed or abandoned.
 struct Moving<'a> {
@@ -237,7 +254,17 @@ impl Drop for Moving<'_> {
 
 impl Queues {
     fn state(&self, name: &str) -> Arc<tokio::sync::Mutex<QueueState>> {
-        self.states.lock().unwrap().entry(name.to_string()).or_default().clone()
+        let version = self.version(name);
+        self.states
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(QueueState { version, ..Default::default() })))
+            .clone()
+    }
+
+    fn version(&self, name: &str) -> Arc<AtomicU64> {
+        self.versions.lock().unwrap().entry(name.to_string()).or_default().clone()
     }
 
     fn notifier(&self, name: &str) -> Arc<tokio::sync::Notify> {
@@ -248,6 +275,19 @@ impl Queues {
     pub fn reset(&self) {
         self.states.lock().unwrap().clear();
         self.arrived.lock().unwrap().clear();
+        self.stats.lock().unwrap().clear();
+    }
+
+    /// The last counts for a queue if taken within `max_age` (and, with `unchanged`, of the
+    /// index as it still is).
+    fn cached_stats(&self, name: &str, max_age: Duration, unchanged: bool) -> Option<Value> {
+        let current = self.version(name).load(Ordering::Acquire);
+        self.stats
+            .lock()
+            .unwrap()
+            .get(name)
+            .filter(|(at, version, _)| at.elapsed() <= max_age && (!unchanged || *version == current))
+            .map(|(_, _, v)| v.clone())
     }
 }
 
@@ -310,6 +350,7 @@ impl HexDBEngine {
         }
         self.ensure_system_tessellation(&messages_tessellation(&config.name))?;
         self.put_system_document(QUEUES_TESSELLATION, config_id(&config.name), serde_json::to_value(&config)?, None).await?;
+        self.queues.stats.lock().unwrap().remove(&config.name);
         Ok(config)
     }
 
@@ -323,6 +364,7 @@ impl HexDBEngine {
             bail!(EngineError::Conflict(format!("Queue '{}' sends its dead letters here; change it first.", user.name)));
         }
         self.delete_system_document(QUEUES_TESSELLATION, config_id(name)).await?;
+        self.queues.stats.lock().unwrap().remove(name);
         self.delete_tessellation_unchecked(&messages_tessellation(name)).await?;
         self.queues.states.lock().unwrap().remove(name);
         self.queues.arrived.lock().unwrap().remove(name);
@@ -361,6 +403,7 @@ impl HexDBEngine {
     }
 
     async fn reload_queue(&self, name: &str, state: &mut QueueState) -> Result<()> {
+        state.version.fetch_add(1, Ordering::AcqRel);
         state.ready.clear();
         state.at.clear();
         let tess = messages_tessellation(name);
@@ -385,6 +428,7 @@ impl HexDBEngine {
 
     /// Move a message in the index (keeping what else it knows of it), or take it out.
     fn set_ready(state: &mut QueueState, id: Ulid, ready_at: Option<i64>) {
+        state.version.fetch_add(1, Ordering::AcqRel);
         let old = state.at.remove(&id);
         if let Some(old) = old {
             state.ready.remove(&(old.ready_at, id));
@@ -590,10 +634,12 @@ impl HexDBEngine {
         self.queues.moving.lock().unwrap().insert(id);
         let moving = Moving { queues: &self.queues, id };
         self.queues.arrived.lock().unwrap().entry(target.name.clone()).or_default().push((now, id));
+        self.queues.version(&target.name).fetch_add(1, Ordering::AcqRel);
         self.commit_system(vec![moved], vec![source]).await?;
         drop(moving);
         // Announced again once stored, in case a receive saw the first announcement too early.
         self.queues.arrived.lock().unwrap().entry(target.name.clone()).or_default().push((now, id));
+        self.queues.version(&target.name).fetch_add(1, Ordering::AcqRel);
         self.queues.notifier(&target.name).notify_waiters();
         Ok(())
     }
@@ -660,11 +706,18 @@ impl HexDBEngine {
         Ok(done)
     }
 
-    /// How many messages are ready, leased (in flight) and delayed. The Overseer counts its
-    /// in-memory index; a replica, which has none, reads the messages (as does the Overseer
-    /// while an operation holds the index for long).
+    /// How many messages are ready, leased (in flight) and delayed, `as_of` when counted.
+    /// The Overseer counts its in-memory index; a replica, which has none, reads the
+    /// messages. Counts less than a second old are answered again, and while an operation
+    /// holds the index for long the Overseer answers its last counts (up to a minute old)
+    /// rather than reading every message when the queue is busiest.
     pub async fn queue_stats(&self, name: &str) -> Result<Value> {
         let config = self.queue_or_404(name).await?;
+        if let Some(fresh) = self.queues.cached_stats(name, STATS_FRESH, true) {
+            return Ok(fresh);
+        }
+        // The version the counts below are of (taken first: a change while counting makes them older).
+        let version = self.queues.version(name).load(Ordering::Acquire);
         let tess = messages_tessellation(name);
         let (mut ready, mut leased, mut delayed, mut oldest) = (0u64, 0u64, 0u64, None::<i64>);
         let mut count = |slot: Slot, now: i64| {
@@ -680,6 +733,11 @@ impl HexDBEngine {
         // The index, unless an operation holds it for long (a slow commit): then the messages.
         let state = self.queues.state(name);
         let locked = if self.is_writable() { tokio::time::timeout(Duration::from_millis(250), state.lock()).await.ok() } else { None };
+        if locked.is_none() && self.is_writable() {
+            if let Some(recent) = self.queues.cached_stats(name, STATS_STALE_OK, false) {
+                return Ok(recent);
+            }
+        }
         if let Some(mut state) = locked {
             self.load_queue(name, &mut state).await?;
             let now = now_ms();
@@ -703,7 +761,9 @@ impl HexDBEngine {
                 }
             }
         }
-        Ok(json!({ "queue": config, "ready": ready, "in_flight": leased, "delayed": delayed, "oldest_sent_at": oldest }))
+        let stats = json!({ "queue": config, "ready": ready, "in_flight": leased, "delayed": delayed, "oldest_sent_at": oldest, "as_of": now_ms() });
+        self.queues.stats.lock().unwrap().insert(name.to_string(), (std::time::Instant::now(), version, stats.clone()));
+        Ok(stats)
     }
 }
 
@@ -739,9 +799,19 @@ mod tests {
             assert_eq!((stats["ready"].as_u64(), stats["in_flight"].as_u64(), stats["delayed"].as_u64()), (Some(2), Some(1), Some(1)), "{stats}");
             assert!(stats["oldest_sent_at"].as_i64().is_some_and(|t| t >= before && t <= now_ms()), "{stats}");
         };
-        check(engine.queue_stats("jobs").await.unwrap());
+        let first = engine.queue_stats("jobs").await.unwrap();
+        check(first.clone());
+        // Asked again with nothing changed: the same counts, not counted again.
+        assert_eq!(engine.queue_stats("jobs").await.unwrap()["as_of"], first["as_of"]);
+        // Any change to the queue counts afresh, however soon.
+        engine.send_messages("jobs", vec![send(0)], "t").await.unwrap();
+        let after = engine.queue_stats("jobs").await.unwrap();
+        assert_eq!(after["ready"].as_u64(), Some(3), "{after}");
+        engine.receive_messages("jobs", 1, None, Duration::ZERO).await.unwrap();
+        assert_eq!(engine.queue_stats("jobs").await.unwrap()["in_flight"].as_u64(), Some(2));
         engine.queues.reset();
-        check(engine.queue_stats("jobs").await.unwrap());
+        let reloaded = engine.queue_stats("jobs").await.unwrap();
+        assert_eq!((reloaded["ready"].as_u64(), reloaded["in_flight"].as_u64(), reloaded["delayed"].as_u64()), (Some(2), Some(2), Some(1)), "{reloaded}");
         engine.shutdown().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }

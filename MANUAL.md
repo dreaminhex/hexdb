@@ -1302,6 +1302,8 @@ curl -X POST http://localhost:7700/queues/thumbnails/extend -d '{ "receipts": ["
 curl http://localhost:7700/queues/thumbnails      # configuration and counts: ready, in_flight, delayed
 ```
 
+- **Counts** (`ready`, `in_flight`, `delayed`, `oldest_sent_at`, and `as_of`, when they were counted) come from the Overseer's index. Asked again within a second with nothing changed in the queue, the same counts are answered, so dashboards polling a queue add no work; any send, receive or acknowledgement makes the next answer a fresh count. While an operation holds the queue's index for long (a slow commit), the Overseer answers its last counts, up to a minute old, rather than reading every message. A replica, which has no index, reads the messages, at most once a second per queue.
+
 - **Receiving** leases up to `max` (100) ready messages; `visibility_seconds` overrides the queue's timeout for this call, and `wait_seconds` (up to 20) waits for messages to arrive (long polling).
 - **Receipts** are new for every lease. Acknowledging, releasing or extending with a receipt whose lease ran out (the message went to another consumer) does nothing and counts as `stale`.
 - **Sending** takes up to 100 messages, each a JSON `body` of at most 256 KB, optionally delayed (`delay_seconds`, up to 15 minutes) or de-duplicated (a `dedupe_key` sent again within 5 minutes is skipped; its ID comes back `null`). The key is stored with the message in one commit, so it holds across restarts and failovers, and counts only if the message was stored.
