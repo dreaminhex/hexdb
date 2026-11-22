@@ -427,7 +427,18 @@ Errors have one shape:
 | 503 | `replication_timeout` | Committed, but fewer than `replication.min_acks` replicas confirmed in time |
 | 503 | `no_quorum` | The Overseer can't see `replication.quorum` hexes, so it refuses writes |
 | 503 | `stepping_down` | The Overseer was handing its role over and wrote nothing. Normally never seen: the request goes on to the next Overseer by itself. With `replication.forward_writes` off, or for an upload, send it again |
-| 507 | `quota_exceeded` | An upload would take its user past their quota |
+| 507 | `quota_exceeded` | An upload would take its user past their quota, or the files tessellation past its own (which applies to everyone, administrators included) |
+| 401 | `password_required` | A sharing link has a password and none was given |
+| 403 | `wrong_password` | A sharing link's password was wrong (counts toward the sign-in lockout) |
+| 409 | `update_refused` | A rolling update can't start: one is already running, a hex isn't answering, every hex already runs the release, or a hex doesn't report its machine; the message says which |
+| 416 | `range_not_satisfiable` | A download's `Range` starts past the end of the file |
+| 421 | `sliced_replica` | A sliced replica doesn't serve WebSocket feeds; the message names the Overseer to connect to |
+| 421 | `partition_epoch` | Between hexes only: the request was routed by another partition map, and was refused before it ran |
+| 422 | `file_quarantined` | The upload was flagged by malware scanning and kept in quarantine, not stored |
+| 429 | `chat_limit` | The AI chat's per-user or per-address allowance is used up; the message says when it resets |
+| 502 | `oracle_unreachable` | The Oracle couldn't be reached to answer an AI request |
+| 503 | `rebuilding` | A new Overseer is still collecting the slices it lacks; retry after `Retry-After` |
+| 503 | `scanner_unavailable` | ClamAV is configured but not answering, so uploads are held; retry after `Retry-After` |
 | 503 | `content_unavailable` | A file's content can't be read here or fetched from another hex right now |
 | 507 | `disk_full` | The data directory is over `storage.disk_mb`; deletes still work |
 
@@ -672,7 +683,7 @@ curl -G http://localhost:7700/articles/count --data-urlencode 'filter={"publishe
 - Pages hold up to 1,000 documents (default 100). Responses include `total`, the number of matches across all pages.
 - `total=false` (query string) or `"total": false` (body) skips counting every match: `total` is `null`, and a filtered or sorted query stops reading once its page is full. Use it for large tessellations when you only need the page.
 - Without `sort`, results come in ID order (creation order), and `next` goes in `after` for the next page. This cursor paging is stable under concurrent writes.
-- With `sort`, page with `offset`. `sort` is `"-views,title"` (a leading `-` means descending) or an array of `{field, descending}`.
+- With `sort`, page with `offset`. `sort` is `"-views,title"` (a leading `-` means descending, `+` ascending), the same as SQL writes it (`"views desc, title asc"`, with field names optionally in quotes or backticks), or an array of `{field, descending}`.
 - Responses include `plan`: `{"indexes": [...], "scanned": n, "index_entries": m}` shows which indexes were used, how many documents were examined, and how many index entries were looked at to find them (candidates from the indexes, or entries walked in sort order; 0 without an index).
 
 ### How a query runs
@@ -755,7 +766,7 @@ query Recent($filter: JSON) {
 | --- | --- |
 | `tessellations`, `tessellation(name)` with `documentCount`, `indexes` and `documents` | `insertDocument`, `insertDocuments` (atomic) |
 | `document(tessellation, id)` | `replaceDocument`, `patchDocument`, `deleteDocument` |
-| `documents(tessellation, filter, sort, limit, offset, after)` | `updateDocuments(tessellation, filter, update, all)`, `deleteDocuments(tessellation, filter, all, dryRun, expect)` (atomic; see [Deleting](#deleting)) |
+| `documents(tessellation, filter, sort, limit, offset, after)`, `similar(tessellation, field, text \| vector, k, minScore, filter)` (see [Vector search](#vector-search)) | `updateDocuments(tessellation, filter, update, all)`, `deleteDocuments(tessellation, filter, all, dryRun, expect)` (atomic; see [Deleting](#deleting)) |
 | `count(tessellation, filter)` | `createTessellation`, `deleteTessellation` |
 | `aggregate(tessellation, filter, groupBy, aggregates, sort, limit, offset)` | `transaction(operations, idempotencyKey)` |
 | `changes(after, tessellation, limit)` | `createIndex`, `dropIndex` |
@@ -969,7 +980,7 @@ WHERE (SELECT MAX(total) FROM orders o WHERE o.customer = c.code)
 - text: `UPPER`, `LOWER`, `LENGTH`, `SUBSTRING`, `TRIM` / `LTRIM` / `RTRIM`, `CONCAT`, `REPLACE`, `LEFT`, `RIGHT`, `POSITION`, `LOCATE`;
 - numbers: `ABS`, `ROUND`, `TRUNCATE`, `FLOOR`, `CEIL`, `MOD`, `POWER`, `SQRT`, `SIGN`, `EXP`, `LOG` (natural), `LOG10`, `PI`;
 - NULLs: `COALESCE`, `IFNULL`, `NULLIF`;
-- dates (ISO 8601 strings): `EXTRACT(part FROM x)` and `YEAR`, `QUARTER`, `MONTH`, `WEEK`, `DAY`, `DAYOFWEEK` (1 = Sunday), `DAYOFYEAR`, `HOUR`, `MINUTE`, `SECOND`, `DAYNAME`, `MONTHNAME`; `CURRENT_DATE`, `CURRENT_TIME`, `NOW()`.
+- dates (ISO 8601 strings): `EXTRACT(part FROM x)` and `YEAR`, `QUARTER`, `MONTH`, `WEEK`, `DAY`, `DAYOFWEEK` (1 = Sunday), `DAYOFYEAR`, `HOUR`, `MINUTE`, `SECOND`, `DAYNAME`, `MONTHNAME`; `CURRENT_DATE`, `CURRENT_TIME`, `NOW()`. Dates run from the year 1 to 9999: later ones are refused as invalid. A leap second (`23:59:60`) counts as the first second of the next minute, here, in filters and in schedules.
 - Aggregates take expressions (`SUM(price * quantity)`), and `DISTINCT` (`SUM(DISTINCT x)`). `GROUP BY` takes expressions too. In a grouped query, every selected expression must be grouped or inside an aggregate.
 - `ORDER BY` takes expressions and `NULLS FIRST` / `NULLS LAST`. NULLs sort first ascending and last descending by default.
 
@@ -1588,7 +1599,7 @@ Quarantining, releasing and deleting are audited (`file.quarantined`, `file.rele
    ```
 5. Check it: `/status` and the dashboard show ClamAV's version and signature date, and uploading the [EICAR test file](https://www.eicar.org/download-anti-malware-testfile/) (harmless, flagged by every scanner) puts it in quarantine.
 
-ClamAV needs 3-4 GB of memory: its engine takes about 1.2 GB, and twice that briefly while it loads new signatures. The connection to clamd isn't encrypted, so keep it on a private network.
+ClamAV needs 3-4 GB of memory: its engine takes about 1.2 GB, and twice that briefly while it loads new signatures. `ConcurrentDatabaseReload no` in `clamd.conf` keeps it near 1.3 GB, at the cost of about a minute's pause in scanning (uploads are held) while it reloads. The connection to clamd isn't encrypted, so keep it on a private network.
 
 ### Upload quotas
 
@@ -1643,6 +1654,7 @@ curl -X DELETE http://localhost:7700/shares/PVETfyjH -H "Authorization: Bearer $
 - A read of content a replica doesn't have yet (or can't rebuild) is fetched from another hex and kept.
 - Chunks travel sealed with AES-256-GCM under a key derived from the lattice key, bound to their ID, so they stay secret without TLS. `GET /lattice/chunks/{id}` needs a lattice signature and is served by every hex, so hexes repair each other.
 - Uploads and resumable parts sent to a replica are streamed to the Overseer. Metadata extraction runs on the Overseer; replicas receive the results.
+- A sliced replica passes downloads on from the Overseer as they arrive, ranges included and with their `Content-Length`, so a large file isn't held in its memory first.
 
 ### Command line
 
@@ -2024,7 +2036,7 @@ Requests without credentials get 401, including requests to paths that don't exi
 - The user record is read on every request, so role changes apply immediately. Live SSE streams re-check every 30 seconds.
 
 **Brute force.**
-- After `security.max_failed_logins` (5) failures for one login, or from one address, within `lockout_minutes` (15), sign-in is refused with 429. The count is shared across the lattice. Wrong answers to the password (and code) a signed-in user must give again (changing the password, setting up or turning off MFA, new backup codes, "Add a hex") count the same way, so a stolen session or API key can't be used to guess the password.
+- After `security.max_failed_logins` (5) failures for one login, or from one address, within `lockout_minutes` (15), sign-in is refused with 429. An IPv6 client is counted by its /64 (a home connection or a server gets a whole /64, so rotating addresses inside it doesn't reset the count); the same goes for sharing links and the AI chat's per-address limits. The count is shared across the lattice. Wrong answers to the password (and code) a signed-in user must give again (changing the password, setting up or turning off MFA, new backup codes, "Add a hex") count the same way, so a stolen session or API key can't be used to guess the password.
 - Unknown logins take as long as wrong passwords and return the same message, so logins can't be enumerated.
 
 ### OAuth access tokens
@@ -2077,7 +2089,7 @@ HexDB supports time-based one-time passwords (TOTP, RFC 6238: HMAC-SHA1, 30-seco
 
 **Codes.**
 - A TOTP code is accepted for the current step and one step either side, for clock drift.
-- No code is accepted twice.
+- No code is accepted twice, anywhere in the lattice: a sign-in on a replica has the Overseer record the code's time step first, and is refused if the step was used. If no Overseer answers, a sign-in with a code on a replica fails (try again shortly); backup codes are checked the same way.
 - Backup codes are stored as Argon2 hashes and work once each.
 
 **Recovery.** An administrator can turn MFA off for a user who lost their device (`PATCH /users/{user}` with `{"use_mfa": false}`, or the Users page).
@@ -2453,7 +2465,7 @@ Every hex runs the same election over the same view, so they agree without a con
 
 **A hex that prefers to lead gets the role back by handover.** When a hex with `identity.role = "overseer"` comes back while another hex leads (it was away, or handed over when it stopped), it follows like any replica. Once it has every change, the sitting Overseer hands the role to it, the same way an Overseer hands over before stopping (writes are held for a moment; one caught mid-commit gets 503 with a retry hint), and carries on as a replica. If the handover can't finish, the sitting Overseer keeps the role and tries again five minutes later.
 
-**Hexes started together.** A starting hex probes its peers before it opens its storage, and the others may not be listening yet: a new lattice, or one restarted whole, would otherwise start with every hex as Overseer until the next round. So a hex with `network.peers` set that finds no one looks once more after its storage is open and its own listener answers. Of two hexes started together, the one that looks later finds the other, and two that find each other both claiming the role agree on one (rule 2). A hex started alone takes one extra probe round (at most 3 seconds) before it serves.
+**Hexes started together.** A starting hex probes its peers before it opens its storage, and the others may not be listening yet: a new lattice, or one restarted whole, would otherwise start with every hex as Overseer until the next round. So a hex with `network.peers` set that finds no one looks once more after its storage is open and its own listener answers. Of two hexes started together, the one that looks later finds the other. When both claim the role, the one whose discovery listener started first keeps it, measured to the nanosecond (the hex ID decides only against hexes that report milliseconds), so every hex settles on the same one. A hex started alone takes one extra probe round (at most 3 seconds) before it serves.
 
 A hex that restarts reports where its data really is: an Overseer that restarts reports its last write and every slice, so it gets its role back instead of passing it to a replica that would rebuild.
 
@@ -2888,6 +2900,7 @@ Limits, so a public deployment's users can't spend its owner's tokens:
 | --- | --- | --- |
 | `ai.chat.model` | empty (`ai.model`) | A smaller model is usually enough, e.g. `claude-haiku-5-5` |
 | `ai.chat.max_tokens_per_answer` | 1024 | Tokens per model call |
+| `ai.chat.max_tokens_per_question` | 20,000 | Tokens one question may use in all, input and output, across every lookup (each step resends the conversation and the lookups' results) |
 | `ai.chat.max_tool_calls` | 6 | Lookups per question; then the model must answer with what it has |
 | `ai.chat.max_question_chars`, `max_history` | 2000, 10 | Question length, and earlier messages sent along |
 | `ai.chat.user_daily_tokens` | 100,000 | Per user per day (UTC); 0: no limit |
@@ -3000,7 +3013,7 @@ role = "oracle"
 | `memory.ttl_scan_frequency` | 600 | Seconds between expiry sweeps |
 | `memory.vertex_integrity_check_frequency` | 300 | Seconds between vertex checks |
 | `compression.compression_level` | 0 | Zstandard level (-7 to 22; 0 is the library default) |
-| `security.admin_login`, `admin_email` | `hexdbadmin` | The first administrator |
+| `security.admin_login`, `admin_email` | `hexdbadmin`, `admin@hexdb` | The first administrator |
 | `security.admin_password` | empty | Generated when empty; ignored once users exist |
 | `security.change_first_password` | true | The first administrator's password works for one sign-in, which chooses a new one |
 | `security.session_hours` | 12 | Session lifetime |
@@ -3015,6 +3028,7 @@ role = "oracle"
 | `replication.slicing`, `slice_copies`, `recent_changes` | true, 1, 20000 | See [Slicing](#slicing) |
 | `partitioning.enabled` | false | See [Partitioning (preview)](#partitioning-preview) |
 | `plugins.enabled`, `registry` | true, `plugins.json` | Plugin loading |
+| `plugins.require_full_sandbox` | false | Refuse to start a sandboxed process plugin when the sandbox can't be fully enforced (see [Isolation](#isolation)) |
 | `functions.scripts`, `python`, `node` | true, `python3`/`python`, `node` | Script runtimes |
 | `ai.api_key_env`, `model`, `base_url` | `ANTHROPIC_API_KEY`, `claude-sonnet-5-5`, Anthropic API | Pre-1.6 query advisor key, used only while the lattice configuration's `ai.provider` is `none` |
 | `analyzers.<name>` | none | Custom text analyzers |
@@ -3072,6 +3086,14 @@ A hex that didn't shut down cleanly leaves its runtime file behind, and the next
 
 **Monitoring.** Use the `@sinks/otlp` plugin for metrics, a logs plugin for logs, and the audit trail for security events. `/status` is suitable for health checks that need more than `/health`.
 
+**Benchmarks.** `cargo run --release -p hexdb_bench` (`-- quick` for smaller data sets and no failover) measures a machine: binary sizes, compression and encryption speed, vertex repair, reads and writes, queries, memory and disk per document, large documents, crash recovery and failover. It writes its report to `bench/results/<system>-full.md` (or `-quick.md`); the published reports are there too. To see whether a new version is faster or slower, compare two `hexdb_api` binaries on one machine:
+
+```bash
+cargo run --release -p hexdb_bench -- compare <A hexdb_api> <B hexdb_api> [rounds] [--only single,lattice,queues]
+```
+
+Each round runs every scenario on a fresh server from each binary in turn, alternating which goes first, so drift on the machine falls on both alike. `single` loads and queries orders on one hex; `lattice` runs three hexes with writes acknowledged by two replicas (`replication.min_acks = 2`), writing alone and then while files download from the Overseer and through a sliced replica (first-byte latency, MB/s, every byte checked, the replica's peak memory); `queues` drains a queue with and without a dashboard polling its counts. The report gives p50/p95/p99 latencies pooled over rounds, throughput as the median of rounds with its range, memory, and the errors: only successful operations count, and a run with any failed request is reported as invalid and exits with an error. The three hexes share one machine, so the lattice scenario shows what synchronous acknowledgements and relayed downloads cost, not what network latency between zones adds. Numbers from different machines, or from a machine doing other work, aren't comparable.
+
 ## 24. Drivers
 
 | Language | Folder | Install |
@@ -3085,7 +3107,7 @@ A hex that didn't shut down cleanly leaves its runtime file behind, and the next
 
 The Node.js, Python and .NET drivers each cover:
 - documents, queries, counts, aggregations and upserts;
-- deletes by filter (`deleteWhere`, with `all`, a dry run and `expect`), the delete history, restoring and purging;
+- deletes by filter (`deleteWhere`, with `all`, a dry run and `expect`) and updates by filter (`updateWhere`, which needs `all` to run without a filter), the delete history, restoring and purging;
 - transactions and idempotency keys;
 - the change feed;
 - streams with consumer groups;
@@ -3288,7 +3310,7 @@ See [drivers/java/README.md](drivers/java/README.md) for every property, convers
 
 **Why did my write return 503 but the data is there?** With `replication.min_acks` set, the write committed on the Overseer, but not enough replicas confirmed within `ack_timeout_ms`. Retry with the same idempotency key to be safe.
 
-**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `sql`, `config`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations. Routes added since 2.0 (`queues`, `shares`, `mcp`, `quarantine`, `updates`, `a2a`, `ready`) can't be new tessellation names either, but a tessellation an earlier version created under one of them stays usable through SQL, GraphQL and transactions.
+**Why can't I name a tessellation `settings`?** API routes use that name. Reserved names include `auth`, `audit`, `backup`, `backups`, `triggers`, `settings`, `join`, `streams`, `functions`, `schedules`, `analyzers`, `schemas`, `sql`, `config`, `changes`, `logs`, `plugins`, `lattice`, `status`, `health`, `deletes`, `blocklist`, `ai` and `ui`. Names starting with `_` are reserved too, and `users` and `roles` are taken by system tessellations. Routes added since 2.0 (`queues`, `shares`, `mcp`, `quarantine`, `users`, `roles`, `updates`, `a2a`, `ready`, `security`, `retire`) can't be new tessellation names either, but a tessellation an earlier version created under one of them stays usable through SQL, GraphQL and transactions.
 
 **A replica is far behind or keeps re-syncing.**
 1. Check the Logs page on the replica, filtered by `hexdb_core::replication`.
