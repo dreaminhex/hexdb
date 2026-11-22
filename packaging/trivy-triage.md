@@ -1,6 +1,6 @@
 # Image findings: triage
 
-Each release scans its images on both architectures (`.github/workflows/release.yml`). The release stops on a critical finding with a fix available. Everything else is in the full report, kept as the `trivy-image` artifact of each release run, and triaged here.
+Each release scans its images on both architectures (`.github/workflows/release.yml`). The release stops on a critical finding with a fix available. Everything else is in the full reports, one per image and architecture (`trivy-full-amd64.json`, `trivy-full-arm64.json`, `trivy-slim-amd64.json`, `trivy-slim-arm64.json`), attached to each GitHub release and kept as the `trivy-image` artifact of its run, and triaged here.
 
 Owner of every entry: the HexDB maintainers. Review by the date given, or at the next release whose report changes the picture, whichever is first. An entry whose packages get a fix is dropped: the release picks up fixed Debian packages itself (`apt-get upgrade` in the image).
 
@@ -28,6 +28,6 @@ Since 2.5.9 there is a slim image (`hexdb:<version>-slim`): the server, the CLI 
 
 ## Process
 
-1. After a release, download `trivy-image` from its run and compare it with the table above.
+1. After a release, download its `trivy-*.json` assets (or the `trivy-image` artifact of its run) and compare them with the table above.
 2. A new finding in a component not listed, or a listed one now reachable from requests, gets a row (or a fix) before the next release.
 3. A critical finding with a fix available already stops the release; a high one with a fix should be picked up by rebuilding (a patch release) within 30 days.
