@@ -1,0 +1,454 @@
+use crate::error::{
+    nom_error_to_parsing_error_with_state, MalformedKind, ParsingError, ParsingErrorState,
+};
+use crate::file::MediaMimeImage;
+use crate::parser::{BufParser, ParsingState, ShareBuf};
+use crate::raf::RafInfo;
+use crate::slice::SubsliceRange;
+use crate::{cr3, heif, jpeg, MediaParser};
+pub use exif_exif::Exif;
+use exif_exif::TIFF_HEADER_LEN;
+use exif_iter::input_into_iter;
+pub use exif_iter::{ExifEntry, ExifEntryRef, ExifIter, ExifIterEntry, IfdIndex, IfdKind};
+pub use gps::{GPSInfo, LatLng};
+pub use tags::{ExifTag, TagOrCode};
+
+use std::io::Read;
+use std::ops::Range;
+
+pub(crate) mod ifd;
+pub(crate) use exif_exif::{check_exif_header, check_exif_header2, TiffHeader};
+pub(crate) use travel::IfdHeaderTravel;
+
+mod exif_exif;
+mod exif_iter;
+pub mod gps;
+pub mod png_text;
+mod tags;
+mod travel;
+
+#[tracing::instrument(skip(reader, skip_by_seek))]
+pub(crate) fn parse_exif_iter<R: Read>(
+    parser: &mut MediaParser,
+    mime_img: MediaMimeImage,
+    reader: &mut R,
+    skip_by_seek: crate::parser::SkipBySeekFn<R>,
+) -> Result<ExifIter, crate::Error> {
+    // For CR3 files, we need special handling to get all CMT blocks
+    if mime_img == MediaMimeImage::Cr3 {
+        return parse_cr3_exif_iter(parser, reader, skip_by_seek);
+    }
+    // PNG: special-cased path peer to CR3.
+    if mime_img == MediaMimeImage::Png {
+        return parse_png_exif_iter(parser, reader, skip_by_seek);
+    }
+
+    let out = parser.load_and_parse(reader, skip_by_seek, |buf, state| {
+        extract_exif_range(mime_img, buf, state)
+    })?;
+
+    let has_track = match mime_img {
+        MediaMimeImage::Jpeg => detect_motion_photo(parser, reader),
+        _ => false,
+    };
+
+    range_to_iter(parser, out, has_track)
+}
+
+/// Demand-driven scan for a Pixel/Google Motion Photo signal in a JPEG
+/// buffer that may not yet hold all APP segments.
+///
+/// `load_and_parse` only fills enough bytes to read the EXIF segment;
+/// for JPEGs with a large EXIF (Pixel/Galaxy thumbnails routinely push
+/// it past 30 KB) the XMP segment that carries `GCamera:MotionPhoto`
+/// can sit just past the buffer's edge. Try the scan first; if it
+/// reports `NeedMoreBytes`, pull another small chunk and retry. Cap
+/// the total extra reads at `MAX_EXTRA` so a malformed file can't loop
+/// forever.
+fn detect_motion_photo<R: Read>(parser: &mut MediaParser, reader: &mut R) -> bool {
+    use crate::parser::{Buf, BufParser};
+    const CHUNK: usize = 8 * 1024;
+    const MAX_EXTRA: usize = 256 * 1024;
+    let mut extra = 0;
+    loop {
+        match jpeg::scan_motion_photo(parser.buffer()) {
+            jpeg::MotionPhotoScan::Found(_) => return true,
+            jpeg::MotionPhotoScan::NotPresent => return false,
+            jpeg::MotionPhotoScan::NeedMoreBytes => {
+                if extra >= MAX_EXTRA {
+                    return false;
+                }
+                let want = CHUNK.min(MAX_EXTRA - extra);
+                if parser.fill_buf(reader, want).is_err() {
+                    return false;
+                }
+                extra += want;
+            }
+        }
+    }
+}
+
+/// Special parser for CR3 files that extracts all CMT blocks (CMT1, CMT2, CMT3)
+/// and adds them as additional TIFF blocks to the ExifIter.
+#[tracing::instrument(skip(reader, skip_by_seek))]
+fn parse_cr3_exif_iter<R: Read>(
+    parser: &mut MediaParser,
+    reader: &mut R,
+    skip_by_seek: crate::parser::SkipBySeekFn<R>,
+) -> Result<ExifIter, crate::Error> {
+    // First, parse to get all CMT ranges
+    let cmt_ranges = parser.load_and_parse(reader, skip_by_seek, |buf, _state| {
+        cr3::extract_all_cmt_ranges(buf)
+    })?;
+
+    let Some(cmt_ranges) = cmt_ranges else {
+        return Err(crate::Error::Malformed {
+            kind: crate::error::MalformedKind::IsoBmffBox,
+            message: "cr3: no CMT data found".into(),
+        });
+    };
+
+    if cmt_ranges.ranges.is_empty() {
+        return Err(crate::Error::Malformed {
+            kind: crate::error::MalformedKind::IsoBmffBox,
+            message: "cr3: no CMT ranges available".into(),
+        });
+    }
+
+    tracing::debug!(
+        cmt_count = cmt_ranges.ranges.len(),
+        "Found CMT ranges in CR3 file"
+    );
+
+    // Get the first CMT range (CMT1) to create the primary ExifIter
+    let (first_block_id, first_range) = &cmt_ranges.ranges[0];
+    tracing::debug!(
+        block_id = first_block_id,
+        range = ?first_range,
+        "Creating primary ExifIter from first CMT block"
+    );
+
+    // Take ownership of the parser's full buffer once. All CMT block ranges
+    // are relative to the parser's position-adjusted buffer view; absolute
+    // ranges within `full` are obtained by adding `position`.
+    let (full, position) = parser.share_buf();
+
+    // Invariant: parse_moov_box uses streaming::take(box_size) for every box,
+    // so when extract_all_cmt_ranges returns Some, all child boxes (including
+    // CMT1/2/3 data) are fully loaded into `full`. Step 3a hardens this from
+    // a soft warning to a structured ParsingError, so reaching here always
+    // means every range fits within `full`.
+    debug_assert!(
+        cmt_ranges
+            .ranges
+            .iter()
+            .all(|(_, r)| r.end + position <= full.len()),
+        "CMT range extends beyond loaded buffer; parse_moov_box invariant violated"
+    );
+
+    let primary_abs = (first_range.start + position)..(first_range.end + position);
+    let primary_view = full.slice(primary_abs);
+    let mut iter = input_into_iter(primary_view, None)?;
+
+    for (block_id, range) in cmt_ranges.ranges.iter().skip(1) {
+        if *block_id == "CMT3" {
+            tracing::debug!(block_id, "Skipping CMT3 (MakerNotes) - proprietary format");
+            continue;
+        }
+        let abs = (range.start + position)..(range.end + position);
+        tracing::debug!(
+            block_id,
+            original_range = ?range,
+            absolute_range = ?abs,
+            "Adding additional CMT block"
+        );
+        iter.add_tiff_block(block_id.to_string(), full.slice(abs), None);
+    }
+
+    Ok(iter)
+}
+
+/// Walks PNG chunks and materializes the resulting EXIF source.
+#[tracing::instrument(skip(reader, skip_by_seek))]
+fn parse_png_exif_iter<R: Read>(
+    parser: &mut MediaParser,
+    reader: &mut R,
+    skip_by_seek: crate::parser::SkipBySeekFn<R>,
+) -> Result<ExifIter, crate::Error> {
+    let out = parser.load_and_parse(reader, skip_by_seek, |buf, state| {
+        crate::png::extract_chunks(buf, state)
+    })?;
+
+    let Some(source) = out.exif else {
+        return Err(crate::Error::ExifNotFound);
+    };
+
+    png_source_to_iter(parser, source)
+}
+
+/// Like [`parse_png_exif_iter`] but also returns the captured `tEXt`
+/// chunks. Used by `MediaParser::parse_image_metadata` for PNG.
+#[allow(clippy::type_complexity)]
+#[tracing::instrument(skip(reader, skip_by_seek))]
+pub(crate) fn parse_png_full<R: Read>(
+    parser: &mut MediaParser,
+    reader: &mut R,
+    skip_by_seek: crate::parser::SkipBySeekFn<R>,
+) -> Result<(Option<ExifIter>, Vec<(String, String)>), crate::Error> {
+    let out = parser.load_and_parse(reader, skip_by_seek, |buf, state| {
+        crate::png::extract_chunks(buf, state)
+    })?;
+
+    let exif_iter = out
+        .exif
+        .map(|source| png_source_to_iter(parser, source))
+        .transpose()?;
+
+    Ok((exif_iter, out.text_chunks))
+}
+
+fn png_source_to_iter(
+    parser: &mut impl ShareBuf,
+    source: crate::png::PngExifSource,
+) -> Result<ExifIter, crate::Error> {
+    let view = match source {
+        crate::png::PngExifSource::EXif(range) => {
+            let (full, position) = parser.share_buf();
+            full.slice((range.start + position)..(range.end + position))
+        }
+        crate::png::PngExifSource::Owned(bytes) => bytes,
+    };
+    input_into_iter(view, None)
+}
+
+type ExifRangeResult = Result<Option<(Range<usize>, Option<TiffHeader>)>, ParsingErrorState>;
+
+fn extract_exif_range(
+    img: MediaMimeImage,
+    buf: &[u8],
+    state: Option<ParsingState>,
+) -> ExifRangeResult {
+    let (exif_data, state) = extract_exif_with_mime(img, buf, state)?;
+    let header = state.and_then(|x| match x {
+        ParsingState::TiffHeader(h) => Some(h),
+        ParsingState::HeifExifSize(_) => None,
+        ParsingState::Cr3ExifSize(_) => None,
+        ParsingState::Png(_) => None,
+        ParsingState::WebpPastHeader(_) => None,
+    });
+    Ok(exif_data
+        .and_then(|x| buf.subslice_in_range(x))
+        .map(|x| (x, header)))
+}
+
+fn range_to_iter(
+    parser: &mut impl ShareBuf,
+    out: Option<(Range<usize>, Option<TiffHeader>)>,
+    has_embedded_track: bool,
+) -> Result<ExifIter, crate::Error> {
+    if let Some((range, header)) = out {
+        tracing::debug!(?range, ?header, "Got Exif data");
+        let (full, position) = parser.share_buf();
+        let abs = (range.start + position)..(range.end + position);
+        let view = full.slice(abs);
+        let mut iter = input_into_iter(view, header)?;
+        iter.set_has_embedded_track(has_embedded_track);
+        Ok(iter)
+    } else {
+        tracing::debug!("Exif not found");
+        Err(crate::Error::ExifNotFound)
+    }
+}
+
+#[cfg(feature = "tokio")]
+#[tracing::instrument(skip(parser, reader, skip_by_seek))]
+pub(crate) async fn parse_exif_iter_async<P, R: AsyncRead + Unpin + Send>(
+    parser: &mut P,
+    mime_img: MediaMimeImage,
+    reader: &mut R,
+    skip_by_seek: crate::parser_async::AsyncSkipBySeekFn<R>,
+) -> Result<ExifIter, crate::Error>
+where
+    P: crate::parser_async::AsyncBufParser + crate::parser::ShareBuf,
+{
+    if mime_img == MediaMimeImage::Png {
+        return parse_png_exif_iter_async(parser, reader, skip_by_seek).await;
+    }
+
+    let out = parser
+        .load_and_parse(reader, skip_by_seek, |buf, state| {
+            extract_exif_range(mime_img, buf, state)
+        })
+        .await?;
+
+    let has_track = match mime_img {
+        MediaMimeImage::Jpeg => detect_motion_photo_async(parser, reader).await,
+        _ => false,
+    };
+
+    range_to_iter(parser, out, has_track)
+}
+
+/// Async twin of [`detect_motion_photo`].
+#[cfg(feature = "tokio")]
+async fn detect_motion_photo_async<P, R>(parser: &mut P, reader: &mut R) -> bool
+where
+    P: crate::parser_async::AsyncBufParser + crate::parser::Buf,
+    R: AsyncRead + Unpin + Send,
+{
+    const CHUNK: usize = 8 * 1024;
+    const MAX_EXTRA: usize = 256 * 1024;
+    let mut extra = 0;
+    loop {
+        match jpeg::scan_motion_photo(parser.buffer()) {
+            jpeg::MotionPhotoScan::Found(_) => return true,
+            jpeg::MotionPhotoScan::NotPresent => return false,
+            jpeg::MotionPhotoScan::NeedMoreBytes => {
+                if extra >= MAX_EXTRA {
+                    return false;
+                }
+                let want = CHUNK.min(MAX_EXTRA - extra);
+                if parser.fill_buf(reader, want).await.is_err() {
+                    return false;
+                }
+                extra += want;
+            }
+        }
+    }
+}
+
+#[tracing::instrument(skip(buf))]
+pub(crate) fn extract_exif_with_mime(
+    img_type: crate::file::MediaMimeImage,
+    buf: &[u8],
+    state: Option<ParsingState>,
+) -> Result<(Option<&[u8]>, Option<ParsingState>), ParsingErrorState> {
+    let (exif_data, state) = match img_type {
+        MediaMimeImage::Jpeg => jpeg::extract_exif_data(buf)
+            .map(|res| (res.1, state.clone()))
+            .map_err(|e| {
+                nom_error_to_parsing_error_with_state(e, MalformedKind::JpegSegment, state)
+            })?,
+        MediaMimeImage::Heic
+        | crate::file::MediaMimeImage::Heif
+        | crate::file::MediaMimeImage::Avif => heif_extract_exif(state, buf)?,
+        MediaMimeImage::Tiff => {
+            let header = match state {
+                Some(ParsingState::TiffHeader(ref h)) => h.to_owned(),
+                None => {
+                    let (_, header) = TiffHeader::parse(buf).map_err(|e| {
+                        nom_error_to_parsing_error_with_state(e, MalformedKind::TiffHeader, None)
+                    })?;
+                    if header.ifd0_offset as usize > buf.len() {
+                        let clear_and_skip =
+                            ParsingError::Need(header.ifd0_offset as usize - TIFF_HEADER_LEN + 2);
+                        let state = Some(ParsingState::TiffHeader(header));
+                        return Err(ParsingErrorState::new(clear_and_skip, state));
+                    }
+                    header
+                }
+                _ => {
+                    return Err(ParsingErrorState::new(
+                        ParsingError::Failed {
+                            kind: MalformedKind::TiffHeader,
+                            message: "unexpected parsing state for tiff".into(),
+                        },
+                        None,
+                    ))
+                }
+            };
+
+            // full fill TIFF data
+            tracing::debug!("full fill TIFF data");
+            let mut iter = IfdHeaderTravel::new(
+                buf,
+                header.ifd0_offset as usize,
+                TagOrCode::Unknown(0x2a),
+                header.endian,
+            );
+            iter.travel_ifd(0)
+                .map_err(|e| ParsingErrorState::new(e, state.clone()))?;
+            tracing::debug!("full fill TIFF data done");
+
+            (Some(buf), state)
+        }
+        MediaMimeImage::Raf => RafInfo::parse(buf)
+            .map(|res| (res.1.exif_data, state.clone()))
+            .map_err(|e| {
+                nom_error_to_parsing_error_with_state(e, MalformedKind::TiffHeader, state)
+            })?,
+        MediaMimeImage::Cr3 => cr3_extract_exif(state, buf)?,
+        MediaMimeImage::Png => {
+            // PNG is dispatched to parse_png_exif_iter at the top of
+            // parse_exif_iter; this arm is unreachable in v3.3.
+            unreachable!("PNG should have been dispatched at parse_exif_iter top");
+        }
+        MediaMimeImage::Webp => crate::webp::extract_exif(state, buf)?,
+    };
+    Ok((exif_data, state))
+}
+
+fn heif_extract_exif(
+    state: Option<ParsingState>,
+    buf: &[u8],
+) -> Result<(Option<&[u8]>, Option<ParsingState>), ParsingErrorState> {
+    heif::extract_exif_data(state, buf)
+}
+
+fn cr3_extract_exif(
+    state: Option<ParsingState>,
+    buf: &[u8],
+) -> Result<(Option<&[u8]>, Option<ParsingState>), ParsingErrorState> {
+    cr3::extract_exif_data(state, buf)
+}
+
+#[cfg(feature = "tokio")]
+async fn parse_png_exif_iter_async<P, R>(
+    parser: &mut P,
+    reader: &mut R,
+    skip_by_seek: crate::parser_async::AsyncSkipBySeekFn<R>,
+) -> Result<ExifIter, crate::Error>
+where
+    P: crate::parser_async::AsyncBufParser + crate::parser::ShareBuf,
+    R: AsyncRead + Unpin + Send,
+{
+    let out = parser
+        .load_and_parse(reader, skip_by_seek, |buf, state| {
+            crate::png::extract_chunks(buf, state)
+        })
+        .await?;
+
+    let Some(source) = out.exif else {
+        return Err(crate::Error::ExifNotFound);
+    };
+
+    png_source_to_iter(parser, source)
+}
+
+#[cfg(feature = "tokio")]
+#[allow(clippy::type_complexity)]
+pub(crate) async fn parse_png_full_async<P, R>(
+    parser: &mut P,
+    reader: &mut R,
+    skip_by_seek: crate::parser_async::AsyncSkipBySeekFn<R>,
+) -> Result<(Option<ExifIter>, Vec<(String, String)>), crate::Error>
+where
+    P: crate::parser_async::AsyncBufParser + crate::parser::ShareBuf,
+    R: AsyncRead + Unpin + Send,
+{
+    let out = parser
+        .load_and_parse(reader, skip_by_seek, |buf, state| {
+            crate::png::extract_chunks(buf, state)
+        })
+        .await?;
+
+    let exif_iter = out
+        .exif
+        .map(|source| png_source_to_iter(parser, source))
+        .transpose()?;
+
+    Ok((exif_iter, out.text_chunks))
+}
+
+#[cfg(feature = "tokio")]
+use tokio::io::AsyncRead;

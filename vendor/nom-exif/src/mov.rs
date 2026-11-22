@@ -1,0 +1,248 @@
+use std::{collections::BTreeMap, ops::Range};
+
+use crate::time::OffsetDateTime;
+use nom::{bytes::streaming, IResult};
+
+use crate::{bbox::to_boxes, values::filter_zero};
+use crate::{
+    bbox::{
+        find_box, parse_video_tkhd_in_moov, travel_header, IlstBox, KeysBox, MvhdBox, ParseBox,
+    },
+    error::{MalformedKind, ParsingError},
+    video::TrackInfoTag,
+    EntryValue,
+};
+
+#[tracing::instrument(skip_all)]
+pub(crate) fn parse_isobmff(moov_body: &[u8]) -> Result<crate::TrackInfo, ParsingError> {
+    let (_, entries) = match parse_moov_body(moov_body) {
+        Ok((remain, Some(entries))) => (remain, entries),
+        Ok((remain, None)) => (remain, Vec::new()),
+        Err(_) => {
+            return Err(ParsingError::Failed {
+                kind: MalformedKind::IsoBmffBox,
+                message: "invalid moov body".into(),
+            });
+        }
+    };
+
+    let mut entries: BTreeMap<TrackInfoTag, EntryValue> = convert_video_tags(entries);
+    let mut extras = parse_mvhd_tkhd(moov_body);
+    if entries.contains_key(&TrackInfoTag::CreateDate) {
+        extras.remove(&TrackInfoTag::CreateDate);
+    }
+    entries.extend(extras);
+
+    let mut info = crate::TrackInfo::default();
+    for (k, v) in entries {
+        info.put(k, v);
+    }
+    Ok(info)
+}
+
+fn parse_mvhd_tkhd(moov_body: &[u8]) -> BTreeMap<TrackInfoTag, EntryValue> {
+    let mut entries = BTreeMap::new();
+    if let Ok((_, Some(bbox))) = find_box(moov_body, "mvhd") {
+        if let Ok((_, mvhd)) = MvhdBox::parse_box(bbox.data) {
+            entries.insert(TrackInfoTag::DurationMs, mvhd.duration_ms().into());
+
+            entries.insert(
+                TrackInfoTag::CreateDate,
+                EntryValue::DateTime(mvhd.creation_time()),
+            );
+        }
+    }
+
+    if let Ok(Some(tkhd)) = parse_video_tkhd_in_moov(moov_body) {
+        entries.insert(TrackInfoTag::Width, tkhd.width.into());
+        entries.insert(TrackInfoTag::Height, tkhd.height.into());
+    }
+
+    entries
+}
+
+fn convert_video_tags(entries: Vec<(String, EntryValue)>) -> BTreeMap<TrackInfoTag, EntryValue> {
+    entries
+        .into_iter()
+        .filter_map(|(k, v)| {
+            if k == "com.apple.quicktime.creationdate" {
+                v.as_str()
+                    .and_then(OffsetDateTime::parse_rfc3339)
+                    .map(|t| (TrackInfoTag::CreateDate, EntryValue::DateTime(t)))
+            } else if k == "com.apple.quicktime.make" {
+                Some((TrackInfoTag::Make, v))
+            } else if k == "com.apple.quicktime.model" {
+                Some((TrackInfoTag::Model, v))
+            } else if k == "com.apple.quicktime.software" {
+                Some((TrackInfoTag::Software, v))
+            } else if k == "com.apple.quicktime.author" {
+                Some((TrackInfoTag::Author, v))
+            } else if k == "com.apple.quicktime.location.ISO6709" {
+                Some((TrackInfoTag::GpsIso6709, v))
+            } else if k == "udta.©xyz" {
+                // For mp4 files, Android phones store GPS info in that box.
+                v.as_u8_slice()
+                    .and_then(parse_udta_gps)
+                    .map(|v| (TrackInfoTag::GpsIso6709, EntryValue::Text(v)))
+            } else if k == "udta.auth" {
+                v.as_u8_slice()
+                    .and_then(parse_udta_auth)
+                    .map(|v| (TrackInfoTag::Author, EntryValue::Text(v)))
+            } else if k.starts_with("udta.") {
+                let tag = k.as_str().parse::<TrackInfoTag>().ok();
+                tag.map(|t| (t, v))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Try to find GPS info from box `moov/udta/©xyz`. For mp4 files, Android
+/// phones store GPS info in that box.
+// fn parse_mp4_gps(moov_body: &[u8]) -> Option<String> {
+//     let bbox = match find_box(moov_body, "udta/©xyz") {
+//         Ok((_, b)) => b,
+//         Err(_) => None,
+//     };
+//     if let Some(bbox) = bbox {
+//         return parse_udta_gps(bbox.body_data());
+//     }
+//     None
+// }
+fn parse_udta_gps(data: &[u8]) -> Option<String> {
+    if data.len() <= 4 {
+        tracing::warn!("moov/udta/©xyz body is too small");
+        None
+    } else {
+        // The first 4 bytes is zero, skip them
+        let location = data[4..] // Safe-slice
+            .iter()
+            .map(|b| *b as char)
+            .collect::<String>();
+        Some(location)
+    }
+}
+
+const ISO_639_2_UND: [u8; 2] = [0x55, 0xc4];
+
+fn parse_udta_auth(data: &[u8]) -> Option<String> {
+    // Skip leading zero bytes
+    let data = filter_zero(data);
+
+    // Skip leading language flags.
+    // Refer to: https://exiftool.org/forum/index.php?topic=11498.0
+    if data.starts_with(&ISO_639_2_UND) {
+        String::from_utf8(data.into_iter().skip(2).collect()).ok()
+    } else {
+        String::from_utf8(data).ok()
+    }
+}
+
+/// Parse the byte data of an ISOBMFF file and return the potential body data of
+/// moov atom it may contain.
+///
+/// Regarding error handling, please refer to [`ParsingError`] for more information.
+#[tracing::instrument(skip_all)]
+pub(crate) fn extract_moov_body_from_buf(input: &[u8]) -> Result<Range<usize>, ParsingError> {
+    // parse metadata from moov/meta/keys & moov/meta/ilst
+    let remain = input;
+
+    let convert_error = |e: nom::Err<_>, msg: &str| match e {
+        nom::Err::Incomplete(needed) => match needed {
+            nom::Needed::Unknown => ParsingError::Need(1),
+            nom::Needed::Size(n) => ParsingError::Need(n.get()),
+        },
+        nom::Err::Failure(_) | nom::Err::Error(_) => ParsingError::Failed {
+            kind: MalformedKind::IsoBmffBox,
+            message: msg.to_string(),
+        },
+    };
+
+    let mut to_skip = 0;
+    let mut skipped = 0;
+    let (remain, header) = travel_header(remain, |h, remain| {
+        tracing::debug!(?h.box_type, ?h.box_size, "Got");
+        if h.box_type == "moov" {
+            // stop travelling
+            skipped += h.header_size;
+            false
+        } else if (remain.len() as u64) < h.body_size() {
+            // stop travelling & skip unused box data
+            to_skip = h.body_size() as usize - remain.len();
+            false
+        } else {
+            // body has been read, so just consume it
+            skipped += h.box_size as usize;
+            true
+        }
+    })
+    .map_err(|e| convert_error(e, "search atom moov failed"))?;
+
+    if to_skip > 0 {
+        return Err(ParsingError::ClearAndSkip(
+            to_skip
+                .checked_add(input.len())
+                .ok_or_else(|| ParsingError::Failed {
+                    kind: MalformedKind::IsoBmffBox,
+                    message: "to_skip is too big".into(),
+                })?,
+        ));
+    }
+
+    let size: usize = header.body_size().try_into().expect("must fit");
+    let (_, body) =
+        streaming::take(size)(remain).map_err(|e| convert_error(e, "moov is too small"))?;
+
+    Ok(skipped..skipped + body.len())
+}
+
+type EntriesResult<'a> = IResult<&'a [u8], Option<Vec<(String, EntryValue)>>>;
+
+#[tracing::instrument(skip(input))]
+fn parse_moov_body(input: &[u8]) -> EntriesResult<'_> {
+    tracing::debug!("parse_moov_body");
+
+    let mut entries = parse_meta(input).unwrap_or_default();
+
+    if let Ok((_, Some(udta))) = find_box(input, "udta") {
+        tracing::debug!("udta");
+        if let Ok(boxes) = to_boxes(udta.body_data()) {
+            for entry in boxes.iter() {
+                tracing::debug!(?entry, "udta entry");
+                entries.push((
+                    format!("udta.{}", entry.box_type()),
+                    EntryValue::U8Array(Vec::from(entry.body_data())),
+                ));
+            }
+        }
+    }
+
+    Ok((input, Some(entries)))
+}
+
+fn parse_meta(input: &[u8]) -> Option<Vec<(String, EntryValue)>> {
+    let (_, Some(meta)) = find_box(input, "meta").ok()? else {
+        return None;
+    };
+
+    let (_, Some(keys)) = find_box(meta.body_data(), "keys").ok()? else {
+        return None;
+    };
+
+    let (_, Some(ilst)) = find_box(meta.body_data(), "ilst").ok()? else {
+        return None;
+    };
+
+    let (_, keys) = KeysBox::parse_box(keys.data).ok()?;
+    let (_, ilst) = IlstBox::parse_box(ilst.data).ok()?;
+
+    let entries = keys
+        .entries
+        .into_iter()
+        .map(|k| k.key)
+        .zip(ilst.items.into_iter().map(|v| v.value))
+        .collect::<Vec<_>>();
+
+    Some(entries)
+}

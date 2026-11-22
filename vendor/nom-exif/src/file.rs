@@ -1,0 +1,281 @@
+use nom::{bytes::complete, FindSubstring};
+use std::io::Cursor;
+
+use crate::{
+    bbox::{travel_header, BoxHeader, BoxHolder},
+    ebml::element::parse_ebml_doc_type,
+    error::MalformedKind,
+    exif::TiffHeader,
+    jpeg::check_jpeg,
+    raf::RafInfo,
+    slice::SubsliceRange,
+};
+
+const HEIF_HEIC_BRAND_NAMES: &[&[u8]] = &[
+    b"heic", // the usual HEIF images
+    b"heix", // 10bit images, or anything that uses h265 with range extension
+    b"hevc", // 'hevx': brands for image sequences
+    b"heim", // multiview
+    b"heis", // scalable
+    b"hevm", // multiview sequence
+    b"hevs", // scalable sequence
+    b"mif1", b"MiHE", b"miaf", b"MiHB", // HEIC file's compatible brands
+];
+
+const HEIC_BRAND_NAMES: &[&[u8]] = &[b"heic", b"heix", b"heim", b"heis"];
+
+// TODO: Refer to the information on the website https://www.ftyps.com to add
+// other less common MP4 brands.
+const MP4_BRAND_NAMES: &[&str] = &[
+    "3g2a", "3g2b", "3g2c", "3ge6", "3ge7", "3gg6", "3gp4", "3gp5", "3gp6", "3gs7", "avc1", "mp41",
+    "mp42", "iso2", "isom", "vfj1", "XAVC",
+];
+
+const QT_BRAND_NAMES: &[&str] = &["qt  ", "mqt "];
+
+const CR3_BRAND_NAMES: &[&str] = &["crx "];
+
+// AVIF (AV1 Image File Format, ISO/IEC 23000-22) brands. `avif` covers single
+// images; `avis` covers image sequences; `avio` covers AVIF item-only files.
+const AVIF_BRAND_NAMES: &[&[u8]] = &[b"avif", b"avis", b"avio"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub(crate) enum MediaMime {
+    Image(MediaMimeImage),
+    Track(MediaMimeTrack),
+}
+
+impl MediaMime {
+    pub fn unwrap_image(self) -> MediaMimeImage {
+        match self {
+            MediaMime::Image(val) => val,
+            MediaMime::Track(_) => {
+                panic!("called `MediaMime::unwrap_image()` on a `MediaMime::Track`")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub(crate) enum MediaMimeImage {
+    Jpeg,
+    Heic,
+    Heif,
+    Avif,
+    Tiff,
+    Raf,
+    Cr3,
+    Png,
+    Webp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub(crate) enum MediaMimeTrack {
+    QuickTime,
+    Mp4,
+    Webm,
+    Matroska,
+    _3gpp,
+}
+
+impl TryFrom<&[u8]> for MediaMime {
+    type Error = crate::Error;
+    fn try_from(input: &[u8]) -> Result<Self, Self::Error> {
+        let mime = if let Ok(x) = parse_bmff_mime(input) {
+            x
+        } else if let Ok(x) = get_ebml_doc_type(input) {
+            if x == "webm" {
+                MediaMime::Track(MediaMimeTrack::Webm)
+            } else {
+                MediaMime::Track(MediaMimeTrack::Matroska)
+            }
+        } else if TiffHeader::parse(input).is_ok() {
+            MediaMime::Image(MediaMimeImage::Tiff)
+        } else if check_png(input).is_ok() {
+            MediaMime::Image(MediaMimeImage::Png)
+        } else if check_webp(input).is_ok() {
+            MediaMime::Image(MediaMimeImage::Webp)
+        } else if check_jpeg(input).is_ok() {
+            MediaMime::Image(MediaMimeImage::Jpeg)
+        } else if RafInfo::check(input).is_ok() {
+            MediaMime::Image(MediaMimeImage::Raf)
+        } else {
+            return Err(crate::Error::UnsupportedFormat);
+        };
+
+        Ok(mime)
+    }
+}
+
+fn get_ebml_doc_type(input: &[u8]) -> crate::Result<String> {
+    let mut cursor = Cursor::new(input);
+    let doc = parse_ebml_doc_type(&mut cursor)?;
+    Ok(doc)
+}
+
+#[tracing::instrument(skip_all)]
+fn parse_bmff_mime(input: &[u8]) -> crate::Result<MediaMime> {
+    // Legacy QuickTime files start with a `pnot` (preview) atom (e.g. early
+    // Nikon COOLPIX, Casio cameras) or directly with `mdat` (no `ftyp`/`wide`
+    // header at all, `moov` at the end of file). The first atom alone is
+    // sufficient to identify the file as QuickTime: the subsequent `moov`
+    // structure is standard, `mov.rs::extract_moov_body_from_buf` skips the
+    // intermediate atoms via `ClearAndSkip` no matter how large `mdat` is.
+    // We do this short-circuit before `get_ftyp_and_major_brand` because it
+    // rejects any first box other than `ftyp`/`wide` as malformed, and the
+    // header parse buffer (128 bytes) is typically too small for the generic
+    // `mdat` scan to succeed past a real-world `moov`. Header-only parsing
+    // (`BoxHeader`, not `BoxHolder`) is essential here: a leading `mdat` is
+    // usually far larger than the header parse buffer, and `BoxHolder::parse`
+    // would bail out with `Incomplete` while requiring the full box body.
+    if BoxHeader::parse(input)
+        .map(|(_, header)| matches!(header.box_type.as_str(), "pnot" | "mdat"))
+        .unwrap_or(false)
+    {
+        return Ok(MediaMime::Track(MediaMimeTrack::QuickTime));
+    }
+
+    let (ftyp, Some(major_brand)) =
+        get_ftyp_and_major_brand(input).map_err(|_| crate::Error::UnsupportedFormat)?
+    else {
+        if travel_header(input, |header, _| header.box_type != "mdat").is_ok() {
+            // ftyp is None, mdat box is found, assume it's a MOV file extracted from HEIC
+            return Ok(MediaMime::Track(MediaMimeTrack::QuickTime));
+        }
+
+        return Err(crate::Error::UnsupportedFormat);
+    };
+
+    tracing::debug!(?ftyp);
+
+    // Check if it is a QuickTime file
+    if QT_BRAND_NAMES.iter().any(|v| v.as_bytes() == major_brand) {
+        return Ok(MediaMime::Track(MediaMimeTrack::QuickTime));
+    }
+
+    // Check if it is an AVIF file. Must precede the HEIF compatible-brand
+    // check below because AVIF files commonly include `mif1`/`miaf` in their
+    // compatible-brand list.
+    if AVIF_BRAND_NAMES.contains(&major_brand) {
+        return Ok(MediaMime::Image(MediaMimeImage::Avif));
+    }
+
+    // Check if it is a HEIF file
+    if HEIF_HEIC_BRAND_NAMES.contains(&major_brand) {
+        if HEIC_BRAND_NAMES.contains(&major_brand) {
+            return Ok(MediaMime::Image(MediaMimeImage::Heic));
+        }
+        return Ok(MediaMime::Image(MediaMimeImage::Heif));
+    }
+
+    // Check if it is a MP4 file
+    if MP4_BRAND_NAMES.iter().any(|v| v.as_bytes() == major_brand) {
+        if major_brand.starts_with(b"3gp") {
+            return Ok(MediaMime::Track(MediaMimeTrack::_3gpp));
+        }
+        return Ok(MediaMime::Track(MediaMimeTrack::Mp4));
+    }
+
+    // Check if it is a CR3 file
+    if CR3_BRAND_NAMES.iter().any(|v| v.as_bytes() == major_brand) {
+        return Ok(MediaMime::Image(MediaMimeImage::Cr3));
+    }
+
+    // Check compatible brands
+    let compatible_brands = ftyp.body_data();
+
+    if QT_BRAND_NAMES
+        .iter()
+        .any(|v| compatible_brands.find_substring(v.as_bytes()).is_some())
+    {
+        return Ok(MediaMime::Track(MediaMimeTrack::QuickTime));
+    }
+
+    if AVIF_BRAND_NAMES
+        .iter()
+        .any(|x| compatible_brands.find_substring(*x).is_some())
+    {
+        return Ok(MediaMime::Image(MediaMimeImage::Avif));
+    }
+
+    if HEIF_HEIC_BRAND_NAMES
+        .iter()
+        .any(|x| compatible_brands.find_substring(*x).is_some())
+    {
+        if HEIC_BRAND_NAMES.contains(&major_brand) {
+            return Ok(MediaMime::Image(MediaMimeImage::Heic));
+        }
+        return Ok(MediaMime::Image(MediaMimeImage::Heif));
+    }
+
+    if MP4_BRAND_NAMES
+        .iter()
+        .any(|v| compatible_brands.subslice_in_range(v.as_bytes()).is_some())
+    {
+        if major_brand.starts_with(b"3gp") {
+            return Ok(MediaMime::Track(MediaMimeTrack::_3gpp));
+        }
+        return Ok(MediaMime::Track(MediaMimeTrack::Mp4));
+    }
+
+    tracing::warn!(
+        marjor_brand = major_brand.iter().map(|b| *b as char).collect::<String>(),
+        "unknown major brand",
+    );
+
+    if travel_header(input, |header, _| header.box_type != "mdat").is_ok() {
+        // mdat box found, assume it's a mp4 file
+        return Ok(MediaMime::Track(MediaMimeTrack::Mp4));
+    }
+
+    Err(crate::Error::UnsupportedFormat)
+}
+
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
+fn check_png(input: &[u8]) -> Result<(), ()> {
+    if input.len() >= PNG_SIGNATURE.len() && &input[..PNG_SIGNATURE.len()] == PNG_SIGNATURE {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn check_webp(input: &[u8]) -> Result<(), ()> {
+    // RIFF container tagged WEBP: "RIFF"(4) + fileSize(4) + "WEBP"(4).
+    if input.len() >= 12 && &input[0..4] == b"RIFF" && &input[8..12] == b"WEBP" {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+fn get_ftyp_and_major_brand(input: &[u8]) -> crate::Result<(BoxHolder<'_>, Option<&[u8]>)> {
+    let (_, bbox) = BoxHolder::parse(input).map_err(|e| crate::Error::Malformed {
+        kind: MalformedKind::IsoBmffBox,
+        message: format!("parse ftyp failed: {e}"),
+    })?;
+
+    if bbox.box_type() == "ftyp" {
+        if bbox.body_data().len() < 4 {
+            return Err(crate::Error::Malformed {
+                kind: MalformedKind::IsoBmffBox,
+                message: format!(
+                    "parse ftyp failed; body size should greater than 4, got {}",
+                    bbox.body_data().len()
+                ),
+            });
+        }
+        let (_, ftyp) = complete::take(4_usize)(bbox.body_data())
+            .map_err(|e| crate::error::nom_err_to_malformed(e, MalformedKind::IsoBmffBox))?;
+        Ok((bbox, Some(ftyp)))
+    } else if bbox.box_type() == "wide" {
+        // MOV files that extracted from HEIC starts with `wide` & `mdat` atoms
+        Ok((bbox, None))
+    } else {
+        Err(crate::Error::Malformed {
+            kind: MalformedKind::IsoBmffBox,
+            message: format!("parse ftyp failed; first box type is: {}", bbox.box_type()),
+        })
+    }
+}

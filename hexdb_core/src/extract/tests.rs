@@ -272,6 +272,8 @@ fn webm() -> Vec<u8> {
         ebml(&[0x44, 0x89], &12_345f64.to_be_bytes()),
         ebml(&[0x7B, 0xA9], b"Holiday"),
         ebml(&[0x57, 0x41], b"HexDB Test"),
+        // DateUTC: nanoseconds since 2001-01-01 UTC (2008-08-08T08:08:08Z).
+        ebml(&[0x44, 0x61], &239_875_688_000_000_000i64.to_be_bytes()),
     ]
     .concat();
     let video = [ebml(&[0xB0], &1920u16.to_be_bytes()), ebml(&[0xBA], &1080u16.to_be_bytes())].concat();
@@ -379,7 +381,8 @@ fn jpeg_exif_gps_iptc_xmp() {
     let m = &out.meta;
     assert_eq!(get(m, "camera.make"), "Canon");
     assert_eq!(get(m, "camera.model"), "EOS R5");
-    assert!(get(m, "taken_at").as_str().unwrap().starts_with("2024-06-01"), "{}", get(m, "taken_at"));
+    // No offset in the file: the date stays local, as written.
+    assert_eq!(get(m, "taken_at"), "2024-06-01T12:30:45");
     assert!((get(m, "gps.lat").as_f64().unwrap() - 64.141_666_7).abs() < 1e-5);
     assert!((get(m, "gps.lon").as_f64().unwrap() + 21.94).abs() < 1e-5);
     assert_eq!(get(m, "width"), 640);
@@ -641,6 +644,9 @@ fn matroska_info_tracks_and_tags() {
     assert_eq!(get(m, "matroska.title"), "Holiday");
     assert_eq!(get(m, "matroska.tags.ARTIST"), "Jo");
     assert_eq!(get(m, "creator_tool"), "HexDB Test");
+    // The track reader and HexDB's own Matroska reader agree on the date, in the same form.
+    assert_eq!(get(m, "taken_at"), "2008-08-08T08:08:08+00:00");
+    assert_eq!(get(m, "matroska.date_utc"), "2008-08-08T08:08:08+00:00");
 }
 
 #[test]

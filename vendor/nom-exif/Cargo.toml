@@ -1,0 +1,32 @@
+# nom-exif 3.8.0 (https://github.com/mindeng/nom-exif, MIT, see LICENSE), vendored
+# by HexDB with chrono replaced by jiff (chrono is unmaintained, RUSTSEC-2026-0543).
+# Used through [patch.crates-io] in the workspace manifest. See VENDORED.md.
+[package]
+edition = "2021"
+rust-version = "1.83"
+name = "nom-exif"
+version = "3.8.0"
+description = "Exif/metadata parsing library (vendored by HexDB: chrono replaced by jiff)."
+license-file = "LICENSE"
+repository = "https://github.com/mindeng/nom-exif"
+publish = false
+
+[lib]
+name = "nom_exif"
+path = "src/lib.rs"
+
+[features]
+serde = ["dep:serde"]
+tokio = ["dep:tokio"]
+tokio-fs = ["tokio", "tokio/fs"]
+
+[dependencies]
+bytes = "1.7.1"
+jiff = "0.2.46"
+iso6709parse = "0.1.0"
+nom = "8.0"
+regex = "1.10"
+serde = { version = "1.0", features = ["derive"], optional = true }
+thiserror = "2.0.11"
+tokio = { version = "1.40.0", features = ["io-util"], optional = true }
+tracing = "0.1.40"

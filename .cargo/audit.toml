@@ -7,8 +7,4 @@ ignore = [
     # bincode: unmaintained, not vulnerable. YARA-X uses it to serialize its compiled
     # rules in memory; HexDB never decodes untrusted bincode with it.
     "RUSTSEC-2025-0141",
-    # chrono: unmaintained (2026-09-14), not vulnerable; no patched version exists.
-    # HexDB's own code moved to jiff in 2.6; chrono remains only via nom-exif (EXIF
-    # parsing). Owner: HexDB maintainers. Review by 2027-03-31.
-    "RUSTSEC-2026-0543",
 ]

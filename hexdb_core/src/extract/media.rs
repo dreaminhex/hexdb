@@ -337,7 +337,7 @@ pub(crate) fn track(ctx: &mut Ctx) -> anyhow::Result<bool> {
             EntryValue::U32(n) => json!(n),
             EntryValue::U64(n) => json!(n),
             EntryValue::DateTime(t) => json!(t.to_rfc3339()),
-            EntryValue::NaiveDateTime(t) => json!(t.format("%Y-%m-%dT%H:%M:%S").to_string()),
+            EntryValue::NaiveDateTime(t) => json!(t.strftime("%Y-%m-%dT%H:%M:%S").to_string()),
             other => json!(other.to_string()),
         };
         let norm = match tag {

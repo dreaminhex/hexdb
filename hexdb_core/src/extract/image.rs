@@ -48,7 +48,7 @@ fn exif_json(value: &EntryValue) -> Option<Value> {
         EntryValue::F32(n) => json!(n),
         EntryValue::F64(n) => json!(n),
         EntryValue::DateTime(t) => json!(t.to_rfc3339()),
-        EntryValue::NaiveDateTime(t) => json!(t.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        EntryValue::NaiveDateTime(t) => json!(t.strftime("%Y-%m-%dT%H:%M:%S").to_string()),
         EntryValue::Undefined(bytes) => {
             if bytes.len() <= 64 && bytes.iter().all(|b| b.is_ascii_graphic() || *b == b' ' || *b == 0) {
                 json!(decode_text(bytes))

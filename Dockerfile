@@ -37,6 +37,8 @@ COPY hexdb_tests hexdb_tests
 # load the workspace manifest.
 COPY drivers/odbc drivers/odbc
 COPY bench bench
+# Patched third-party crates (see vendor/VENDORED.md).
+COPY vendor vendor
 # The amd64 and arm64 images build in parallel: they take turns with the
 # shared download cache, and each keeps its own build directory.
 ARG TARGETPLATFORM

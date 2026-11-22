@@ -34,6 +34,10 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## nom-exif (modified)
+
+HexDB builds a modified copy of nom-exif 3.8.0 (https://github.com/mindeng/nom-exif, MIT license, copyright (c) 2024 Min Deng), in `vendor/nom-exif`, with its date and time handling moved from chrono to jiff. The license text is in `vendor/nom-exif/LICENSE`; the changes are listed in `vendor/VENDORED.md`.
+
 ## In the Docker image
 
 The image (`Dockerfile`) also carries programs HexDB runs, each as a separate process, never linked into HexDB:

@@ -9,3 +9,9 @@ members = [
     "bench"
 ]
 resolver = "2"
+# Third-party crates HexDB carries patched copies of (see vendor/VENDORED.md).
+exclude = ["vendor/nom-exif"]
+
+[patch.crates-io]
+# nom-exif 3.8.0 with chrono (unmaintained, RUSTSEC-2026-0543) replaced by jiff.
+nom-exif = { path = "vendor/nom-exif" }
