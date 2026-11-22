@@ -1,6 +1,12 @@
 //! Comparing HexDB versions on one machine:
 //!
-//!   cargo run --release -p hexdb_bench -- compare <old hexdb_api> <new hexdb_api> [rounds]
+//!   cargo run --release -p hexdb_bench -- compare <old hexdb_api> <new hexdb_api> [rounds] [--only single,lattice,queues]
+//!
+//! Scenarios (all by default): `single`, one hex loading and querying orders; `lattice`,
+//! three hexes with writes acknowledged by two replicas, alone and while files download
+//! from the Overseer and through a sliced replica; `queues`, consumers draining a queue
+//! with and without a dashboard polling its counts (see `scenarios`). Errors are counted,
+//! never timed: any error makes the comparison invalid, and the run says so and fails.
 //!
 //! Each round starts a fresh server from each binary in turn, alternating which goes
 //! first (A B, then B A, ...), so drift on the machine (heat, other load, the disk's
@@ -26,15 +32,19 @@ const DOCS: usize = 50_000;
 
 /// One version's results from every round.
 #[derive(Default)]
-struct Samples {
+pub(crate) struct Samples {
     /// Operation -> latencies, pooled over rounds.
-    latency: BTreeMap<&'static str, Vec<Duration>>,
+    pub(crate) latency: BTreeMap<&'static str, Vec<Duration>>,
     /// Operation -> one rate (operations per second) per round.
     rate: BTreeMap<&'static str, Vec<f64>>,
     /// One value per round, in bytes.
     rss_loaded: Vec<f64>,
     rss_peak: Vec<f64>,
-    version: String,
+    /// Other memory measurements (bytes), one per round.
+    pub(crate) peaks: BTreeMap<&'static str, Vec<f64>>,
+    /// Operation -> requests that failed (a wrong status or wrong bytes), over all rounds.
+    pub(crate) errors: BTreeMap<&'static str, usize>,
+    pub(crate) version: String,
 }
 
 impl Samples {
@@ -44,16 +54,24 @@ impl Samples {
         self.latency.entry(op).or_default().push(started.elapsed());
         Ok(out)
     }
-    fn rate(&mut self, op: &'static str, count: usize, took: Duration) {
+    pub(crate) fn rate(&mut self, op: &'static str, count: usize, took: Duration) {
         self.rate.entry(op).or_default().push(count as f64 / took.as_secs_f64().max(1e-9));
     }
 }
 
+const SCENARIOS: [&str; 3] = ["single", "lattice", "queues"];
+
 pub fn run(args: &[String]) -> Result<()> {
+    let only = args.iter().position(|a| a == "--only").and_then(|i| args.get(i + 1)).map(|s| s.split(',').map(str::trim).map(String::from).collect::<Vec<_>>());
+    let args: Vec<&String> = args.iter().enumerate().filter(|(i, a)| *a != "--only" && (*i == 0 || args[i - 1] != "--only")).map(|(_, a)| a).collect();
     let (Some(a), Some(b)) = (args.first(), args.get(1)) else {
-        bail!("usage: hexdb_bench compare <hexdb_api A> <hexdb_api B> [rounds]");
+        bail!("usage: hexdb_bench compare <hexdb_api A> <hexdb_api B> [rounds] [--only single,lattice,queues]");
     };
     let rounds: usize = args.get(2).map(|r| r.parse()).transpose().context("rounds must be a number")?.unwrap_or(4).max(2);
+    let scenarios: Vec<&str> = SCENARIOS.iter().copied().filter(|s| only.as_ref().is_none_or(|o| o.iter().any(|x| x == s))).collect();
+    if scenarios.is_empty() {
+        bail!("--only takes some of: {}", SCENARIOS.join(", "));
+    }
     let bins = [absolute(a)?, absolute(b)?];
 
     let mut rng = Rng(42);
@@ -67,11 +85,22 @@ pub fn run(args: &[String]) -> Result<()> {
         let order: [usize; 2] = if round % 2 == 0 { [0, 1] } else { [1, 0] };
         for which in order {
             println!("Round {} of {}: {}", round + 1, rounds, if which == 0 { "A" } else { "B" });
-            one_round(&bins[which], &orders, &mut results[which]).with_context(|| format!("round {} with {}", round + 1, bins[which].display()))?;
+            let bin = &bins[which];
+            let context = || format!("round {} with {}", round + 1, bin.display());
+            if scenarios.contains(&"single") {
+                one_round(bin, &orders, &mut results[which]).with_context(context)?;
+            }
+            if scenarios.contains(&"lattice") {
+                crate::scenarios::lattice(bin, &orders, &mut results[which]).with_context(context)?;
+            }
+            if scenarios.contains(&"queues") {
+                crate::scenarios::queues(bin, &mut results[which]).with_context(context)?;
+            }
+
         }
     }
 
-    let text = report(&machine, &bins, rounds, &results, started.elapsed());
+    let text = report(&machine, &bins, rounds, &scenarios, &results, started.elapsed());
     print!("\n{}", text);
     let dir = crate::workspace().join("bench").join("results");
     std::fs::create_dir_all(&dir)?;
@@ -79,6 +108,10 @@ pub fn run(args: &[String]) -> Result<()> {
     let file = dir.join(format!("compare-{}-{}-{}.md", system, results[0].version, results[1].version));
     std::fs::write(&file, &text)?;
     println!("Wrote {}", file.display());
+    let errors: usize = results.iter().flat_map(|r| r.errors.values()).sum();
+    if errors > 0 {
+        bail!("invalid comparison: {} request(s) failed (see Errors in the report)", errors);
+    }
     Ok(())
 }
 
@@ -187,7 +220,7 @@ fn one_round(bin: &Path, orders: &[Vec<u8>], out: &mut Samples) -> Result<()> {
 }
 
 /// Runs `f` on `threads` threads; returns every latency they recorded.
-fn concurrent(threads: usize, f: impl Fn(usize, &mut Vec<Duration>) -> Result<()> + Sync) -> Result<Vec<Duration>> {
+pub(crate) fn concurrent(threads: usize, f: impl Fn(usize, &mut Vec<Duration>) -> Result<()> + Sync) -> Result<Vec<Duration>> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
@@ -208,7 +241,7 @@ fn concurrent(threads: usize, f: impl Fn(usize, &mut Vec<Duration>) -> Result<()
 }
 
 /// The process's resident set and its peak, in bytes (0 where unknown).
-fn memory(pid: u32) -> (f64, f64) {
+pub(crate) fn memory(pid: u32) -> (f64, f64) {
     #[cfg(target_os = "linux")]
     {
         let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).unwrap_or_default();
@@ -250,23 +283,35 @@ fn change(a: f64, b: f64) -> String {
     format!("{:+.1}%", 100.0 * (b - a) / a)
 }
 
-fn report(machine: &str, bins: &[PathBuf; 2], rounds: usize, results: &[Samples; 2], took: Duration) -> String {
+fn report(machine: &str, bins: &[PathBuf; 2], rounds: usize, scenarios: &[&str], results: &[Samples; 2], took: Duration) -> String {
     let [a, b] = results;
     let mut t = String::new();
     let _ = writeln!(t, "# HexDB {} vs {}\n", a.version, b.version);
     let _ = writeln!(
         t,
-        "Machine: {}. {} rounds of {} documents, alternating which version runs first; {} s in all.\n\n- A: HexDB {} (`{}`)\n- B: HexDB {} (`{}`)\n",
+        "Machine: {}. {} rounds ({}), alternating which version runs first; {} s in all.\n\n- A: HexDB {} (`{}`)\n- B: HexDB {} (`{}`)\n",
         machine,
         rounds,
-        DOCS,
+        scenarios.join(", "),
         took.as_secs(),
         a.version,
         bins[0].display(),
         b.version,
         bins[1].display()
     );
-    let _ = writeln!(t, "Run with `cargo run --release -p hexdb_bench -- compare <A> <B> {}`. Both versions ran on this machine in one go; numbers from other machines aren't comparable.\n", rounds);
+    let only = if scenarios.len() == SCENARIOS.len() { String::new() } else { format!(" --only {}", scenarios.join(",")) };
+    let _ = writeln!(t, "Run with `cargo run --release -p hexdb_bench -- compare <A> <B> {}{}`. Both versions ran on this machine in one go; numbers from other machines aren't comparable. The lattice scenario runs three hexes on this one machine: it shows what synchronous acknowledgements and relayed downloads cost, not what three zones' network latency adds.\n", rounds, only);
+    let errors_a: usize = a.errors.values().sum();
+    let errors_b: usize = b.errors.values().sum();
+    let _ = writeln!(t, "## Errors\n\n| Operation | A | B |\n| --- | --- | --- |");
+    for op in a.errors.keys().chain(b.errors.keys()).collect::<std::collections::BTreeSet<_>>() {
+        let _ = writeln!(t, "| {} | {} | {} |", op, a.errors.get(op).copied().unwrap_or(0), b.errors.get(op).copied().unwrap_or(0));
+    }
+    let _ = writeln!(
+        t,
+        "\n{}\n",
+        if errors_a + errors_b == 0 { "No request failed: every operation counted returned its expected status (and every download its exact bytes)." } else { "**Invalid comparison:** some requests failed. Throughput below counts only successful operations." }
+    );
 
     let _ = writeln!(t, "## Latency (all rounds pooled; ms)\n\n| Operation | A p50 / p95 / p99 | B p50 / p95 / p99 | p50 change | p99 change |\n| --- | --- | --- | --- | --- |");
     for (op, samples_a) in &a.latency {
@@ -289,8 +334,16 @@ fn report(machine: &str, bins: &[PathBuf; 2], rounds: usize, results: &[Samples;
     let _ = writeln!(t, "\n## Server memory (median of rounds)\n\n| Measurement | A | B | Change |\n| --- | --- | --- | --- |");
     let (al, bl) = (median(&a.rss_loaded), median(&b.rss_loaded));
     let (ap, bp) = (median(&a.rss_peak), median(&b.rss_peak));
-    let _ = writeln!(t, "| Resident set after the workload | {} | {} | {} |", mb(al), mb(bl), change(al, bl));
-    let _ = writeln!(t, "| Peak resident set | {} | {} | {} |", mb(ap), mb(bp), change(ap, bp));
+    // Measured by the single-hex scenario only.
+    if !a.rss_loaded.is_empty() && !b.rss_loaded.is_empty() {
+        let _ = writeln!(t, "| Resident set after the workload | {} | {} | {} |", mb(al), mb(bl), change(al, bl));
+        let _ = writeln!(t, "| Peak resident set | {} | {} | {} |", mb(ap), mb(bp), change(ap, bp));
+    }
+    for (what, va) in &a.peaks {
+        let Some(vb) = b.peaks.get(what) else { continue };
+        let (ma, mb_) = (median(va), median(vb));
+        let _ = writeln!(t, "| {} | {} | {} | {} |", what, mb(ma), mb(mb_), change(ma, mb_));
+    }
     let _ = writeln!(t, "\nA change within the throughput ranges above is noise, not a difference between the versions.");
     t
 }

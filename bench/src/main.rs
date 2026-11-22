@@ -3,7 +3,7 @@
 //!
 //!   cargo run --release -p hexdb_bench            everything (about 5 minutes)
 //!   cargo run --release -p hexdb_bench -- quick   smaller data sets, no failover
-//!   cargo run --release -p hexdb_bench -- compare <A/hexdb_api> <B/hexdb_api> [rounds]
+//!   cargo run --release -p hexdb_bench -- compare <A/hexdb_api> <B/hexdb_api> [rounds] [--only single,lattice,queues]
 //!                                                 two versions on this machine, alternating
 //!                                                 (p50/p95/p99, throughput, RSS; see compare.rs)
 //!
@@ -17,6 +17,7 @@
 //! bench/results/.
 
 mod compare;
+mod scenarios;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
@@ -207,6 +208,12 @@ impl Http {
             request = request.header("Content-Type", "application/json").body(body);
         }
         let response = request.send()?;
+        let status = response.status().as_u16();
+        Ok((status, response.bytes()?.to_vec()))
+    }
+    /// A body sent as it is (a file upload).
+    fn send_raw(&self, method: reqwest::Method, path: &str, body: Vec<u8>) -> Result<(u16, Vec<u8>)> {
+        let response = self.client.request(method, format!("{}{}", self.base, path)).bearer_auth(&self.token).header("Content-Type", "application/octet-stream").body(body).send()?;
         let status = response.status().as_u16();
         Ok((status, response.bytes()?.to_vec()))
     }
