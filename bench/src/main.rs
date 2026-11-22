@@ -6,6 +6,7 @@
 //!   cargo run --release -p hexdb_bench -- compare <A/hexdb_api> <B/hexdb_api> [rounds] [--only single,lattice,queues]
 //!                                                 two versions on this machine, alternating
 //!                                                 (p50/p95/p99, throughput, RSS; see compare.rs)
+//!   cargo run --release -p hexdb_bench -- failover [interval] [runs]   only failover, repeated
 //!
 //! HEXDB_BENCH_LABEL (for example "debian-docker") names the environment in the
 //! report and in its file name, so runs on several systems don't overwrite each other.
@@ -717,23 +718,37 @@ fn failover(report: &mut Report, interval: Option<u64>) -> Result<()> {
     leader.insert("orders", &json!({ "before": true }))?;
     let killed = Instant::now();
     leader.kill();
-    let mut elected = None;
+    // Either survivor may win: elections weigh more than memory (a hex that needs
+    // nothing rebuilt goes first), so the one that does is the one timed.
+    let survivors = [&next, &third];
+    let mut elected: Option<(Duration, usize)> = None;
     loop {
-        if elected.is_none() && role(&next) == "Overseer" {
-            elected = Some(killed.elapsed());
+        if elected.is_none() {
+            if let Some(i) = survivors.iter().position(|s| role(s) == "Overseer") {
+                elected = Some((killed.elapsed(), i));
+            }
         }
-        if elected.is_some() && next.request(reqwest::Method::POST, "/orders", Some(&json!({ "after": true })), &[]).map(|r| r.status.as_u16() == 201).unwrap_or(false) {
-            break;
+        if let Some((_, i)) = elected {
+            if survivors[i].request(reqwest::Method::POST, "/orders", Some(&json!({ "after": true })), &[]).map(|r| r.status.as_u16() == 201).unwrap_or(false) {
+                break;
+            }
         }
         if killed.elapsed() > Duration::from_secs(180) {
-            bail!("no failover within 3 minutes");
+            bail!(
+                "no failover within 3 minutes (elected: {:?})\n--- second hex:\n{}\n--- third hex:\n{}",
+                elected.map(|(_, i)| i + 2),
+                next.log_tail(60),
+                third.log_tail(60)
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    let elected = elected.map(|(at, _)| at);
     let writable = killed.elapsed();
     let label = match interval {
+        Some(5) => "discovery every 5 s (the default)".into(),
         Some(i) => format!("discovery every {} s", i),
-        None => "default settings (discovery every 10 s)".into(),
+        None => "the test harness's discovery interval (10 s)".into(),
     };
     report.row(&format!("Overseer killed, {}: new Overseer elected", label), ms(elected.unwrap_or(writable)));
     report.row(&format!("Overseer killed, {}: new Overseer accepting writes", label), ms(writable));
@@ -744,6 +759,21 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("compare") {
         return compare::run(&args[1..]);
+    }
+    // Only the failover measurement, repeated: `failover [interval seconds] [runs]`, against
+    // the release hexdb_api built next to this program.
+    if args.first().map(String::as_str) == Some("failover") {
+        let interval: u64 = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
+        let runs: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(5);
+        let exe = std::env::current_exe()?;
+        let server = exe.with_file_name(if cfg!(windows) { "hexdb_api.exe" } else { "hexdb_api" });
+        std::env::set_var("HEXDB_SERVER_BIN", &server);
+        let mut report = Report { text: String::new() };
+        report.section("Failover, repeated", "");
+        for _ in 0..runs {
+            failover(&mut report, Some(interval))?;
+        }
+        return Ok(());
     }
     let quick = std::env::args().any(|a| a == "quick");
     let mut report = Report { text: String::new() };
@@ -765,10 +795,10 @@ fn main() -> Result<()> {
     if !quick {
         report.section(
             "Failover (three hexes on one machine)",
-            "The Overseer of a three-hex lattice is killed. A hex is marked lost after three missed discovery rounds; then the others elect a new Overseer.",
+            "The Overseer of a three-hex lattice is killed. A hex is marked lost after three missed discovery rounds, each waiting up to 3 s for the unanswered probe, and not while another hex still sees it (one more round), so a hex cut off alone can't split the lattice; then the others elect a new Overseer.",
         );
         failover(&mut report, Some(1))?;
-        failover(&mut report, None)?;
+        failover(&mut report, Some(5))?;
     }
 
     let header = format!(

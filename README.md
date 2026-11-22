@@ -52,36 +52,38 @@ The macOS installer (`hexdb-macos-universal.dmg`, 46 MB) holds both Mac builds. 
 
 ### Speed
 
-Measured with `cargo run --release -p hexdb_bench` on one laptop (Intel Core i9-12900H, 20 threads, 64 GB, Samsung 980 PRO NVMe SSD): natively on Windows 11, and on Debian 13 in Docker on the same machine. Server and client run on the same machine. Every write is in the write-ahead log and fsynced before it's acknowledged.
+Measured with HexDB 2.6.0 and `cargo run --release -p hexdb_bench` on one laptop (Intel Core i9-12900H, 20 threads, 64 GB, Samsung 980 PRO NVMe SSD): natively on Windows 11, and on Debian in Docker on the same machine. Server and client run on the same machine. Every write is in the write-ahead log and fsynced before it's acknowledged.
 
-| Area | Windows 11 | Debian 13 (Docker) |
+| Area | Windows 11 | Debian (Docker) |
 | --- | --- | --- |
-| **Bulk writes** (1,000 per request) | 32,700 documents/s | 21,500 documents/s |
-| **Single write**, median | 2.3 ms; 1,940/s from 8 clients | 5.3 ms; 810/s from 8 clients |
-| **Read by ID**, median | 0.12 ms; 17,600/s from 8 clients | 0.18 ms; 12,700/s from 8 clients |
-| **Indexed lookup** in 100,000 documents, median | 0.65 ms | 1.0 ms |
-| **`SELECT COUNT(*)`**, median | 0.24 ms | 0.32 ms |
-| **`GROUP BY`** with `SUM` and `AVG` over 100,000 documents | 1.1 s | 1.6 s |
-| **AES-256-GCM**, one core | 1,100 MB/s encrypting, 1,500 MB/s decrypting | 1,930 MB/s encrypting, 2,170 MB/s decrypting |
-| **10 MB document**, structured JSON | written in 551 ms, read in 163 ms | written in 796 ms, read in 168 ms |
-| **10 MB document**, incompressible | written in 84 ms, read in 24 ms | written in 59 ms, read in 13 ms |
-| **Rebuild a lost vertex** (100,000 documents) | 0.36 s | 0.36 s |
-| **Restart after a crash** | 0.5 s with data in SSTables; 3.1 s replaying 100,000 unflushed writes | 0.06 s; 2.7 s |
-| **Failover**, discovery every second | new Overseer takes writes after 2.5 s | 2.8 s |
-| **Failover**, default 10 s discovery | 31 s | 30 s |
+| **Bulk writes** (1,000 per request) | 27,600 documents/s | 23,000 documents/s |
+| **Single write**, median | 2.3 ms; 1,900/s from 8 clients | 5.4 ms; 790/s from 8 clients |
+| **Read by ID**, median | 0.13 ms; 16,000/s from 8 clients | 0.21 ms; 11,000/s from 8 clients |
+| **Indexed lookup** in 100,000 documents, median | 0.77 ms | 0.90 ms |
+| **`SELECT COUNT(*)`**, median | 0.29 ms | 0.27 ms |
+| **`GROUP BY`** with `SUM` and `AVG` over 100,000 documents | 0.57 s | 0.49 s |
+| **AES-256-GCM**, one core | 1,110 MB/s encrypting, 1,520 MB/s decrypting | 1,980 MB/s encrypting, 2,180 MB/s decrypting |
+| **10 MB document**, structured JSON | written in 600 ms, read in 174 ms | written in 875 ms, read in 159 ms |
+| **10 MB document**, incompressible | written in 84 ms, read in 24 ms | written in 87 ms, read in 13 ms |
+| **Rebuild a lost vertex** (100,000 documents) | 0.35 s | 0.32 s |
+| **Restart after a crash** | 0.5 s with data in SSTables; 2.6 s replaying 100,000 unflushed writes | 0.26 s; 2.7 s |
+| **Failover**, discovery every second | new Overseer takes writes after 10 to 14 s | 3.0 s |
+| **Failover**, default 5 s discovery | 22 s | 16 s |
 
-Writes are slower in the Linux column because Docker on Windows keeps its data on WSL2's virtual disk, which adds to every fsync. Ubuntu 24.04 in the same setup measured within a few percent of Debian. The full reports, with how each number is taken, are in [bench/results](bench/results): [Windows](bench/results/windows-full.md), [Debian](bench/results/debian-docker-full.md) and [Ubuntu](bench/results/ubuntu-docker-full.md). Run the benchmark to measure your own hardware. To compare two versions on one machine, `cargo run --release -p hexdb_bench -- compare <old hexdb_api> <new hexdb_api> [rounds]` runs each in turn, alternating which goes first, and reports p50/p95/p99 latencies, throughput with its range across rounds, and the server's memory.
+Writes are slower in the Linux column because Docker on Windows keeps its data on WSL2's virtual disk, which adds to every fsync. Failover is slower on Windows because a probe to a stopped hex's port on Windows waits seconds to be refused, where Linux refuses at once; each discovery round waits for it, and a hex is counted lost only after three missed rounds and once no other hex still sees it (so one hex cut off alone can't split the lattice). The full reports, with how each number is taken, are in [bench/results](bench/results): [Windows](bench/results/windows-full.md) and [Debian](bench/results/debian-docker-full.md) (the [Ubuntu](bench/results/ubuntu-docker-full.md) report, from 2.1.2, measured within a few percent of Debian). Run the benchmark to measure your own hardware.
+
+**2.6.0 against 2.5.9.** `cargo run --release -p hexdb_bench -- compare <old hexdb_api> <new hexdb_api> [rounds]` runs two versions on one machine, alternating which goes first, through three scenarios: one hex loading and querying; three hexes with writes acknowledged by two replicas (`replication.min_acks = 2`), alone and while files download from the Overseer and through a sliced replica; and a queue drained with and without a dashboard polling its counts. It reports p50/p95/p99 latencies, throughput with its range across rounds, memory, and any failed request (which makes the comparison invalid). On the laptop above ([report](bench/results/compare-windows-2.5.9-2.6.0.md), 4 rounds, no failed requests), 2.6.0 matched 2.5.9 within the noise everywhere, except a file download's first byte through a sliced replica: 9.5 ms instead of 17.9 ms (median), now that the replica streams it. With synchronous acknowledgements, 8 clients wrote about 700 documents/s (11 ms median), unchanged while files downloaded at over 500 MB/s; the replica relaying them peaked at 128 MB.
 
 Some results don't depend on the machine:
 
 - **Memory:** 1.5 times the JSON size, as four data and two parity fragments per document.
-- **Disk:** structured JSON compresses to 16% of its size (a 10 MB document takes 1.6 MB). Small documents average 81%, after encryption and per-document overhead.
+- **Disk:** structured JSON compresses to 16% of its size (a 10 MB document takes 1.6 MB). 100,000 small order documents take 33% of their JSON, encrypted, compressed and indexed (81% in 2.1.2).
 - **Vertex failure:** documents stay readable with two of the six vertices lost.
-- **Failover timing:** a hex is declared lost after three missed discovery rounds, once no other hex still sees it, so failover takes three to four times `network.discovery_interval_seconds` (5 s): about 15 to 20 seconds.
+- **Failover timing:** a hex is declared lost after three missed discovery rounds, once no other hex still sees it, so failover takes three to four rounds of `network.discovery_interval_seconds` (5 s), each also waiting for the unanswered probe: about 15 seconds on Linux, 20 to 25 on Windows.
 
 Documents over 1 MB need `limits.max_document_kb` raised (up to 64 MB).
 
-For the hosted sizes of HexDB Enterprise (2 or 4 shared or dedicated vCPUs), [bench/results/enterprise-sizes.md](bench/results/enterprise-sizes.md) has the same benchmark run under each size's CPU and memory limits.
+For the hosted sizes of HexDB Enterprise (2 or 4 shared or dedicated vCPUs), [bench/results/enterprise-sizes.md](bench/results/enterprise-sizes.md) has the same benchmark (from 2.1.2) run under each size's CPU and memory limits.
 
 ## Quick start
 
