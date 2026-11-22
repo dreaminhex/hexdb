@@ -771,7 +771,9 @@ pub fn client_bucket(client: &str) -> String {
 }
 
 /// Check a login, password and (with MFA) one-time code, and start a session.
-pub async fn login(engine: &HexDBEngine, login: &str, password: &str, code: Option<&str>, client: &str) -> Result<SignIn> {
+/// A password that must be changed (`password_change_required`) starts a session
+/// only together with `new_password`, which then replaces it.
+pub async fn login(engine: &HexDBEngine, login: &str, password: &str, code: Option<&str>, new_password: Option<&str>, client: &str) -> Result<SignIn> {
     let throttle = &engine.login_throttle;
     let login_key = format!("login:{}", login.trim().to_ascii_lowercase());
     let client_key = format!("client:{}", client_bucket(client));
@@ -823,6 +825,21 @@ pub async fn login(engine: &HexDBEngine, login: &str, password: &str, code: Opti
     if user.password_expiration > 0 && user.password_expiration <= jiff::Timestamp::now().as_second() {
         return Err(unauthorized("This password has expired. Ask an administrator to reset it."));
     }
+    // A one-time password: asked for before the one-time code, so the code isn't used up
+    // by a sign-in that can't finish (codes work once).
+    let new_password = new_password.filter(|p| !p.is_empty());
+    let new_hash = if user.password_change_required {
+        let Some(new) = new_password else {
+            return Err(EngineError::PasswordChangeRequired("This password works once: choose a new one to finish signing in.".into()).into());
+        };
+        users::validate_new_password(new, &user.login)?;
+        if verify_hash(new, &user.password_hash) {
+            return Err(EngineError::Invalid("Choose a password different from the one you signed in with.".into()).into());
+        }
+        Some(crate::crypt::create_hash(new))
+    } else {
+        None
+    };
     if user.use_mfa && user.mfa_secret.is_some() {
         let Some(code) = code.map(str::trim).filter(|c| !c.is_empty()) else {
             return Err(EngineError::MfaRequired("Enter the code from your authenticator app (or a backup code).".into()).into());
@@ -839,6 +856,24 @@ pub async fn login(engine: &HexDBEngine, login: &str, password: &str, code: Opti
     }
     throttle.succeed(&login_key);
     share_throttle(engine, &[], &[&login_key]).await;
+
+    if let Some(new_hash) = new_hash {
+        let changed = if engine.is_writable() {
+            users::complete_required_password_change(engine, &user_id.to_string(), &user.password_hash, &new_hash).await?
+        } else {
+            let body = serde_json::json!({ "user": user_id.to_string(), "old_hash": user.password_hash, "new_hash": new_hash });
+            let answer = crate::replication::post_to_overseer_for(engine, "/lattice/first-password", &body, std::time::Duration::from_secs(10))
+                .await
+                .map_err(|e| EngineError::Unavailable(format!("Couldn't reach the Overseer to set the new password: {:#}. Try again shortly.", e)))?;
+            serde_json::from_slice::<serde_json::Value>(&answer).ok().is_some_and(|v| v["changed"] == true)
+        };
+        if !changed {
+            return Err(EngineError::Conflict("The password was changed in the meantime. Sign in with the current one.".into()).into());
+        }
+        engine
+            .record_audit(AuditEvent::new(&user.login, "auth.password_change", &user.login).client(client).details(serde_json::json!({ "required": true })))
+            .await;
+    }
 
     let (token, claims) = issue_session(&engine.config.session_key()?, &user_id.to_string(), engine.live().session_hours);
     info!(%client, "🔓 '{}' signed in from {}.", user.login, client);

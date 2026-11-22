@@ -177,6 +177,11 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub admin_password: String,
     pub admin_email: String,
+    /// The first administrator's first sign-in must choose a new password, so the
+    /// one set up here (or generated) works once. Turn off only for automation
+    /// that signs in with it repeatedly (tests, demos).
+    #[serde(default = "default_true")]
+    pub change_first_password: bool,
     /// How long a sign-in session lasts.
     #[serde(default = "default_session_hours")]
     pub session_hours: u64,
@@ -779,6 +784,7 @@ impl Default for HexConfig {
                 admin_login: "hexdbadmin".into(),
                 admin_password: String::new(),
                 admin_email: "admin@hexdb".into(),
+                change_first_password: true,
                 session_hours: default_session_hours(),
                 max_failed_logins: default_max_failed_logins(),
                 lockout_minutes: default_lockout_minutes(),

@@ -13,10 +13,20 @@ fn cli(server: &TestServer, args: &[&str]) -> Result<Output> {
 }
 
 fn sign_in(server: &TestServer, password: &str) -> Result<StatusCode> {
-    let client: Client = hexdb_tests::http().build()?;
-    let res = client.post(server.url("/auth/login")).json(&json!({ "login": TEST_ADMIN_LOGIN, "password": password })).send()?;
-    Ok(res.status())
+    sign_in_choosing(server, password, None)
 }
+
+fn sign_in_choosing(server: &TestServer, password: &str, new_password: Option<&str>) -> Result<StatusCode> {
+    let client: Client = hexdb_tests::http().build()?;
+    let mut body = json!({ "login": TEST_ADMIN_LOGIN, "password": password });
+    if let Some(new) = new_password {
+        body["new_password"] = json!(new);
+    }
+    Ok(client.post(server.url("/auth/login")).json(&body).send()?.status())
+}
+
+/// The administrator's own password, chosen at the first sign-in after a reset.
+const CHOSEN: &str = "Chosen after the reset 2026";
 
 fn printed_password(output: &Output) -> Option<String> {
     String::from_utf8_lossy(&output.stdout).lines().find_map(|l| l.trim().strip_prefix("password:").map(|p| p.trim().to_string()))
@@ -30,7 +40,10 @@ fn a_running_server_resets_the_admin_password() -> Result<()> {
     let password = printed_password(&out).expect("the new password is printed");
 
     assert_eq!(sign_in(&server, TEST_ADMIN_PASSWORD)?, StatusCode::UNAUTHORIZED, "the old password no longer works");
-    assert!(sign_in(&server, &password)?.is_success(), "the new one does");
+    // The printed password works once: that sign-in chooses the administrator's own.
+    assert_eq!(sign_in(&server, &password)?, StatusCode::FORBIDDEN, "password_change_required");
+    assert!(sign_in_choosing(&server, &password, Some(CHOSEN))?.is_success(), "the new one does, with a password of their own");
+    assert!(sign_in(&server, CHOSEN)?.is_success());
     let old_session = server.request(Method::GET, "/auth/me", None, &[])?;
     assert_eq!(old_session.status, StatusCode::UNAUTHORIZED, "sessions from before the reset are signed out");
     assert!(!server.data_dir().join("reset-password.result").exists(), "the CLI removes the answer");
@@ -61,6 +74,6 @@ fn a_stopped_server_resets_at_its_next_start() -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     assert!(!server.data_dir().join("reset-password.request").exists(), "the request is used once");
-    assert!(sign_in(&server, &password)?.is_success());
+    assert!(sign_in_choosing(&server, &password, Some(CHOSEN))?.is_success());
     Ok(())
 }

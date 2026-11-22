@@ -943,7 +943,7 @@ async fn reset_password(config_path: Option<&Path>, login: Option<String>, mfa_o
     let done = |login: &str| {
         println!("  login:    {}", login);
         println!("  password: {}", password);
-        println!("Sign in and change it.");
+        println!("It works once: the sign-in that uses it chooses a new password.");
     };
 
     // A Windows service's runtime file is private to its account: unknown counts as maybe running.

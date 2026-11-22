@@ -104,7 +104,7 @@ fn is_lattice_route(method: &Method, path: &str) -> bool {
         Method::GET => {
             matches!(rest, "snapshot" | "catalog" | "changes" | "control/hexes") || one_segment("snapshot/") || one_segment("slice-snapshot/") || one_segment("chunks/")
         }
-        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "content" | "ai-tool" | "security-review" | "throttle" | "share-download" | "elect" | "rehash-key" | "mfa-step" | "retire" | "control/retire"),
+        Method::POST => matches!(rest, "revoke" | "audit" | "ai-usage" | "content" | "ai-tool" | "security-review" | "throttle" | "share-download" | "elect" | "rehash-key" | "mfa-step" | "first-password" | "retire" | "control/retire"),
         _ => false,
     }
 }
@@ -353,6 +353,10 @@ pub struct LoginRequest {
     /// With MFA on: the current code from the authenticator app, or a backup code.
     #[serde(default)]
     pub code: Option<String>,
+    /// A password that works once (`password_change_required`): the new password,
+    /// set as part of the sign-in.
+    #[serde(default)]
+    pub new_password: Option<String>,
     /// Also return the token in the body (for scripts). Browsers should rely
     /// on the HttpOnly cookie so page scripts never see the token.
     #[serde(default)]
@@ -367,7 +371,7 @@ pub async fn login(
     body: Result<Json<LoginRequest>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult {
     let Json(input) = body?;
-    let signed_in = core_auth::login(&engine, &input.login, &input.password, input.code.as_deref(), &client).await?;
+    let signed_in = core_auth::login(&engine, &input.login, &input.password, input.code.as_deref(), input.new_password.as_deref(), &client).await?;
     let max_age = signed_in.claims.exp - jiff::Timestamp::now().as_second();
     let mut body = json!({
         "user": me_json(&signed_in.principal),

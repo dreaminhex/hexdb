@@ -17,6 +17,8 @@ role = "auto" # auto | overseer | harvester | replicant
 admin_login = "hexdbadmin"
 admin_email = "admin@localhost"
 # admin_password: left out, the first start generates one and prints it once.
+# Either way it works for one sign-in, which chooses a new password
+# (change_first_password = true).
 
 [memory]
 ram_mb = 1024

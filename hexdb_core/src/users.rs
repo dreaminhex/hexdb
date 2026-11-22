@@ -133,6 +133,11 @@ pub struct StoredUser {
     /// Upload quota in files (0: none); none: `quotas.default_files`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_files: Option<u64>,
+    /// The password is for one sign-in only: that sign-in must choose a new one
+    /// (see `crate::auth::login`). Set for the first administrator, after
+    /// `hexdb reset-password`, and by administrators.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub password_change_required: bool,
 }
 
 /// Name of the internal index on `users.login_key`.
@@ -165,6 +170,9 @@ pub struct UserView {
     pub use_mfa: bool,
     pub last_password_change: i64,
     pub password_expiration: i64,
+    /// The next sign-in must choose a new password.
+    #[serde(default)]
+    pub password_change_required: bool,
     /// Values role filters can refer to.
     #[serde(default)]
     pub attributes: serde_json::Map<String, Value>,
@@ -188,6 +196,7 @@ impl UserView {
             use_mfa: user.use_mfa,
             last_password_change: user.last_password_change,
             password_expiration: user.password_expiration,
+            password_change_required: user.password_change_required,
             attributes: user.attributes.clone(),
             quota_mb: user.quota_mb,
             quota_files: user.quota_files,
@@ -213,6 +222,9 @@ pub struct NewUser {
     pub quota_mb: Option<u64>,
     #[serde(default)]
     pub quota_files: Option<u64>,
+    /// The password is temporary: the user's first sign-in must choose a new one.
+    #[serde(default)]
+    pub password_change_required: bool,
 }
 
 /// Input for changing a user. For a full replace (PUT), `email_address` and
@@ -228,6 +240,9 @@ pub struct UserChanges {
     pub is_locked: Option<bool>,
     pub use_mfa: Option<bool>,
     pub password_expiration: Option<i64>,
+    /// True: the next sign-in must choose a new password. Setting a new `password`
+    /// without this clears it (the password is the user's own again).
+    pub password_change_required: Option<bool>,
     /// Replaces the user's attributes.
     pub attributes: Option<serde_json::Map<String, Value>>,
     /// Upload quota in MB (0: none; null: the lattice's default).
@@ -383,9 +398,39 @@ pub async fn change_own_password(engine: &HexDBEngine, user_id: &str, current: &
     user.password_hash = create_hash(new);
     user.last_password_change = jiff::Timestamp::now().as_second();
     user.sessions_valid_after = jiff::Timestamp::now().as_millisecond();
+    user.password_change_required = false;
     engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
     info!("🔑 '{}' changed their password; other sessions were signed out.", user.login);
     Ok(())
+}
+
+/// Finish a sign-in that had to choose a new password (on the Overseer; a replica
+/// asks through `/lattice/first-password`). `expected_hash` is the hash the sign-in
+/// checked: if the password changed since, or no longer needs changing, nothing is
+/// written and the answer is false. Other sessions are signed out.
+pub async fn complete_required_password_change(engine: &HexDBEngine, user_id: &str, expected_hash: &str, new_hash: &str) -> Result<bool> {
+    if !crate::crypt::is_hash(new_hash) {
+        return Err(invalid("the new password hash is not an Argon2 hash."));
+    }
+    engine.ensure_writable()?;
+    let _lock = engine.users_lock.lock().await;
+    let (id, mut user) = find_by_id(engine, user_id).await?.ok_or_else(|| not_found(user_id))?;
+    if !user.password_change_required || user.password_hash != expected_hash {
+        return Ok(false);
+    }
+    let now = jiff::Timestamp::now();
+    user.password_hash = new_hash.to_string();
+    user.last_password_change = now.as_second();
+    user.sessions_valid_after = now.as_millisecond();
+    user.password_change_required = false;
+    engine.replace_document(USERS_TESSELLATION, &id.to_string(), to_json(&user)?, None, None).await?;
+    info!("🔑 '{}' chose a new password at sign-in, as required.", user.login);
+    Ok(true)
+}
+
+/// Check a password a user wants to set (length, not their login, not too common).
+pub fn validate_new_password(password: &str, login: &str) -> Result<()> {
+    validate_password_for(password, login)
 }
 
 /// Set a user's password from `hexdb reset-password` (see `crate::recovery`),
@@ -406,6 +451,8 @@ pub async fn recover_password(engine: &HexDBEngine, login: &str, password_hash: 
     user.password_attempts = 0;
     user.is_locked = false;
     user.sessions_valid_after = now.as_millisecond();
+    // The CLI printed the password: it's for one sign-in, which chooses the user's own.
+    user.password_change_required = true;
     if turn_off_mfa {
         user.use_mfa = false;
         user.mfa_secret = None;
@@ -589,7 +636,7 @@ pub async fn ensure_service_user(engine: &HexDBEngine, login: &str, roles: Vec<R
     let password = URL_SAFE_NO_PAD.encode(crate::crypt::random_bytes(24));
     let created = create_user(
         engine,
-        NewUser { login: login.to_string(), password, email_address: format!("{}@service.hexdb.local", login), roles, attributes: Default::default(), quota_mb: None, quota_files: None },
+        NewUser { login: login.to_string(), password, email_address: format!("{}@service.hexdb.local", login), roles, attributes: Default::default(), quota_mb: None, quota_files: None, password_change_required: false },
         None,
     )
     .await?;
@@ -705,6 +752,7 @@ pub async fn create_user(engine: &HexDBEngine, input: NewUser, idem: Option<Idem
         attributes: validate_attributes(input.attributes)?,
         quota_mb: input.quota_mb,
         quota_files: input.quota_files,
+        password_change_required: input.password_change_required,
     };
 
     let outcome = engine.insert_documents(USERS_TESSELLATION, vec![to_json(&user)?], None, idem).await?;
@@ -748,6 +796,10 @@ pub async fn update_user(
         user.password_attempts = 0;
         // A reset signs the user out everywhere.
         user.sessions_valid_after = jiff::Timestamp::now().as_millisecond();
+        user.password_change_required = false;
+    }
+    if let Some(required) = changes.password_change_required {
+        user.password_change_required = required;
     }
     if let Some(email) = changes.email_address {
         validate_email(&email)?;
@@ -1079,18 +1131,22 @@ async fn bootstrap_inner(engine: &HexDBEngine, security: &SecurityConfig) -> Res
             attributes: Default::default(),
             quota_mb: None,
             quota_files: None,
+            // The password was printed, or handed over by whoever set it up: the
+            // administrator's first sign-in chooses their own.
+            password_change_required: security.change_first_password,
         };
         create_user(engine, admin, None).await?;
         if generated {
             // Shown once, on the console and in an owner-only file; never in the log buffer.
             let file = engine.config.storage_dir().join("initial-admin-password.txt");
+            let what_next = if security.change_first_password { "It works for one sign-in, which chooses a new password." } else { "Sign in and change it." };
             let note = format!(
                 "HexDB created the first administrator.
   login:    {}
   password: {}
-Sign in and change this password, then delete this file.
+{} Then delete this file.
 ",
-                login, password
+                login, password, what_next
             );
             let saved = crate::runtime::write_private_file(&file, note.as_bytes());
             eprintln!("
@@ -1098,7 +1154,7 @@ Sign in and change this password, then delete this file.
             eprintln!(" HexDB created the first administrator.");
             eprintln!("   login:    {}", login);
             eprintln!("   password: {}", password);
-            eprintln!(" Sign in and change it. This is the only time it is shown.");
+            eprintln!(" {} This is the only time it is shown.", what_next);
             eprintln!("================================================================
 ");
             match saved {

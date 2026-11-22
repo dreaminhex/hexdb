@@ -126,6 +126,7 @@ impl From<anyhow::Error> for ApiError {
             Some(EngineError::ReadOnly(m)) => ApiError::new(StatusCode::MISDIRECTED_REQUEST, "read_only_replica", m.clone()),
             Some(EngineError::Unauthorized(m)) => ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", m.clone()),
             Some(EngineError::MfaRequired(m)) => ApiError::new(StatusCode::UNAUTHORIZED, "mfa_required", m.clone()),
+            Some(EngineError::PasswordChangeRequired(m)) => ApiError::new(StatusCode::FORBIDDEN, "password_change_required", m.clone()),
             Some(EngineError::ReplicationTimeout(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "replication_timeout", m.clone()),
             Some(EngineError::NoQuorum(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no_quorum", m.clone()),
             Some(EngineError::Unavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "content_unavailable", m.clone()),

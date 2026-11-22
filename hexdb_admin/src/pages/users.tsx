@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { IconLoader2, IconLock, IconPencil, IconPlus, IconShieldCheck, IconShieldLock, IconTrash } from "@tabler/icons-react"
+import { IconKey, IconLoader2, IconLock, IconPencil, IconPlus, IconShieldCheck, IconShieldLock, IconTrash } from "@tabler/icons-react"
 import { toast } from "sonner"
 
 import { ConfirmDialog } from "@/components/confirm-dialog"
@@ -115,6 +115,7 @@ function UserDialog({
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [locked, setLocked] = useState(false)
+  const [mustChange, setMustChange] = useState(true)
   const [resetMfa, setResetMfa] = useState(false)
   const [attributes, setAttributes] = useState("")
   const [quotaMb, setQuotaMb] = useState("")
@@ -129,6 +130,8 @@ function UserDialog({
     setEmail(user?.email_address ?? "")
     setPassword("")
     setLocked(user?.is_locked ?? false)
+    // A password an administrator types is temporary unless they say otherwise.
+    setMustChange(user ? user.password_change_required : true)
     setResetMfa(false)
     setAttributes(user?.attributes && Object.keys(user.attributes).length ? JSON.stringify(user.attributes, null, 2) : "")
     setQuotaMb(user?.quota_mb != null ? String(user.quota_mb) : "")
@@ -163,6 +166,7 @@ function UserDialog({
         if (login !== user.login) changes.login = login
         if (email !== user.email_address) changes.email_address = email
         if (password) changes.password = password
+        if (password || mustChange !== user.password_change_required) changes.password_change_required = mustChange
         if (locked !== user.is_locked) changes.is_locked = locked
         if (resetMfa) changes.use_mfa = false
         const grants = grantsFrom(draft)
@@ -172,7 +176,16 @@ function UserDialog({
           toast.success(`Updated ${login}.`)
         }
       } else {
-        await api.createUser({ login, email_address: email, password, roles: grantsFrom(draft), attributes: attrs, quota_mb: quota(quotaMb), quota_files: quota(quotaFiles) })
+        await api.createUser({
+          login,
+          email_address: email,
+          password,
+          roles: grantsFrom(draft),
+          attributes: attrs,
+          quota_mb: quota(quotaMb),
+          quota_files: quota(quotaFiles),
+          password_change_required: mustChange,
+        })
         toast.success(`Created ${login}.`)
       }
       onSaved()
@@ -212,6 +225,13 @@ function UserDialog({
               minLength={12}
               placeholder={user ? "Leave blank to keep the current password" : "At least 12 characters, not containing the login"}
             />
+          </div>
+          <div className="flex items-start gap-2">
+            <Checkbox id="user-must-change" checked={mustChange} onCheckedChange={(checked) => setMustChange(checked === true)} className="mt-0.5" />
+            <Label htmlFor="user-must-change" className="grid gap-0.5 font-normal">
+              <span className="font-medium">Must choose a new password at the next sign-in</span>
+              <span className="text-muted-foreground text-xs">The password works once, so only the user knows the one they go on with.</span>
+            </Label>
           </div>
           {user && (
             <div className="flex items-center gap-2">
@@ -332,6 +352,11 @@ export function UsersPage() {
                       </Badge>
                     ) : (
                       <Badge variant="outline">Active</Badge>
+                    )}
+                    {user.password_change_required && (
+                      <Badge variant="outline" className="gap-1" title="The next sign-in must choose a new password">
+                        <IconKey className="size-3" /> New password due
+                      </Badge>
                     )}
                     {user.use_mfa && (
                       <Badge variant="outline" className="gap-1" title="Multi-factor authentication is on">

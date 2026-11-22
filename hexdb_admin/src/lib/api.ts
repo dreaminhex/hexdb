@@ -1105,6 +1105,8 @@ export interface User {
   use_mfa: boolean
   last_password_change: number
   password_expiration: number
+  /** The next sign-in must choose a new password (the current one works once). */
+  password_change_required: boolean
   /** Values role filters can refer to: {"$user": "attributes.region"}. */
   attributes?: Record<string, unknown>
   /** Upload quotas (null: the lattice's defaults; 0: no limit). */
@@ -1161,11 +1163,13 @@ export interface NewUser {
   attributes?: Record<string, unknown>
   quota_mb?: number | null
   quota_files?: number | null
+  password_change_required?: boolean
 }
 
 export type UserChanges = Partial<{
   login: string
   password: string
+  password_change_required: boolean
   email_address: string
   roles: RoleGrant[]
   is_locked: boolean
@@ -1247,8 +1251,14 @@ export const api = {
   rescan: () => request<{ rescan: string }>("POST", "/quarantine/rescan"),
   chat: (question: string, history: { role: "user" | "assistant"; content: string }[]) => request<ChatAnswer>("POST", "/ai/chat", { question, history }),
   chatStream: streamChat,
-  login: (login: string, password: string, code?: string) =>
-    request<{ user: Me; expires_at: number }>("POST", "/auth/login", code ? { login, password, code } : { login, password }),
+  /** `newPassword`: when the password works once, the one replacing it. */
+  login: (login: string, password: string, code?: string, newPassword?: string) =>
+    request<{ user: Me; expires_at: number }>("POST", "/auth/login", {
+      login,
+      password,
+      ...(code ? { code } : {}),
+      ...(newPassword ? { new_password: newPassword } : {}),
+    }),
   mfa: () => request<MfaStatus>("GET", "/auth/mfa"),
   mfaSetup: (password: string) => request<{ secret: string; otpauth_uri: string }>("POST", "/auth/mfa/setup", { password }),
   mfaEnable: (code: string) => request<{ backup_codes: string[] }>("POST", "/auth/mfa/enable", { code }),

@@ -362,7 +362,7 @@ path = "./no-ui"
 admin_login = "{admin}"
 admin_password = "{password}"
 admin_email = "admin@example.com"
-{security_extra}
+{first_password}{security_extra}
 "#,
             key = self.options.encryption_key.as_deref().unwrap_or(TEST_ENCRYPTION_KEY),
             previous = self.options.previous_encryption_keys.iter().map(|k| format!("\"{}\"", k)).collect::<Vec<_>>().join(", "),
@@ -371,6 +371,9 @@ admin_email = "admin@example.com"
             identity_extra = self.options.identity_toml,
             storage_extra = self.options.storage_toml,
             security_extra = self.options.security_toml,
+            // Tests sign in with the configured password over and over; a test of the
+            // one-time first password turns it back on in `security_toml`.
+            first_password = if self.options.security_toml.contains("change_first_password") { "" } else { "change_first_password = false\n" },
             disk_mb = self.options.disk_mb.unwrap_or(1024),
             password = if self.options.no_admin_password { "" } else { TEST_ADMIN_PASSWORD },
         ) + &self.options.extra_toml;
@@ -499,6 +502,15 @@ admin_email = "admin@example.com"
                 .post(self.url("/auth/login"))
                 .json(&serde_json::json!({ "login": TEST_ADMIN_LOGIN, "password": TEST_ADMIN_PASSWORD, "return_token": true }))
                 .send()?;
+            if res.status() == reqwest::StatusCode::FORBIDDEN {
+                // A one-time first password (a test turned `change_first_password` on):
+                // the test signs in itself, so the server stays without a session here.
+                let body: Value = res.json().unwrap_or_default();
+                if body["error"]["code"] == "password_change_required" {
+                    return Ok(());
+                }
+                bail!("Could not sign in as the test admin: 403 {}", body);
+            }
             if res.status().is_success() {
                 let body: Value = res.json()?;
                 let token = body["token"].as_str().ok_or_else(|| anyhow!("login returned no token: {}", body))?.to_string();

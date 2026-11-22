@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { IconLoader2, IconLock, IconShieldLock } from "@tabler/icons-react"
+import { IconKey, IconLoader2, IconLock, IconShieldLock } from "@tabler/icons-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -9,17 +9,24 @@ import { api, ApiError, errorMessage } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { useNotice } from "@/hooks/use-notice"
 
+/** Where the sign-in is: the password, a new one (when the password works once), or a one-time code. */
+type Step = "password" | "choose" | "code"
+
 /**
- * Sign-in screen, shown whenever there's no valid session. Accounts with
- * multi-factor authentication get a second step asking for a one-time code.
+ * Sign-in screen, shown whenever there's no valid session. A password that works
+ * once (the first administrator's, or one an administrator handed out) leads to a
+ * step choosing a new one; accounts with multi-factor authentication get a step
+ * asking for a one-time code.
  */
 export function LoginPage() {
   const { refresh } = useAuth()
   const notice = useNotice()
   const [login, setLogin] = useState("")
   const [password, setPassword] = useState("")
+  const [newPassword, setNewPassword] = useState("")
+  const [confirm, setConfirm] = useState("")
   const [code, setCode] = useState("")
-  const [needsCode, setNeedsCode] = useState(false)
+  const [step, setStep] = useState<Step>("password")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
 
@@ -29,19 +36,29 @@ export function LoginPage() {
     const form = new FormData(event.currentTarget)
     const field = (name: string, fallback: string) => String(form.get(name) ?? fallback)
     const [user, secret, otp] = [field("login", login), field("password", password), field("code", code)]
+    const [chosen, again] = [field("new-password", newPassword), field("confirm-password", confirm)]
+    if (step === "choose" && chosen !== again) {
+      setError("The two passwords don't match.")
+      return
+    }
     setLogin(user)
+    setPassword(secret)
     setBusy(true)
     setError(undefined)
     try {
-      await api.login(user.trim(), secret, needsCode ? otp.trim() : undefined)
+      await api.login(user.trim(), secret, step === "code" ? otp.trim() : undefined, step === "password" ? undefined : chosen)
       setPassword("")
+      setNewPassword("")
+      setConfirm("")
       setCode("")
       await refresh()
     } catch (e) {
-      if (e instanceof ApiError && e.code === "mfa_required") {
+      if (e instanceof ApiError && e.code === "password_change_required") {
+        setStep("choose")
+      } else if (e instanceof ApiError && e.code === "mfa_required") {
         // The password was right; ask for the code (an error only if one was already given).
-        if (needsCode) setError(e.message)
-        setNeedsCode(true)
+        if (step === "code") setError(e.message)
+        setStep("code")
         setCode("")
       } else {
         setError(errorMessage(e))
@@ -52,11 +69,21 @@ export function LoginPage() {
   }
 
   const startOver = () => {
-    setNeedsCode(false)
+    setStep("password")
     setPassword("")
+    setNewPassword("")
+    setConfirm("")
     setCode("")
     setError(undefined)
   }
+
+  const title = { password: "Sign in", choose: "Choose a new password", code: "Verification code" }[step]
+  const description = {
+    password: "Use your HexDB account. Administrators can create accounts on the Users page.",
+    choose: `The password for ${login.trim()} works once. Choose your own to finish signing in.`,
+    code: `Enter the 6-digit code from your authenticator app for ${login.trim()}, or one of your backup codes.`,
+  }[step]
+  const Icon = { password: IconLock, choose: IconKey, code: IconShieldLock }[step]
 
   return (
     <div className="bg-muted/40 flex min-h-svh items-center justify-center p-4">
@@ -70,18 +97,14 @@ export function LoginPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              {needsCode ? <IconShieldLock className="text-muted-foreground size-5" /> : <IconLock className="text-muted-foreground size-5" />}
-              {needsCode ? "Verification code" : "Sign in"}
+              <Icon className="text-muted-foreground size-5" />
+              {title}
             </CardTitle>
-            <CardDescription>
-              {needsCode
-                ? `Enter the 6-digit code from your authenticator app for ${login.trim()}, or one of your backup codes.`
-                : "Use your HexDB account. Administrators can create accounts on the Users page."}
-            </CardDescription>
+            <CardDescription>{description}</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={submit} className="grid gap-4">
-              {!needsCode && (
+              {step === "password" && (
                 <>
                   <div className="grid gap-2">
                     <Label htmlFor="login">Login</Label>
@@ -93,7 +116,38 @@ export function LoginPage() {
                   </div>
                 </>
               )}
-              {needsCode && (
+              {step === "choose" && (
+                <>
+                  <div className="grid gap-2">
+                    <Label htmlFor="new-password">New password</Label>
+                    <Input
+                      id="new-password"
+                      name="new-password"
+                      type="password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      autoComplete="new-password"
+                      minLength={12}
+                      autoFocus
+                      required
+                    />
+                    <p className="text-muted-foreground text-xs">At least 12 characters, not your login, not a common password.</p>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="confirm-password">Confirm it</Label>
+                    <Input
+                      id="confirm-password"
+                      name="confirm-password"
+                      type="password"
+                      value={confirm}
+                      onChange={(e) => setConfirm(e.target.value)}
+                      autoComplete="new-password"
+                      required
+                    />
+                  </div>
+                </>
+              )}
+              {step === "code" && (
                 <div className="grid gap-2">
                   <Label htmlFor="code">Code</Label>
                   <Input
@@ -117,9 +171,9 @@ export function LoginPage() {
               )}
               <Button type="submit" disabled={busy}>
                 {busy && <IconLoader2 className="animate-spin" />}
-                {needsCode ? "Verify" : "Sign in"}
+                {{ password: "Sign in", choose: "Set password and sign in", code: "Verify" }[step]}
               </Button>
-              {needsCode && (
+              {step !== "password" && (
                 <Button type="button" variant="ghost" size="sm" onClick={startOver}>
                   Use a different account
                 </Button>

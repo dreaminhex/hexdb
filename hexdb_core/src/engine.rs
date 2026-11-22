@@ -102,6 +102,8 @@ pub enum EngineError {
     RateLimited(String, u64),
     /// The password was right, but the account also needs a one-time code (401).
     MfaRequired(String),
+    /// The password was right, but it's for one sign-in: send a new one with it (403).
+    PasswordChangeRequired(String),
     /// Stored content can't be read right now (503): its shards are unreadable
     /// here and no other hex could supply it.
     Unavailable(String),
@@ -138,6 +140,7 @@ impl fmt::Display for EngineError {
             | EngineError::Forbidden(m)
             | EngineError::RateLimited(m, _)
             | EngineError::MfaRequired(m)
+            | EngineError::PasswordChangeRequired(m)
             | EngineError::ReplicationTimeout(m)
             | EngineError::TooLarge(m)
             | EngineError::SchemaViolation(m)

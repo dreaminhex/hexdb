@@ -57,7 +57,7 @@ fn to_gql(e: anyhow::Error) -> async_graphql::Error {
         Some(EngineError::Conflict(m)) => gql_error("CONFLICT", m.clone()),
         Some(EngineError::Unprocessable(m)) => gql_error("UNPROCESSABLE", m.clone()),
         Some(EngineError::ReadOnly(m)) => gql_error("READ_ONLY_REPLICA", m.clone()),
-        Some(EngineError::Unauthorized(m)) | Some(EngineError::MfaRequired(m)) => gql_error("UNAUTHENTICATED", m.clone()),
+        Some(EngineError::Unauthorized(m)) | Some(EngineError::MfaRequired(m)) | Some(EngineError::PasswordChangeRequired(m)) => gql_error("UNAUTHENTICATED", m.clone()),
         Some(EngineError::ReplicationTimeout(m)) => gql_error("REPLICATION_TIMEOUT", m.clone()),
         Some(EngineError::NoQuorum(m)) => gql_error("NO_QUORUM", m.clone()),
         Some(EngineError::Unavailable(m)) => gql_error("CONTENT_UNAVAILABLE", m.clone()),

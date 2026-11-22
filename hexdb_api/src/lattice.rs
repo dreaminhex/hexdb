@@ -392,6 +392,17 @@ pub async fn rehash_key(method: Method, uri: Uri, headers: HeaderMap, axum::extr
     Ok(Json(serde_json::json!({ "stored": stored })).into_response())
 }
 
+/// `POST /lattice/first-password` `{"user", "old_hash", "new_hash"}`: a replica's sign-in
+/// chose the new password a one-time password requires; `{"changed": true}` once stored,
+/// false if the password changed meanwhile or no longer needs changing.
+pub async fn first_password(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {
+    authorize(&engine, &headers, &method, &uri, &body)?;
+    let body: serde_json::Value = serde_json::from_slice(&body).map_err(|e| ApiError::invalid(e.to_string()))?;
+    let field = |k: &str| body[k].as_str().ok_or_else(|| ApiError::invalid(format!("{} is required.", k)));
+    let changed = hexdb_core::users::complete_required_password_change(&engine, field("user")?, field("old_hash")?, field("new_hash")?).await?;
+    Ok(Json(serde_json::json!({ "changed": changed })).into_response())
+}
+
 /// `POST /lattice/mfa-step` `{"user", "step"}`: a replica's sign-in used this TOTP step;
 /// `{"used": true}` if it's the first use (it's recorded), false if it was used before.
 pub async fn mfa_step(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine, body: Bytes) -> ApiResult {

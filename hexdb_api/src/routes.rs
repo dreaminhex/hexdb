@@ -155,6 +155,7 @@ pub fn app_router(
         .route("/security/alert-test", post(crate::reviews::alert_test))
         .route("/lattice/rehash-key", post(crate::lattice::rehash_key))
         .route("/lattice/mfa-step", post(crate::lattice::mfa_step))
+        .route("/lattice/first-password", post(crate::lattice::first_password))
         .route("/lattice/share-download", post(crate::lattice::share_download))
         .route("/lattice/throttle", post(crate::lattice::throttle))
         .route("/lattice/elect", post(crate::lattice::elect))

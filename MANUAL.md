@@ -137,7 +137,11 @@ The CLI sends `--token` (or `HEXDB_TOKEN`) only over HTTPS or to this machine (`
 
 ### The first administrator
 
-With no users, the first start creates the administrator named by `security.admin_login` (default `hexdbadmin`). If `security.admin_password` is empty (recommended), HexDB generates a password, prints it once on the console, and writes it to `initial-admin-password.txt` in the data directory, readable by the owner only. It's never written to the log. Sign in, change the password on the Account page, and delete the file.
+With no users, the first start creates the administrator named by `security.admin_login` (default `hexdbadmin`). If `security.admin_password` is empty (recommended), HexDB generates a password, prints it once on the console, and writes it to `initial-admin-password.txt` in the data directory, readable by the owner only. It's never written to the log. Delete the file once you've signed in.
+
+**The first password works once.** Generated or configured, the first administrator's password is for one sign-in, which must choose a new password (`security.change_first_password`, default true). The sign-in page asks for it; over the API, `POST /auth/login` answers 403 `password_change_required` until the request also carries `"new_password"`, which then replaces the old one before a session starts. So a password that passed through a configuration file, a secret store, a console or a hosting dashboard stops working as soon as it's used, and only the administrator knows the one they go on with. Turn it off only for automation that signs in with the configured password again and again (test suites, demos).
+
+**Other one-time passwords.** An administrator can give any user a temporary password: tick "Must choose a new password at the next sign-in" on the Users page (on by default for a new user), or send `"password_change_required": true` with `POST /users` or with a new `password` in `PATCH /users/<login>`. A new password without it is the user's own. `hexdb reset-password` sets it too (see below). The flag is about the password only: API keys the user already has keep working. A sign-in on a replica sends the new password's hash to the Overseer over the lattice's signed connection (`/lattice/first-password`), which stores it only if the password still needs changing and hasn't changed meanwhile. A user with MFA gives their code in the same request as the new password; the new password is asked for first, so the code isn't used up by a sign-in that can't finish. Each change is audited as `auth.password_change` with `{"required": true}`.
 
 ### A forgotten password
 
@@ -152,7 +156,7 @@ hexdb --config /etc/hexdb/hexdb.toml reset-password   # the server's configurati
 
 Only someone who can write to the server's storage folder (`storage.path`) can reset a password this way. That folder already holds the data and is readable only by the server's account, so the reset grants nothing new, and no network request can start one. Run the CLI as the server's account or as an administrator of the machine. In Docker, run `docker exec -u hexdb <container> hexdb reset-password`; the image's `HEXDB_CONFIG` points the CLI at the server's configuration. In a lattice, run it on the Overseer's machine (users are written there).
 
-**What the reset does.** The user gets the new password; the account is unlocked; its failed sign-ins are cleared (on this hex and lattice-wide); every session it had is signed out; with `--mfa-off`, its authenticator, pending enrollment and backup codes are removed. Roles aren't changed. The server logs a warning and records `user.password_recovered` in the audit trail (actor `-`, client `local`, details `{"mfa_turned_off": true|false}`).
+**What the reset does.** The user gets the new password, for one sign-in that chooses their own (see [The first administrator](#the-first-administrator)); the account is unlocked; its failed sign-ins are cleared (on this hex and lattice-wide); every session it had is signed out; with `--mfa-off`, its authenticator, pending enrollment and backup codes are removed. Roles aren't changed. The server logs a warning and records `user.password_recovered` in the audit trail (actor `-`, client `local`, details `{"mfa_turned_off": true|false}`).
 
 **What the CLI does.**
 
@@ -400,6 +404,7 @@ Errors have one shape:
 | 400 | `filter_required` | A delete or update by filter without a filter and without `"all": true` |
 | 401 | `unauthorized` | Missing, expired, revoked or invalid credentials |
 | 401 | `mfa_required` | Sign-in needs an MFA code (or the code was wrong) |
+| 403 | `password_change_required` | The password works once: send `new_password` with it to finish signing in |
 | 403 | `forbidden` | Your roles don't allow it, or a system tessellation via document routes |
 | 403 | `cross_origin` | A cookie-authenticated change from another site (CSRF protection) |
 | 403 | `blocked` | The client's address is on the [IP blocklist](#ip-blocklist) |
@@ -1993,7 +1998,7 @@ Every API request needs credentials except:
 Requests without credentials get 401, including requests to paths that don't exist.
 
 **Sessions.**
-- Created by `POST /auth/login` with `{"login", "password", "code"?}`.
+- Created by `POST /auth/login` with `{"login", "password", "code"?, "new_password"?}`. `new_password` is needed (and only used) when the password works once: without it the answer is 403 `password_change_required`.
 - The token is set as an `HttpOnly`, `SameSite=Strict` cookie (`Secure` over HTTPS), so page scripts can't read it. Scripts can ask for it with `"return_token": true` and send it as `Authorization: Bearer hxs.…`.
 - Sessions last `security.session_hours` (12) and work on every hex of the lattice.
 - `POST /auth/logout` revokes the session. `GET /auth/me` returns the signed-in user with their grants.
@@ -2995,6 +3000,7 @@ role = "oracle"
 | `compression.compression_level` | 0 | Zstandard level (-7 to 22; 0 is the library default) |
 | `security.admin_login`, `admin_email` | `hexdbadmin` | The first administrator |
 | `security.admin_password` | empty | Generated when empty; ignored once users exist |
+| `security.change_first_password` | true | The first administrator's password works for one sign-in, which chooses a new one |
 | `security.session_hours` | 12 | Session lifetime |
 | `security.max_failed_logins`, `lockout_minutes` | 5, 15 | Sign-in throttling |
 | `security.audit_retention_days` | 90 | Audit event lifetime (0: forever) |
