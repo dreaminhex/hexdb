@@ -22,17 +22,17 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 - **Vector search.** Vector indexes over vectors you supply, or over embeddings HexDB makes from your text fields (OpenAI, Voyage AI, Azure OpenAI, Ollama and other OpenAI-compatible servers). Similarity searches (`near`, and `ORDER BY SIMILARITY(...)` in SQL) combine with ordinary filters and respect each user's permissions, row filters and field masks. Files are found by the meaning of their extracted text, and int8 quantization keeps vectors in a quarter of the memory. The AI chat, MCP and A2A search by meaning too.
 - **AI chat and MCP.** An Ask page and `POST /ai/chat` answer questions about your data with the AI provider you configure, looking things up as the asking user (their permissions, row filters and field masks), within per-user and per-address daily limits that say when they reset. `POST /mcp` lets external agents such as Claude Desktop and Claude Code read the lattice through the Model Context Protocol, with an API key, read-only. Other agents can also ask it questions over A2A (Agent2Agent), answered by the chat as the calling user, streamed or posted back to a webhook, from a signed agent card. An Oracle hex (`identity.role = "oracle"`) can take all of it: it answers every AI question, keeps no data, and reads what it needs from the other hexes as the asking user.
 - **Plugins.** Change data capture (Kafka, Kinesis), ingest sources (PostgreSQL, SQL Server, S3), file imports from S3, Azure Blob Storage, Google Drive and Dropbox, log and metrics sinks (OpenTelemetry, files, HTTP) and enrichers. A plugin can be a process, a webhook or built in. Stream plugins can acknowledge what their destination accepted, for at-least-once delivery end to end. Process plugins run sandboxed (Landlock and seccomp on Linux, an AppContainer on Windows), and a hex reports what its sandbox actually enforces.
-- **Replication.** Automatic discovery and Overseer election, snapshot plus change-stream replication, and failover. Replicas share the data in slices instead of each keeping a full copy (the Overseer keeps everything), and hold writes while the Overseer restarts, so a rolling upgrade fails none. Spread a lattice over three or more regions and it loses no data, and keeps serving, if a whole region goes down; each hex shows where it runs. Optional synchronous acknowledgements, a write quorum, and write forwarding from replicas. Built for slow and shared CPUs: a busy hex keeps answering its lattice instead of being voted out, an Overseer that restarts keeps its role, and elections prefer the hex that needs nothing rebuilt.
+- **Replication.** Automatic discovery and Overseer election, snapshot plus change-stream replication, and failover. A partition map with epochs on forwarded requests prepares for partitioned writes (a preview: every lattice is still one partition). Replicas share the data in slices instead of each keeping a full copy (the Overseer keeps everything), and hold writes while the Overseer restarts, so a rolling upgrade fails none. Spread a lattice over three or more regions and it loses no data, and keeps serving, if a whole region goes down; each hex shows where it runs. Optional synchronous acknowledgements, a write quorum, and write forwarding from replicas. Built for slow and shared CPUs: a busy hex keeps answering its lattice instead of being voted out, an Overseer that restarts keeps its role, and elections prefer the hex that needs nothing rebuilt.
 - **Security.**
-  - Authentication: sessions, API keys, TOTP multi-factor authentication, and access tokens from your OpenID Connect provider (Entra ID, Auth0, Okta, Keycloak, Google), each acting as an existing HexDB user.
+  - Authentication: sessions, API keys, TOTP multi-factor authentication, and access tokens from your OpenID Connect provider (Entra ID, Auth0, Okta, Keycloak, Google), each acting as an existing HexDB user. The first administrator's password, a reset one, and any temporary password an administrator hands out work for one sign-in, which chooses a new password, so a password that passed through a config file, a secret store or a log stops working once used.
   - Access control: built-in and custom roles granted per tessellation, with row filters (for example, only the user's region), hidden fields, and masked fields per role (a card number can read as `************1234`, for PCI DSS). A user's roles combine per document: a role's hidden fields go with its row filter, so a role for one tenant never uncovers another tenant's fields. Uploading, deleting and restoring files are separate permissions that can be limited to folders.
   - Code that runs for users: script functions get a session that ends with the run, however it ends, and every process they start stops with them; webhooks the server calls are checked against server-side request forgery.
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Tokenization: a schema can mark a field `tokenize`, and its value is replaced by a token (`tok_..._1111`) before it's stored anywhere. Lookups and joins by the real value still work. One-way tokens can't be reversed; vault tokens can be, by users with the `detokenize` permission, and every reveal is audited.
   - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
-  - Releases: published only from commits CI passed; the container image is scanned, carries an SBOM and build provenance, and is signed with Sigstore (see [SECURITY.md](SECURITY.md#verifying-a-release)).
+  - Releases: published only from commits CI passed; both container images are scanned on both architectures (the full reports are attached to each release), carry an SBOM and build provenance, and are signed with Sigstore (see [SECURITY.md](SECURITY.md#verifying-a-release)). Third-party code HexDB patches is listed in [vendor/VENDORED.md](vendor/VENDORED.md).
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon coding that repairs corrupted memory. Background work (flushing, compaction, file processing, catch-up copies for other hexes) runs at a lower operating-system priority, so requests and the lattice come first on a throttled CPU.
-- **Operations.** Online backups, an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, an Entity Framework Core provider, and ODBC and JDBC drivers. Each hex checks daily for a newer release; the dashboard shows every hex's version and marks those that need an update, and on HexDB Enterprise rolls an update out one hex at a time.
+- **Operations.** Online backups of the whole lattice from any hex (a replica without all of it passes the request to the Overseer), verified to hold every file chunk their documents need, and still running if the request times out; an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, an Entity Framework Core provider, and ODBC and JDBC drivers. Each hex checks daily for a newer release; the dashboard shows every hex's version and marks those that need an update, and on HexDB Enterprise rolls an update out one hex at a time.
 
 ## Performance
 
@@ -201,7 +201,7 @@ hexdb start
 
 The server runs in this terminal; Ctrl+C stops it gracefully. On the first start it creates the administrator `hexdbadmin` and prints a generated password. The password is also saved to `hexdb_api/.hexdb/initial-admin-password.txt`, readable only by you.
 
-Open http://localhost:7700/ui/ and sign in. Then change the password on the Account page and delete that file.
+Open http://localhost:7700/ui/ and sign in with it. That password works once: the sign-in asks you to choose your own. Then delete the file.
 
 To run the server in the background instead, use `hexdb start -s` (it's restarted if it crashes; output goes to `hexdb_api/.hexdb/hexdb.log`), and stop it with `hexdb stop` from the same folder. Data lives in `hexdb_api/.hexdb`. Delete that folder to start over; the key in `hexdb.local.toml` can stay.
 
@@ -237,7 +237,7 @@ To see replication and failover in the UI, run the demo script from the reposito
 node scripts/lattice-demo.mjs
 ```
 
-It starts three hexes on ports 7800, 7810 and 7820, separate from your own server on 7700, and loads sample data into the first. Then it prints a UI link for each hex and an admin password. Sign in on any of them:
+It starts three hexes on ports 7800, 7810 and 7820, separate from your own server on 7700, and loads sample data into the first. Then it prints a UI link for each hex and an admin password. Sign in on any of them (the demo turns off the first-sign-in password change):
 - The Dashboard's Lattice card lists all three hexes, with one Overseer and two Harvesters, and their replication lag.
 - Each hex's vertex hexagon shows its six memory vertices.
 - The Documents page on any hex shows the replicated data.
@@ -259,7 +259,7 @@ docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb \
   -e HEXDB_STORAGE__ENCRYPTION_KEY="base64:$(openssl rand -base64 32)" hexdb
 ```
 
-The first start prints a generated administrator password in the container log (`docker logs <container> | grep password`). Open http://localhost:7700/ui/ and sign in. Keep the encryption key: the data can't be read without it.
+The first start prints a generated administrator password in the container log (`docker logs <container> | grep password`). Open http://localhost:7700/ui/ and sign in; that first sign-in chooses your own password, so the one in the log stops working. Keep the encryption key: the data can't be read without it.
 
 `docker compose up -d` starts a three-hex lattice instead; see the comments at the top of [docker-compose.yml](docker-compose.yml).
 
@@ -272,8 +272,9 @@ hexdb stop [--force]             stop it gracefully
 hexdb health                     is it up?
 hexdb status                     status and metrics (needs HEXDB_TOKEN)
 hexdb secret                     print a new random key
-hexdb reset-password [--login L] a new password for a forgotten admin login (on the server's machine)
-hexdb backup [--name N] [--list] back up the running server (needs HEXDB_TOKEN)
+hexdb reset-password [--login L] a one-time password for a forgotten login (on the server's machine)
+hexdb backup [--name N] [--hex]  back up the lattice (--hex: only this hex's part; needs HEXDB_TOKEN)
+hexdb backup --list              list backups
 hexdb sql "SELECT ..." [-p V]   run a SQL query and print a table (needs HEXDB_TOKEN)
 hexdb put|get|ls TESS ...        upload, download and list files (needs HEXDB_TOKEN)
 hexdb config get|set|history ... the lattice configuration: settings, secrets, history, rollback (admins)
@@ -298,7 +299,7 @@ The admin UI is served at `/ui/`. Users see only the pages their roles allow.
 | Files | Folders, thumbnails, search, uploads, previews and an audio player, metadata and AI tags, versions and the trash |
 | Streams | Create streams, publish, read messages, and watch consumer groups and deliveries |
 | Functions | Create and run functions; manage schedules and triggers |
-| Users, Roles | Accounts, role grants, user attributes, custom roles with row filters, hidden and masked fields, MFA resets |
+| Users, Roles | Accounts, temporary passwords that must be changed at the next sign-in, role grants, user attributes, custom roles with row filters, hidden and masked fields, MFA resets |
 | Audit Trail | Security events, filterable by user, action and time |
 | Plugins | Loaded plugins, their state and deliveries |
 | Logs | The server log, tailed live |
@@ -334,7 +335,7 @@ Prebuilt releases are on the [releases page](https://github.com/dreaminhex/hexdb
 | Docker | `docker run -p 7700:7700 -v hexdb-data:/var/lib/hexdb -e HEXDB_STORAGE__ENCRYPTION_KEY=... ghcr.io/dreaminhex/hexdb` (also on Docker Hub as `dreaminhex/hexdb`) |
 | Kubernetes | `helm install hexdb oci://ghcr.io/dreaminhex/charts/hexdb --set replicas=3` (see the MANUAL's [On Kubernetes](MANUAL.md#on-kubernetes)) |
 
-Then run `hexdb start`. The first start creates your configuration and encryption key (`hexdb init` does only that step) and prints where the generated administrator password is; open http://127.0.0.1:7700/ui/ to sign in. Each installer includes the ODBC driver, and the Windows installer and the Debian package register it.
+Then run `hexdb start`. The first start creates your configuration and encryption key (`hexdb init` does only that step) and prints where the generated administrator password is; open http://127.0.0.1:7700/ui/ to sign in with it and choose your own. Each installer includes the ODBC driver, and the Windows installer and the Debian package register it.
 
 Linux builds need glibc 2.28 or later (Ubuntu 20.04, Debian 10, RHEL 8 and newer). Windows builds need nothing else installed.
 
@@ -355,6 +356,8 @@ plugins/        plugin SDK and example plugins
 packaging/      installers and service files
 docker/         container configuration
 scripts/        seed data and the OpenAPI generator
+vendor/         third-party crates HexDB carries patched copies of (see VENDORED.md)
+bench/          the benchmark and version comparison
 ```
 
 ## Development

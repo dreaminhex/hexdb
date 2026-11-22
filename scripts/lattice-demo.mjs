@@ -100,6 +100,8 @@ path = ${toml(ui.replaceAll("\\", "/"))}
 admin_login = "admin"
 admin_password = ${toml(settings.password)}
 admin_email = "admin@example.com"
+# The demo signs in with this password itself (to load the sample data), again and again.
+change_first_password = false
 
 [plugins]
 enabled = false
