@@ -622,7 +622,14 @@ jobs:
       - name: Publish @dreaminhex/hexdb to npm
         if: env.NODE_AUTH_TOKEN != ''
         working-directory: drivers/node
-        run: npm ci && npm run build && npm publish --access public
+        # A rerun (or a tag moved to a fixed commit) finds the version published already: skip it.
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if npm view "@dreaminhex/hexdb@$version" version >/dev/null 2>&1; then
+            echo "@dreaminhex/hexdb $version is on npm already"
+          else
+            npm ci && npm run build && npm publish --access public
+          fi
 
   pypi:
     needs: verify

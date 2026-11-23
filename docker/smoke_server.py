@@ -58,7 +58,15 @@ def main() -> int:
                 if time.time() > deadline:
                     raise RuntimeError("the server didn't start")
                 time.sleep(2)
-        token = call("POST", "/auth/login", {"login": "hexdbadmin", "password": password, "return_token": True})["token"]
+        # The first administrator's password works once (2.6): that sign-in must choose a new one.
+        try:
+            call("POST", "/auth/login", {"login": "hexdbadmin", "password": password, "return_token": True})
+            raise RuntimeError("the first password signed in without choosing a new one")
+        except urllib.error.HTTPError as e:
+            if e.code != 403 or json.loads(e.read() or b"{}").get("error", {}).get("code") != "password_change_required":
+                raise
+        chosen = "Smoke-chosen-" + secrets.token_urlsafe(18)
+        token = call("POST", "/auth/login", {"login": "hexdbadmin", "password": password, "new_password": chosen, "return_token": True})["token"]
         if slim:
             function = {"name": "smoke_slim", "kind": "script", "runtime": "python", "code": SCRIPTS["python"]}
             try:
