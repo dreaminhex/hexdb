@@ -58,6 +58,9 @@ pub struct QuotaCache {
     /// Held from a commit's check until its reservation is made, so two
     /// commits can't both see the same room.
     gate: tokio::sync::Mutex<()>,
+    /// Commits added to the counted usage so far: a recount during which one
+    /// landed may have missed it, so it isn't kept (the next check counts again).
+    added: std::sync::atomic::AtomicU64,
 }
 
 impl QuotaCache {
@@ -118,6 +121,7 @@ impl HexDBEngine {
                 return Ok(*usage);
             }
         }
+        let added = self.quota_cache.added.load(std::sync::atomic::Ordering::Acquire);
         let mut usage = QuotaUsage::default();
         let filter = Filter::parse(&json!({ "uploaded_by": login }))?;
         let names: Vec<String> = self.tessellation_details().into_iter().map(|(name, _)| name).filter(|name| self.holds_files(name)).collect();
@@ -146,7 +150,7 @@ impl HexDBEngine {
                 offset += count;
             }
         }
-        self.quota_cache.usage.lock().unwrap().insert(login.to_string(), (Instant::now(), usage));
+        self.keep_count(login.to_string(), usage, added);
         Ok(usage)
     }
 
@@ -180,7 +184,9 @@ impl HexDBEngine {
         if limits.bytes.is_none() && limits.files.is_none() {
             return Ok(());
         }
-        let (counted, reserved) = (self.quota_usage(login).await?, self.quota_cache.reserved(login));
+        // Reserved first, counted second (see check_tessellation_quota).
+        let reserved = self.quota_cache.reserved(login);
+        let counted = self.quota_usage(login).await?;
         let usage = QuotaUsage { bytes: counted.bytes + reserved.bytes, files: counted.files + reserved.files };
         if let Some(max) = limits.bytes.filter(|max| usage.bytes.saturating_add(bytes) > *max) {
             return Err(EngineError::QuotaExceeded(format!(
@@ -196,9 +202,19 @@ impl HexDBEngine {
         Ok(())
     }
 
+    /// Cache a recount, unless a commit was added while it ran (`added` is the
+    /// count of commits when it started): it may have missed that one.
+    fn keep_count(&self, key: String, usage: QuotaUsage, added: u64) {
+        let mut cache = self.quota_cache.usage.lock().unwrap();
+        if self.quota_cache.added.load(std::sync::atomic::Ordering::Acquire) == added {
+            cache.insert(key, (Instant::now(), usage));
+        }
+    }
+
     /// Add a committed upload to `login`'s and `tess`'s counted usage.
     pub(crate) fn quota_add(&self, login: &str, tess: &str, bytes: u64, new_file: bool) {
         let mut cache = self.quota_cache.usage.lock().unwrap();
+        self.quota_cache.added.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         for key in [login.to_string(), tess_key(tess)] {
             if let Some((_, usage)) = cache.get_mut(&key) {
                 usage.bytes += bytes;
@@ -244,6 +260,7 @@ impl HexDBEngine {
                 return Ok(*usage);
             }
         }
+        let added = self.quota_cache.added.load(std::sync::atomic::Ordering::Acquire);
         let mut usage = QuotaUsage::default();
         let mut add = |data: &Value| {
             let earlier: u64 = data["versions"].as_array().into_iter().flatten().filter_map(|v| v["size"].as_u64()).sum();
@@ -264,13 +281,17 @@ impl HexDBEngine {
                 add(&doc.data_json());
             }
         }
-        self.quota_cache.usage.lock().unwrap().insert(key, (Instant::now(), usage));
+        self.keep_count(key, usage, added);
         Ok(usage)
     }
 
     async fn check_tessellation_quota(&self, tess: &str, bytes: u64, new_file: bool) -> Result<()> {
         let Some(quota) = self.tessellation_quota(tess) else { return Ok(()) };
-        let (counted, reserved) = (self.tessellation_usage(tess).await?, self.quota_cache.reserved(&tess_key(tess)));
+        // Reserved first, counted second: a commit adds itself to the counted usage before it
+        // releases its reservation, so in this order it's seen at least once (read the other
+        // way round, one finishing in between would be in neither).
+        let reserved = self.quota_cache.reserved(&tess_key(tess));
+        let counted = self.tessellation_usage(tess).await?;
         let usage = QuotaUsage { bytes: counted.bytes + reserved.bytes, files: counted.files + reserved.files };
         if let Some(mb) = quota.mb.filter(|m| *m > 0) {
             if usage.bytes.saturating_add(bytes) > mb.saturating_mul(1024 * 1024) {
