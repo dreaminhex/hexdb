@@ -53,3 +53,9 @@ prebuilt/
 # Build output of vendored crates tested on their own
 /vendor/*/target
 /vendor/*/Cargo.lock
+
+# Book publishing notes, covers and manuscripts for Amazon (kept local; the overview screenshots in marketing/ stay tracked)
+/marketing/HexDB_*
+/marketing/Amazon_*
+/marketing/*.epub
+/marketing/*.pdf
