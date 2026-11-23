@@ -20,7 +20,7 @@ ulid = { version = "3.0.0", features = ["serde"] }
 rust_decimal = { version = "1.37.1", features = ["serde"] }
 base64 = "0.23.1"
 # Timestamps (UTC only: no time zone database).
-jiff = { version = "0.2.46", default-features = false, features = ["std"] }
+jiff = { version = "1.0.2", default-features = false, features = ["std"] }
 aes-gcm = "0.11.1"
 zeroize = "1.9"
 rand = { version = "0.10.3", features = ["std"] }

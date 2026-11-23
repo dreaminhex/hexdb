@@ -22,7 +22,7 @@ tokio-fs = ["tokio", "tokio/fs"]
 
 [dependencies]
 bytes = "1.7.1"
-jiff = "0.2.46"
+jiff = { version = "1.0.2", default-features = false, features = ["std"] }
 iso6709parse = "0.1.0"
 nom = "8.0"
 regex = "1.10"
