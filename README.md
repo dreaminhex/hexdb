@@ -38,17 +38,17 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
 
 ### Size
 
-What version 2.2.0 downloads and installs. Installed is the server (storage engine, REST, GraphQL, gRPC, SQL and replication), the CLI, the ODBC driver and the admin UI.
+What version 2.6.0 downloads and installs. Installed is the server (storage engine, REST, GraphQL, gRPC, SQL and replication), the CLI, the ODBC driver and the admin UI.
 
 | Platform | Download | Installed | Server | CLI | ODBC | Admin UI |
 | --- | --- | --- | --- | --- | --- | --- |
-| Windows x64 | 18.4 MB installer (23.0 MB zip) | 65.2 MB | 50.2 MB | 9.3 MB | 2.9 MB | 2.7 MB |
-| macOS, Apple silicon | 22.9 MB | 61.7 MB | 46.7 MB | 9.0 MB | 3.1 MB | 2.7 MB |
-| macOS, Intel | 24.4 MB | 65.5 MB | 49.9 MB | 9.5 MB | 3.3 MB | 2.7 MB |
-| Linux x64 | 15.4 MB Debian package (23.6 MB archive) | 57.9 MB | 43.0 MB | 9.0 MB | 3.0 MB | 2.7 MB |
-| Linux arm64, Raspberry Pi | 13.3 MB Debian package (21.7 MB archive) | 51.2 MB | 37.6 MB | 8.1 MB | 2.6 MB | 2.7 MB |
+| Windows x64 | 33.0 MB installer (41.4 MB zip) | 121.2 MB | 95.1 MB | 20.3 MB | 3.0 MB | 2.8 MB |
+| macOS, Apple silicon | 41.4 MB | 120.1 MB | 90.3 MB | 23.8 MB | 3.2 MB | 2.8 MB |
+| macOS, Intel | 44.3 MB | 128.5 MB | 98.3 MB | 24.0 MB | 3.4 MB | 2.8 MB |
+| Linux x64 | 28.6 MB Debian package (43.2 MB archive) | 112.1 MB | 85.0 MB | 21.2 MB | 3.1 MB | 2.8 MB |
+| Linux arm64, Raspberry Pi | 24.3 MB Debian package (39.0 MB archive) | 97.2 MB | 72.0 MB | 19.7 MB | 2.7 MB | 2.8 MB |
 
-The macOS installer (`hexdb-macos-universal.dmg`, 46 MB) holds both Mac builds. The Docker image is larger than the server alone, because it also carries Python and Node.js 24 for script functions and plugins, Tesseract and a small ffmpeg.
+The server and CLI are about twice their 2.2 size: since then they carry the YARA-X malware scanner (with the wasmtime engine it compiles rules with), and previews for RAW photos, PDF pages and SVG, all built in rather than installed separately. The macOS installer (`hexdb-macos-universal.dmg`, 85.9 MB) holds both Mac builds. The Docker image is larger than the server alone, because it also carries Python and Node.js 24 for script functions and plugins, Tesseract and a small ffmpeg; the `slim` image is the server only.
 
 ### Speed
 
