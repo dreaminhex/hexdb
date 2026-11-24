@@ -499,7 +499,8 @@ pub fn spawn_streams(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>)
 }
 
 async fn reconcile(engine: &Arc<HexDBEngine>) {
-    let wanted: Vec<(String, String, StreamConfig, usize, bool)> = if engine.is_writable() {
+    // Streams live in partition 0 (their messages are lattice-wide system records): run there.
+    let wanted: Vec<(String, String, StreamConfig, usize, bool)> = if engine.leads_partition_zero() {
         match engine.list_streams().await {
             Ok(list) => list
                 .into_iter()

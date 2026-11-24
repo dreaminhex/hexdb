@@ -877,7 +877,8 @@ pub fn spawn_scheduler(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
                 revoke_abandoned_sessions(&engine).await;
-                if !engine.is_writable() {
+                // Once per lattice: on partition 0's Overseer (the Overseer, unpartitioned).
+                if !engine.leads_partition_zero() {
                     continue;
                 }
                 let Ok(schedules) = engine.list_schedules().await else { continue };

@@ -193,6 +193,24 @@ fn each_partition_leads_itself_and_partition_zero_serves_the_system_tessellation
         let ns: Vec<i64> = listed.body["documents"].as_array().unwrap().iter().filter_map(|d| d["n"].as_i64()).collect();
         assert_eq!(ns, vec![0, 0, 1], "{}", listed.body);
     }
+    // The change feed merges both partitions' feeds, with a cursor per partition.
+    let start = a.request(Method::GET, "/changes", None, &[])?;
+    assert_eq!(start.status, 200, "{}", start.body);
+    let cursor = start.body["cursor"].as_str().unwrap_or_default().to_string();
+    assert!(cursor.contains("0:") && cursor.contains("1:"), "{}", start.body);
+    a.request(Method::POST, "/orders", Some(&json!({ "n": 500 })), &[])?;
+    b.request(Method::POST, "/orders", Some(&json!({ "n": 501 })), &[])?;
+    let feed = b.request(Method::GET, &format!("/changes?after={}&tessellation=orders&wait=5", cursor), None, &[])?;
+    assert_eq!(feed.status, 200, "{}", feed.body);
+    let seen: Vec<(i64, i64)> = feed.body["changes"].as_array().unwrap().iter().filter_map(|c| Some((c["document"]["n"].as_i64()?, c["partition"].as_i64()?))).collect();
+    assert!(seen.contains(&(500, 0)) && seen.contains(&(501, 1)), "{}", feed.body);
+    let again = a.request(Method::GET, &format!("/changes?after={}&tessellation=orders", feed.body["cursor"].as_str().unwrap_or_default()), None, &[])?;
+    assert_eq!(again.body["changes"].as_array().map(Vec::len), Some(0), "nothing twice: {}", again.body);
+    let res = a.request(Method::GET, "/changes/stream", None, &[])?;
+    assert_eq!(res.status, 409, "{}", res.body);
+    // Back to the documents: the two just added are counted everywhere.
+    assert_eq!(a.request(Method::GET, "/orders/count", None, &[])?.body["count"], 42);
+
     // What can't be merged yet is refused, not answered from one partition.
     for (path, body) in [("/orders/_aggregate", json!({ "group_by": [], "aggregates": [{ "op": "count" }] })), ("/sql", json!({ "query": "SELECT COUNT(*) FROM orders" }))] {
         let res = a.request(Method::POST, path, Some(&body), &[])?;

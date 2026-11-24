@@ -206,6 +206,12 @@ impl HexDBEngine {
         *self.partitions.map.write().unwrap() = map;
     }
 
+    /// True on the Overseer of partition 0 (the Overseer, on a one-partition lattice): where
+    /// what runs once per lattice runs (schedules, stream processing).
+    pub fn leads_partition_zero(&self) -> bool {
+        self.is_writable() && self.my_partition() == Some(0)
+    }
+
     /// This hex's partition: Some(0) on a one-partition lattice, None for a hex a
     /// multi-partition map doesn't place (it holds nothing and is never elected).
     pub fn my_partition(&self) -> Option<u32> {

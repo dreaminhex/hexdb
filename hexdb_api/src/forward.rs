@@ -789,6 +789,13 @@ async fn fan_out_read(engine: &Arc<HexDBEngine>, request: Request, next: &Next) 
         return Err(Box::new(request));
     }
     let path = request.uri().path().to_string();
+    if *request.method() == Method::GET && path == "/changes" {
+        let (parts, _) = request.into_parts();
+        return Ok(merged_changes(engine, parts, next).await);
+    }
+    if *request.method() == Method::GET && (path == "/changes/stream" || path == "/changes/ws") {
+        return Ok(*not_across_partitions("A live change stream (Server-Sent Events or WebSocket)"));
+    }
     // Only these reads are partitioned; anything else goes on untouched (with its body).
     let get_list = *request.method() == Method::GET && path.trim_start_matches('/').split('/').count() == 1;
     if !(path == "/sql" || path == "/graphql" || path.ends_with("/_query") || path.ends_with("/_aggregate") || path.ends_with("/count") || get_list) {
@@ -899,6 +906,93 @@ fn merge(plan: FanOut, answers: Vec<serde_json::Value>, partitions: usize) -> Re
             let total = if total { answers.iter().map(|a| a["total"].as_u64()).sum::<Option<u64>>() } else { None };
             axum::Json(serde_json::json!({ "documents": page, "total": total, "next": null, "partitions": partitions })).into_response()
         }
+    }
+}
+
+/// A merged change feed's cursor: each partition's last sequence number, as
+/// `"0:12,1:40"`. A partition it doesn't name starts at its current position.
+fn parse_change_cursor(text: &str) -> Result<std::collections::BTreeMap<u32, u64>, Box<Response>> {
+    let bad = || Box::new(crate::handlers::ApiError::invalid("after: on a partitioned lattice, pass back the cursor a merged feed answered (\"0:12,1:40\").").into_response());
+    let mut cursor = std::collections::BTreeMap::new();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (partition, seq) = part.split_once(':').ok_or_else(bad)?;
+        cursor.insert(partition.parse::<u32>().map_err(|_| bad())?, seq.parse::<u64>().map_err(|_| bad())?);
+    }
+    Ok(cursor)
+}
+
+fn format_change_cursor(cursor: &std::collections::BTreeMap<u32, u64>) -> String {
+    cursor.iter().map(|(p, s)| format!("{}:{}", p, s)).collect::<Vec<_>>().join(",")
+}
+
+/// `GET /changes` on a partitioned lattice: every partition's feed, read from that
+/// partition's Overseer (whose sequence numbers are the partition's history), merged.
+/// Order holds within a partition; each change says which partition it's from.
+async fn merged_changes(engine: &Arc<HexDBEngine>, parts: axum::http::request::Parts, next: &Next) -> Response {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        after: Option<String>,
+        tessellation: Option<String>,
+        limit: Option<usize>,
+        wait: Option<u64>,
+    }
+    let params = match axum::extract::Query::<Params>::try_from_uri(&parts.uri) {
+        Ok(q) => q.0,
+        Err(e) => return crate::handlers::ApiError::invalid(e.body_text()).into_response(),
+    };
+    let mut cursor = match params.after.as_deref() {
+        Some(text) => match parse_change_cursor(text) {
+            Ok(c) => c,
+            Err(refused) => return *refused,
+        },
+        None => Default::default(),
+    };
+    let map = engine.partition_map();
+    let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+    let deadline = Instant::now() + Duration::from_secs(params.wait.unwrap_or(0).min(60));
+    loop {
+        let mut changes: Vec<serde_json::Value> = Vec::new();
+        for partition in map.partitions.iter().map(|p| p.id) {
+            let mut path = format!("/changes?limit={}", limit);
+            if let Some(seq) = cursor.get(&partition) {
+                path.push_str(&format!("&after={}", seq));
+            }
+            if let Some(t) = params.tessellation.as_deref().filter(|t| !t.is_empty()) {
+                path.push_str(&format!("&tessellation={}", hexdb_core::sigv4::uri_encode(t)));
+            }
+            // This hex's own partition answers here only if it's that partition's Overseer:
+            // a replica's sequence numbers are its own, not the partition's.
+            let (status, body) = if Some(partition) == engine.my_partition() && engine.is_writable() {
+                let mut local = parts.clone();
+                local.uri = path.parse().unwrap_or_default();
+                local.headers.insert(HeaderName::from_static(PARTITION_LOCAL_HEADER), HeaderValue::from_static("1"));
+                let response = next.clone().run(Request::from_parts(local, Body::empty())).await;
+                let status = response.status();
+                (status, axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024).await.unwrap_or_default())
+            } else {
+                match ask_partition(engine, partition, &parts, &Method::GET, &path, &Bytes::new()).await {
+                    Ok(answer) => answer,
+                    Err(response) => return *response,
+                }
+            };
+            if !status.is_success() {
+                return (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
+            }
+            let answer: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            for mut change in answer["changes"].as_array().cloned().unwrap_or_default() {
+                change["partition"] = serde_json::json!(partition);
+                changes.push(change);
+            }
+            if let Some(seq) = answer["last_seq"].as_u64() {
+                cursor.insert(partition, seq);
+            }
+        }
+        if !changes.is_empty() || Instant::now() >= deadline {
+            let token = format_change_cursor(&cursor);
+            return axum::Json(serde_json::json!({ "changes": changes, "last_seq": token, "cursor": token, "partitions": map.partitions.len() })).into_response();
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
