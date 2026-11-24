@@ -34,7 +34,7 @@ pub mod render;
 pub mod sandbox;
 pub mod thumbnail;
 pub mod video;
-mod xml;
+pub(crate) mod xml;
 
 use serde_json::{json, Map, Value};
 use std::io::{self, Read, Seek, SeekFrom};

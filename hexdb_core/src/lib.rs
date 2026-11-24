@@ -58,6 +58,7 @@ pub mod updates;
 pub mod compress;
 pub mod erasure;
 pub mod blobs;
+pub mod objstore;
 pub mod files;
 pub mod extract;
 pub mod network {
