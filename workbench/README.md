@@ -26,3 +26,7 @@ The Rust side (`src-tauri/`) is its own Cargo workspace, kept out of the server'
 ## Releases
 
 Tag `workbench-vX.Y.Z` and the Workbench workflow builds installers for Windows (MSI and setup), macOS (a universal DMG) and Linux (AppImage, deb, rpm). It signs them when the signing secrets are set (see the workflow's header) and publishes a prerelease with `SHA256SUMS`, signed with the project's packaging key. Without the Windows and Apple certificates the installers are unsigned, and the workflow warns about it.
+
+## Known advisories
+
+- **glib 0.18 (GHSA-wrw7-89jp-8q8g)**, Linux builds only: unsoundness in `glib::VariantStrIter`. It comes in through the GTK3 bindings that Tauri's Linux backend uses (wry, tao, webkit2gtk, muda). The fix is only in glib 0.20, which has no GTK3 bindings, so no update can reach it until Tauri moves on, and Dependabot's security update for it fails for that reason. Nothing in the workbench or its dependencies calls `VariantStrIter` (checked 2026-11-23). Check again when Tauri updates its Linux backend.
