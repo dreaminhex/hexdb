@@ -182,6 +182,7 @@ pub const PARTITION_LOCAL_TESSELLATIONS: &[&str] = &[
     crate::plugins::PLUGIN_CURSORS_TESSELLATION,
     crate::triggers::TRIGGER_CURSORS_TESSELLATION,
     crate::streams::STREAM_OFFSETS_TESSELLATION,
+    crate::files::UPLOADS_TESSELLATION,
 ];
 
 /// System tessellations each hex writes for itself in the stage-2 preview (its own
@@ -282,6 +283,23 @@ impl HexDBEngine {
             }
         }
         None
+    }
+
+    /// A new document ID for `tessellation`. On a partitioned lattice it's drawn until it
+    /// falls in a slice this hex's partition owns, so an insert commits on the hex that
+    /// received it (its group's Overseer) and never has to cross to another partition;
+    /// placement stays by hash. Two partitions take about two draws.
+    pub fn new_document_id(&self, tessellation: &str) -> ulid::Ulid {
+        let owned = self.owned_slices();
+        if owned == ALL_SLICES || owned == 0 || self.is_system_tessellation(tessellation) {
+            return ulid::Ulid::generate();
+        }
+        loop {
+            let id = ulid::Ulid::generate();
+            if crate::slicing::holds(owned, crate::slicing::slice_of(tessellation, id)) {
+                return id;
+            }
+        }
     }
 
     /// Where a record of `tessellation` with `id` belongs. System tessellations are

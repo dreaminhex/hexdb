@@ -264,6 +264,29 @@ impl HexDBEngine {
                 return Err(EngineError::NotFound(format!("Tessellation '{}' not found.", op.tessellation)).into());
             }
         }
+        // On a partitioned lattice a transaction stays within this hex's partition until
+        // two-phase commit (stage 3): one naming a document of another partition, or
+        // deleting by filter (its documents can't be placed up front), is refused untouched.
+        let map = self.partition_map();
+        if !map.is_single() {
+            let mine = self.my_partition();
+            for op in ops {
+                if op.kind == TxOpKind::DeleteWhere {
+                    return Err(EngineError::Conflict("cross_partition: delete_where isn't available in transactions on a partitioned lattice yet; nothing was written.".into()).into());
+                }
+                if let Some(id) = op.id {
+                    if Some(map.partition_of(&op.tessellation, id)) != mine {
+                        return Err(EngineError::Conflict(format!(
+                            "cross_partition: {}/{} belongs to partition {}, and a transaction can't span partitions yet; nothing was written.",
+                            op.tessellation,
+                            id,
+                            map.partition_of(&op.tessellation, id)
+                        ))
+                        .into());
+                    }
+                }
+            }
+        }
         // Inserts create their tessellation, as single-document inserts do.
         for op in ops.iter().filter(|op| op.kind == TxOpKind::Insert) {
             self.ensure_tessellation(&op.tessellation)?;
@@ -374,7 +397,7 @@ impl HexDBEngine {
                 result_keys.push(None);
                 continue;
             }
-            let id = op.id.unwrap_or_else(Ulid::generate);
+            let id = op.id.unwrap_or_else(|| self.new_document_id(&op.tessellation));
             let key = DocKey::new(&op.tessellation, id);
 
             let (read, write) = scopes

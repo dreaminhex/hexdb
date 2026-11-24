@@ -574,6 +574,11 @@ impl HexDBEngine {
     ) -> Result<Outcome<UpsertSummary>> {
         validate_tess(tess)?;
         check_bulk_size(docs.len())?;
+        // Matching by key fields would see only this partition's documents and could store
+        // a duplicate in another: upserts wait for cross-partition uniqueness (stage 3).
+        if !self.partition_map().is_single() {
+            return Err(EngineError::Conflict("cross_partition: upserts by key fields aren't available on a partitioned lattice yet; nothing was written.".into()).into());
+        }
         if key.is_empty() || key.len() > 4 || key.iter().any(|k| k.is_empty() || k == "id" || k.starts_with('_')) {
             return Err(invalid("key: 1-4 field names (not id or fields starting with '_')."));
         }
@@ -639,7 +644,7 @@ impl HexDBEngine {
                 None => {
                     write.check_change(None, &fields_json(fields), fields.keys().map(String::as_str))?;
                     summary.inserted += 1;
-                    let doc = Document { id: Ulid::generate(), tessellation: tess.to_string(), data: fields.clone(), ttl };
+                    let doc = Document { id: self.new_document_id(tess), tessellation: tess.to_string(), data: fields.clone(), ttl };
                     if !write.allows(&doc) {
                         return Err(outside_scope(tess));
                     }
@@ -787,7 +792,7 @@ impl HexDBEngine {
         fields
             .iter()
             .map(|data| {
-                let doc = Document { id: Ulid::generate(), tessellation: tess.to_string(), data: data.clone(), ttl };
+                let doc = Document { id: self.new_document_id(tess), tessellation: tess.to_string(), data: data.clone(), ttl };
                 BatchItem { key: DocKey::new(tess, doc.id), op: WalOp::Put(doc), expected_seq: None }
             })
             .collect()

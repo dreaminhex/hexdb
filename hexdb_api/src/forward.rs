@@ -59,6 +59,63 @@ use tracing::{debug, warn};
 /// How long a write waits for an Overseer (an election, a handover) before it's refused.
 const HOLD_FOR_OVERSEER: Duration = Duration::from_secs(30);
 
+/// The Overseer of `partition` (or, with None, of this hex's own group), waiting until
+/// `until` while there's none.
+async fn overseer_for(engine: &HexDBEngine, until: Instant, partition: Option<u32>) -> Option<hexdb_core::network::discovery::PeerHex> {
+    let Some(partition) = partition else { return overseer_until(engine, until).await };
+    loop {
+        let map = engine.partition_map();
+        let (found, members) = {
+            let peers = engine.peers.lock().await;
+            let in_partition: Vec<_> = peers.iter().filter(|p| p.status == "active" && map.partition_of_hex(&p.hex.id) == Some(partition)).collect();
+            (in_partition.iter().find(|p| p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone()), in_partition.len())
+        };
+        // No live hex of that partition at all: nothing to wait for (none is about to be elected).
+        if found.is_some() || members == 0 || Instant::now() >= until {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// API routes that aren't lattice-wide system writes: they run on the hex that gets them
+/// (transactions, the delete history and trash, which stay in their partition, GraphQL,
+/// agents, hex-specific operations). Every other route (users, roles, keys, the
+/// configuration, tessellation definitions, functions, streams...) is partition 0's.
+const NOT_PARTITION_ZERO: &[&str] = &["transactions", "graphql", "a2a", "deletes", "mcp", "sql", "_s", "lattice", "updates", "quarantine", "health", "ready", "status", "logs", "changes", "backup", "backups", "flush", "compact", "scrub", "shutdown", "settings", "retire"];
+
+/// On a partitioned lattice, the partition a write must run in when that isn't
+/// necessarily this hex's: a change to an existing document (by its ID's slice), or a
+/// lattice-wide system write (users, keys, the configuration, tessellation definitions),
+/// which is partition 0's. None: run it here (reads, inserts, which draw an ID in this
+/// hex's partition, bulk writes and anything hex-specific; the commit refuses a
+/// document that isn't this partition's).
+fn routed_partition(engine: &HexDBEngine, method: &Method, path: &str) -> Option<u32> {
+    let map = engine.partition_map();
+    if map.is_single() || matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || handled_locally(method, path) {
+        return None;
+    }
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let first = segments.first().copied().unwrap_or_default();
+    // Signing in reads users this hex has as copies; everything else under /auth changes them.
+    if first == "auth" {
+        return if matches!(segments.get(1).copied(), Some("login") | Some("me")) { None } else { Some(0) };
+    }
+    // Not an API route: a user tessellation, even one this hex hasn't heard of yet (just created elsewhere).
+    if !hexdb_core::catalog::is_route_name(first) {
+        if segments.len() == 2 && matches!(*method, Method::PUT | Method::PATCH | Method::DELETE) {
+            if let Ok(id) = ulid::Ulid::from_string(segments[1]) {
+                return Some(map.partition_of(first, id));
+            }
+        }
+        return None;
+    }
+    if NOT_PARTITION_ZERO.contains(&first) || first.is_empty() {
+        return None;
+    }
+    Some(0)
+}
+
 /// The Overseer to pass a request to, waiting until `until` while there's none.
 /// A hex handing its role over waits for another hex to hold it.
 async fn overseer_until(engine: &HexDBEngine, until: Instant) -> Option<hexdb_core::network::discovery::PeerHex> {
@@ -443,10 +500,12 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
     // A sliced replica only has some of the data: everything that reads it goes to the Overseer.
     // So does a lattice backup sent to a replica that doesn't hold the whole lattice.
     let partial = (!engine.is_writable() && engine.is_partial_replica() && !answers_without_data(&path)) || lattice_backup_elsewhere(&engine, &request);
+    // A write that another partition must run goes to that partition's Overseer.
+    let elsewhere = routed_partition(&engine, request.method(), &path).filter(|p| Some(*p) != engine.my_partition());
     // An Overseer handing its role over passes writes on to the next one.
     let writing_here = engine.is_writable() && !hexdb_core::updates::stepping_down();
     let mut request = request;
-    if !partial && (writing_here || !engine.config.replication.forward_writes || handled_locally(request.method(), &path)) {
+    if elsewhere.is_none() && !partial && (writing_here || !engine.config.replication.forward_writes || handled_locally(request.method(), &path)) {
         let resendable = writing_here
             && engine.config.replication.forward_writes
             && !handled_locally(request.method(), &path)
@@ -478,7 +537,17 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
         request = Request::from_parts(parts, Body::from(bytes));
     }
     let until = Instant::now() + HOLD_FOR_OVERSEER;
-    let overseer = overseer_until(&engine, until).await;
+    let overseer = overseer_for(&engine, until, elsewhere).await;
+    // Another partition's write with no Overseer of it reachable: refused untouched, never run here.
+    if let (None, Some(partition)) = (&overseer, elsewhere) {
+        return crate::handlers::ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "partition_unavailable",
+            format!("This belongs to partition {}, and no hex of it is reachable now. Nothing was written; try again shortly.", partition),
+        )
+        .with_retry_after(2)
+        .into_response();
+    }
     let Some(overseer) = overseer else {
         if partial {
             return crate::handlers::ApiError::new(
@@ -555,7 +624,7 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
                 // so only a read or a keyed write is sent again. A timeout isn't: it may still be running.
                 if (e.is_connect() || ((resendable || read) && !e.is_timeout())) && Instant::now() < until {
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    if let Some(next) = overseer_until(&engine, until).await {
+                    if let Some(next) = overseer_for(&engine, until, elsewhere).await {
                         overseer = next;
                         continue;
                     }

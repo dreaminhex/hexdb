@@ -444,7 +444,7 @@ impl HexDBEngine {
                     if let Some(scan) = &scan {
                         map.insert("scan".into(), scan.clone());
                     }
-                    (document(tess, Ulid::generate(), map, None), 0, true)
+                    (document(tess, self.new_document_id(tess), map, None), 0, true)
                 }
             };
             if !write.allows(&doc) {
@@ -521,7 +521,7 @@ impl HexDBEngine {
             self.check_quota(&caller_login(), tess, size, self.find_file(tess, &path, &name).await?.is_none()).await?;
         }
         self.disk_used.fetch_sub(size.unwrap_or(0), Ordering::Relaxed);
-        let id = Ulid::generate();
+        let id = self.new_document_id(tess);
         let map = json!({
             "tessellation": tess, "path": path, "name": name, "size": size, "offset": 0,
             "declared_type": options.content_type, "modified_at": options.modified_at.map(time_text), "created_at": options.created_at.map(time_text),

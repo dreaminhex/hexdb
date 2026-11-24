@@ -271,6 +271,13 @@ pub async fn changes(
             format!("Changes after {} are no longer kept; take a new snapshot.", e.available_after),
         )
     };
+    // A group's feed is for its own hexes: one that's now in another partition must not
+    // apply this partition's changes (it would hold documents that aren't its own).
+    if let Some(hex) = params.hex.as_deref().filter(|_| scope == FeedScope::Group) {
+        if !engine.in_my_group(hex) {
+            return Err(ApiError::new(StatusCode::CONFLICT, "not_in_group", "That hex is in another partition now; it follows its own partition's Overseer."));
+        }
+    }
     // Only a group's replicas acknowledge its writes (replication.min_acks).
     if let Some(hex) = params.hex.as_deref().filter(|_| scope == FeedScope::Group) {
         engine.record_replica_progress(hex, params.after);

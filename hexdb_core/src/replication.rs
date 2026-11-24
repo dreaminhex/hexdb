@@ -138,23 +138,32 @@ async fn peer_signs(engine: &HexDBEngine, url: &str) -> bool {
     peers.iter().find(|p| url.starts_with(&peer_base_url(&p.hex))).is_none_or(|p| p.hex.signs_responses)
 }
 
+/// Lattice API calls about this hex's own group (file content, retiring, and what each hex
+/// keeps for itself); every other one carries a lattice-wide system write, partition 0's.
+const GROUP_CALLS: &[&str] = &["/lattice/content", "/lattice/retire", "/lattice/audit", "/lattice/ai-usage", "/lattice/throttle"];
+
+/// The Overseer a replica's lattice API call goes to: its own group's, or partition 0's for
+/// lattice-wide system writes (the same hex on a one-partition lattice).
+async fn overseer_for_call(engine: &HexDBEngine, path: &str) -> Option<crate::network::discovery::PeerHex> {
+    let map = engine.partition_map();
+    let group = map.is_single() || GROUP_CALLS.iter().any(|p| path.starts_with(p));
+    let peers = engine.peers.lock().await;
+    peers
+        .iter()
+        .filter(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER)
+        .find(|p| if group { engine.in_my_group(&p.hex.id) } else { map.partition_of_hex(&p.hex.id) == Some(0) })
+        .map(|p| p.hex.clone())
+}
+
 /// POST a JSON body to the Overseer's lattice API (e.g. to forward a sign-out from a replica).
 pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_json::Value) -> Result<()> {
-    let overseer = {
-        let peers = engine.peers.lock().await;
-        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER && engine.in_my_group(&p.hex.id)).map(|p| p.hex.clone())
-    }
-    .ok_or_else(|| anyhow!("no Overseer is reachable"))?;
+    let overseer = overseer_for_call(engine, path).await.ok_or_else(|| anyhow!("no Overseer is reachable"))?;
     post_to_peer(engine, &overseer, path, body).await
 }
 
 /// [`post_to_overseer`], returning the answer's body.
 pub async fn post_to_overseer_for(engine: &HexDBEngine, path: &str, body: &serde_json::Value, timeout: Duration) -> Result<Vec<u8>> {
-    let overseer = {
-        let peers = engine.peers.lock().await;
-        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER && engine.in_my_group(&p.hex.id)).map(|p| p.hex.clone())
-    }
-    .ok_or_else(|| anyhow!("no Overseer is reachable"))?;
+    let overseer = overseer_for_call(engine, path).await.ok_or_else(|| anyhow!("no Overseer is reachable"))?;
     post_to_peer_for(engine, &overseer, path, body, timeout).await
 }
 
@@ -856,6 +865,10 @@ impl Follower {
                     url.push_str(&format!("&slices={}", slices));
                 }
                 let page: SnapshotPage = self.get_ok(&url).await?;
+                // Elected, or moved to another partition, while copying: stop before applying it.
+                if engine.is_writable() || !engine.in_my_group(&overseer.hex.id) {
+                    bail!("this hex's role or partition changed during the full sync from '{}'", overseer.hex.name);
+                }
                 let mut writes = Vec::with_capacity(page.documents.len());
                 for (doc, seq) in page.documents {
                     if filtered && !slicing::holds(slices, slicing::slice_of(name, doc.id)) {
@@ -950,6 +963,13 @@ impl Follower {
         };
         let session = self.session.as_mut().unwrap();
         if batch.source_id != session.source_id {
+            self.session = None;
+            return Ok(Duration::ZERO);
+        }
+        // The long poll may have been sent before this hex was elected, or before the
+        // partition map moved it to another group: a batch from an Overseer that isn't its
+        // group's (any more) is dropped unapplied, or it would hold another partition's documents.
+        if self.engine.is_writable() || !self.engine.in_my_group(&session.overseer_id) {
             self.session = None;
             return Ok(Duration::ZERO);
         }

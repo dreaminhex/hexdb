@@ -79,26 +79,32 @@ fn a_lattice_is_split_only_while_empty_and_then_writes_only_its_own_slices() -> 
     assert_eq!(res.body["this_hex"], 0, "{}", res.body);
     assert_eq!(res.body["partitions"][1]["slices"].as_array().map(Vec::len), Some(32), "{}", res.body);
 
-    // A user write lands only in a slice this hex's partition owns; one for partition 1
-    // (no hex holds it yet) is refused before anything is written.
-    let (mut stored, mut refused) = (0, 0);
+    // New documents get IDs in this hex's partition, so inserts land here.
     for n in 0..40 {
         let res = server.request(Method::POST, "/orders", Some(&json!({ "n": n })), &[])?;
-        match res.status.as_u16() {
-            201 => {
-                let id: ulid::Ulid = res.body["id"].as_str().unwrap_or_default().parse()?;
-                assert!(hexdb_core::slicing::slice_of("orders", id) < 32, "a document for partition 1 was stored here");
-                stored += 1;
-            }
-            503 => {
-                assert_eq!(res.body["error"]["code"], "partition_unavailable", "{}", res.body);
-                refused += 1;
-            }
-            other => panic!("unexpected {}: {}", other, res.body),
-        }
+        assert_eq!(res.status, 201, "{}", res.body);
+        let id: ulid::Ulid = res.body["id"].as_str().unwrap_or_default().parse()?;
+        assert!(hexdb_core::slicing::slice_of("orders", id) < 32, "a document for partition 1 was stored here");
     }
-    assert!(stored > 0 && refused > 0, "stored {}, refused {}", stored, refused);
-    assert_eq!(server.count("orders")?, stored);
+    assert_eq!(server.count("orders")?, 40);
+    // A write to a document of partition 1 (no hex leads it yet) is refused untouched.
+    let theirs = loop {
+        let id = ulid::Ulid::generate();
+        if hexdb_core::slicing::slice_of("orders", id) >= 32 {
+            break id;
+        }
+    };
+    let res = server.request(Method::PUT, &format!("/orders/{}", theirs), Some(&json!({ "n": 1 })), &[])?;
+    assert_eq!(res.status, 503, "{}", res.body);
+    assert_eq!(res.body["error"]["code"], "partition_unavailable", "{}", res.body);
+    // A transaction naming it is refused as crossing partitions, and so are upserts.
+    let tx = json!({ "operations": [{ "op": "insert", "tessellation": "orders", "data": { "n": 1 } }, { "op": "replace", "tessellation": "orders", "id": theirs.to_string(), "data": { "n": 2 } }] });
+    let res = server.request(Method::POST, "/transactions", Some(&tx), &[])?;
+    assert_eq!(res.status, 409, "{}", res.body);
+    assert!(res.body.to_string().contains("cross_partition"), "{}", res.body);
+    let res = server.request(Method::POST, "/orders/_upsert", Some(&json!({ "key": ["n"], "documents": [{ "n": 1 }] })), &[])?;
+    assert_eq!(res.status, 409, "{}", res.body);
+    assert_eq!(server.count("orders")?, 40);
 
     // System writes (users) aren't placed by hash: they always work on partition 0.
     let user = server.request(Method::POST, "/users", Some(&json!({ "login": "ada", "password": "correct horse battery", "email_address": "ada@example.com", "roles": [] })), &[])?;
@@ -146,21 +152,26 @@ fn each_partition_leads_itself_and_partition_zero_serves_the_system_tessellation
     })?;
     assert_eq!(role(&a)?, "Overseer");
 
-    // Each takes user writes only for its own slices.
+    // Each hex's inserts land in its own partition's slices.
+    let mut on_b = None;
     for (server, low) in [(&a, true), (&b, false)] {
-        let mut stored = 0;
-        for n in 0..30 {
+        for n in 0..20 {
             let res = server.request(Method::POST, "/orders", Some(&json!({ "n": n })), &[])?;
-            if res.status == 201 {
-                let id: ulid::Ulid = res.body["id"].as_str().unwrap_or_default().parse()?;
-                assert_eq!(hexdb_core::slicing::slice_of("orders", id) < 32, low, "a document landed in the wrong partition");
-                stored += 1;
-            } else {
-                assert_eq!(res.body["error"]["code"], "partition_unavailable", "{}", res.body);
+            assert_eq!(res.status, 201, "{}", res.body);
+            let id: ulid::Ulid = res.body["id"].as_str().unwrap_or_default().parse()?;
+            assert_eq!(hexdb_core::slicing::slice_of("orders", id) < 32, low, "a document landed in the wrong partition");
+            if !low {
+                on_b = Some(id);
             }
         }
-        assert!(stored > 0);
     }
+    assert_eq!((a.count("orders")?, b.count("orders")?), (20, 20), "each partition holds exactly its own documents");
+    // A change to partition 1's document sent to A is passed to B, which owns it.
+    let id = on_b.unwrap();
+    let res = a.request(Method::PATCH, &format!("/orders/{}", id), Some(&json!({ "n": 99 })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    assert_eq!(b.get_doc("orders", &id.to_string())?.map(|d| d["n"].clone()), Some(json!(99)));
+    assert!(a.get_doc("orders", &id.to_string())?.is_none(), "A doesn't hold partition 1's documents");
 
     // A user made on partition 0 reaches partition 1 through the system stream.
     let res = a.request(Method::POST, "/users", Some(&json!({ "login": "ada", "password": "correct horse battery", "email_address": "ada@example.com", "roles": [] })), &[])?;
@@ -168,10 +179,11 @@ fn each_partition_leads_itself_and_partition_zero_serves_the_system_tessellation
     wait_until(Duration::from_secs(30), "the user to reach partition 1", || {
         Ok(b.request(Method::GET, "/users", None, &[])?.body.to_string().contains("\"ada\""))
     })?;
-    // Partition 1 doesn't make users itself (they're partition 0's).
+    // A user made through partition 1 is passed to partition 0, which keeps users.
     let res = b.request(Method::POST, "/users", Some(&json!({ "login": "bob", "password": "correct horse battery", "email_address": "bob@example.com", "roles": [] })), &[])?;
-    assert_eq!(res.status, 503, "{}", res.body);
-    assert_eq!(res.body["error"]["code"], "partition_unavailable", "{}", res.body);
+    assert!(res.status.is_success(), "{}", res.body);
+    assert!(a.request(Method::GET, "/users", None, &[])?.body.to_string().contains("\"bob\""));
+    wait_until(Duration::from_secs(30), "bob to reach partition 1", || Ok(b.request(Method::GET, "/users", None, &[])?.body.to_string().contains("\"bob\"")))?;
 
     // An index defined on partition 0 reaches partition 1 with the catalog.
     let res = a.request(Method::POST, "/tessellations/orders/indexes", Some(&json!({ "name": "by_n", "fields": ["n"] })), &[])?;
