@@ -2833,6 +2833,10 @@ hexdb config rollback 3 -m "bad key"
 | `alerts.pagerduty.routing_key` | empty | PagerDuty Events API v2 key (a secret); see [Alert channels](#alert-channels) |
 | `alerts.twilio.account_sid`, `.auth_token`, `.from`, `.to` | empty | SMS through Twilio (the token is a secret) |
 | `alerts.chat.webhook_urls` | empty | Slack, Teams or Discord incoming webhooks (a secret) |
+| `backup.continuous.enabled` | false | Ship to an S3-compatible store for point-in-time restore; see [Point-in-time restore](#23-operations) |
+| `backup.continuous.endpoint`, `.bucket`, `.prefix`, `.region` | empty, empty, the lattice's name, `us-east-1` | Where to ship |
+| `backup.continuous.access_key_id`, `.secret_access_key` | empty | The store's credentials (the secret key is write-only) |
+| `backup.continuous.retention_days`, `.base_hours`, `.max_lag_seconds` | 7, 24, 60 | How far back a restore can go, how often a base is shipped, and the most seconds a write waits to be shipped |
 | `alerts.webhook.url`, `alerts.webhook.signing_secret` | empty | A JSON webhook, signed with HMAC-SHA256 when the secret is set |
 | `ai.max_tokens_per_file` | 4,000 | Tokens one file may use |
 | `ai.tagging.enabled` | false | AI tags and descriptions for uploaded files |
@@ -3070,6 +3074,30 @@ Writes continue throughout, but flushes wait until the backup finishes; with har
 Restoring: stop the hex (or start a new one), point `storage.path` at the backup folder (or copy it into the data directory), and start it with the same encryption keys. Recovery replays the copied WAL on top of the SSTables, exactly as after a crash at the backup's sequence number. The restored data gets a new change history ID, so replicas take a full sync from it and plugins start at its end, rather than mistaking it for the original's history.
 
 Hard-linked backups share disk blocks with the live data, so they don't protect against losing the disk: copy backup folders to other storage. Back up `storage.encryption_key` separately too; the data is useless without it. A Replicant is another option: a live copy you can back up while it's stopped.
+
+**Point-in-time restore.** A backup is a copy at the moment it runs, on the lattice's own machines. With continuous shipping on, the Overseer also keeps a copy off the lattice, in any S3-compatible store (AWS S3, Cloudflare R2, Backblaze B2, Google Cloud Storage's interoperability API, MinIO, RustFS, Tigris), from which the lattice can be rebuilt as it was at any moment within the retention window. Set it in the lattice configuration (the Configuration page or `hexdb config set`; the secret is write-only):
+
+```bash
+hexdb config set backup.continuous.endpoint https://s3.us-east-1.amazonaws.com
+hexdb config set backup.continuous.bucket my-lattice-backups
+hexdb config set backup.continuous.access_key_id AKIA...
+hexdb config set backup.continuous.secret_access_key ...
+hexdb config set backup.continuous.enabled true
+```
+
+- **What goes up.** A lattice backup without its file content every `backup.continuous.base_hours` (24); every pack file of file content (a sealed one once, the open one as its new bytes each pass); every closed WAL segment, the WAL being rotated so no acknowledged write waits longer than `backup.continuous.max_lag_seconds` (60) to be shipped. Everything is already encrypted with the storage key, so the store never sees a document, a name or a key; the small state file that records what's shipped is sealed with it too. Objects go under `<prefix>/history/<history ID>/` (`backup.continuous.prefix`, default the lattice's name); a new Overseer after a failover ships under its own history, starting with a base at once.
+- **Who ships.** The Overseer, every few seconds, at low priority; a hex that doesn't hold the whole lattice doesn't. While shipping is on, no WAL segment is pruned before it's in the store: retired segments go to the archive even with `storage.change_history_hours = 0`, and the archive's limits wait for the shipper.
+- **Retention.** `backup.continuous.retention_days` (7). Older bases are deleted except the newest one older than the window, with the segments only they needed; a pack's objects go once garbage collection removed the pack from the lattice before the oldest kept base. Histories of earlier Overseers are removed when nothing in them is newer than the window.
+- **Status.** `GET /backups/continuous` (the `maintenance` permission) shows the store, the newest shipped sequence number, the last pass, the oldest moment a restore can reach, the last base, and the last error.
+
+To restore, on any machine with the lattice's storage key (`storage.encryption_key` in the configuration, as for any restore) and the store's credentials in the environment (`HEXDB_S3_ACCESS_KEY_ID` and `HEXDB_S3_SECRET_ACCESS_KEY`, or `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`):
+
+```bash
+hexdb restore --endpoint https://s3.us-east-1.amazonaws.com --bucket my-lattice-backups \
+  --until 2026-11-23T14:05:00Z --to /var/lib/hexdb-restored
+```
+
+It takes the newest base shipped at or before `--until` (default: the newest moment shipped), the WAL segments after it, cutting the last one after the last commit at or before `--until` (a commit is never cut in half, so a transaction is in the restore whole or not at all), and every pack shipped in that history (chunks written later come along unused, and garbage collection removes them). The folder gets a history of its own. Point `storage.path` at it and start the hex, as with a restored backup.
 
 **Upgrades.** Stop the hex, replace the binaries and the UI, and start it. Data in older formats is read and rewritten by compaction. In a lattice, upgrade replicas first, then the Overseer. A failover moves the Overseer role while it's down.
 

@@ -3501,6 +3501,38 @@
         }
       }
     },
+    "/backups/continuous": {
+      "get": {
+        "tags": [
+          "Server"
+        ],
+        "summary": "Continuous shipping for point-in-time restore: the store, what's shipped, the oldest restorable moment, the last error (maintenance permission)",
+        "operationId": "get_backups_continuous",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An error: {\"error\": {\"code\", \"message\"}}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/backup": {
       "post": {
         "tags": [

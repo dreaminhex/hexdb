@@ -157,6 +157,27 @@ enum Commands {
         #[arg(short, long)]
         url: Option<String>,
     },
+    /// Rebuild a data folder as the lattice was at a moment, from what point-in-time restore
+    /// shipped to an S3-compatible store (credentials: HEXDB_S3_ACCESS_KEY_ID and
+    /// HEXDB_S3_SECRET_ACCESS_KEY, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)
+    Restore {
+        /// The store's endpoint, e.g. https://s3.us-east-1.amazonaws.com
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long)]
+        bucket: String,
+        /// Folder in the bucket (default: the lattice's name)
+        #[arg(long)]
+        prefix: Option<String>,
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        /// The moment to restore, RFC 3339 (e.g. 2026-11-23T14:05:00Z); default: the newest shipped
+        #[arg(long)]
+        until: Option<String>,
+        /// An empty folder for the restored data
+        #[arg(long)]
+        to: PathBuf,
+    },
     /// Upload files to a files tessellation (needs a token with write access)
     Put {
         /// The files tessellation, e.g. media
@@ -760,6 +781,34 @@ async fn run() -> Result<()> {
         Commands::Ls { tessellation, folder, search, url } => {
             let (base, config) = base_url(config_path, url)?;
             files::ls(&config, &base, token, &tessellation, &folder, search.as_deref()).await
+        }
+        Commands::Restore { endpoint, bucket, prefix, region, until, to } => {
+            let config = load(config_path)?;
+            let keys = config.key_ring().context("The lattice's storage key (storage.encryption_key) is needed to read what was shipped")?;
+            let env = |names: [&str; 2]| names.iter().find_map(|n| std::env::var(n).ok().filter(|v| !v.is_empty()));
+            let access_key_id = env(["HEXDB_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"]).context("Set HEXDB_S3_ACCESS_KEY_ID (or AWS_ACCESS_KEY_ID)")?;
+            let secret_access_key = env(["HEXDB_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"]).context("Set HEXDB_S3_SECRET_ACCESS_KEY (or AWS_SECRET_ACCESS_KEY)")?;
+            let prefix = match prefix {
+                Some(p) => p,
+                None => hexdb_core::network::discovery::resolve_lattice_name(&config, &keys)?.0,
+            };
+            let until = match until {
+                Some(t) => Some(t.parse::<jiff::Timestamp>().with_context(|| format!("--until '{}' isn't an RFC 3339 time", t))?.as_millisecond()),
+                None => None,
+            };
+            let store = hexdb_core::objstore::StoreConfig { endpoint, bucket, region, access_key_id, secret_access_key };
+            let report = hexdb_core::restore::restore(store, &prefix, until, &to, &keys).await?;
+            println!(
+                "Restored from base {} (shipped {}) and {} WAL segment(s){} into {}, with {} pack file(s).",
+                report.base_sequence,
+                jiff::Timestamp::from_millisecond(report.base_created).map(|t| t.to_string()).unwrap_or_default(),
+                report.segments,
+                if report.cut { ", the last cut at --until" } else { "" },
+                to.display(),
+                report.packs
+            );
+            println!("To start it: point storage.path at that folder (with the same storage key) and start the hex.");
+            Ok(())
         }
         Commands::Backup { name, list, hex, url } => {
             let (base, config) = base_url(config_path, url)?;

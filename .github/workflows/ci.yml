@@ -99,6 +99,34 @@ jobs:
             (cd "$dir" && npm audit --omit=dev --audit-level=moderate)
           done
 
+  # Point-in-time restore against a real S3-compatible store (RustFS; MinIO's images are no
+  # longer published openly). Service containers only run on Linux runners, so it's a job of
+  # its own; elsewhere these tests skip themselves.
+  pitr:
+    name: Point-in-time restore (S3)
+    runs-on: ubuntu-latest
+    services:
+      s3:
+        image: rustfs/rustfs@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
+        ports: ["9000:9000"]
+    env:
+      HEXDB_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      HEXDB_TEST_S3_KEY: rustfsadmin
+      HEXDB_TEST_S3_SECRET: rustfsadmin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: Wait for the store
+        run: for i in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:9000 && exit 0; sleep 1; done; exit 1
+      - name: Test
+        run: |
+          cargo build --locked -p hexdb_api -p hexdb_cli
+          cargo test --locked -p hexdb_core --lib objstore
+          cargo test --locked -p hexdb_tests --test point_in_time
+
   drivers:
     name: Drivers
     runs-on: ubuntu-latest

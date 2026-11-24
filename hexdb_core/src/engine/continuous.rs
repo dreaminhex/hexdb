@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 /// Associated data of the sealed state, so another object can't stand in for it.
-const STATE_AAD: &[u8] = b"hexdb-continuous-state";
+pub const STATE_AAD: &[u8] = b"hexdb-continuous-state";
 const STATE_FILE: &str = "state.hxe";
 
 /// Shipping settings from the lattice configuration; None when it's off or incomplete.

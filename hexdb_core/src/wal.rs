@@ -568,6 +568,30 @@ pub fn replay(dir: &Path, keys: &crate::crypt::KeyRing, mut apply: impl FnMut(Wa
 /// Read one segment's records in order, passing each to `apply` until it
 /// returns false. `is_last` only affects how a torn tail is reported (a crash
 /// mid-write is expected in the newest segment).
+/// Cut a segment after its last record committed at or before `until` (epoch
+/// milliseconds), for a point-in-time restore. A record is one commit, so a
+/// transaction is kept whole or dropped whole. Returns true if anything was cut
+/// (a later record was found); the segment is then the restore's last.
+pub fn cut_after_time(path: &Path, keys: &crate::crypt::KeyRing, until: i64) -> Result<bool> {
+    let bytes = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut offset = 0usize;
+    while offset + 4 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap_or_default()) as usize;
+        if !(NONCE_LEN + 16..=MAX_RECORD_LEN).contains(&len) || offset + 4 + len > bytes.len() {
+            break;
+        }
+        let record = decode_record(keys, &bytes[offset + 4..offset + 4 + len]).with_context(|| format!("unreadable record in {}", path.display()))?;
+        if record.time > until {
+            let file = OpenOptions::new().write(true).open(path)?;
+            file.set_len(offset as u64)?;
+            file.sync_all()?;
+            return Ok(true);
+        }
+        offset += 4 + len;
+    }
+    Ok(false)
+}
+
 fn read_segment(path: &Path, keys: &crate::crypt::KeyRing, is_last: bool, stats: &mut ReplayStats, apply: &mut dyn FnMut(WalRecord) -> bool) -> Result<()> {
     let mut reader = io::BufReader::new(File::open(path).with_context(|| format!("Failed to open {}", path.display()))?);
     loop {
