@@ -184,6 +184,11 @@ pub const PARTITION_LOCAL_TESSELLATIONS: &[&str] = &[
     crate::streams::STREAM_OFFSETS_TESSELLATION,
 ];
 
+/// System tessellations each hex writes for itself in the stage-2 preview (its own
+/// audit entries, sign-in failures and AI usage), rather than getting them from
+/// partition 0: a hex outside partition 0 keeps its own.
+pub const HEX_WRITTEN_TESSELLATIONS: &[&str] = &[crate::audit::AUDIT_TESSELLATION, crate::auth::THROTTLE_TESSELLATION, crate::ai::AI_USAGE_TESSELLATION];
+
 /// Where a record belongs in a partitioned lattice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
@@ -231,6 +236,28 @@ impl HexDBEngine {
         map.partition_of_hex(&self.id.to_string()).and_then(|id| map.partitions.iter().find(|p| p.id == id)).map_or(0, |p| p.slices)
     }
 
+    /// Lattice-wide system tessellations every hex gets from partition 0's Overseer
+    /// (users, roles, API keys, the configuration, the partition map...): system ones,
+    /// but not those that travel with their write, aren't replicated at all, or that
+    /// each hex writes for itself in this preview.
+    pub fn in_system_scope(&self, tessellation: &str) -> bool {
+        self.is_system_tessellation(tessellation)
+            && !PARTITION_LOCAL_TESSELLATIONS.contains(&tessellation)
+            && !HEX_WRITTEN_TESSELLATIONS.contains(&tessellation)
+            && !crate::engine::is_local_only(tessellation)
+    }
+
+    /// True when this hex gets `tessellation` from partition 0's system stream instead of
+    /// its own group: on a multi-partition lattice, outside partition 0. Its group's feed
+    /// and snapshot leave it out, and a group full sync never drops or thins it out.
+    pub fn from_system_stream(&self, tessellation: &str) -> bool {
+        let outside_zero = {
+            let map = self.partitions.map.read().unwrap();
+            !map.is_single() && map.partition_of_hex(&self.id.to_string()) != Some(0)
+        };
+        outside_zero && self.in_system_scope(tessellation)
+    }
+
     /// Why a write can't be committed here, if one of its user documents belongs to a
     /// partition this hex isn't in. Always None on a one-partition lattice.
     pub(crate) fn misplaced_write(&self, items: &[crate::engine::writes::BatchItem]) -> Option<String> {
@@ -241,6 +268,11 @@ impl HexDBEngine {
         let mine = map.partition_of_hex(&self.id.to_string());
         for item in items {
             let tess = &item.key.tessellation;
+            // Lattice-wide system records are partition 0's: a hex outside it has them
+            // only as copies (its system stream would remove one written here).
+            if mine != Some(0) && self.in_system_scope(tess) {
+                return Some(format!("'{}' is kept by partition 0, which this hex isn't in. Nothing was written; send it to a hex of partition 0.", tess));
+            }
             if PARTITION_LOCAL_TESSELLATIONS.contains(&tess.as_str()) || self.is_system_tessellation(tess) {
                 continue;
             }

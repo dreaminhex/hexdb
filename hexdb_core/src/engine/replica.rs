@@ -70,6 +70,12 @@ fn continuation_id() -> Ulid {
     Ulid::from(2u128)
 }
 
+/// The cursor of the system stream from partition 0 (hexes outside it; see
+/// `crate::system_follower`), kept apart from the main replication cursor.
+fn system_cursor_id() -> Ulid {
+    Ulid::from(3u128)
+}
+
 /// One write received from the Overseer.
 #[derive(Debug, Clone)]
 pub enum ReplicaWrite {
@@ -264,6 +270,50 @@ impl HexDBEngine {
             "system" if name.starts_with('_') => self.ensure_system_tessellation(name),
             kind => self.create_tessellation_unchecked(name, kind).map(|_| ()),
         }
+    }
+
+    /// Apply writes from partition 0's system stream atomically, with its own cursor.
+    /// Unlike [`Self::apply_replicated`], it leaves this hex's replication position,
+    /// continuation and content tracking alone: those follow its own group's Overseer.
+    pub(crate) async fn apply_system_replicated(&self, writes: Vec<ReplicaWrite>, cursor: Option<&ReplicaCursor>) -> Result<()> {
+        let mut last: HashMap<DocKey, usize> = HashMap::new();
+        for (i, w) in writes.iter().enumerate() {
+            last.insert(w.key(), i);
+        }
+        let mut items = Vec::with_capacity(last.len() + 1);
+        for (i, w) in writes.into_iter().enumerate() {
+            let key = w.key();
+            if last.get(&key) != Some(&i) {
+                continue;
+            }
+            self.ensure_replicated_tessellation(&key.tessellation)?;
+            let op = match w {
+                ReplicaWrite::Put(doc) => WalOp::Put(doc),
+                ReplicaWrite::Delete { tessellation, id } => WalOp::Delete { tessellation, id },
+            };
+            items.push(BatchItem { key, op, expected_seq: None });
+        }
+        if let Some(cursor) = cursor {
+            self.ensure_system_tessellation(REPLICATION_TESSELLATION)?;
+            let mut data = crate::document::CompactFields::new();
+            data.insert("source_id".into(), FieldValue::String(cursor.source_id.clone()));
+            data.insert("applied_seq".into(), FieldValue::Integer(cursor.applied_seq as i64));
+            data.insert("held_slices".into(), FieldValue::Integer(0));
+            let doc = Document { id: system_cursor_id(), tessellation: REPLICATION_TESSELLATION.into(), data, ttl: None };
+            items.push(BatchItem { key: DocKey::new(REPLICATION_TESSELLATION, doc.id), op: WalOp::Put(doc), expected_seq: None });
+        }
+        self.commit_replicated(items).await?;
+        Ok(())
+    }
+
+    /// The saved cursor of the system stream from partition 0, if any.
+    pub(crate) async fn load_system_cursor(&self) -> Option<ReplicaCursor> {
+        if !self.tessellation_exists(REPLICATION_TESSELLATION) {
+            return None;
+        }
+        let (doc, _) = self.read_latest(&DocKey::new(REPLICATION_TESSELLATION, system_cursor_id())).await.ok()?;
+        let data = doc?.data_json();
+        Some(ReplicaCursor { source_id: data.get("source_id")?.as_str()?.to_string(), applied_seq: data.get("applied_seq")?.as_u64()?, held_slices: 0 })
     }
 
     /// Apply writes from the Overseer atomically, with the new cursor.

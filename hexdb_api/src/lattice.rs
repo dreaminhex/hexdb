@@ -22,7 +22,7 @@ use axum::{
 };
 use hexdb_core::{
     engine::HexDBEngine,
-    replication::{ChangeBatch, SnapshotPage},
+    replication::{ChangeBatch, FeedScope, SnapshotPage},
     LATTICE_SIGNATURE_HEADER,
 };
 use serde::Deserialize;
@@ -126,18 +126,38 @@ pub async fn chunk(Path(id): Path<String>, method: Method, uri: Uri, headers: He
     Ok(response)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeParams {
+    /// group (default), system or catalog: see hexdb_core::replication::FeedScope.
+    pub scope: Option<String>,
+}
+
+/// The feed scope asked for. The system and catalog scopes are partition 0's to serve.
+fn feed_scope(engine: &HexDBEngine, scope: Option<&str>) -> Result<FeedScope, ApiError> {
+    let scope = FeedScope::parse(scope).ok_or_else(|| ApiError::invalid("scope must be group, system or catalog."))?;
+    if scope != FeedScope::Group && engine.my_partition() != Some(0) {
+        return Err(ApiError::new(StatusCode::CONFLICT, "not_partition_zero", "Only the Overseer of partition 0 serves the system stream."));
+    }
+    Ok(scope)
+}
+
 /// Where a full sync starts.
-pub async fn snapshot(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
+pub async fn snapshot(params: Result<Query<ScopeParams>, QueryRejection>, method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, b"")?;
     not_rebuilding(&engine)?;
-    Ok(Json(engine.snapshot_meta()).into_response())
+    let Query(params) = params?;
+    let scope = feed_scope(&engine, params.scope.as_deref())?;
+    Ok(Json(engine.snapshot_meta_for(scope)).into_response())
 }
 
 /// Tessellations and index definitions (replicas poll this for new ones).
-pub async fn catalog(method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
+pub async fn catalog(params: Result<Query<ScopeParams>, QueryRejection>, method: Method, uri: Uri, headers: HeaderMap, axum::extract::State(engine): Engine) -> ApiResult {
     authorize(&engine, &headers, &method, &uri, b"")?;
     not_rebuilding(&engine)?;
-    Ok(Json(engine.snapshot_meta()).into_response())
+    let Query(params) = params?;
+    let scope = feed_scope(&engine, params.scope.as_deref())?;
+    Ok(Json(engine.snapshot_meta_for(scope)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +246,8 @@ pub struct ChangeParams {
     pub limit: Option<usize>,
     /// The polling replica's hex ID; `after` doubles as its acknowledgement.
     pub hex: Option<String>,
+    /// group (default) or system: see hexdb_core::replication::FeedScope.
+    pub scope: Option<String>,
 }
 
 /// Changes after a sequence number, with typed documents; long-polls up to `wait` seconds.
@@ -239,6 +261,7 @@ pub async fn changes(
     authorize(&engine, &headers, &method, &uri, b"")?;
     not_rebuilding(&engine)?;
     let Query(params) = params?;
+    let scope = feed_scope(&engine, params.scope.as_deref())?;
     let limit = params.limit.unwrap_or(1000).clamp(1, 10_000);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(params.wait.unwrap_or(0).min(30));
     let gone = |e: hexdb_core::HistoryExpired| {
@@ -248,14 +271,15 @@ pub async fn changes(
             format!("Changes after {} are no longer kept; take a new snapshot.", e.available_after),
         )
     };
-    if let Some(hex) = params.hex.as_deref() {
+    // Only a group's replicas acknowledge its writes (replication.min_acks).
+    if let Some(hex) = params.hex.as_deref().filter(|_| scope == FeedScope::Group) {
         engine.record_replica_progress(hex, params.after);
     }
     // A replica further behind than the in-memory feed reads the history on disk.
     if params.after < engine.changes.available_after() {
         let taken = engine.changes_after(params.after, limit).await.map_err(gone)?;
         let last_seq = taken.last().map_or(params.after, |c| c.seq);
-        let changes = taken.iter().filter(|c| !hexdb_core::engine::is_local_only(&c.tessellation)).map(|c| (**c).clone()).collect();
+        let changes = taken.iter().filter(|c| engine.in_feed(&c.tessellation, scope)).map(|c| (**c).clone()).collect();
         still_overseer(&engine)?;
         return Ok(Json(ChangeBatch {
             source_id: engine.history_id(),
@@ -281,7 +305,7 @@ pub async fn changes(
             let last_seq = taken.last().map_or(params.after, |c| c.seq);
             let changes = taken
                 .iter()
-                .filter(|c| !hexdb_core::engine::is_local_only(&c.tessellation))
+                .filter(|c| engine.in_feed(&c.tessellation, scope))
                 .map(|c| (**c).clone())
                 .collect();
             still_overseer(&engine)?;

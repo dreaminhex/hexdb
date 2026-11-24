@@ -3,10 +3,37 @@
 //! holds no user documents, and a hex taking user writes only for the slices its
 //! partition owns.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use hexdb_tests::{TestOptions, TestServer, TEST_ADMIN_PASSWORD};
 use reqwest::Method;
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
+
+fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> Result<bool>) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if check().unwrap_or(false) {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            bail!("timed out waiting for {}", what);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// A hex of a two-hex lattice with partitioning on.
+fn lattice_hex(ports: &[u16], i: usize, ram_mb: u64) -> TestOptions {
+    TestOptions {
+        lattice: Some(format!("partitions-{}", ports[0])),
+        discovery_port: Some(ports[i]),
+        peers: ports.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, p)| format!("127.0.0.1:{}", p)).collect(),
+        ram_mb: Some(ram_mb),
+        discovery_interval_seconds: Some(1),
+        extra_toml: "\n[partitioning]\nenabled = true\n".into(),
+        ..Default::default()
+    }
+}
 
 fn enabled() -> TestOptions {
     TestOptions { extra_toml: "\n[partitioning]\nenabled = true\n".into(), ..Default::default() }
@@ -90,5 +117,75 @@ fn the_map_stays_put_while_partitioning_is_off() -> Result<()> {
     let res = server.request(Method::PUT, "/status/partitions", Some(&json!({ "password": TEST_ADMIN_PASSWORD, "partitions": split(&me) })), &[])?;
     assert_eq!(res.status, 400, "{}", res.body);
     assert!(res.body.to_string().contains("partitioning.enabled"), "{}", res.body);
+    Ok(())
+}
+
+/// Two partitions of one hex each: each hex leads its own group, writes land only in
+/// the partition that owns them, and partition 0's users, keys and tessellation
+/// definitions reach the other partition through the system stream.
+#[test]
+fn each_partition_leads_itself_and_partition_zero_serves_the_system_tessellations() -> Result<()> {
+    let ports = [TestServer::free_port()?, TestServer::free_port()?];
+    let a = TestServer::start_with(lattice_hex(&ports, 0, 4096))?;
+    let b = TestServer::start_with(lattice_hex(&ports, 1, 1024))?;
+    let role = |s: &TestServer| -> Result<String> { Ok(s.request(Method::GET, "/status", None, &[])?.body["hex_type"].as_str().unwrap_or_default().to_string()) };
+    wait_until(Duration::from_secs(30), "one Overseer and a replica", || Ok(role(&a)? == "Overseer" && role(&b)? != "Overseer"))?;
+    let (ida, idb) = (hex_id(&a)?, hex_id(&b)?);
+
+    let map = json!([
+        { "id": 0, "slices": (0..32).collect::<Vec<u32>>(), "hexes": [ida] },
+        { "id": 1, "slices": (32..64).collect::<Vec<u32>>(), "hexes": [idb] },
+    ]);
+    let res = a.request(Method::PUT, "/status/partitions", Some(&json!({ "password": TEST_ADMIN_PASSWORD, "partitions": map })), &[])?;
+    assert_eq!(res.status, 200, "{}", res.body);
+
+    // B learns the map and leads partition 1; A keeps leading partition 0.
+    wait_until(Duration::from_secs(30), "B to lead partition 1", || {
+        let p = b.request(Method::GET, "/status/partitions", None, &[])?.body;
+        Ok(p["epoch"] == 2 && p["this_hex"] == 1 && role(&b)? == "Overseer")
+    })?;
+    assert_eq!(role(&a)?, "Overseer");
+
+    // Each takes user writes only for its own slices.
+    for (server, low) in [(&a, true), (&b, false)] {
+        let mut stored = 0;
+        for n in 0..30 {
+            let res = server.request(Method::POST, "/orders", Some(&json!({ "n": n })), &[])?;
+            if res.status == 201 {
+                let id: ulid::Ulid = res.body["id"].as_str().unwrap_or_default().parse()?;
+                assert_eq!(hexdb_core::slicing::slice_of("orders", id) < 32, low, "a document landed in the wrong partition");
+                stored += 1;
+            } else {
+                assert_eq!(res.body["error"]["code"], "partition_unavailable", "{}", res.body);
+            }
+        }
+        assert!(stored > 0);
+    }
+
+    // A user made on partition 0 reaches partition 1 through the system stream.
+    let res = a.request(Method::POST, "/users", Some(&json!({ "login": "ada", "password": "correct horse battery", "email_address": "ada@example.com", "roles": [] })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    wait_until(Duration::from_secs(30), "the user to reach partition 1", || {
+        Ok(b.request(Method::GET, "/users", None, &[])?.body.to_string().contains("\"ada\""))
+    })?;
+    // Partition 1 doesn't make users itself (they're partition 0's).
+    let res = b.request(Method::POST, "/users", Some(&json!({ "login": "bob", "password": "correct horse battery", "email_address": "bob@example.com", "roles": [] })), &[])?;
+    assert_eq!(res.status, 503, "{}", res.body);
+    assert_eq!(res.body["error"]["code"], "partition_unavailable", "{}", res.body);
+
+    // An index defined on partition 0 reaches partition 1 with the catalog.
+    let res = a.request(Method::POST, "/tessellations/orders/indexes", Some(&json!({ "name": "by_n", "fields": ["n"] })), &[])?;
+    assert!(res.status.is_success(), "{}", res.body);
+    wait_until(Duration::from_secs(30), "the index to reach partition 1", || {
+        Ok(b.request(Method::GET, "/tessellations/orders/indexes", None, &[])?.body.to_string().contains("by_n"))
+    })?;
+
+    // Partition 1 keeps its own documents and the system tessellations through a restart.
+    let mut b = b;
+    let before = b.count("orders")?;
+    b.restart()?;
+    wait_until(Duration::from_secs(30), "B to lead partition 1 again", || Ok(role(&b)? == "Overseer"))?;
+    assert_eq!(b.count("orders")?, before);
+    assert!(b.request(Method::GET, "/users", None, &[])?.body.to_string().contains("\"ada\""));
     Ok(())
 }

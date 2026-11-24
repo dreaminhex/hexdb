@@ -388,6 +388,8 @@ async fn server() -> anyhow::Result<()> {
 
     // Follow the Overseer whenever this hex isn't one.
     hexdb_core::spawn_replication_task(engine.clone(), shutdown_rx.clone());
+    // Outside partition 0 of a partitioned lattice: users, roles, keys and the catalog from partition 0.
+    hexdb_core::system_follower::spawn_system_follower(engine.clone(), shutdown_rx.clone());
 
     // Record metrics samples for the dashboard's charts.
     spawn_metrics_task(

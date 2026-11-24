@@ -106,3 +106,21 @@ Each step is useful and testable alone, and the first two change nothing for one
 1. **Empty lattices only.** A multi-partition map can be set only before the lattice holds user documents, until stage 4 can move data.
 2. **Enforced parent links and cascading deletes** across partitions are refused until stage 3.
 3. **Preview.** Stage 2 ships off by default as a preview, not for production data, because backups of a multi-partition lattice aren't mutually consistent until stage 5.
+
+## Progress
+
+- **Step 1** (done): `HexDBEngine::placement` recognizes system tessellations as the engine does, and `PARTITION_LOCAL_TESSELLATIONS` names those that travel with their write.
+- **Step 2** (done): `owned_slices()` replaces "all 64 slices" wherever it meant "everything this hex should hold".
+- **Step 3** (done): partition groups. Elections (`elect_in_group`), quorum, handovers, retiring, replication and forwarding stay within a hex's group (`in_my_group`, from the map's `hexes`). A hex the map doesn't place is never elected.
+- **Step 4** (done):
+  - The map writer (`PUT /status/partitions`): administrators, password re-check, behind `partitioning.enabled`. Several partitions only while the lattice holds no user documents, checked under the commit lock.
+  - A backstop refusing writes this hex's partition doesn't own (503 `partition_unavailable`): user documents of another partition, and lattice-wide system records on a hex outside partition 0.
+  - Feed scopes (`?scope=group|system|catalog`). A group feed outside partition 0 leaves out what partition 0 serves, and a group full sync never drops it.
+  - The system follower (`hexdb_core::system_follower`): every hex outside partition 0 copies users, roles, keys, the configuration and every tessellation's definition from partition 0's Overseer, with its own cursor.
+  - Test: `hexdb_tests/tests/partitions.rs`.
+
+## Preview limits so far (until steps 5 to 7)
+
+- No routing yet. A write sent to a hex whose partition doesn't own it is refused (503 `partition_unavailable`), not passed on. Reads answer from the hex's own partition only.
+- User management, API keys and tessellation definitions (DDL) are made on partition 0's hexes. Partition 1 gets them through the system stream. A tessellation dropped on partition 0 isn't dropped elsewhere yet.
+- Each hex keeps its own audit entries, sign-in failures and AI usage (`HEX_WRITTEN_TESSELLATIONS`).

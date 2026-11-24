@@ -77,9 +77,9 @@ use ulid::Ulid;
 
 pub use crate::network::lattice_auth::{LATTICE_RESPONSE_HEADER, LATTICE_SIGNATURE_HEADER};
 /// Documents per snapshot page and per applied batch.
-const PAGE: usize = 500;
+pub(crate) const PAGE: usize = 500;
 /// How long a replica long-polls the Overseer for changes.
-const POLL_SECONDS: u64 = 5;
+pub(crate) const POLL_SECONDS: u64 = 5;
 /// How often a streaming replica re-checks the Overseer's catalog (new tessellations, indexes).
 const CATALOG_EVERY: Duration = Duration::from_secs(15);
 
@@ -107,7 +107,7 @@ pub fn peer_base_url(peer: &crate::network::discovery::PeerHex) -> String {
 }
 
 /// Path and query of a URL, as signed.
-fn path_and_query(url: &str) -> String {
+pub(crate) fn path_and_query(url: &str) -> String {
     match reqwest::Url::parse(url) {
         Ok(u) => match u.query() {
             Some(q) => format!("{}?{}", u.path(), q),
@@ -421,6 +421,27 @@ pub struct ChangeBatch {
     pub pending_since: Option<UtcTime>,
 }
 
+/// What a feed (snapshot, changes) carries: a group's own data, the lattice-wide system
+/// tessellations partition 0 serves to every hex, or (for catalog syncs) every
+/// tessellation's definition. On a one-partition lattice, Group is everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedScope {
+    Group,
+    System,
+    Catalog,
+}
+
+impl FeedScope {
+    pub fn parse(value: Option<&str>) -> Option<FeedScope> {
+        match value {
+            None | Some("group") => Some(FeedScope::Group),
+            Some("system") => Some(FeedScope::System),
+            Some("catalog") => Some(FeedScope::Catalog),
+            Some(_) => None,
+        }
+    }
+}
+
 impl HexDBEngine {
     /// Fingerprint of what replicas copy from the catalog (see `ChangeBatch::catalog`).
     pub fn catalog_fingerprint(&self) -> String {
@@ -433,6 +454,24 @@ impl HexDBEngine {
     /// Snapshot metadata. The sequence number is taken first, so every change
     /// after it is either in the documents read afterwards or in the feed.
     pub fn snapshot_meta(&self) -> SnapshotMeta {
+        self.snapshot_meta_for(FeedScope::Group)
+    }
+
+    /// Whether a change or a tessellation goes out in a feed of this scope.
+    pub fn in_feed(&self, tessellation: &str, scope: FeedScope) -> bool {
+        if crate::engine::is_local_only(tessellation) {
+            return false;
+        }
+        match scope {
+            // A hex outside partition 0 leaves out what its replicas get from partition 0 directly.
+            FeedScope::Group => !self.from_system_stream(tessellation),
+            FeedScope::System => self.in_system_scope(tessellation),
+            FeedScope::Catalog => true,
+        }
+    }
+
+    /// [`Self::snapshot_meta`] for a feed scope.
+    pub fn snapshot_meta_for(&self, scope: FeedScope) -> SnapshotMeta {
         let seq = self.changes.published_seq();
         SnapshotMeta {
             source_id: self.history_id(),
@@ -440,7 +479,7 @@ impl HexDBEngine {
             hex_id: self.id.to_string(),
             available_after: self.history_available_after(),
             seq,
-            tessellations: self.tessellation_details().into_iter().filter(|(name, _)| !crate::engine::is_local_only(name)).collect(),
+            tessellations: self.tessellation_details().into_iter().filter(|(name, _)| self.in_feed(name, scope)).collect(),
             content_key: self.sealed_content_key(),
             token_key: self.sealed_token_key(),
             continues: self.continuation.read().unwrap().clone(),
@@ -794,7 +833,8 @@ impl Follower {
         let slices = self.wanted_slices(overseer).await;
         let wanted: HashSet<&str> = meta.tessellations.iter().map(|(n, _)| n.as_str()).collect();
         for (name, _) in engine.tessellation_details() {
-            if !crate::engine::is_local_only(name.as_str()) && !wanted.contains(name.as_str()) {
+            // What partition 0's system stream brings isn't in a group's snapshot: never dropped here.
+            if !crate::engine::is_local_only(name.as_str()) && !wanted.contains(name.as_str()) && !engine.from_system_stream(&name) {
                 engine.drop_replicated_tessellation(&name).await?;
             }
         }
