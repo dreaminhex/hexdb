@@ -39,6 +39,12 @@ fn enabled() -> TestOptions {
     TestOptions { extra_toml: "\n[partitioning]\nenabled = true\n".into(), ..Default::default() }
 }
 
+/// Documents in `tess` on this hex's partition only (a plain count merges every partition's).
+fn local_count(server: &TestServer, tess: &str) -> Result<u64> {
+    let res = server.request(Method::GET, &format!("/{}/count", tess), None, &[("x-hexdb-partition-local", "1")])?;
+    Ok(res.body["count"].as_u64().unwrap_or(u64::MAX))
+}
+
 fn hex_id(server: &TestServer) -> Result<String> {
     Ok(server.request(Method::GET, "/status", None, &[])?.body["id"].as_str().unwrap_or_default().to_string())
 }
@@ -86,7 +92,7 @@ fn a_lattice_is_split_only_while_empty_and_then_writes_only_its_own_slices() -> 
         let id: ulid::Ulid = res.body["id"].as_str().unwrap_or_default().parse()?;
         assert!(hexdb_core::slicing::slice_of("orders", id) < 32, "a document for partition 1 was stored here");
     }
-    assert_eq!(server.count("orders")?, 40);
+    assert_eq!(local_count(&server, "orders")?, 40);
     // A write to a document of partition 1 (no hex leads it yet) is refused untouched.
     let theirs = loop {
         let id = ulid::Ulid::generate();
@@ -104,7 +110,7 @@ fn a_lattice_is_split_only_while_empty_and_then_writes_only_its_own_slices() -> 
     assert!(res.body.to_string().contains("cross_partition"), "{}", res.body);
     let res = server.request(Method::POST, "/orders/_upsert", Some(&json!({ "key": ["n"], "documents": [{ "n": 1 }] })), &[])?;
     assert_eq!(res.status, 409, "{}", res.body);
-    assert_eq!(server.count("orders")?, 40);
+    assert_eq!(local_count(&server, "orders")?, 40);
 
     // System writes (users) aren't placed by hash: they always work on partition 0.
     let user = server.request(Method::POST, "/users", Some(&json!({ "login": "ada", "password": "correct horse battery", "email_address": "ada@example.com", "roles": [] })), &[])?;
@@ -165,13 +171,34 @@ fn each_partition_leads_itself_and_partition_zero_serves_the_system_tessellation
             }
         }
     }
-    assert_eq!((a.count("orders")?, b.count("orders")?), (20, 20), "each partition holds exactly its own documents");
+    assert_eq!((local_count(&a, "orders")?, local_count(&b, "orders")?), (20, 20), "each partition holds exactly its own documents");
     // A change to partition 1's document sent to A is passed to B, which owns it.
     let id = on_b.unwrap();
     let res = a.request(Method::PATCH, &format!("/orders/{}", id), Some(&json!({ "n": 99 })), &[])?;
     assert!(res.status.is_success(), "{}", res.body);
     assert_eq!(b.get_doc("orders", &id.to_string())?.map(|d| d["n"].clone()), Some(json!(99)));
-    assert!(a.get_doc("orders", &id.to_string())?.is_none(), "A doesn't hold partition 1's documents");
+    // Reads: one document from either hex; queries and counts from both partitions, merged.
+    assert_eq!(a.get_doc("orders", &id.to_string())?.map(|d| d["n"].clone()), Some(json!(99)), "A passes the read to B");
+    let local = a.request(Method::GET, "/orders/count", None, &[("x-hexdb-partition-local", "1")])?;
+    assert_eq!(local.body["count"], 20, "{}", local.body);
+    for server in [&a, &b] {
+        assert_eq!(server.request(Method::GET, "/orders/count", None, &[])?.body["count"], 40);
+        let res = server.request(Method::POST, "/orders/_query", Some(&json!({ "sort": "-n", "limit": 5, "offset": 2, "fields": ["n"] })), &[])?;
+        assert_eq!(res.status, 200, "{}", res.body);
+        assert_eq!(res.body["total"], 40, "{}", res.body);
+        let ns: Vec<i64> = res.body["documents"].as_array().unwrap().iter().filter_map(|d| d["n"].as_i64()).collect();
+        // 99 (B's 19, patched), A's 19, then 18, 18, 17, 17, ...: offset 2 skips the first two.
+        assert_eq!(ns, vec![18, 18, 17, 17, 16], "{}", res.body);
+        let listed = server.request(Method::GET, "/orders?sort=n&limit=3", None, &[])?;
+        let ns: Vec<i64> = listed.body["documents"].as_array().unwrap().iter().filter_map(|d| d["n"].as_i64()).collect();
+        assert_eq!(ns, vec![0, 0, 1], "{}", listed.body);
+    }
+    // What can't be merged yet is refused, not answered from one partition.
+    for (path, body) in [("/orders/_aggregate", json!({ "group_by": [], "aggregates": [{ "op": "count" }] })), ("/sql", json!({ "query": "SELECT COUNT(*) FROM orders" }))] {
+        let res = a.request(Method::POST, path, Some(&body), &[])?;
+        assert_eq!(res.status, 409, "{} {}", path, res.body);
+        assert_eq!(res.body["error"]["code"], "cross_partition", "{}", res.body);
+    }
 
     // A user made on partition 0 reaches partition 1 through the system stream.
     let res = a.request(Method::POST, "/users", Some(&json!({ "login": "ada", "password": "correct horse battery", "email_address": "ada@example.com", "roles": [] })), &[])?;
@@ -194,10 +221,10 @@ fn each_partition_leads_itself_and_partition_zero_serves_the_system_tessellation
 
     // Partition 1 keeps its own documents and the system tessellations through a restart.
     let mut b = b;
-    let before = b.count("orders")?;
+    let before = local_count(&b, "orders")?;
     b.restart()?;
     wait_until(Duration::from_secs(30), "B to lead partition 1 again", || Ok(role(&b)? == "Overseer"))?;
-    assert_eq!(b.count("orders")?, before);
+    assert_eq!(local_count(&b, "orders")?, before);
     assert!(b.request(Method::GET, "/users", None, &[])?.body.to_string().contains("\"ada\""));
     Ok(())
 }

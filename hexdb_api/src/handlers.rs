@@ -43,8 +43,8 @@ pub const STEPPING_DOWN_CODE: &str = "stepping_down";
 /// Response header set when a result is replayed from an idempotency record.
 pub const IDEMPOTENT_REPLAYED_HEADER: &str = "idempotent-replayed";
 
-const DEFAULT_PAGE_SIZE: usize = 100;
-const MAX_PAGE_SIZE: usize = 1000;
+pub(crate) const DEFAULT_PAGE_SIZE: usize = 100;
+pub(crate) const MAX_PAGE_SIZE: usize = 1000;
 
 pub(crate) type Engine = State<Arc<HexDBEngine>>;
 pub(crate) type ApiResult = Result<Response, ApiError>;
@@ -248,7 +248,7 @@ pub enum FieldList {
 }
 
 impl FieldList {
-    fn paths(self) -> Vec<String> {
+    pub(crate) fn paths(self) -> Vec<String> {
         match self {
             FieldList::Text(t) => split_fields(&t),
             FieldList::List(l) => l.into_iter().filter(|f| !f.trim().is_empty()).collect(),
@@ -256,7 +256,7 @@ impl FieldList {
     }
 }
 
-fn split_fields(text: &str) -> Vec<String> {
+pub(crate) fn split_fields(text: &str) -> Vec<String> {
     text.split(',').map(str::trim).filter(|f| !f.is_empty()).map(String::from).collect()
 }
 
@@ -275,7 +275,7 @@ pub struct CountParams {
     pub filter: Option<String>,
 }
 
-fn parse_filter_param(filter: Option<&str>) -> Result<Value, ApiError> {
+pub(crate) fn parse_filter_param(filter: Option<&str>) -> Result<Value, ApiError> {
     match filter.map(str::trim) {
         None | Some("") => Ok(Value::Null),
         Some(text) => serde_json::from_str(text).map_err(|e| ApiError::invalid(format!("filter is not valid JSON: {}", e))),

@@ -92,11 +92,18 @@ const NOT_PARTITION_ZERO: &[&str] = &["transactions", "graphql", "a2a", "deletes
 /// document that isn't this partition's).
 fn routed_partition(engine: &HexDBEngine, method: &Method, path: &str) -> Option<u32> {
     let map = engine.partition_map();
-    if map.is_single() || matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || handled_locally(method, path) {
+    if map.is_single() {
         return None;
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let first = segments.first().copied().unwrap_or_default();
+    // One document's read goes to the partition that holds it.
+    if matches!(*method, Method::GET | Method::HEAD) && segments.len() == 2 && !hexdb_core::catalog::is_route_name(first) && !first.starts_with('_') {
+        return ulid::Ulid::from_string(segments[1]).ok().map(|id| map.partition_of(first, id));
+    }
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) || handled_locally(method, path) {
+        return None;
+    }
     // Signing in reads users this hex has as copies; everything else under /auth changes them.
     if first == "auth" {
         return if matches!(segments.get(1).copied(), Some("login") | Some("me")) { None } else { Some(0) };
@@ -492,6 +499,11 @@ pub async fn forward_writes(State(engine): State<Arc<HexDBEngine>>, request: Req
             }
         }
     }
+    // A partitioned lattice answers queries and counts from every partition.
+    let request = match fan_out_read(&engine, request, &next).await {
+        Ok(response) => return response,
+        Err(request) => *request,
+    };
     if let Some(note) = engine.rebuilding() {
         if !answers_without_data(&path) {
             return crate::handlers::ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "rebuilding", note).with_retry_after(5).into_response();
@@ -676,6 +688,218 @@ fn idempotent_with_key(engine: &HexDBEngine, method: &Method, path: &str) -> boo
     }
     let first = path.trim_start_matches('/').split('/').next().unwrap_or_default();
     engine.tessellation_info(first).is_some_and(|t| t.kind == "user")
+}
+
+// ---------------------------------------------------------------------------
+// Reads across partitions (partitioning stage 2, a preview)
+// ---------------------------------------------------------------------------
+
+/// Marks a read one partition answers alone: a part of a fan-out (or a client asking
+/// for this hex's partition only).
+pub const PARTITION_LOCAL_HEADER: &str = "x-hexdb-partition-local";
+
+/// A read a partitioned lattice answers from every partition.
+enum FanOut {
+    /// `GET /{tess}` or `POST /{tess}/_query`, as one query: sort keys, page, fields, filter.
+    Query { tess: String, filter: serde_json::Value, sort: Vec<hexdb_core::SortKey>, limit: usize, offset: usize, fields: Option<Vec<String>>, total: bool },
+    /// `GET /{tess}/count`.
+    Count { tess: String, query: String },
+}
+
+fn not_across_partitions(what: &str) -> Box<Response> {
+    Box::new(crate::handlers::ApiError::new(
+        StatusCode::CONFLICT,
+        "cross_partition",
+        format!("{} isn't answered across partitions yet (partitioning is a preview); send it with the {} header to read this hex's partition only.", what, PARTITION_LOCAL_HEADER),
+    )
+    .into_response())
+}
+
+fn page_bounds(limit: Option<usize>, offset: Option<usize>) -> Result<(usize, usize), Box<Response>> {
+    let (limit, offset) = (limit.unwrap_or(crate::handlers::DEFAULT_PAGE_SIZE), offset.unwrap_or(0));
+    if limit + offset > crate::handlers::MAX_PAGE_SIZE {
+        return Err(Box::new(crate::handlers::ApiError::invalid(format!("Across partitions, offset + limit can't pass {} yet (partitioning is a preview).", crate::handlers::MAX_PAGE_SIZE)).into_response()));
+    }
+    Ok((limit, offset))
+}
+
+fn no_cursor() -> Box<Response> {
+    Box::new(crate::handlers::ApiError::invalid("Across partitions, page with offset: after isn't available yet (partitioning is a preview).").into_response())
+}
+
+/// What a read needs from every partition, or None for a read one hex answers (or that
+/// isn't partitioned at all). Reads that can't be merged yet are refused rather than
+/// answered from one partition: never a partial answer passed off as whole.
+fn classify_read(engine: &HexDBEngine, method: &Method, path: &str, query: Option<&str>, body: &[u8]) -> Result<Option<FanOut>, Box<Response>> {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let first = segments.first().copied().unwrap_or_default();
+    if (path == "/sql" || path == "/graphql") && *method == Method::POST {
+        return Err(not_across_partitions(if path == "/sql" { "SQL" } else { "GraphQL" }));
+    }
+    if first.is_empty() || hexdb_core::catalog::is_route_name(first) || first.starts_with('_') || engine.is_system_tessellation(first) {
+        return Ok(None);
+    }
+    let tess = first.to_string();
+    match (method.clone(), segments.len(), segments.get(1).copied()) {
+        (Method::GET, 1, _) => {
+            let uri: axum::http::Uri = format!("http://h{}?{}", path, query.unwrap_or_default()).parse().unwrap_or_default();
+            let params = axum::extract::Query::<crate::handlers::ListParams>::try_from_uri(&uri).map_err(|e| Box::new(crate::handlers::ApiError::invalid(e.body_text()).into_response()))?.0;
+            if params.after.is_some() {
+                return Err(no_cursor());
+            }
+            let (limit, offset) = page_bounds(params.limit, params.offset)?;
+            Ok(Some(FanOut::Query {
+                tess,
+                filter: crate::handlers::parse_filter_param(params.filter.as_deref()).map_err(|e| Box::new(e.into_response()))?,
+                sort: crate::handlers::parse_sort_text(params.sort.as_deref().unwrap_or("")).map_err(|e| Box::new(e.into_response()))?,
+                limit,
+                offset,
+                fields: params.fields.as_deref().map(crate::handlers::split_fields),
+                total: params.total.unwrap_or(true),
+            }))
+        }
+        (Method::POST, 2, Some("_query")) => {
+            // A body the handler can't read: it explains what's wrong with it.
+            let Ok(request) = serde_json::from_slice::<crate::handlers::QueryRequest>(body) else { return Ok(None) };
+            if request.near.is_some() {
+                return Err(not_across_partitions("A similarity search (near)"));
+            }
+            if request.after.is_some() {
+                return Err(no_cursor());
+            }
+            let sort = match request.sort {
+                Some(crate::handlers::SortSpec::Text(t)) => crate::handlers::parse_sort_text(&t).map_err(|e| Box::new(e.into_response()))?,
+                Some(crate::handlers::SortSpec::Keys(k)) => k,
+                None => Vec::new(),
+            };
+            let (limit, offset) = page_bounds(request.limit, request.offset)?;
+            Ok(Some(FanOut::Query { tess, filter: request.filter, sort, limit, offset, fields: request.fields.map(crate::handlers::FieldList::paths), total: request.total.unwrap_or(true) }))
+        }
+        (Method::GET, 2, Some("count")) => Ok(Some(FanOut::Count { tess, query: query.unwrap_or_default().to_string() })),
+        (Method::POST, 2, Some("_aggregate")) => Err(not_across_partitions("An aggregation")),
+        _ => Ok(None),
+    }
+}
+
+/// On a partitioned lattice, answers a read from every partition and merges the answers.
+/// Gives the request back when it isn't such a read.
+async fn fan_out_read(engine: &Arc<HexDBEngine>, request: Request, next: &Next) -> Result<Response, Box<Request>> {
+    let map = engine.partition_map();
+    if map.is_single() || request.headers().contains_key(PARTITION_LOCAL_HEADER) || !matches!(*request.method(), Method::GET | Method::POST) {
+        return Err(Box::new(request));
+    }
+    let path = request.uri().path().to_string();
+    // Only these reads are partitioned; anything else goes on untouched (with its body).
+    let get_list = *request.method() == Method::GET && path.trim_start_matches('/').split('/').count() == 1;
+    if !(path == "/sql" || path == "/graphql" || path.ends_with("/_query") || path.ends_with("/_aggregate") || path.ends_with("/count") || get_list) {
+        return Err(Box::new(request));
+    }
+    let (parts, body) = request.into_parts();
+    let bytes: Bytes = match axum::body::to_bytes(body, crate::routes::bulk_body_limit(engine)).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(crate::handlers::ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "too_large", "The request body is too large.").into_response()),
+    };
+    let plan = match classify_read(engine, &parts.method, &path, parts.uri.query(), &bytes) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return Err(Box::new(Request::from_parts(parts, Body::from(bytes)))),
+        Err(refused) => return Ok(*refused),
+    };
+    // Each partition answers the same narrow request: a query's first offset + limit
+    // matches in the query's order (whole documents, projected after the merge), or a count.
+    let (sub_path, sub_method, sub_body) = match &plan {
+        FanOut::Query { tess, filter, sort, limit, offset, total, .. } => (
+            format!("/{}/_query", tess),
+            Method::POST,
+            Bytes::from(serde_json::to_vec(&serde_json::json!({ "filter": filter, "sort": sort, "limit": limit + offset, "offset": 0, "total": total })).unwrap_or_default()),
+        ),
+        FanOut::Count { tess, query } => (if query.is_empty() { format!("/{}/count", tess) } else { format!("/{}/count?{}", tess, query) }, Method::GET, Bytes::new()),
+    };
+    let mine = engine.my_partition();
+    let mut answers: Vec<serde_json::Value> = Vec::new();
+    for partition in map.partitions.iter().map(|p| p.id) {
+        let (status, body) = if Some(partition) == mine {
+            let mut local = parts.clone();
+            local.method = sub_method.clone();
+            local.uri = sub_path.parse().unwrap_or_default();
+            local.headers.insert(HeaderName::from_static(PARTITION_LOCAL_HEADER), HeaderValue::from_static("1"));
+            local.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            local.headers.remove(header::CONTENT_LENGTH);
+            let response = next.clone().run(Request::from_parts(local, Body::from(sub_body.clone()))).await;
+            let status = response.status();
+            (status, axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024).await.unwrap_or_default())
+        } else {
+            match ask_partition(engine, partition, &parts, &sub_method, &sub_path, &sub_body).await {
+                Ok(answer) => answer,
+                Err(response) => return Ok(*response),
+            }
+        };
+        if !status.is_success() {
+            // A partition's own refusal (permissions, a bad filter): the client sees it as is.
+            return Ok((status, [(header::CONTENT_TYPE, "application/json")], body).into_response());
+        }
+        answers.push(serde_json::from_slice(&body).unwrap_or_default());
+    }
+    Ok(merge(plan, answers, map.partitions.len()))
+}
+
+/// Sends one partition its part of a fan-out, through that partition's Overseer, signed as
+/// a forwarded request with the client's credentials.
+async fn ask_partition(engine: &HexDBEngine, partition: u32, parts: &axum::http::request::Parts, method: &Method, path: &str, body: &Bytes) -> Result<(StatusCode, Bytes), Box<Response>> {
+    let unavailable = || {
+        Box::new(crate::handlers::ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "partition_unavailable", format!("Partition {} isn't reachable now, so the lattice can't answer this whole; try again shortly.", partition))
+            .with_retry_after(2)
+            .into_response())
+    };
+    let Some(overseer) = overseer_for(engine, Instant::now() + Duration::from_secs(5), Some(partition)).await else { return Err(unavailable()) };
+    let Some(http) = forward_client(engine) else { return Err(unavailable()) };
+    let client = crate::auth::client_address(&parts.extensions);
+    let mut headers = HeaderMap::new();
+    copy_headers(&parts.headers, &mut headers);
+    headers.remove(header::CONTENT_LENGTH);
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(HeaderName::from_static(PARTITION_LOCAL_HEADER), HeaderValue::from_static("1"));
+    let signature = sign_forward(engine, method.as_str(), path, &client, &mut headers).await;
+    let url = format!("{}{}", hexdb_core::replication::peer_base_url(&overseer), path);
+    let method = reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
+    let timeout = Duration::from_secs(engine.config.limits.request_timeout_seconds.max(1));
+    let response = match http.request(method, &url).timeout(timeout).headers(headers).body(body.clone()).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("⚠️ Asking partition {} ('{}') failed: {}", partition, overseer.name, e);
+            return Err(unavailable());
+        }
+    };
+    let (status, _, answer) = checked_answer(engine, &overseer, &signature, response, None).await.map_err(|e| Box::new(e.into_response()))?;
+    let body = match answer {
+        Answer::Checked(body) => body,
+        Answer::Unchecked(response) => response.bytes().await.unwrap_or_default(),
+    };
+    Ok((status, body))
+}
+
+/// Merges the partitions' answers into one, as a one-partition lattice would answer.
+fn merge(plan: FanOut, answers: Vec<serde_json::Value>, partitions: usize) -> Response {
+    match plan {
+        FanOut::Count { .. } => {
+            let count: u64 = answers.iter().map(|a| a["count"].as_u64().unwrap_or(0)).sum();
+            axum::Json(serde_json::json!({ "count": count, "partitions": partitions })).into_response()
+        }
+        FanOut::Query { sort, limit, offset, fields, total, .. } => {
+            let mut documents: Vec<serde_json::Value> = answers.iter().flat_map(|a| a["documents"].as_array().cloned().unwrap_or_default()).collect();
+            documents.sort_by(|a, b| hexdb_core::filter::compare_api_documents(a, b, &sort));
+            let page: Vec<serde_json::Value> = documents
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|d| match &fields {
+                    Some(f) if !f.is_empty() => hexdb_core::project(&d, f),
+                    _ => d,
+                })
+                .collect();
+            let total = if total { answers.iter().map(|a| a["total"].as_u64()).sum::<Option<u64>>() } else { None };
+            axum::Json(serde_json::json!({ "documents": page, "total": total, "next": null, "partitions": partitions })).into_response()
+        }
+    }
 }
 
 #[cfg(test)]

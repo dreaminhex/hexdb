@@ -561,6 +561,22 @@ pub(crate) fn compare(a: &Value, b: &Value) -> Option<Ordering> {
 }
 
 /// Order documents by sort keys. Missing and null values sort first (last when descending).
+/// The order [`sort_documents`] gives, for documents as the API renders them (with an
+/// `id` field): by the sort keys, then by ID. Used to merge pages from several partitions.
+pub fn compare_api_documents(a: &Value, b: &Value, keys: &[SortKey]) -> Ordering {
+    for key in keys {
+        let path: Vec<String> = key.field.split('.').map(String::from).collect();
+        let (x, y) = (resolve(a, &path).first().map(|v| (*v).clone()), resolve(b, &path).first().map(|v| (*v).clone()));
+        let ord = sort_order(x.as_ref(), y.as_ref());
+        let ord = if key.descending { ord.reverse() } else { ord };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    // ULIDs in their text form sort as the IDs do.
+    a["id"].as_str().unwrap_or_default().cmp(b["id"].as_str().unwrap_or_default())
+}
+
 pub fn sort_documents(docs: &mut [Document], keys: &[SortKey]) {
     if keys.is_empty() {
         return;
