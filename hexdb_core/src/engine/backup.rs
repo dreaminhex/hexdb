@@ -238,8 +238,11 @@ impl HexDBEngine {
     /// lattice's documents: an Overseer not rebuilding, or a replica keeping every
     /// slice and caught up. (File content is checked separately, by a backup.)
     pub fn backup_coverage(&self) -> (u32, bool) {
+        // A partitioned lattice's data is spread over its partitions: no one hex holds it all.
+        let partitioned = !self.partition_map().is_single();
         let r = self.replication.lock().unwrap();
         let complete = !self.is_oracle()
+            && !partitioned
             && if self.is_writable() {
                 r.rebuilding.is_none()
             } else {
@@ -268,6 +271,12 @@ impl HexDBEngine {
         // What the backup covers, at that position.
         let role = self.role();
         let (slices, documents_complete) = self.backup_coverage();
+        if scope == BackupScope::Lattice && !self.partition_map().is_single() {
+            return Err(crate::engine::EngineError::Unavailable(
+                "A partitioned lattice (a preview) is backed up partition by partition: ask each partition's Overseer for scope=hex. The backups aren't one consistent point across partitions yet.".into(),
+            )
+            .into());
+        }
         if scope == BackupScope::Lattice && !documents_complete {
             return Err(crate::engine::EngineError::Unavailable(format!(
                 "This {} doesn't hold the whole lattice right now ({} of 64 slices, or not caught up), so it can't take a lattice backup. Send it to the Overseer, or ask for scope=hex.",

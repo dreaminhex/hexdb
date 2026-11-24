@@ -119,8 +119,23 @@ Each step is useful and testable alone, and the first two change nothing for one
   - The system follower (`hexdb_core::system_follower`): every hex outside partition 0 copies users, roles, keys, the configuration and every tessellation's definition from partition 0's Overseer, with its own cursor.
   - Test: `hexdb_tests/tests/partitions.rs`.
 
-## Preview limits so far (until steps 5 to 7)
+- **Step 5** (done): writes are routed.
+  - New IDs are drawn in the receiving hex's partition (`new_document_id`), so inserts never cross partitions.
+  - Changes to existing documents go to their partition's Overseer.
+  - Lattice-wide system writes, and replicas' lattice calls that carry them, go to partition 0.
+  - Cross-partition transactions and upserts are refused (409).
+  - A replica drops a batch or a snapshot page from an Overseer outside its group (a race the test found).
+- **Step 6** (done): reads across partitions. Document reads are routed. Queries, listings and counts are fanned out and merged (`compare_api_documents`). Aggregations, SQL, GraphQL and `near` are refused (409 `cross_partition`) until they're merged.
+- **Step 7** (done): the merged change feed. `GET /changes` takes a per-partition cursor. Live streams are refused. Schedules and stream processing run on partition 0's Overseer; plugins and triggers run per partition.
+- **Step 8** (done): backups.
+  - A lattice backup is refused on a partitioned lattice; back up each partition with `scope=hex`.
+  - Point-in-time restore ships under `<prefix>/partition-N`.
+  - The manual and the release notes describe the preview.
 
-- No routing yet. A write sent to a hex whose partition doesn't own it is refused (503 `partition_unavailable`), not passed on. Reads answer from the hex's own partition only.
-- User management, API keys and tessellation definitions (DDL) are made on partition 0's hexes. Partition 1 gets them through the system stream. A tessellation dropped on partition 0 isn't dropped elsewhere yet.
-- Each hex keeps its own audit entries, sign-in failures and AI usage (`HEX_WRITTEN_TESSELLATIONS`).
+## Preview limits (for later stages)
+
+- Moving data between partitions (rebalancing), so a lattice can only be split while empty.
+- Cross-partition transactions, upserts, unique indexes and cascades (two-phase commit, stage 3).
+- Merged aggregations, SQL, GraphQL, similarity search, `after` cursors and live change streams.
+- One consistent backup point across partitions (stage 5).
+- A tessellation dropped on partition 0 isn't dropped on the others yet. Each hex keeps its own audit entries, sign-in failures and AI usage.

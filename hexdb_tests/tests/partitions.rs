@@ -211,6 +211,11 @@ fn each_partition_leads_itself_and_partition_zero_serves_the_system_tessellation
     // Back to the documents: the two just added are counted everywhere.
     assert_eq!(a.request(Method::GET, "/orders/count", None, &[])?.body["count"], 42);
 
+    // No hex holds a partitioned lattice whole: a lattice backup is refused, partition by partition instead.
+    let res = a.request(Method::POST, "/backup", None, &[])?;
+    assert_eq!(res.status, 503, "{}", res.body);
+    assert!(res.body.to_string().contains("partition by partition"), "{}", res.body);
+
     // What can't be merged yet is refused, not answered from one partition.
     for (path, body) in [("/orders/_aggregate", json!({ "group_by": [], "aggregates": [{ "op": "count" }] })), ("/sql", json!({ "query": "SELECT COUNT(*) FROM orders" }))] {
         let res = a.request(Method::POST, path, Some(&body), &[])?;

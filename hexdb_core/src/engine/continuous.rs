@@ -114,7 +114,12 @@ impl HexDBEngine {
         let prefix = Some(text("backup.continuous.prefix")).filter(|p| !p.is_empty()).unwrap_or_else(|| self.config.network.lattice_name.clone());
         Some(ContinuousConfig {
             store: StoreConfig { endpoint, bucket, region, access_key_id: text("backup.continuous.access_key_id"), secret_access_key: secret.expose().to_string() },
-            prefix: prefix.trim_matches('/').to_string(),
+            // Each partition of a partitioned lattice ships under its own folder, so a restore
+            // never mixes partitions (`hexdb restore --prefix <prefix>/partition-N`).
+            prefix: match (self.partition_map().is_single(), self.my_partition()) {
+                (true, _) | (false, None) => prefix.trim_matches('/').to_string(),
+                (false, Some(p)) => format!("{}/partition-{}", prefix.trim_matches('/'), p),
+            },
             retention_days: number("backup.continuous.retention_days", 7).max(1),
             base_hours: number("backup.continuous.base_hours", 24).max(1),
             max_lag: Duration::from_secs(number("backup.continuous.max_lag_seconds", 60).max(10)),
