@@ -73,13 +73,53 @@ impl Environment {
     }
 }
 
+/// Where API keys are kept: the OS keychain, or memory in tests (CI runners have no keychain).
+pub trait Keychain: Send + Sync {
+    fn set(&self, id: &str, key: &str) -> Result<()>;
+    fn get(&self, id: &str) -> Result<Option<String>>;
+    fn delete(&self, id: &str) -> Result<()>;
+}
+
+/// The OS keychain: Windows Credential Manager, the macOS Keychain, the Secret Service.
+pub struct OsKeychain;
+
+impl Keychain for OsKeychain {
+    fn set(&self, id: &str, key: &str) -> Result<()> {
+        entry(id)?.set_password(key.trim()).context("Couldn't save the API key in the keychain")
+    }
+
+    fn get(&self, id: &str) -> Result<Option<String>> {
+        match entry(id)?.get_password() {
+            Ok(k) => Ok(Some(k)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(anyhow!("Couldn't read the API key from the keychain: {}", e)),
+        }
+    }
+
+    fn delete(&self, id: &str) -> Result<()> {
+        match entry(id)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(anyhow!("Couldn't remove the API key from the keychain: {}", e)),
+        }
+    }
+}
+
 pub struct Store {
     path: PathBuf,
+    keys: Box<dyn Keychain>,
 }
 
 impl Store {
     pub fn new(dir: &Path) -> Store {
-        Store { path: dir.join("environments.json") }
+        Store::with_keychain(dir, Box::new(OsKeychain))
+    }
+
+    pub fn with_keychain(dir: &Path, keys: Box<dyn Keychain>) -> Store {
+        Store { path: dir.join("environments.json"), keys }
+    }
+
+    pub fn key(&self, id: &str) -> Result<Option<String>> {
+        self.keys.get(id)
     }
 
     pub fn list(&self) -> Result<Vec<Environment>> {
@@ -115,11 +155,11 @@ impl Store {
         let previous = list.iter().find(|e| e.id == env.id).map(|e| e.has_key).unwrap_or(false);
         env.has_key = match key {
             Some("") => {
-                delete_key(&env.id)?;
+                self.keys.delete(&env.id)?;
                 false
             }
             Some(k) => {
-                set_key(&env.id, k)?;
+                self.keys.set(&env.id, k)?;
                 true
             }
             None => previous,
@@ -135,31 +175,12 @@ impl Store {
         let mut list = self.list()?;
         list.retain(|e| e.id != id);
         self.write(&list)?;
-        delete_key(id)
+        self.keys.delete(id)
     }
 }
 
 fn entry(id: &str) -> Result<keyring::Entry> {
     Ok(keyring::Entry::new(KEYCHAIN_SERVICE, id)?)
-}
-
-pub fn set_key(id: &str, key: &str) -> Result<()> {
-    entry(id)?.set_password(key.trim()).context("Couldn't save the API key in the keychain")
-}
-
-pub fn get_key(id: &str) -> Result<Option<String>> {
-    match entry(id)?.get_password() {
-        Ok(k) => Ok(Some(k)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(anyhow!("Couldn't read the API key from the keychain: {}", e)),
-    }
-}
-
-fn delete_key(id: &str) -> Result<()> {
-    match entry(id)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(anyhow!("Couldn't remove the API key from the keychain: {}", e)),
-    }
 }
 
 #[cfg(test)]
@@ -182,11 +203,33 @@ mod tests {
         assert!(Environment { ssh: Some(sneaky), url: "http://127.0.0.1:7700".into(), ..env() }.validate().is_err());
     }
 
+    #[derive(Default)]
+    struct MemoryKeychain(std::sync::Mutex<std::collections::HashMap<String, String>>);
+
+    impl Keychain for MemoryKeychain {
+        fn set(&self, id: &str, key: &str) -> Result<()> {
+            self.0.lock().unwrap().insert(id.into(), key.into());
+            Ok(())
+        }
+        fn get(&self, id: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+        fn delete(&self, id: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(id);
+            Ok(())
+        }
+    }
+
     #[test]
     fn saves_and_lists_without_secrets_in_the_file() {
         let dir = std::env::temp_dir().join(format!("hexdb-workbench-test-{}", ulid::Ulid::new()));
-        let store = Store::new(&dir);
-        let saved = store.save(env(), None).unwrap();
+        let store = Store::with_keychain(&dir, Box::new(MemoryKeychain::default()));
+        let saved = store.save(env(), Some("hxk_secret")).unwrap();
+        assert!(saved.has_key);
+        assert_eq!(store.key(&saved.id).unwrap().as_deref(), Some("hxk_secret"));
+        assert!(!std::fs::read_to_string(dir.join("environments.json")).unwrap().contains("hxk_secret"), "the key stays out of the file");
+        let saved = store.save(Environment { has_key: false, ..saved }, None).unwrap();
+        assert!(saved.has_key, "saving without a key keeps the one in the keychain");
         assert!(!saved.id.is_empty());
         assert_eq!(store.list().unwrap(), vec![saved.clone()]);
         store.save(Environment { name: "Prod".into(), ..saved.clone() }, None).unwrap();

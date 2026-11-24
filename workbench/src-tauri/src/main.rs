@@ -175,7 +175,7 @@ async fn compare_environments(app: State<'_, App>, left: String, right: String) 
     let mut snapshots = Vec::new();
     for id in [&left, &right] {
         let env = app.store.get(id).map_err(text)?;
-        let key = envs::get_key(id).map_err(text)?.ok_or_else(|| format!("{} has no API key in the keychain; add one (read access is enough).", env.name))?;
+        let key = app.store.key(id).map_err(text)?.ok_or_else(|| format!("{} has no API key in the keychain; add one (read access is enough).", env.name))?;
         let base = base_url(&app, &env).await.map_err(text)?;
         snapshots.push(compare::fetch(&app.client, &base, &key).await.map_err(|e| format!("{}: {:#}", env.name, e))?);
     }
