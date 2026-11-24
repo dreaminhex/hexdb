@@ -21,6 +21,15 @@ maintainers:
     url: https://hexdb.app
 annotations:
   artifacthub.io/license: Apache-2.0
+  # What Artifact Hub scans for vulnerabilities. ClamAV's image is upstream's (an optional
+  # scanner, clamav.enabled), not ours: whitelisted, so it isn't scanned (its scans failed).
+  # The workflow stamps the release's version in place of HEXDB_VERSION.
+  artifacthub.io/images: |
+    - name: hexdb
+      image: ghcr.io/dreaminhex/hexdb:HEXDB_VERSION
+    - name: clamav
+      image: clamav/clamav:1.5
+      whitelisted: true
   artifacthub.io/links: |
     - name: Website
       url: https://hexdb.app
