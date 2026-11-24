@@ -219,6 +219,54 @@ pub fn spawn_continuous_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Recei
     });
 }
 
+/// With a customer-managed key, asks the key service to unwrap the storage key every
+/// `storage.key.check_minutes`. A definite refusal means the key was revoked: audit,
+/// alert, and request a graceful stop on `stop_tx`. An unreachable key service is only
+/// a warning.
+pub fn spawn_key_check_task(engine: Arc<HexDBEngine>, stop_tx: Arc<watch::Sender<()>>, shutdown_rx: watch::Receiver<()>) {
+    let key = engine.config.storage.key.clone();
+    if !key.is_set() || key.check_minutes == 0 {
+        return;
+    }
+    let service = match crate::kms::KeyService::for_key(&key) {
+        Ok(service) => Arc::new(service),
+        Err(e) => {
+            error!("❌ The storage key check can't run: {:#}", e);
+            return;
+        }
+    };
+    // Tests check every few seconds instead of every few minutes.
+    let every = std::env::var("HEXDB_DEBUG_KEY_CHECK_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(key.check_minutes.saturating_mul(60)));
+    supervise_background("storage key check", shutdown_rx.clone(), move || {
+        let (engine, service, key, stop_tx, mut shutdown_rx) = (engine.clone(), service.clone(), key.clone(), stop_tx.clone(), shutdown_rx.clone());
+        async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    _ = tokio::time::sleep(every) => {}
+                }
+                match service.unwrap(&key.wrapped).await {
+                    Ok(_) => debug!("🔑 The key service still unwraps the storage key."),
+                    Err(crate::kms::KmsError::Unreachable(m)) => warn!("⚠️ The key service can't be reached to check the storage key (the hex keeps running): {}", m),
+                    Err(crate::kms::KmsError::Refused(m)) => {
+                        let provider = key.provider().map(|p| p.label()).unwrap_or("The key service");
+                        error!("❌ {} refused to unwrap the storage key: {}. Stopping: the hex won't start until the key is usable again.", provider, m);
+                        engine.audit("system", "storage.key_revoked", &engine.name, serde_json::json!({ "provider": key.provider, "key_id": key.key_id, "error": m })).await;
+                        let alert = crate::alerts::Alert::key_revoked(&engine, provider, &key.key_id, &m);
+                        engine.send_alert(&alert, None).await;
+                        let _ = stop_tx.send(());
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Extract metadata from uploaded files (see `crate::extract`), and copy file
 /// content from other hexes.
 pub fn spawn_extraction_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {

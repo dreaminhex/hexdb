@@ -95,6 +95,23 @@ impl Alert {
         }
     }
 
+    /// The customer-managed key was revoked: the hex stops and won't start until it's usable again.
+    pub fn key_revoked(engine: &HexDBEngine, provider: &str, key_id: &str, error: &str) -> Alert {
+        Alert {
+            key: format!("hexdb-key-revoked-{}-{}", engine.config.network.lattice_name, engine.name),
+            severity: "critical".into(),
+            title: format!("HexDB '{}': the storage key was revoked; hex {} is stopping", engine.config.network.lattice_name, engine.name),
+            text: format!(
+                "{} refused to unwrap the storage key ({}): {}. The hex is flushing what it holds and shutting down, and won't start until the key is usable again.",
+                provider, key_id, error
+            ),
+            link: None,
+            lattice: engine.config.network.lattice_name.clone(),
+            hex: engine.name.clone(),
+            review: json!({ "storage_key": { "provider": provider, "key_id": key_id, "error": error } }),
+        }
+    }
+
     /// Shipping for point-in-time restore has been failing for a while: acknowledged writes
     /// are piling up on the lattice and aren't off it.
     pub fn continuous_failing(engine: &HexDBEngine, since: i64, error: &str) -> Alert {

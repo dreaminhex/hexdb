@@ -13,9 +13,8 @@
 // AWS itself, where the bucket goes in the host name
 // (`https://bucket.s3.region.amazonaws.com/key`), as AWS recommends.
 
+use crate::sigv4::{canonical_query, payload_hash, uri_encode, Signer};
 use anyhow::{anyhow, bail, Context, Result};
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 /// Where and how to reach a bucket.
@@ -89,8 +88,8 @@ impl ObjectStore {
 
     async fn send(&self, method: reqwest::Method, path: &str, query: &[(&str, String)], body: Vec<u8>) -> Result<reqwest::Response> {
         let host = self.base.split("://").nth(1).unwrap_or_default().to_string();
-        let payload_hash = hex::encode(Sha256::digest(&body));
-        let now = jiff::Timestamp::now().strftime("%Y%m%dT%H%M%SZ").to_string();
+        let payload_hash = payload_hash(&body);
+        let now = crate::sigv4::amz_date_now();
         let headers = vec![("host".to_string(), host), ("x-amz-content-sha256".to_string(), payload_hash.clone()), ("x-amz-date".to_string(), now.clone())];
         let authorization = authorization(&self.config, method.as_str(), path, query, &headers, &payload_hash, &now);
         let query_string = canonical_query(query);
@@ -196,48 +195,10 @@ fn parse_listing(body: &[u8]) -> Result<(Vec<ObjectInfo>, Option<String>)> {
     Ok((objects, if truncated { next } else { None }))
 }
 
-/// Percent-encode as SigV4 requires: everything but A-Z a-z 0-9 - _ . ~
-fn uri_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{:02X}", b));
-        }
-    }
-    out
-}
-
-fn canonical_query(query: &[(&str, String)]) -> String {
-    let mut pairs: Vec<(String, String)> = query.iter().map(|(k, v)| (uri_encode(k), uri_encode(v))).collect();
-    pairs.sort();
-    pairs.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("&")
-}
-
-fn hmac(key: &[u8], data: &str) -> Vec<u8> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC takes any key length");
-    mac.update(data.as_bytes());
-    mac.finalize().into_bytes().to_vec()
-}
-
-/// The `Authorization` header for a request (AWS Signature Version 4). `headers` are
-/// lowercase names with their values; all of them are signed.
+/// The `Authorization` header for an S3 request (AWS Signature Version 4).
 fn authorization(config: &StoreConfig, method: &str, path: &str, query: &[(&str, String)], headers: &[(String, String)], payload_hash: &str, amz_date: &str) -> String {
-    let date = &amz_date[..8];
-    let mut headers: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string())).collect();
-    headers.sort();
-    let canonical_headers: String = headers.iter().map(|(k, v)| format!("{}:{}\n", k, v)).collect();
-    let signed_headers = headers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(";");
-    let canonical_request = format!("{}\n{}\n{}\n{}\n{}\n{}", method, path, canonical_query(query), canonical_headers, signed_headers, payload_hash);
-    let scope = format!("{}/{}/s3/aws4_request", date, config.region);
-    let string_to_sign = format!("AWS4-HMAC-SHA256\n{}\n{}\n{}", amz_date, scope, hex::encode(Sha256::digest(canonical_request.as_bytes())));
-    let key = hmac(format!("AWS4{}", config.secret_access_key).as_bytes(), date);
-    let key = hmac(&key, &config.region);
-    let key = hmac(&key, "s3");
-    let key = hmac(&key, "aws4_request");
-    let signature = hex::encode(hmac(&key, &string_to_sign));
-    format!("AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}", config.access_key_id, scope, signed_headers, signature)
+    let signer = Signer { access_key_id: &config.access_key_id, secret_access_key: &config.secret_access_key, region: &config.region, service: "s3" };
+    signer.authorization(method, path, query, headers, payload_hash, amz_date)
 }
 
 #[cfg(test)]

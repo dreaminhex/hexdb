@@ -88,6 +88,20 @@ async fn server() -> anyhow::Result<()> {
         warn!("⚠️ Couldn't turn off core dumps: {:#}", e);
     }
 
+    // A customer-managed key: the key service unwraps the storage key (kept in memory only).
+    let managed_key = match hexdb_core::kms::resolve(&mut config, Duration::from_secs(60)).await {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            error!("❌ {:#}", e);
+            std::process::exit(1);
+        }
+    };
+    if let Some(resolved) = &managed_key {
+        match resolved.provider {
+            Some(provider) => info!("🔑 {} unwrapped the storage key ({}).", provider.label(), resolved.key_id),
+            None => info!("🔑 Unwrapped {} previous storage key(s).", resolved.previous),
+        }
+    }
     // The storage key ring (current and previous keys) and the lattice key must be valid.
     let keys = Arc::new(config.key_ring().unwrap_or_else(|e| {
         error!("❌ {:#}", e);
@@ -396,6 +410,12 @@ async fn server() -> anyhow::Result<()> {
     let tls = config.tls.enabled();
     let runtime = RuntimeInfo::for_current_process(&config.network.api_endpoint, started_at, tls)?;
     let stop_tx = Arc::new(stop_tx);
+    if let Some(resolved) = &managed_key {
+        engine
+            .audit("system", "storage.key_unwrapped", &engine.name, serde_json::json!({ "provider": resolved.provider.map(|p| p.name()), "key_id": resolved.key_id, "previous": resolved.previous }))
+            .await;
+    }
+    hexdb_core::tasks::spawn_key_check_task(engine.clone(), stop_tx.clone(), shutdown_rx.clone());
     let shutdown_handle = ShutdownHandle {
         token: Arc::new(runtime.shutdown_token.clone()),
         trigger: stop_tx.clone(),

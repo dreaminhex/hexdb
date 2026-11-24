@@ -118,6 +118,12 @@ enum Commands {
     },
     /// Print a new random key for storage.encryption_key or network.lattice_secret
     Secret,
+    /// Customer-managed keys: the storage key wrapped by AWS KMS or Azure Key Vault
+    /// ([storage.key]; credentials from AWS_* or AZURE_* environment variables)
+    Keys {
+        #[command(subcommand)]
+        sub: KeysCommand,
+    },
     /// Run a SQL SELECT and print the rows as a table, or a DELETE ... WHERE (needs a token with read access; write to delete)
     Sql {
         /// The statement, e.g. "SELECT customer, COUNT(*) FROM orders GROUP BY customer"
@@ -499,6 +505,34 @@ enum ConfigCommand {
 }
 
 #[derive(Subcommand)]
+enum KeysCommand {
+    /// Make a new random storage key, wrapped, and print the [storage.key] section
+    New {
+        /// aws_kms or azure_key_vault
+        #[arg(long)]
+        provider: String,
+        /// The KMS key's ARN, or the Key Vault key's URL
+        #[arg(long)]
+        key_id: String,
+    },
+    /// Wrap the configuration's plain storage.encryption_key (then remove the plain key)
+    Wrap {
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        key_id: String,
+    },
+    /// Unwrap [storage.key] and wrap it again under another key (no data is rewritten)
+    Rewrap {
+        /// The new KMS key's ARN, or the Key Vault key's URL (a new version)
+        #[arg(long)]
+        key_id: String,
+    },
+    /// Ask the key service to unwrap [storage.key] once and report (the key isn't printed)
+    Check,
+}
+
+#[derive(Subcommand)]
 enum LatticeCommand {
     /// Start hexes that join the lattice of the hex this config describes
     Spawn {
@@ -631,7 +665,7 @@ async fn run() -> Result<()> {
             PluginCommand::List => list_plugins(),
         },
         Commands::Lattice { sub } => {
-            let config = load(config_path)?;
+            let config = load_unwrapped(config_path).await?;
             match sub {
                 LatticeCommand::Spawn { count, role, server_bin } => lattice::spawn(&config, count.max(1), &role, &resolve_server_bin(server_bin)).await,
                 LatticeCommand::List => lattice::list(&config),
@@ -642,6 +676,7 @@ async fn run() -> Result<()> {
             println!("{}", lattice::new_secret());
             Ok(())
         }
+        Commands::Keys { sub } => keys_command(config_path, sub).await,
         Commands::Sql { statement, params, json, dry_run, expect, all, url } => {
             let (base, config) = base_url(config_path, url)?;
             if token.is_none() {
@@ -783,8 +818,8 @@ async fn run() -> Result<()> {
             files::ls(&config, &base, token, &tessellation, &folder, search.as_deref()).await
         }
         Commands::Restore { endpoint, bucket, prefix, region, until, to } => {
-            let config = load(config_path)?;
-            let keys = config.key_ring().context("The lattice's storage key (storage.encryption_key) is needed to read what was shipped")?;
+            let config = load_unwrapped(config_path).await?;
+            let keys = config.key_ring().context("The lattice's storage key (storage.encryption_key or [storage.key]) is needed to read what was shipped")?;
             let env = |names: [&str; 2]| names.iter().find_map(|n| std::env::var(n).ok().filter(|v| !v.is_empty()));
             let access_key_id = env(["HEXDB_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"]).context("Set HEXDB_S3_ACCESS_KEY_ID (or AWS_ACCESS_KEY_ID)")?;
             let secret_access_key = env(["HEXDB_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"]).context("Set HEXDB_S3_SECRET_ACCESS_KEY (or AWS_SECRET_ACCESS_KEY)")?;
@@ -1277,6 +1312,68 @@ fn spawn_hint(server: &Path) -> String {
 
 fn load(config_path: Option<&Path>) -> Result<HexConfig> {
     load_config_from(config_path).map_err(|e| anyhow!("Failed to load configuration: {}", e))
+}
+
+/// The configuration with a customer-managed key unwrapped (in memory), for commands
+/// that read the data folder or what was shipped.
+async fn load_unwrapped(config_path: Option<&Path>) -> Result<HexConfig> {
+    let mut config = load(config_path)?;
+    hexdb_core::kms::resolve(&mut config, std::time::Duration::from_secs(30)).await?;
+    Ok(config)
+}
+
+/// `hexdb keys ...`.
+async fn keys_command(config_path: Option<&Path>, sub: KeysCommand) -> Result<()> {
+    use hexdb_core::kms::{KeyService, ManagedKey, Provider};
+    let print = |provider: Provider, wrapped: hexdb_core::kms::Wrapped| {
+        let key = ManagedKey { provider: provider.name().into(), key_id: wrapped.key_id, wrapped: wrapped.wrapped, ..Default::default() };
+        println!("{}", key.toml());
+    };
+    match sub {
+        KeysCommand::New { provider, key_id } => {
+            let provider = Provider::parse(&provider)?;
+            let data = hexdb_core::random_bytes(hexdb_core::crypt::ENCRYPTION_KEY_LEN);
+            let wrapped = KeyService::new(provider, &key_id)?.wrap(&data).await?;
+            eprintln!("# A new storage key, wrapped by {}. Put this in hexdb.toml (or hexdb.local.toml) and leave storage.encryption_key empty.", provider.label());
+            print(provider, wrapped);
+            Ok(())
+        }
+        KeysCommand::Wrap { provider, key_id } => {
+            let provider = Provider::parse(&provider)?;
+            let config = load(config_path)?;
+            let data = hexdb_core::decode_encryption_key(&config.storage.encryption_key)?;
+            let wrapped = KeyService::new(provider, &key_id)?.wrap(&data).await?;
+            eprintln!("# The configuration's storage key, wrapped by {}. Add this, then remove storage.encryption_key everywhere it's set.", provider.label());
+            print(provider, wrapped);
+            Ok(())
+        }
+        KeysCommand::Rewrap { key_id } => {
+            let config = load(config_path)?;
+            let current = &config.storage.key;
+            if !current.is_set() {
+                bail!("There's no [storage.key] to rewrap.");
+            }
+            let provider = current.provider()?;
+            let data = KeyService::for_key(current)?.unwrap(&current.wrapped).await.map_err(|e| anyhow!("{} didn't unwrap the storage key: {}", provider.label(), e))?;
+            let wrapped = KeyService::new(provider, &key_id)?.wrap(&data).await?;
+            eprintln!("# The same storage key, now wrapped by {}. Replace [storage.key] on every hex; no data is rewritten.", key_id);
+            let key = ManagedKey { provider: provider.name().into(), key_id: wrapped.key_id, wrapped: wrapped.wrapped, check_minutes: current.check_minutes };
+            println!("{}", key.toml());
+            Ok(())
+        }
+        KeysCommand::Check => {
+            let config = load(config_path)?;
+            let current = &config.storage.key;
+            if !current.is_set() {
+                bail!("There's no [storage.key] in the configuration.");
+            }
+            let provider = current.provider()?;
+            let data = KeyService::for_key(current)?.unwrap(&current.wrapped).await.map_err(|e| anyhow!("{} didn't unwrap the storage key: {}", provider.label(), e))?;
+            let data: [u8; hexdb_core::crypt::ENCRYPTION_KEY_LEN] = data.as_slice().try_into().map_err(|_| anyhow!("The unwrapped key is {} bytes, not 32.", data.len()))?;
+            println!("{} unwrapped the storage key ({}); its ID is {:016x}.", provider.label(), current.key_id, hexdb_core::KeyRing::key_id(&data));
+            Ok(())
+        }
+    }
 }
 
 /// The server's base URL (`https://` when the config enables TLS) and the config.

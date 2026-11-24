@@ -128,6 +128,10 @@ pub struct StorageConfig {
     /// compaction re-encrypts it with the current key, after which they can be removed.
     #[serde(default)]
     pub previous_encryption_keys: Vec<String>,
+    /// A customer-managed key: the data key kept only wrapped by a key in AWS KMS
+    /// or Azure Key Vault, unwrapped at start (then `encryption_key` stays empty).
+    #[serde(default)]
+    pub key: crate::kms::ManagedKey,
     pub compaction_frequency: u64, // seconds
     pub wal_flush_check_frequency: u64, // seconds
     /// fsync the WAL before acknowledging writes. Disabling it is faster, but a
@@ -802,6 +806,7 @@ impl Default for HexConfig {
                 disk_mb: 8192,
                 encryption_key: String::new(), // must be supplied by config or environment
                 previous_encryption_keys: Vec::new(),
+                key: Default::default(),
                 compaction_frequency: 1800, // 30 minutes
                 wal_flush_check_frequency: 60, // 1 minute
                 wal_sync: true,

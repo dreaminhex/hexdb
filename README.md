@@ -29,7 +29,7 @@ The [technical manual](MANUAL.md) covers every feature in depth, including how t
   - Code that runs for users: script functions get a session that ends with the run, however it ends, and every process they start stops with them; webhooks the server calls are checked against server-side request forgery.
   - Audit and abuse protection: a persistent audit trail and lattice-wide sign-in throttling.
   - Tokenization: a schema can mark a field `tokenize`, and its value is replaced by a token (`tok_..._1111`) before it's stored anywhere. Lookups and joins by the real value still work. One-way tokens can't be reversed; vault tokens can be, by users with the `detokenize` permission, and every reveal is audited.
-  - Encryption: AES-256-GCM encryption at rest with key rotation, TLS, and mutually authenticated hex-to-hex traffic.
+  - Encryption: AES-256-GCM encryption at rest with key rotation, customer-managed keys (the storage key wrapped by AWS KMS or Azure Key Vault, revocable), TLS, and mutually authenticated hex-to-hex traffic.
   - Releases: published only from commits CI passed; both container images are scanned on both architectures (the full reports are attached to each release), carry an SBOM and build provenance, and are signed with Sigstore (see [SECURITY.md](SECURITY.md#verifying-a-release)). Third-party code HexDB patches is listed in [vendor/VENDORED.md](vendor/VENDORED.md).
 - **Resilience.** A write-ahead log with group commit, SSTables with compaction, and in-memory Reed-Solomon coding that repairs corrupted memory. Background work (flushing, compaction, file processing, catch-up copies for other hexes) runs at a lower operating-system priority, so requests and the lattice come first on a throttled CPU.
 - **Operations.** Point-in-time restore to any moment of the last week (configurable), from continuous encrypted copies in any S3-compatible store; online backups of the whole lattice from any hex (a replica without all of it passes the request to the Overseer), verified to hold every file chunk their documents need, and still running if the request times out; an admin UI, a CLI, runtime settings, metrics history, logs, an OpenAPI description, drivers for Node.js, Python and .NET, an Entity Framework Core provider, and ODBC and JDBC drivers. Each hex checks daily for a newer release; the dashboard shows every hex's version and marks those that need an update, and on HexDB Enterprise rolls an update out one hex at a time.
@@ -274,6 +274,7 @@ hexdb stop [--force]             stop it gracefully
 hexdb health                     is it up?
 hexdb status                     status and metrics (needs HEXDB_TOKEN)
 hexdb secret                     print a new random key
+hexdb keys new|wrap|rewrap|check customer-managed keys (AWS KMS, Azure Key Vault)
 hexdb reset-password [--login L] a one-time password for a forgotten login (on the server's machine)
 hexdb backup [--name N] [--hex]  back up the lattice (--hex: only this hex's part; needs HEXDB_TOKEN)
 hexdb backup --list              list backups

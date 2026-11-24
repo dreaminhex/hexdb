@@ -132,7 +132,10 @@ pub async fn spawn(config: &HexConfig, count: usize, role: &str, server: &Path) 
         }
         // With a lattice secret each hex can have its own storage key; without
         // one, the lattice key comes from the storage key, so it is shared.
-        let local_toml = if config.network.lattice_secret.trim().is_empty() {
+        let local_toml = if config.network.lattice_secret.trim().is_empty() && config.storage.key.is_set() {
+            // A customer-managed key: the spawned hex unwraps the same wrapped key.
+            config.storage.key.toml()
+        } else if config.network.lattice_secret.trim().is_empty() {
             format!("[storage]\nencryption_key = {}\n", toml_string(&config.storage.encryption_key))
         } else {
             format!(

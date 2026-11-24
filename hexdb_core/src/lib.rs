@@ -59,6 +59,8 @@ pub mod compress;
 pub mod erasure;
 pub mod blobs;
 pub mod objstore;
+pub mod sigv4;
+pub mod kms;
 pub mod restore;
 pub mod files;
 pub mod extract;

@@ -1,6 +1,6 @@
 # Design: customer-managed keys
 
-Status: accepted for 2.7 (the user's decisions 2026-11-23: AWS KMS and Azure Key Vault; envelope encryption, rotation, revocation).
+Status: implemented in 2.7 (`hexdb_core/src/kms.rs`, `sigv4.rs`; tests in `hexdb_tests/tests/managed_keys.rs`). Decisions 2026-11-23: AWS KMS and Azure Key Vault; envelope encryption, rotation, revocation.
 
 ## Why
 

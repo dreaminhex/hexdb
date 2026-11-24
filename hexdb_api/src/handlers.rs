@@ -1894,6 +1894,9 @@ pub async fn join_info(
     );
     let local_toml = if secret_key == "network.lattice_secret" {
         format!("[network]\nlattice_secret = \"{}\"\n\n[storage]\n# Its own key for data at rest; generate one with the CLI: hexdb secret\nencryption_key = \"\"\n", secret_value)
+    } else if config.storage.key.is_set() {
+        // A customer-managed key: hand out the wrapped key, never the unwrapped one.
+        format!("# This lattice authenticates hexes with a key derived from the storage key,\n# a customer-managed key: the new hex needs the same wrapped key, and\n# credentials for the key service in its environment.\n{}", config.storage.key.toml())
     } else {
         format!("# This lattice authenticates hexes with a key derived from the storage key,\n# so the new hex needs the same one. Setting network.lattice_secret on every\n# hex instead lets each keep its own storage key.\n[storage]\nencryption_key = \"{}\"\n", secret_value)
     };

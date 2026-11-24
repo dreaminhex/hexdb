@@ -98,7 +98,7 @@ A hex reads its configuration from:
 
 Relative paths in the file (`storage.path`, `ui.path`, `plugins.registry`) resolve against the config file's folder.
 
-The one required setting is `storage.encryption_key`: 32 random bytes, base64-encoded, with a `base64:` prefix. Generate one with `hexdb secret` or `echo "base64:$(openssl rand -base64 32)"`. Without the key, the data can't be read. Back it up separately from the data.
+The one required setting is `storage.encryption_key`: 32 random bytes, base64-encoded, with a `base64:` prefix. Generate one with `hexdb secret` or `echo "base64:$(openssl rand -base64 32)"`. Without the key, the data can't be read. Back it up separately from the data. (Or keep it only wrapped by AWS KMS or Azure Key Vault: see [Customer-managed keys](#customer-managed-keys).)
 
 `hexdb init` writes a starting configuration: `hexdb.toml` (data in `./data` beside it, and the admin UI that shipped with this copy of HexDB) and `hexdb.local.toml` with a new key, readable by the user only. It writes to the user's HexDB folder, or to `--dir <folder>`, and never replaces a file that exists. `hexdb start` runs it by itself when it finds no configuration and no key in the environment, which is what happens on the first start after installing HexDB.
 
@@ -2397,6 +2397,32 @@ Only SSTable headers (format, counts, offsets, key ID) are plaintext. Every nonc
 
 A server whose data needs a key that isn't configured refuses to start, rather than discard anything. The error names the setting to fix.
 
+### Customer-managed keys
+
+Instead of keeping `storage.encryption_key` in the configuration, a lattice can keep its storage key only **wrapped** by a key-encryption key in its owner's AWS KMS or Azure Key Vault. Whoever holds the configuration then can't read the data without the key service, and disabling the key there cuts every hex off from it.
+
+```toml
+[storage.key]
+provider = "aws_kms"          # or "azure_key_vault"
+key_id = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-..."   # or https://<vault>.vault.azure.net/keys/<name>/<version>
+wrapped = "base64:..."        # from hexdb keys new (or wrap)
+check_minutes = 15            # how often a running hex asks again; 0: only at start
+```
+
+- **Credentials** come from the environment, as the providers' own tools read them: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and, for temporary credentials, `AWS_SESSION_TOKEN` (the region comes from the key's ARN, or `AWS_REGION`); `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` for a service principal with the Key Vault Crypto User role (or the `wrapKey` and `unwrapKey` permissions). AWS needs `kms:Encrypt` and `kms:Decrypt` on the key. Azure keys are RSA, used with RSA-OAEP-256.
+- **At start** the hex asks the key service to unwrap the storage key and keeps it in memory only; nothing on disk changes format. If the key service can't be reached, the hex tries again for up to a minute. If it refuses (the key is disabled or deleted, or the credentials lost permission), the hex doesn't start, and says why. `storage.encryption_key` must be empty: it's one or the other. The unwrap is audited as `storage.key_unwrapped`; CloudTrail or Azure Monitor records it too.
+- **While running** the hex asks again every `check_minutes`. A refusal is audited as `storage.key_revoked`, alerts administrators on every alert channel (critical), and stops the hex gracefully, writing out what it holds first. It won't start again until the key is usable. A key service that can't be reached is only a warning in the log: an outage there doesn't take the lattice down.
+- **In a lattice** every hex shares the storage key, so every hex has the same `[storage.key]` and credentials. "Add a hex" and `hexdb lattice spawn` hand out the wrapped key, never the unwrapped one. Revoking the key stops every hex within `check_minutes`.
+
+**Commands** (credentials from the same environment variables):
+
+- `hexdb keys new --provider aws_kms --key-id <ARN>` makes a new random storage key, wraps it and prints the `[storage.key]` section. For a new lattice, or for rotating the storage key (put the old one in `previous_encryption_keys`, as below).
+- `hexdb keys wrap --provider ... --key-id ...` wraps the configuration's current plain `storage.encryption_key`, to move an existing lattice to a customer-managed key. Add the section to every hex, remove the plain key, and restart them.
+- `hexdb keys rewrap --key-id <new>` unwraps the storage key with the current KMS key and wraps it with another one (or a new Key Vault key version), printing the new section. No data is rewritten. AWS's automatic key rotation needs nothing: old wraps keep working.
+- `hexdb keys check` asks the key service to unwrap once and prints the storage key's ID (as `/status` and the sealed files show it), never the key.
+
+A previous key can be wrapped too: an entry `"wrapped:<provider>:<key_id>:base64:..."` in `storage.previous_encryption_keys` is unwrapped at start the same way. Commands that read a data folder or shipped backups (`hexdb restore`, `hexdb lattice spawn`) unwrap as the server does.
+
 ### Between hexes
 
 Hexes authenticate each other with the lattice key: `network.lattice_secret`, or, when that's empty, a key derived from `storage.encryption_key`. The key is never sent.
@@ -2980,8 +3006,10 @@ role = "oracle"
 | `identity.name` | generated | The hex's name (1-64 characters); drawn and saved on the first start when empty |
 | `identity.region` | `FLY_REGION`, else empty | Where the hex runs (a region code such as `iad`), shown on the dashboard; see [Regions](#regions) |
 | `storage.path` | `./.hexdb` | Data directory |
-| `storage.encryption_key` | required | `base64:` plus 32 bytes |
-| `storage.previous_encryption_keys` | `[]` | Old keys still accepted for reading |
+| `storage.encryption_key` | required (or `[storage.key]`) | `base64:` plus 32 bytes |
+| `storage.previous_encryption_keys` | `[]` | Old keys still accepted for reading (plain, or `wrapped:<provider>:<key_id>:base64:...`) |
+| `storage.key.provider`, `key_id`, `wrapped` | none | A [customer-managed key](#customer-managed-keys): the storage key wrapped by AWS KMS (`aws_kms`) or Azure Key Vault (`azure_key_vault`) |
+| `storage.key.check_minutes` | 15 | How often a running hex asks the key service again (0: only at start) |
 | `storage.disk_mb` | 8192 | Disk budget |
 | `storage.wal_sync` | `true` | fsync before acknowledging |
 | `storage.wal_flush_check_frequency` | 60 | Seconds between flush checks |
