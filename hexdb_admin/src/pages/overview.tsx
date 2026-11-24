@@ -411,6 +411,52 @@ function VertexCard({ vertices }: { vertices: VertexStatus[] }) {
   )
 }
 
+/** Point-in-time restore: when the Overseer last shipped, how far back a restore can go, and whether shipping is failing. */
+function ContinuousCard() {
+  const { me } = useAuth()
+  const allowed = has(me, "maintenance")
+  const state = usePoll(() => (allowed ? api.continuousBackups() : Promise.resolve(null)), 15_000, [allowed])
+  const c = state.data
+  if (!c || !c.enabled || !c.this_hex_ships) return null
+  const when = (ms?: number | null) => (ms ? new Date(ms).toLocaleString() : "not yet")
+  const failing = !!c.failing_since
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <IconShieldCheck className="text-muted-foreground size-5" /> Point-in-time restore
+        </CardTitle>
+        <CardDescription>
+          Shipped to {c.bucket}/{c.prefix} at {c.endpoint}; a restore can go back {c.retention_days} day{c.retention_days === 1 ? "" : "s"}.
+        </CardDescription>
+        <CardAction>
+          {failing ? (
+            <Badge variant="outline" className="gap-1">
+              <IconAlertTriangle className="text-status-warning size-3.5" /> Failing
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="gap-1">
+              <IconCircleCheck className="text-status-good size-3.5" /> Shipping
+            </Badge>
+          )}
+        </CardAction>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2 text-sm">
+        {c.last_error && (
+          <p className="flex items-start gap-2 text-amber-600 dark:text-amber-400">
+            <IconAlertTriangle className="mt-0.5 size-4 shrink-0" /> Failing since {when(c.failing_since)}: {c.last_error.message}
+          </p>
+        )}
+        <div className="text-muted-foreground flex flex-wrap gap-x-8 gap-y-1">
+          <span>Last shipped: {when(c.last_pass)}</span>
+          <span>Oldest restorable moment: {when(c.oldest_restorable)}</span>
+          <span>Last base: {when(c.last_base?.created)}</span>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
 /** Malware scanning of uploads: the engines and their versions, a warning when it's weaker than it should be, and the quarantine. */
 function ScanCard({ status }: { status: Status }) {
   const { me } = useAuth()
@@ -955,6 +1001,9 @@ export function OverviewPage() {
       </div>
       <div className="px-4 lg:px-6">
         <ScanCard status={status.data} />
+      </div>
+      <div className="px-4 lg:px-6 empty:hidden">
+        <ContinuousCard />
       </div>
       <div className="px-4 lg:px-6">
         <TessellationTable status={status.data} />

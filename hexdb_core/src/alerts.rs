@@ -95,6 +95,22 @@ impl Alert {
         }
     }
 
+    /// Shipping for point-in-time restore has been failing for a while: acknowledged writes
+    /// are piling up on the lattice and aren't off it.
+    pub fn continuous_failing(engine: &HexDBEngine, since: i64, error: &str) -> Alert {
+        let iso = |ms: i64| crate::clock::from_millis(ms).map(|t| crate::clock::format(t, "%Y-%m-%d %H:%M UTC")).unwrap_or_default();
+        Alert {
+            key: format!("hexdb-continuous-{}-{}", engine.config.network.lattice_name, since),
+            severity: "high".into(),
+            title: format!("HexDB '{}': shipping for point-in-time restore has failed since {}", engine.config.network.lattice_name, iso(since)),
+            text: format!("Writes since then aren't in the store, so a restore can't reach them yet; they're kept on the lattice until shipping works again. The last error: {}", error),
+            link: None,
+            lattice: engine.config.network.lattice_name.clone(),
+            hex: engine.name.clone(),
+            review: json!({ "continuous_backup": { "failing_since": since, "error": error } }),
+        }
+    }
+
     /// The alert behind "Send a test alert".
     pub fn test(engine: &HexDBEngine, by: &str) -> Alert {
         Alert {

@@ -1155,6 +1155,21 @@ export interface RoleInput {
   restrictions?: Record<string, Restriction>
 }
 
+/** Point-in-time restore's shipping, as the Overseer reports it. */
+export interface ContinuousBackups {
+  enabled: boolean
+  endpoint?: string
+  bucket?: string
+  prefix?: string
+  retention_days?: number
+  last_pass?: number | null
+  oldest_restorable?: number | null
+  last_base?: { sequence: number; created: number } | null
+  last_error?: { at: number; message: string } | null
+  failing_since?: number | null
+  this_hex_ships?: boolean
+}
+
 export interface NewUser {
   login: string
   password: string
@@ -1290,6 +1305,8 @@ export const api = {
     return request<LogPage>("GET", `/logs?${params}`)
   },
   flush: () => request<{ entries: number; tessellations: number }>("POST", "/flush"),
+  /** Continuous shipping for point-in-time restore (GET /backups/continuous). */
+  continuousBackups: () => request<ContinuousBackups>("GET", "/backups/continuous"),
   backup: (name?: string) => request<{ name: string; path: string; sequence: number; files: number; linked: number; bytes: number; millis: number; role: string; slices: number; complete: boolean }>("POST", "/backup", name ? { name } : {}),
 
   tessellations: () => request<{ tessellations: Tessellation[] }>("GET", "/tessellations").then((r) => r.tessellations),

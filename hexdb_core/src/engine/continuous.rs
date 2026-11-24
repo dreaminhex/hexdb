@@ -81,7 +81,13 @@ pub struct Runtime {
     last_error: Mutex<Option<(i64, String)>>,
     /// The first sequence number of the oldest segment not yet in the store (0 until a pass knows).
     unshipped_from: AtomicU64,
+    /// Since when passes have been failing, and whether the alert for it went out.
+    failing_since: Mutex<Option<i64>>,
+    alerted: std::sync::atomic::AtomicBool,
 }
+
+/// How long shipping may fail before administrators are alerted.
+const ALERT_AFTER_MS: i64 = 10 * 60 * 1000;
 
 fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
@@ -140,6 +146,7 @@ impl HexDBEngine {
             "oldest_restorable": state.as_ref().and_then(|s| s.bases.first().map(|b| b.created)),
             "last_base": state.as_ref().and_then(|s| s.bases.last().map(|b| json!({ "sequence": b.sequence, "created": b.created }))),
             "last_error": error.map(|(at, message)| json!({ "at": at, "message": message })),
+            "failing_since": *self.continuous.failing_since.lock().unwrap(),
         })
     }
 
@@ -151,14 +158,29 @@ impl HexDBEngine {
             return;
         }
         match self.ship_pass(&config).await {
-            Ok(()) => *self.continuous.last_error.lock().unwrap() = None,
+            Ok(()) => {
+                *self.continuous.last_error.lock().unwrap() = None;
+                let was_failing = self.continuous.failing_since.lock().unwrap().take();
+                if was_failing.is_some() && self.continuous.alerted.swap(false, Ordering::AcqRel) {
+                    info!("📤 Shipping for point-in-time restore works again.");
+                    self.audit("system", "backup.continuous_recovered", &self.name, json!({ "failing_since": was_failing })).await;
+                }
+            }
             Err(e) => {
                 let message = format!("{:#}", e);
                 let first = self.continuous.last_error.lock().unwrap().as_ref().map(|(_, m)| m != &message).unwrap_or(true);
                 if first {
                     warn!("⚠️ Shipping for point-in-time restore failed: {}", message);
                 }
-                *self.continuous.last_error.lock().unwrap() = Some((now_ms(), message));
+                let now = now_ms();
+                *self.continuous.last_error.lock().unwrap() = Some((now, message.clone()));
+                let since = *self.continuous.failing_since.lock().unwrap().get_or_insert(now);
+                // Failing for a while: tell administrators once, on every alert channel, and audit it.
+                if now - since >= ALERT_AFTER_MS && !self.continuous.alerted.swap(true, Ordering::AcqRel) {
+                    let alert = crate::alerts::Alert::continuous_failing(self, since, &message);
+                    let deliveries = self.send_alert(&alert, None).await;
+                    self.audit("system", "backup.continuous_failing", &self.name, json!({ "failing_since": since, "error": message, "alerted": deliveries.len() })).await;
+                }
             }
         }
     }
