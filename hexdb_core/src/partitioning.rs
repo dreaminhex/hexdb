@@ -189,6 +189,17 @@ pub enum Placement {
 }
 
 impl HexDBEngine {
+    /// The slices this hex's partition owns: every slice on a one-partition lattice
+    /// (every lattice until stage 2), its partition's mask otherwise, and none for a hex
+    /// the map doesn't place. "Holds all it should" means holding these, not all 64.
+    pub fn owned_slices(&self) -> SliceMask {
+        let map = self.partitions.map.read().unwrap();
+        if map.is_single() {
+            return ALL_SLICES;
+        }
+        map.partition_of_hex(&self.id.to_string()).and_then(|id| map.partitions.iter().find(|p| p.id == id)).map_or(0, |p| p.slices)
+    }
+
     /// Where a record of `tessellation` with `id` belongs. System tessellations are
     /// recognized as the engine does (the `_` prefix, `users` and `roles`, or a catalog
     /// kind of `system`), never by hash.
@@ -296,6 +307,12 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 2, "user documents spread over both partitions");
+        // This hex isn't in the map: it owns nothing. Placed in partition 1, it owns that mask.
+        assert_eq!(engine.owned_slices(), 0);
+        engine.partitions.map.write().unwrap().partitions[1].hexes.push(engine.id.to_string());
+        assert_eq!(engine.owned_slices(), !low);
+        *engine.partitions.map.write().unwrap() = PartitionMap::default();
+        assert_eq!(engine.owned_slices(), ALL_SLICES);
     }
 
     #[test]

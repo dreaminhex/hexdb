@@ -571,7 +571,7 @@ impl Follower {
                 }
                 // Remember that this hex leads its own history now, so after a
                 // restart it reports where it really is (see restore_replication_state).
-                let led = ReplicaCursor { source_id: self.engine.history_id(), applied_seq: self.engine.changes.published_seq(), held_slices: ALL_SLICES };
+                let led = ReplicaCursor { source_id: self.engine.history_id(), applied_seq: self.engine.changes.published_seq(), held_slices: self.engine.owned_slices() };
                 if let Err(e) = self.engine.apply_replicated(Vec::new(), Some(&led)).await {
                     warn!("⚠️ Couldn't record that this hex leads the lattice: {:#}", e);
                 }
@@ -661,7 +661,7 @@ impl Follower {
         if let Some(mut cursor) = self.engine.load_replica_cursor().await {
             // A hex that led its history is at its last position in it.
             if cursor.source_id == self.engine.history_id() {
-                cursor = ReplicaCursor { applied_seq: self.engine.changes.published_seq(), held_slices: ALL_SLICES, ..cursor };
+                cursor = ReplicaCursor { applied_seq: self.engine.changes.published_seq(), held_slices: self.engine.owned_slices(), ..cursor };
             }
             let meta: SnapshotMeta = self.get_ok(&format!("{}/lattice/catalog", base)).await?;
             // The Overseer continues the history this hex followed, from its position or just before it.
@@ -1003,8 +1003,10 @@ impl Follower {
         if self.engine.is_oracle() {
             return 0;
         }
+        // Never more than this hex's partition owns (every slice on a one-partition lattice).
+        let owned = self.engine.owned_slices();
         if !overseer.hex.slicing {
-            return ALL_SLICES;
+            return owned;
         }
         let me = self.engine.id.to_string();
         // A retiring hex keeps nothing: the others take its slices before it gives any up.
@@ -1024,13 +1026,13 @@ impl Follower {
         // The successor of a retiring Overseer keeps every slice, to take over without collecting any.
         let identity = self.engine.identity_cache.read().unwrap().clone();
         if identity.is_some_and(|mine| crate::retire::is_successor(&mine, &overseer.hex, &members)) {
-            return ALL_SLICES;
+            return owned;
         }
         replicas.push(me.clone());
         if replicas.len() < 2 {
-            return ALL_SLICES;
+            return owned;
         }
-        slicing::placement(&replicas, overseer.hex.slice_copies.max(1)).get(&me).copied().unwrap_or(ALL_SLICES)
+        slicing::placement(&replicas, overseer.hex.slice_copies.max(1)).get(&me).copied().unwrap_or(ALL_SLICES) & owned
     }
 
     /// Copy slices this hex gains from the Overseer; give up the ones it loses
@@ -1150,8 +1152,10 @@ impl Follower {
             self.finish_rebuild(None).await?;
             return Ok(true);
         };
+        // Complete when it holds every slice its partition owns (all 64 on a one-partition lattice).
+        let owned = engine.owned_slices();
         let mut held = cursor.held_slices;
-        if held == ALL_SLICES {
+        if held & owned == owned {
             self.finish_rebuild(Some(&cursor)).await?;
             return Ok(true);
         }
@@ -1168,7 +1172,7 @@ impl Follower {
         let tessellations: Vec<String> = engine.tessellation_details().into_iter().map(|(n, _)| n).filter(|n| engine.is_sliced_tessellation(n)).collect();
         // For each missing slice, the holder furthest along.
         let mut plan: HashMap<String, (crate::network::discovery::PeerHex, SliceMask)> = HashMap::new();
-        for slice in slicing::list(!held) {
+        for slice in slicing::list(owned & !held) {
             if let Some(best) = holders.iter().filter(|h| slicing::holds(h.slices_held, slice)).max_by_key(|h| h.applied_seq) {
                 plan.entry(best.id.clone()).or_insert_with(|| (best.clone(), 0)).1 |= 1u64 << slice;
             }
@@ -1251,8 +1255,8 @@ impl Follower {
                 .await?;
             self.set_status(|s| s.slices_held = held);
         }
-        if held != ALL_SLICES {
-            let missing = slicing::count(!held);
+        if held & owned != owned {
+            let missing = slicing::count(owned & !held);
             // Who has them: hexes discovery knows but can't reach now, holding a missing slice.
             let waiting_for: Vec<String> = {
                 let peers = engine.peers.lock().await;
@@ -1286,18 +1290,19 @@ impl Follower {
             });
             return Ok(false);
         }
-        let done = ReplicaCursor { held_slices: ALL_SLICES, ..cursor };
+        let done = ReplicaCursor { held_slices: owned, ..cursor };
         self.finish_rebuild(Some(&done)).await?;
         Ok(true)
     }
 
     async fn finish_rebuild(&mut self, cursor: Option<&ReplicaCursor>) -> Result<()> {
+        let owned = self.engine.owned_slices();
         if let Some(cursor) = cursor {
-            self.engine.apply_replicated(Vec::new(), Some(&ReplicaCursor { held_slices: ALL_SLICES, ..cursor.clone() })).await?;
+            self.engine.apply_replicated(Vec::new(), Some(&ReplicaCursor { held_slices: owned, ..cursor.clone() })).await?;
         }
         self.engine.request_chunk_catch_up();
         self.set_status(|s| {
-            s.slices_held = ALL_SLICES;
+            s.slices_held = owned;
             s.rebuilding = None;
             s.waiting_for.clear();
         });

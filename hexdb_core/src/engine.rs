@@ -736,8 +736,9 @@ impl HexDBEngine {
         // A sliced replica becoming the Overseer has only part of the data:
         // it takes no requests until it has collected the rest (see replication).
         if role == crate::network::discovery::ROLE_OVERSEER {
+            let owned = self.owned_slices();
             let mut status = self.replication.lock().unwrap();
-            if status.slices_held != crate::slicing::ALL_SLICES && status.rebuilding.is_none() {
+            if status.slices_held & owned != owned && status.rebuilding.is_none() {
                 status.rebuilding = Some("This hex just became the Overseer and is collecting slices from the other hexes; try again shortly.".into());
             }
         } else {
@@ -870,7 +871,8 @@ impl HexDBEngine {
 
     /// True for a replica that keeps only some slices: it can't answer queries itself.
     pub fn is_partial_replica(&self) -> bool {
-        !self.is_writable() && self.replication.lock().unwrap().slices_held != crate::slicing::ALL_SLICES
+        let owned = self.owned_slices();
+        !self.is_writable() && self.replication.lock().unwrap().slices_held & owned != owned
     }
 
     /// True if documents of this tessellation are sliced (user data; system tessellations never are).

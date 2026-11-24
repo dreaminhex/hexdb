@@ -304,7 +304,7 @@ impl HexDBEngine {
         if let Some(cursor) = cursor {
             // Taken right after the commit, so the pair always matches the data.
             let mut position = self.replica_position.lock().unwrap();
-            let whole = cursor.held_slices == crate::slicing::ALL_SLICES;
+            let whole = cursor.held_slices & self.owned_slices() == self.owned_slices();
             *position = Some(crate::replication::Continuation::advanced(
                 position.take(),
                 &cursor.source_id,
@@ -341,7 +341,7 @@ impl HexDBEngine {
         };
         if led {
             let mut status = self.replication.lock().unwrap();
-            status.slices_held = crate::slicing::ALL_SLICES;
+            status.slices_held = self.owned_slices();
             status.history = Some(own);
             status.applied_seq = self.changes.published_seq();
             return;
@@ -350,11 +350,12 @@ impl HexDBEngine {
         *self.replica_position.lock().unwrap() =
             Some(crate::replication::Continuation::advanced(None, &cursor.source_id, cursor.applied_seq, self.changes.published_seq(), false));
         let writable = self.is_writable();
+        let owned = self.owned_slices();
         let mut status = self.replication.lock().unwrap();
         status.slices_held = cursor.held_slices;
         status.history = Some(cursor.source_id.clone());
         status.applied_seq = cursor.applied_seq;
-        if writable && cursor.held_slices != crate::slicing::ALL_SLICES {
+        if writable && cursor.held_slices & owned != owned {
             status.rebuilding = Some("This hex started as the Overseer with only some of the lattice's slices and is collecting the rest; try again shortly.".into());
         }
     }
