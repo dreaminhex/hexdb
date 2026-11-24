@@ -368,18 +368,6 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 
 The header's sun/moon button switches between light, dark and system themes.
 
-### The desktop workbench (pilot)
-
-HexDB Workbench (`workbench/`, a Tauri app for Windows, macOS and Linux) is for people who work with several lattices: development, staging, production.
-
-- **Environments.** Each is one lattice: a name, a color, its address and, optionally, an SSH tunnel. The color frames the environment's window and fills a banner across its top, so production never looks like development.
-- **The admin UI in its own window.** Opening an environment shows that lattice's own admin UI (the version that matches the server). Each window keeps its own cookies and storage, so signing in to one environment never signs in to another, and the lattice's pages get no access to the workbench.
-- **SSH tunnels** go through the system's OpenSSH client, so keys, agents and `~/.ssh/config` work as in a terminal. Host keys are always checked; "Host key" shows a server's fingerprints, and the workbench trusts a host only after you confirm they match.
-- **API keys** (for compare and checks) are kept in the OS keychain (Windows Credential Manager, the macOS Keychain, the Secret Service on Linux), never in its settings file.
-- **Schema and index compare** lists the tessellations two lattices have and where their kinds, index definitions or current schemas differ. Read-only.
-
-Builds come from the Workbench workflow on a `workbench-v*` tag, as a prerelease: an MSI and a setup program for Windows, a universal DMG for macOS, an AppImage, deb and rpm for Linux. They're signed when the signing certificates are configured; until then Windows SmartScreen and macOS Gatekeeper warn on first launch. No auto-update yet.
-
 ## 5. Documents
 
 Documents are JSON objects. Responses add `id`, `_expires_at` when a TTL is set, and `_schema` when the tessellation has a schema. All three are ignored if sent in a body. A write to a tessellation that doesn't exist creates it.
