@@ -368,6 +368,18 @@ The admin UI is at `/ui/` on every hex (`/` redirects there). It's built from [h
 
 The header's sun/moon button switches between light, dark and system themes.
 
+### The desktop workbench (pilot)
+
+HexDB Workbench (`workbench/`, a Tauri app for Windows, macOS and Linux) is for people who work with several lattices: development, staging, production.
+
+- **Environments.** Each is one lattice: a name, a color, its address and, optionally, an SSH tunnel. The color frames the environment's window and fills a banner across its top, so production never looks like development.
+- **The admin UI in its own window.** Opening an environment shows that lattice's own admin UI (the version that matches the server). Each window keeps its own cookies and storage, so signing in to one environment never signs in to another, and the lattice's pages get no access to the workbench.
+- **SSH tunnels** go through the system's OpenSSH client, so keys, agents and `~/.ssh/config` work as in a terminal. Host keys are always checked; "Host key" shows a server's fingerprints, and the workbench trusts a host only after you confirm they match.
+- **API keys** (for compare and checks) are kept in the OS keychain (Windows Credential Manager, the macOS Keychain, the Secret Service on Linux), never in its settings file.
+- **Schema and index compare** lists the tessellations two lattices have and where their kinds, index definitions or current schemas differ. Read-only.
+
+Builds come from the Workbench workflow on a `workbench-v*` tag, as a prerelease: an MSI and a setup program for Windows, a universal DMG for macOS, an AppImage, deb and rpm for Linux. They're signed when the signing certificates are configured; until then Windows SmartScreen and macOS Gatekeeper warn on first launch. No auto-update yet.
+
 ## 5. Documents
 
 Documents are JSON objects. Responses add `id`, `_expires_at` when a TTL is set, and `_schema` when the tessellation has a schema. All three are ignored if sent in a body. A write to a tessellation that doesn't exist creates it.
@@ -434,6 +446,7 @@ Errors have one shape:
 | 416 | `range_not_satisfiable` | A download's `Range` starts past the end of the file |
 | 421 | `sliced_replica` | A sliced replica doesn't serve WebSocket feeds; the message names the Overseer to connect to |
 | 421 | `partition_epoch` | Between hexes only: the request was routed by another partition map, and was refused before it ran |
+| 503 | `partition_unavailable` | Partitioning (preview): the write belongs to a partition with no reachable Overseer, or not to this hex's; nothing was written |
 | 422 | `file_quarantined` | The upload was flagged by malware scanning and kept in quarantine, not stored |
 | 429 | `chat_limit` | The AI chat's per-user or per-address allowance is used up; the message says when it resets |
 | 502 | `oracle_unreachable` | The Oracle couldn't be reached to answer an AI request |
@@ -2572,15 +2585,25 @@ What slicing doesn't change: the Overseer still keeps everything (it runs every 
 
 ### Partitioning (preview)
 
-Partitioned writes will split the 64 slices among several groups of hexes, each with its own Overseer, so a lattice's storage and write throughput grow with the number of groups (the design is in `design/partitioning.md`). 2.6 lays the groundwork only: every lattice is one partition, and nothing behaves differently.
+Partitioned writes split the 64 slices among several groups of hexes, each with its own Overseer, so a lattice's storage and write throughput grow with the number of groups. The design is in `design/partitioning.md` and `design/partitioning-stage-2.md`. 2.7 has it as a **preview**: off by default, and not for production data yet. Until a later stage, a lattice is split only while it's empty, reads stay within the partition that answers, and backups of a split lattice aren't one consistent point.
 
 ```toml
 [partitioning]
 enabled = false   # the default
 ```
 
-- **The partition map** says which partition owns each slice, and which hexes form each partition's group. Every change gets a higher epoch. A lattice that never changed it has the implicit map: partition 0, every slice, epoch 1. Upgrading writes nothing. `GET /status/partitions` (administrators) shows the map this hex routes by: `epoch`, each partition's `slices` and `hexes`, `this_hex`, `sends_epochs`, and `rejected_versions`: stored versions that were never applied, because they're invalid or because two different versions claim the same epoch.
-- **Routing.** With `enabled = true`, a hex that forwards a request to the Overseer also sends the epoch of the map it routed by, covered by the lattice signature, once every live hex runs 2.6 or later (older ones would reject the signature). A hex whose map has another epoch refuses the request before running it, with 421 `partition_epoch`; the forwarding hex reloads its map and sends the request again (up to three times), if the refusal is signed for that request or the request is a read or a write with an idempotency key. Otherwise the 421 goes back to the client. A forwarded file upload can't be sent twice, so the 421 goes back to the client, which can send it again: nothing was written.
+- **The partition map** says which partition owns each slice, and which hexes form each partition's group. Every change gets a higher epoch. A lattice that never changed it has the implicit map: partition 0, every slice, epoch 1, and behaves exactly as a lattice without partitions. Upgrading writes nothing. `GET /status/partitions` (administrators) shows the map this hex routes by: `epoch`, each partition's `slices` and `hexes`, `this_hex`, `sends_epochs`, and `rejected_versions` (stored versions never applied, because they're invalid or two different versions claim one epoch).
+- **Splitting a lattice.** `PUT /status/partitions {"password", "partitions": [{"id": 0, "slices": [0, ..., 31], "hexes": ["<hex ID>", ...]}, {"id": 1, ...}]}` (administrators, the password again, audited), on the Overseer of partition 0, with `partitioning.enabled` on every hex. Every slice must be in exactly one partition, partition 0 must exist, and every hex must run 2.7 or later. A map with several partitions is accepted only while the lattice holds **no user documents**: partitions can't move data yet. The check runs under the commit lock, so no write slips in between (one that tries is refused with 409 and can be sent again). Hex IDs are in `GET /status` (`id`).
+- **Groups.** Each partition's hexes elect their own Overseer. Quorum (`replication.quorum`), acknowledgements (`replication.min_acks`), handovers, retiring and replication work within the group, as on an unpartitioned lattice. A hex the map doesn't place in any partition is never elected and holds no data.
+- **Writes.**
+  - A new document gets an ID that falls in a slice of the receiving hex's partition, so an insert commits there and never crosses partitions. Spread clients over the hexes (a load balancer does) and writes spread over the partitions.
+  - A change to an existing document (`PUT`, `PATCH`, `DELETE /{tessellation}/{id}`) goes to the partition that owns it.
+  - Users, roles, API keys, the lattice configuration and tessellation definitions (indexes, schemas) belong to partition 0. Any hex passes those changes on to partition 0's Overseer.
+  - A write whose partition has no reachable Overseer is refused before anything is written, with 503 `partition_unavailable`. A hex never stores a document of another partition: its commits refuse one.
+  - Refused until partitions can commit together (a later stage), with 409 and nothing written: transactions naming documents of more than one partition (or deleting by filter), upserts by key fields, and cascading deletes or enforced parent links across partitions. A bulk write commits only in the receiving hex's partition.
+- **The system stream.** Every hex outside partition 0 copies the lattice-wide system tessellations (users, roles, API keys, the configuration, the partition map) and every tessellation's definition from partition 0's Overseer, and keeps them current, so it can authenticate requests and check schemas. Each hex keeps its own audit entries, sign-in failures and AI usage in this preview.
+- **Reads** answer from the partition of the hex that gets them, in this preview: a query sees that partition's documents only.
+- **Routing.** A hex that forwards a request sends the epoch of the map it routed by, covered by the lattice signature, once every live hex runs 2.6 or later. A hex whose map has another epoch refuses the request before running it, with 421 `partition_epoch`. The forwarding hex reloads its map and sends the request again (up to three times) if the refusal is signed for that request, or if the request is a read or a write with an idempotency key. Otherwise the 421 goes back to the client. A forwarded file upload can't be sent twice, so the 421 goes back to the client, which can send it again: nothing was written.
 
 ### Adding a hex
 
