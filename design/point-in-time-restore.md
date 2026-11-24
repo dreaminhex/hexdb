@@ -10,11 +10,11 @@ Status: accepted for 2.7 (the user's decisions 2026-11-23: any S3-compatible sto
 
 Everything shipped is already encrypted with the lattice's storage key (WAL records, SSTables, metadata), or sealed before upload (file chunks). The store never sees a document, a name or a key.
 
-1. **Base backups.** A lattice backup (`engine.backup`, scope `lattice`, so on a hex that holds everything) every `backup.continuous.base_hours` (24), uploaded file by file under `<prefix>/base/<sequence>/`, with its `backup.json` manifest last. A base is usable once its manifest is there.
-2. **WAL segments.** Every closed segment, under `<prefix>/wal/<first sequence>.wal`, as soon as it's closed. The Overseer rotates the WAL when the open segment has records older than `backup.continuous.max_lag_seconds` (60), so at most about a minute of acknowledged writes isn't off the lattice yet. Segments are immutable once closed, so an upload is never repeated with other contents.
-3. **File chunks.** Every chunk stored after the last base, under `<prefix>/chunks/<chunk id>`, sealed with AES-256-GCM under a key derived from the storage key, the chunk ID as associated data (the same sealing chunks get between hexes). Chunks are content-addressed and immutable.
+1. **Base backups.** A lattice backup (`engine.backup`, scope `lattice`, so on a hex that holds everything) every `backup.continuous.base_hours` (24), uploaded file by file under `<prefix>/history/<history id>/base/<sequence>/`, with its `backup.json` manifest last, without its file content (shipped as packs, below). A base is usable once its manifest is there.
+2. **WAL segments.** Every closed segment, under `<prefix>/history/<history id>/wal/<first sequence>.wal`, as soon as it's closed. The Overseer rotates the WAL when the open segment has records older than `backup.continuous.max_lag_seconds` (60), so at most about a minute of acknowledged writes isn't off the lattice yet. Segments are immutable once closed, so an upload is never repeated with other contents.
+3. **File content, as pack files.** File chunks live in append-only pack files, one series per vertex; a pack is sealed at 256 MB and never changes again. Each pass uploads every sealed pack once (`<prefix>/history/<history id>/packs/vertex-<n>/<pack>`) and, of the open pack, the bytes appended since the last pass (`.../<pack>.<offset>`), after syncing the store. Packs go up before the WAL segments of the same pass, and a chunk is durable before the commit that refers to it, so every shipped segment's chunks are already shipped. The bytes are the pack's own: fragments encrypted with the content key, Reed-Solomon coded. (Chunks can't be tracked one by one across restarts: the store's generation counter lives in memory.)
 
-A small `<prefix>/state.json` (sealed) records the newest uploaded segment and base, so a new Overseer continues where the last one stopped; it's also rebuilt from a listing if missing.
+A small `<prefix>/history/<history id>/state.hxe` (sealed with the storage key) records the newest uploaded segment and base, so a new Overseer continues where the last one stopped; it's also rebuilt from a listing if missing.
 
 ## Who ships
 
@@ -44,14 +44,16 @@ Lattice configuration (encrypted, versioned, audited; secrets write-only):
 
 1. Lists the bases and picks the newest whose sequence's time is at or before `--until`.
 2. Downloads it, then every segment after it, in order, up to the first record later than `--until`. That segment is cut after the last record at or before it: a record is one commit, so a transaction is never cut in half.
-3. Downloads the chunks the restored file documents reference that the base doesn't have, and imports them.
+3. Downloads every pack shipped in that history: a sealed one whole, an open one by joining its pieces in offset order (a gap is an error). Chunks written after `--until` come along unused; garbage collection removes them.
 4. Writes a fresh catalog history ID (as any restore does), so replicas and plugins treat it as a new history.
 
 The folder then starts as a hex, as a restored backup does today. `--until` defaults to the newest moment available.
 
 ## Retention
 
-The Overseer deletes bases older than the retention window, except the newest one older than it (a restore at the window's start needs it), and segments and chunks only the deleted bases needed. Deleting is the last step of a pass, after uploads.
+The Overseer deletes bases older than the retention window, except the newest one older than it (a restore at the window's start needs it), and the segments only deleted bases needed. A pack's objects are deleted once the pack itself was deleted on the lattice (garbage collection) before the oldest kept base: no restore point can need it then, since its live chunks had moved to packs shipped since. Histories of earlier Overseers are deleted whole once nothing in them is newer than the window. Deleting is the last step of a pass, after uploads.
+
+While shipping is on, the Overseer keeps every WAL segment it hasn't shipped: retired segments go to the archive even with `storage.change_history_hours = 0`, and the archive's age and size limits never remove one that isn't in the store yet.
 
 ## Testing
 

@@ -101,15 +101,18 @@ impl HexDBEngine {
 
     /// Delete archived history beyond the configured limits.
     pub(crate) async fn prune_change_history(&self) {
-        if !self.keeps_change_history() {
+        let keep_from = self.keep_unshipped();
+        if !self.keeps_change_history() && keep_from.is_none() {
             return;
         }
         let dir = self.wal_dir.clone();
         let keys = self.keys.clone();
         let live = self.live();
+        // Without a change history the archive only holds segments waiting to be shipped.
         let max_age = std::time::Duration::from_secs(live.change_history_hours * 3600);
-        let max_bytes = live.change_history_mb.saturating_mul(1024 * 1024);
-        match tokio::task::spawn_blocking(move || wal::prune_archive(&dir, &keys, max_age, max_bytes)).await {
+        let max_bytes = if self.keeps_change_history() { live.change_history_mb.saturating_mul(1024 * 1024) } else { 0 };
+        let keep_from = keep_from.unwrap_or(u64::MAX);
+        match tokio::task::spawn_blocking(move || wal::prune_archive(&dir, &keys, max_age, max_bytes, keep_from)).await {
             Ok(Ok(0)) => {}
             Ok(Ok(n)) => tracing::debug!("🗂️ Pruned {} archived WAL segment(s) from the change history.", n),
             Ok(Err(e)) => warn!("⚠️ Pruning the change history failed: {:#}", e),

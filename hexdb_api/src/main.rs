@@ -339,6 +339,7 @@ async fn server() -> anyhow::Result<()> {
     info!("🏃‍➡️  Starting the TTL sweep task (3 of 4)...");
     let ttl_interval = Duration::from_secs(config.memory.ttl_scan_frequency.max(1));
     spawn_ttl_sweep_task(engine.clone(), ttl_interval, shutdown_rx.clone());
+    hexdb_core::tasks::spawn_continuous_task(engine.clone(), shutdown_rx.clone());
 
     // Spawn a task to monitor vertices
     info!("🏃‍➡️  Starting the vertex monitoring task (4 of 4)...");

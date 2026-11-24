@@ -42,6 +42,7 @@ use tracing::{debug, error, info, warn};
 use ulid::Ulid;
 
 pub(crate) mod backup;
+pub mod continuous;
 pub use backup::BackupScope;
 pub mod deletes;
 mod files;
@@ -263,6 +264,8 @@ pub struct HexDBEngine {
     /// Held by file garbage collection and by a backup, so a backup's file content
     /// is exactly what its documents reference (see `engine::backup`).
     file_gc_lock: Mutex<()>,
+    /// Shipping for point-in-time restore (see `continuous`).
+    pub(crate) continuous: continuous::Runtime,
     flush_needed: Notify,
     /// Sequence numbers below this are no longer in the WAL.
     wal_floor: AtomicU64,
@@ -589,6 +592,7 @@ impl HexDBEngine {
             wal,
             flush_lock: Mutex::new(()),
             file_gc_lock: Mutex::new(()),
+            continuous: Default::default(),
             flush_needed: Notify::new(),
             wal_floor: AtomicU64::new(wal_floor),
             ram_budget,
@@ -1416,7 +1420,9 @@ impl HexDBEngine {
             }
         }
 
-        stats.wal_segments_deleted = if self.keeps_change_history() {
+        // While shipping for point-in-time restore is on, retired segments go to the archive
+        // even without a change history, so none is deleted before it's in the store.
+        stats.wal_segments_deleted = if self.keeps_change_history() || self.keep_unshipped().is_some() {
             wal::archive_segments_before(&self.wal_dir, new_segment)?
         } else {
             wal::delete_segments_before(&self.wal_dir, new_segment)?

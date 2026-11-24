@@ -203,6 +203,22 @@ pub fn spawn_ttl_sweep_task(engine: Arc<HexDBEngine>, interval: Duration, shutdo
     });
 }
 
+/// Ship base backups, WAL segments and file content for point-in-time restore
+/// (see `engine::continuous`), on the Overseer while shipping is configured.
+pub fn spawn_continuous_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {
+    crate::tasks::supervise_background("continuous shipping", shutdown_rx.clone(), move || {
+        let (engine, mut shutdown_rx) = (engine.clone(), shutdown_rx.clone());
+        async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => engine.ship_continuous().await,
+                }
+            }
+        }
+    });
+}
+
 /// Extract metadata from uploaded files (see `crate::extract`), and copy file
 /// content from other hexes.
 pub fn spawn_extraction_task(engine: Arc<HexDBEngine>, shutdown_rx: watch::Receiver<()>) {

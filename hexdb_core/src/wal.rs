@@ -397,9 +397,10 @@ pub fn archive_segments_before(dir: &Path, seq: u64) -> Result<usize> {
 }
 
 /// Delete archived segments beyond the limits, oldest first, and any the key
-/// ring can no longer read (written with a key that has been removed).
-/// Returns how many were deleted.
-pub fn prune_archive(dir: &Path, keys: &crate::crypt::KeyRing, max_age: std::time::Duration, max_bytes: u64) -> Result<usize> {
+/// ring can no longer read (written with a key that has been removed), but
+/// never one starting at `keep_from` or later (not yet shipped for
+/// point-in-time restore; `u64::MAX` keeps nothing back). Returns how many were deleted.
+pub fn prune_archive(dir: &Path, keys: &crate::crypt::KeyRing, max_age: std::time::Duration, max_bytes: u64, keep_from: u64) -> Result<usize> {
     let archive = dir.join(ARCHIVE_DIR);
     let segments = list_segments(&archive)?;
     let mut sizes: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
@@ -413,6 +414,9 @@ pub fn prune_archive(dir: &Path, keys: &crate::crypt::KeyRing, max_age: std::tim
     // The newest segments are kept; history must stay contiguous, so only a prefix is removed.
     let mut remove_prefix = 0;
     for (i, (path, size, modified)) in sizes.iter().enumerate() {
+        if segments[i].0 >= keep_from {
+            break;
+        }
         let too_old = now.duration_since(*modified).unwrap_or_default() > max_age;
         let too_big = total > max_bytes;
         let unreadable = !first_record_readable(path, keys);
@@ -757,12 +761,12 @@ mod tests {
         // Size limit: the oldest archived segment goes first, keeping history contiguous.
         let first_size = fs::metadata(dir.join(ARCHIVE_DIR).join("00000000000000000001.wal")).unwrap().len();
         let total: u64 = list_segments(&dir.join(ARCHIVE_DIR)).unwrap().iter().map(|(_, p)| fs::metadata(p).unwrap().len()).sum();
-        assert_eq!(prune_archive(&dir, &key(), std::time::Duration::from_secs(3600), total - first_size).unwrap(), 1);
+        assert_eq!(prune_archive(&dir, &key(), std::time::Duration::from_secs(3600), total - first_size, u64::MAX).unwrap(), 1);
         assert_eq!(seqs(0, 99, 100), None, "no longer reaches back");
         assert_eq!(seqs(3, 99, 100), Some(vec![4, 5, 6]));
         // A key that can't read the archive anymore prunes it.
         let other = crate::crypt::KeyRing::new(&[9u8; 32], &[]);
-        assert_eq!(prune_archive(&dir, &other, std::time::Duration::from_secs(3600), u64::MAX).unwrap(), 1);
+        assert_eq!(prune_archive(&dir, &other, std::time::Duration::from_secs(3600), u64::MAX, u64::MAX).unwrap(), 1);
         wal.shutdown().await.unwrap();
         fs::remove_dir_all(&dir).ok();
     }

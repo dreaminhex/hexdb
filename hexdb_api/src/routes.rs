@@ -166,6 +166,7 @@ pub fn app_router(
         .route("/flush", post(flush))
         .route("/backup", post(backup))
         .route("/backups", get(list_backups))
+        .route("/backups/continuous", get(continuous_backups))
         .route("/compact", post(compact))
         .route("/scrub", post(scrub))
         .route("/shutdown", post(shutdown))

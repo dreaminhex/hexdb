@@ -634,6 +634,15 @@ pub async fn backup(State(engine): Engine, Auth(principal): Auth, Query(query): 
     Ok((StatusCode::CREATED, Json(json!(info))).into_response())
 }
 
+/// Continuous shipping for point-in-time restore: what's in the store, the oldest
+/// moment a restore can reach, and the last error (on the Overseer, which ships).
+pub async fn continuous_backups(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
+    principal.require_action(Action::Maintenance)?;
+    let mut status = engine.continuous_status();
+    status["this_hex_ships"] = json!(engine.is_writable());
+    Ok(Json(status).into_response())
+}
+
 /// Backups in the backup directory, newest first.
 pub async fn list_backups(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
     principal.require_action(Action::Maintenance)?;
