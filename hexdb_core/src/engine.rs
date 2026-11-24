@@ -128,6 +128,9 @@ pub enum EngineError {
     TooMany(String),
     /// A document names a parent that doesn't exist, through an enforced parent link (422).
     ParentMissing(String),
+    /// A write for a slice another partition owns, which this hex can't pass on (503);
+    /// nothing was written.
+    PartitionUnavailable(String),
 }
 
 impl fmt::Display for EngineError {
@@ -158,6 +161,7 @@ impl fmt::Display for EngineError {
             | EngineError::HasChildren(m)
             | EngineError::TooMany(m)
             | EngineError::ParentMissing(m)
+            | EngineError::PartitionUnavailable(m)
             | EngineError::Unprocessable(m) => f.write_str(m),
         }
     }
@@ -923,6 +927,12 @@ impl HexDBEngine {
 
     /// Write a document into a system tessellation (created if missing).
     /// `ttl` is an expiry in epoch milliseconds. Only on the Overseer.
+    /// Waits for the commit in progress (if any) to finish: commits hold this lock while
+    /// they check and append, so any commit that started before returns first.
+    pub(crate) async fn commit_barrier(&self) {
+        drop(self.state.lock().await);
+    }
+
     pub(crate) async fn put_system_document(&self, tess: &str, id: Ulid, data: serde_json::Value, ttl: Option<i64>) -> Result<()> {
         self.ensure_writable()?;
         self.ensure_system_tessellation(tess)?;

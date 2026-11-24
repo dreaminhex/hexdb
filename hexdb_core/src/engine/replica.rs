@@ -203,7 +203,8 @@ impl HexDBEngine {
         // counted (zero before any count): a busy list is never taken as a quorum.
         let active = match self.peers.try_lock() {
             Ok(peers) => {
-                let active = peers.iter().filter(|p| p.status == "active").count();
+                // Within this hex's partition group: each group keeps its own quorum.
+                let active = peers.iter().filter(|p| p.status == "active" && self.in_my_group(&p.hex.id)).count();
                 self.active_peers_seen.store(active, std::sync::atomic::Ordering::Relaxed);
                 active
             }

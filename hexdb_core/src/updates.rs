@@ -194,7 +194,8 @@ pub async fn hand_over_before_stopping(engine: &HexDBEngine, limit: Duration) {
     let (candidates, replicas) = {
         let peers = engine.peers.lock().await;
         // The Oracle holds no data: it's neither a candidate nor a replica here.
-        let active: Vec<_> = peers.iter().filter(|p| p.status == "active" && p.hex.role != crate::network::discovery::ROLE_ORACLE).collect();
+        // Handovers stay within this hex's partition group.
+        let active: Vec<_> = peers.iter().filter(|p| p.status == "active" && p.hex.role != crate::network::discovery::ROLE_ORACLE && engine.in_my_group(&p.hex.id)).collect();
         (active.iter().filter(|p| matches!(p.hex.preference.as_str(), "auto" | "overseer")).count(), active.len())
     };
     // Sliced replicas each lack most of the data, which a new Overseer would collect.
@@ -205,7 +206,7 @@ pub async fn hand_over_before_stopping(engine: &HexDBEngine, limit: Duration) {
     let started = Instant::now();
     match tokio::time::timeout(limit, step_down(engine)).await {
         Ok(Ok(())) => {
-            let overseer = engine.peers.lock().await.iter().find(|p| p.status == "active" && p.hex.role == crate::network::discovery::ROLE_OVERSEER).map(|p| p.hex.name.clone());
+            let overseer = engine.peers.lock().await.iter().find(|p| p.status == "active" && p.hex.role == crate::network::discovery::ROLE_OVERSEER && engine.in_my_group(&p.hex.id)).map(|p| p.hex.name.clone());
             info!("🤝 '{}' is the Overseer now ({} ms); stopping.", overseer.unwrap_or_default(), started.elapsed().as_millis());
         }
         Ok(Err(e)) => warn!("⚠️ Couldn't hand the Overseer role over ({:#}); stopping anyway.", e),
@@ -256,7 +257,7 @@ pub async fn hand_over_to_preferred(engine: &HexDBEngine) {
         let peers = engine.peers.lock().await;
         peers
             .iter()
-            .filter(|p| p.status == "active" && p.hex.preference == "overseer")
+            .filter(|p| p.status == "active" && p.hex.preference == "overseer" && engine.in_my_group(&p.hex.id))
             // Sliced: it must hold every slice, or it would have to collect the rest first.
             .filter(|p| !p.hex.slicing || p.hex.slices_held == crate::slicing::ALL_SLICES)
             .find(|p| engine.replica_applied(&p.hex.id).is_some_and(|applied| applied >= head))
@@ -472,7 +473,7 @@ async fn update_replica(engine: &HexDBEngine, config: &UpdatesConfig, hex: &Peer
 }
 
 async fn update_self(engine: &HexDBEngine, config: &UpdatesConfig, me: &PeerHex, target: &str) -> anyhow::Result<()> {
-    if engine.peers.lock().await.iter().any(|p| p.status == "active") {
+    if engine.peers.lock().await.iter().any(|p| p.status == "active" && engine.in_my_group(&p.hex.id)) {
         set_step(&me.id, "handing over");
         step_down(engine).await?;
     }
@@ -518,7 +519,7 @@ async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
         // must resume, so each must be at the head.
         // The Oracle isn't among them: it can't be elected and holds no user data.
         let mut replicas: Vec<String> =
-            engine.peers.lock().await.iter().filter(|p| p.status == "active" && p.hex.role != crate::network::discovery::ROLE_ORACLE).map(|p| p.hex.id.clone()).collect();
+            engine.peers.lock().await.iter().filter(|p| p.status == "active" && p.hex.role != crate::network::discovery::ROLE_ORACLE && engine.in_my_group(&p.hex.id)).map(|p| p.hex.id.clone()).collect();
         for id in engine.polling_replicas(Duration::from_secs(10)) {
             if !replicas.contains(&id) {
                 replicas.push(id);
@@ -538,7 +539,7 @@ async fn step_down(engine: &HexDBEngine) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5 * 60);
     loop {
         crate::network::discovery::elect_everywhere(engine).await;
-        let elected = engine.peers.lock().await.iter().any(|p| p.status == "active" && p.hex.role == crate::network::discovery::ROLE_OVERSEER);
+        let elected = engine.peers.lock().await.iter().any(|p| p.status == "active" && p.hex.role == crate::network::discovery::ROLE_OVERSEER && engine.in_my_group(&p.hex.id));
         if elected && !engine.is_writable() {
             return Ok(());
         }

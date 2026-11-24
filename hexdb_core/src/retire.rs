@@ -72,10 +72,11 @@ pub struct RetiringHex {
     pub waiting_for: Option<String>,
 }
 
-/// The hexes of the lattice with their status: this one, then its peers.
+/// The hexes of this hex's partition group (the whole lattice on a one-partition
+/// lattice) with their status: this one, then its peers. Retiring stays within a group.
 async fn members(engine: &HexDBEngine) -> Vec<(PeerHex, String)> {
     let mut out = vec![(crate::network::discovery::local_identity(engine).await, "active".to_string())];
-    out.extend(engine.peers.lock().await.iter().map(|p| (p.hex.clone(), p.status.clone())));
+    out.extend(engine.peers.lock().await.iter().filter(|p| engine.in_my_group(&p.hex.id)).map(|p| (p.hex.clone(), p.status.clone())));
     out
 }
 
@@ -230,7 +231,7 @@ pub async fn hand_over_if_retiring(engine: &HexDBEngine) {
     let head = engine.changes.published_seq();
     let target = {
         let peers = engine.peers.lock().await;
-        successor(peers.iter().map(|p| (&p.hex, p.status.as_str())), &retiring)
+        successor(peers.iter().filter(|p| engine.in_my_group(&p.hex.id)).map(|p| (&p.hex, p.status.as_str())), &retiring)
             .filter(|h| !h.slicing || h.slices_held == ALL_SLICES)
             .filter(|h| engine.replica_applied(&h.id).is_some_and(|applied| applied >= head))
             .map(|h| h.name.clone())

@@ -758,6 +758,17 @@ fn rank(a: &PeerHex, b: &PeerHex) -> Ordering {
     b.ram_mb.cmp(&a.ram_mb).then(b.disk_mb.cmp(&a.disk_mb)).then(a.id.cmp(&b.id))
 }
 
+/// [`elect`] among this hex's partition group: one Overseer per partition. On a
+/// one-partition lattice that's every live peer, as before. A hex a multi-partition
+/// map doesn't place is never a candidate.
+pub fn elect_in_group(engine: &HexDBEngine, local: &PeerHex, live: Vec<PeerHex>) -> String {
+    if engine.my_partition().is_none() {
+        return if local.preference == "oracle" { ROLE_ORACLE.into() } else { ROLE_HARVESTER.into() };
+    }
+    let group: Vec<PeerHex> = live.into_iter().filter(|p| engine.in_my_group(&p.id)).collect();
+    elect(local, &group)
+}
+
 /// Decide this hex's role from its own identity and the live peers. Pure, so
 /// every hex with the same view reaches the same answer.
 pub fn elect(local: &PeerHex, live_peers: &[PeerHex]) -> String {
@@ -952,13 +963,13 @@ pub async fn discovery_round(engine: &HexDBEngine, interval: Duration, on_time: 
         members.retain(|m| now.since(m.last_seen) <= forget_after);
         let active: Vec<PeerHex> = members.iter().filter(|m| m.status == "active").map(|m| m.hex.clone()).collect();
         // The count the quorum check uses while the list is busy.
-        engine.active_peers_seen.store(active.len(), std::sync::atomic::Ordering::Relaxed);
+        engine.active_peers_seen.store(active.iter().filter(|p| engine.in_my_group(&p.id)).count(), std::sync::atomic::Ordering::Relaxed);
         active
     };
 
     let local = local_identity(engine).await;
     *engine.identity_cache.write().unwrap() = Some(local.clone());
-    let role = elect(&local, &live);
+    let role = elect_in_group(engine, &local, live);
     if role != local.role {
         info!("🎖️ Role changed: {} -> {}.", local.role, role);
         engine.set_role(&role);
@@ -1023,6 +1034,33 @@ mod tests {
             count_misses(&mut alone, &[], &Default::default(), true);
         }
         assert_eq!(alone[0].status, "lost");
+    }
+
+    #[tokio::test]
+    async fn each_partition_group_elects_its_own_overseer() {
+        use crate::partitioning::{Partition, PartitionMap};
+        let (engine, _dir) = crate::engine::test_engine().await;
+        let me = engine.id.to_string();
+        let low: crate::slicing::SliceMask = (1u64 << 32) - 1;
+        // Group 0: this hex (small) and "a0" (big); group 1: "b0" (biggest) and "b1".
+        engine.set_partition_map_for_test(PartitionMap {
+            epoch: 2,
+            partitions: vec![Partition { id: 0, slices: low, hexes: vec![me.clone(), "a0".into()] }, Partition { id: 1, slices: !low, hexes: vec!["b0".into(), "b1".into()] }],
+        });
+        let local = hex(&me, ROLE_HARVESTER, "auto", 1024);
+        let others = vec![hex("a0", ROLE_HARVESTER, "auto", 2048), hex("b0", ROLE_OVERSEER, "auto", 9999), hex("b1", ROLE_HARVESTER, "auto", 512)];
+        // Group 1's sitting Overseer doesn't stop group 0 from electing one; a0 outranks this hex.
+        assert_eq!(elect_in_group(&engine, &local, others.clone()), ROLE_HARVESTER);
+        let alone = vec![hex("b0", ROLE_OVERSEER, "auto", 9999), hex("b1", ROLE_HARVESTER, "auto", 512)];
+        assert_eq!(elect_in_group(&engine, &local, alone), ROLE_OVERSEER, "this hex leads its group though another group has an Overseer");
+        assert!(engine.in_my_group("a0") && !engine.in_my_group("b0"));
+        // A hex the map doesn't place is never a candidate.
+        engine.set_partition_map_for_test(PartitionMap { epoch: 3, partitions: vec![Partition { id: 0, slices: low, hexes: vec!["a0".into()] }, Partition { id: 1, slices: !low, hexes: vec!["b0".into()] }] });
+        assert_eq!(elect_in_group(&engine, &local, Vec::new()), ROLE_HARVESTER);
+        // One partition: everyone is one group, as before.
+        engine.set_partition_map_for_test(PartitionMap::default());
+        assert_eq!(elect_in_group(&engine, &local, Vec::new()), ROLE_OVERSEER);
+        assert!(engine.in_my_group("anyone"));
     }
 
     fn hex(id: &str, role: &str, preference: &str, ram_mb: u64) -> PeerHex {

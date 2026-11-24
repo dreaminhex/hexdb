@@ -63,7 +63,8 @@ const HOLD_FOR_OVERSEER: Duration = Duration::from_secs(30);
 /// A hex handing its role over waits for another hex to hold it.
 async fn overseer_until(engine: &HexDBEngine, until: Instant) -> Option<hexdb_core::network::discovery::PeerHex> {
     loop {
-        let found = engine.peers.lock().await.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone());
+        // This hex's partition group's Overseer (writes for other partitions are routed in stage 2's step 5).
+        let found = engine.peers.lock().await.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER && engine.in_my_group(&p.hex.id)).map(|p| p.hex.clone());
         if found.is_some() || Instant::now() >= until {
             return found;
         }

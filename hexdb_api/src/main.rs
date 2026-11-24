@@ -286,8 +286,9 @@ async fn server() -> anyhow::Result<()> {
     {
         let local = hexdb_core::network::discovery::local_identity(&engine).await;
         // Of hexes started together, only the first to listen keeps an Overseer claim.
-        let (local, settled) = hexdb_core::network::discovery::settle_start(local, peers.clone());
-        let role = elect(&local, &settled);
+        let group: Vec<_> = peers.iter().filter(|p| engine.in_my_group(&p.id)).cloned().collect();
+        let (local, settled) = hexdb_core::network::discovery::settle_start(local, group);
+        let role = hexdb_core::network::discovery::elect_in_group(&engine, &local, settled);
         if role != engine.role() {
             info!("🎖️ With its data loaded, this hex starts as {} (not {}).", role, engine.role());
             engine.set_role(&role);

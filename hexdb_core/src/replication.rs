@@ -142,7 +142,7 @@ async fn peer_signs(engine: &HexDBEngine, url: &str) -> bool {
 pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_json::Value) -> Result<()> {
     let overseer = {
         let peers = engine.peers.lock().await;
-        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone())
+        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER && engine.in_my_group(&p.hex.id)).map(|p| p.hex.clone())
     }
     .ok_or_else(|| anyhow!("no Overseer is reachable"))?;
     post_to_peer(engine, &overseer, path, body).await
@@ -152,7 +152,7 @@ pub async fn post_to_overseer(engine: &HexDBEngine, path: &str, body: &serde_jso
 pub async fn post_to_overseer_for(engine: &HexDBEngine, path: &str, body: &serde_json::Value, timeout: Duration) -> Result<Vec<u8>> {
     let overseer = {
         let peers = engine.peers.lock().await;
-        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).map(|p| p.hex.clone())
+        peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER && engine.in_my_group(&p.hex.id)).map(|p| p.hex.clone())
     }
     .ok_or_else(|| anyhow!("no Overseer is reachable"))?;
     post_to_peer_for(engine, &overseer, path, body, timeout).await
@@ -596,7 +596,8 @@ impl Follower {
 
         let overseer = {
             let peers = self.engine.peers.lock().await;
-            peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER).cloned()
+            // A replica follows its own partition group's Overseer.
+            peers.iter().find(|p| p.status == "active" && p.hex.role == ROLE_OVERSEER && self.engine.in_my_group(&p.hex.id)).cloned()
         };
         let Some(overseer) = overseer else {
             *self.engine.overseer_endpoint.write().unwrap() = None;
@@ -1017,7 +1018,7 @@ impl Follower {
             let peers = self.engine.peers.lock().await;
             let replicas = peers
                 .iter()
-                .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.role != crate::network::discovery::ROLE_ORACLE && p.hex.id != me)
+                .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.role != crate::network::discovery::ROLE_ORACLE && p.hex.id != me && self.engine.in_my_group(&p.hex.id))
                 .filter(|p| !crate::retire::is_retiring(&p.hex.id))
                 .map(|p| p.hex.id.clone())
                 .collect();
@@ -1101,7 +1102,7 @@ impl Follower {
                 peers
                     .iter()
                     // A retiring replica is about to go: its copies don't count.
-                    .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.id != me && p.hex.replication_source == source && !crate::retire::is_retiring(&p.hex.id))
+                    .filter(|p| p.status == "active" && p.hex.role != ROLE_OVERSEER && p.hex.id != me && p.hex.replication_source == source && !crate::retire::is_retiring(&p.hex.id) && engine.in_my_group(&p.hex.id))
                     .map(|p| p.hex.slices_held)
                     .collect()
             };

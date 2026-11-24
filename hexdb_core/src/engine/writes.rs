@@ -1231,6 +1231,20 @@ impl HexDBEngine {
             if !replicated && self.is_writable() && crate::updates::stepping_down() {
                 return Err(EngineError::SteppingDown(crate::updates::STEPPING_DOWN_MESSAGE.into()).into());
             }
+            // On a partitioned lattice, user documents only in the slices this hex's partition
+            // owns: the backstop under routing, so nothing lands where it doesn't belong.
+            if !replicated {
+                if let Some(misplaced) = self.misplaced_write(&items) {
+                    return Err(EngineError::PartitionUnavailable(misplaced).into());
+                }
+            }
+            // A new partition map is going in (see `set_partition_map`): no user document now.
+            if !replicated
+                && self.partitions.changing.load(std::sync::atomic::Ordering::Acquire)
+                && items.iter().any(|i| !self.is_system_tessellation(&i.key.tessellation))
+            {
+                return Err(EngineError::Conflict("The partition map is changing; try again in a moment.".into()).into());
+            }
             for item in &items {
                 if let Some(expected) = item.expected_seq {
                     if self.current_seq(&state, &item.key).await != expected {

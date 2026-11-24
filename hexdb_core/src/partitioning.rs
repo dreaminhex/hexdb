@@ -36,6 +36,8 @@ pub const PARTITION_EPOCH_HEADER: &str = "x-hexdb-partition-epoch";
 pub const EPOCH_MISMATCH_CODE: &str = "partition_epoch";
 /// The first version that understands partition epochs on forwarded requests.
 pub const FIRST_VERSION: &str = "2.6.0";
+/// The first version with partition groups: a map with several partitions needs every hex on it.
+pub const STAGE_2_VERSION: &str = "2.7.0";
 
 /// One partition: the slices it owns and the hexes of its group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +160,10 @@ pub struct PartitionState {
     map: RwLock<PartitionMap>,
     /// `_partitions`' generation when last read, so an unchanged map isn't read again.
     seen: Mutex<Option<u64>>,
+    /// Set while a new map is being committed: user writes are refused meanwhile
+    /// (checked under the commit lock), so none slips in between the emptiness check
+    /// and the new map.
+    pub(crate) changing: std::sync::atomic::AtomicBool,
     /// Stored versions that failed validation (never applied).
     rejected: Mutex<Vec<String>>,
 }
@@ -189,6 +195,31 @@ pub enum Placement {
 }
 
 impl HexDBEngine {
+    #[cfg(test)]
+    pub(crate) fn set_partition_map_for_test(&self, map: PartitionMap) {
+        *self.partitions.map.write().unwrap() = map;
+    }
+
+    /// This hex's partition: Some(0) on a one-partition lattice, None for a hex a
+    /// multi-partition map doesn't place (it holds nothing and is never elected).
+    pub fn my_partition(&self) -> Option<u32> {
+        self.partitions.map.read().unwrap().partition_of_hex(&self.id.to_string())
+    }
+
+    /// True if `hex_id` is in this hex's group: every hex on a one-partition lattice;
+    /// otherwise the hexes the map puts in this hex's partition. Elections, quorum,
+    /// replication and handovers happen within a group (design/partitioning-stage-2.md).
+    pub fn in_my_group(&self, hex_id: &str) -> bool {
+        let map = self.partitions.map.read().unwrap();
+        if map.is_single() {
+            return true;
+        }
+        match map.partition_of_hex(&self.id.to_string()) {
+            Some(mine) => map.partition_of_hex(hex_id) == Some(mine),
+            None => false,
+        }
+    }
+
     /// The slices this hex's partition owns: every slice on a one-partition lattice
     /// (every lattice until stage 2), its partition's mask otherwise, and none for a hex
     /// the map doesn't place. "Holds all it should" means holding these, not all 64.
@@ -198,6 +229,27 @@ impl HexDBEngine {
             return ALL_SLICES;
         }
         map.partition_of_hex(&self.id.to_string()).and_then(|id| map.partitions.iter().find(|p| p.id == id)).map_or(0, |p| p.slices)
+    }
+
+    /// Why a write can't be committed here, if one of its user documents belongs to a
+    /// partition this hex isn't in. Always None on a one-partition lattice.
+    pub(crate) fn misplaced_write(&self, items: &[crate::engine::writes::BatchItem]) -> Option<String> {
+        let map = self.partitions.map.read().unwrap();
+        if map.is_single() {
+            return None;
+        }
+        let mine = map.partition_of_hex(&self.id.to_string());
+        for item in items {
+            let tess = &item.key.tessellation;
+            if PARTITION_LOCAL_TESSELLATIONS.contains(&tess.as_str()) || self.is_system_tessellation(tess) {
+                continue;
+            }
+            let owner = map.partition_of(tess, item.key.id);
+            if mine != Some(owner) {
+                return Some(format!("This document belongs to partition {}, which this hex isn't in, and no hex of it could take the write here. Nothing was written; try again.", owner));
+            }
+        }
+        None
     }
 
     /// Where a record of `tessellation` with `id` belongs. System tessellations are
@@ -237,6 +289,61 @@ impl HexDBEngine {
     /// Reads the newest map version if `_partitions` changed since the last look.
     /// Cheap when nothing changed; called at startup and by the configuration task.
     /// The epoch never goes back: a version older than the one in use is ignored.
+    /// Commits a new partition map (epoch + 1), on the Overseer of partition 0. A map with
+    /// several partitions is accepted only while the lattice holds no user documents:
+    /// stage 2 doesn't move data (decision 2026-11-23), so a slice that changed partitions
+    /// would leave its documents behind. Every hex must understand partitions first.
+    pub async fn set_partition_map(&self, partitions: Vec<Partition>) -> Result<PartitionMap> {
+        use std::sync::atomic::Ordering;
+        self.ensure_writable()?;
+        if self.my_partition() != Some(0) {
+            bail!(crate::engine::EngineError::Invalid("The partition map is changed on the Overseer of partition 0.".into()));
+        }
+        if !self.config.partitioning.enabled {
+            bail!(crate::engine::EngineError::Invalid("Partitioning is off (partitioning.enabled); a preview in this version.".into()));
+        }
+        if !self.all_understand_partitions().await {
+            bail!(crate::engine::EngineError::Conflict(format!("Every hex must run HexDB {} or later before the partition map can change.", STAGE_2_VERSION)));
+        }
+        let current = self.partition_map();
+        let next = PartitionMap { epoch: current.epoch + 1, partitions };
+        next.validate().map_err(|e| crate::engine::EngineError::Invalid(format!("{:#}", e)))?;
+        if self.partitions.changing.swap(true, Ordering::AcqRel) {
+            bail!(crate::engine::EngineError::Conflict("Another partition map change is in progress.".into()));
+        }
+        let result = async {
+            // A barrier: a user write that passed the check before the flag was set has
+            // finished (it held the lock); every later one is refused until the map is in.
+            self.commit_barrier().await;
+            let slices_move = next.partitions.len() > 1 || !current.is_single();
+            if slices_move {
+                for (name, _) in self.tessellation_details() {
+                    if !self.is_system_tessellation(&name) && self.count_documents(&name).await? > 0 {
+                        bail!(crate::engine::EngineError::Conflict(format!(
+                            "The lattice holds documents (in '{}'): until partitions can move data (a later 2.x stage), a lattice is split only while it's empty.",
+                            name
+                        )));
+                    }
+                }
+            }
+            self.ensure_system_tessellation(PARTITIONS_TESSELLATION)?;
+            self.put_system_document(PARTITIONS_TESSELLATION, ulid::Ulid::generate(), next.to_document(), None).await?;
+            Ok(())
+        }
+        .await;
+        self.partitions.changing.store(false, Ordering::Release);
+        result?;
+        self.refresh_partition_map().await;
+        Ok(self.partition_map())
+    }
+
+    /// True when every active hex runs a version with partition groups (stage 2).
+    async fn all_understand_partitions(&self) -> bool {
+        let peers = self.peers.lock().await;
+        // A hex on this hex's own version runs this code (before the version number reaches STAGE_2_VERSION, in development).
+        peers.iter().filter(|p| p.status == "active" && p.hex.version != self.version).all(|p| !crate::updates::is_newer(STAGE_2_VERSION, &p.hex.version))
+    }
+
     pub async fn refresh_partition_map(&self) {
         if !self.tessellation_exists(PARTITIONS_TESSELLATION) {
             return;

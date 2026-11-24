@@ -130,6 +130,7 @@ impl From<anyhow::Error> for ApiError {
             Some(EngineError::ReplicationTimeout(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "replication_timeout", m.clone()),
             Some(EngineError::NoQuorum(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "no_quorum", m.clone()),
             Some(EngineError::Unavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "content_unavailable", m.clone()),
+            Some(EngineError::PartitionUnavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "partition_unavailable", m.clone()).with_retry_after(2),
             Some(EngineError::SteppingDown(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, STEPPING_DOWN_CODE, m.clone()).with_retry_after(2),
             Some(EngineError::QuotaExceeded(m)) => ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "quota_exceeded", m.clone()),
             Some(EngineError::ScannerUnavailable(m)) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "scanner_unavailable", m.clone()).with_retry_after(10),
@@ -1995,6 +1996,55 @@ pub async fn get_partitions(State(engine): Engine, Auth(principal): Auth) -> Api
         "rejected_versions": engine.rejected_partition_maps(),
     }))
     .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct PartitionInput {
+    pub id: u32,
+    /// Slice numbers, 0 to 63.
+    pub slices: Vec<u32>,
+    /// Hex IDs.
+    pub hexes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SetPartitions {
+    /// The administrator's password again: this changes where every write goes.
+    pub password: String,
+    pub partitions: Vec<PartitionInput>,
+}
+
+/// Sets a new partition map (administrators, on the Overseer of partition 0). A preview:
+/// a map with several partitions is accepted only while the lattice holds no user documents.
+pub async fn put_partitions(
+    State(engine): Engine,
+    Auth(principal): Auth,
+    crate::client::ClientIp(client): crate::client::ClientIp,
+    body: Result<Json<SetPartitions>, JsonRejection>,
+) -> ApiResult {
+    principal.require_admin()?;
+    let Json(input) = body?;
+    hexdb_core::auth::check_reauth(&engine, &principal.login, &client).await?;
+    if !users::verify_password(&engine, &principal.user_id, &input.password).await? {
+        hexdb_core::auth::reauth_failed(&engine, &principal.login, &client, "partitions.set").await;
+        return Err(ApiError::forbidden("The password is wrong."));
+    }
+    let mut partitions = Vec::with_capacity(input.partitions.len());
+    for p in input.partitions {
+        let mut mask: hexdb_core::slicing::SliceMask = 0;
+        for slice in p.slices {
+            if slice >= hexdb_core::slicing::SLICES {
+                return Err(ApiError::invalid(format!("Slice {} doesn't exist: slices are 0 to {}.", slice, hexdb_core::slicing::SLICES - 1)));
+            }
+            mask |= 1u64 << slice;
+        }
+        partitions.push(hexdb_core::partitioning::Partition { id: p.id, slices: mask, hexes: p.hexes });
+    }
+    let map = engine.set_partition_map(partitions).await?;
+    engine
+        .audit(&principal.login, "partitions.set", "partition map", json!({ "epoch": map.epoch, "partitions": map.partitions.iter().map(|p| json!({ "id": p.id, "slices": hexdb_core::slicing::count(p.slices), "hexes": p.hexes })).collect::<Vec<_>>() }))
+        .await;
+    get_partitions(State(engine), Auth(principal)).await
 }
 
 pub async fn get_settings(State(engine): Engine, Auth(principal): Auth) -> ApiResult {
