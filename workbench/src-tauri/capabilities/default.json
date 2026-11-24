@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The workbench's own window. Environment windows (a lattice's pages) get no capability, so they can't call the workbench.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

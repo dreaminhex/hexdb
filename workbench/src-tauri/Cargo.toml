@@ -1,0 +1,29 @@
+[package]
+name = "hexdb_workbench"
+version = "0.1.0"
+edition = "2021"
+description = "HexDB Workbench: a desktop app for working with HexDB lattices"
+license = "MIT"
+publish = false
+
+# Not part of the server's workspace: the desktop toolkit's system libraries
+# (WebView2, WebKitGTK) aren't needed to build or test HexDB itself.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", features = ["process", "time", "net", "macros"] }
+ulid = "1"
+anyhow = "1"
+
+[profile.release]
+strip = true
+lto = true
