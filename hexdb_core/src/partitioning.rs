@@ -106,11 +106,9 @@ impl PartitionMap {
         self.partitions.iter().find(|p| crate::slicing::holds(p.slices, slice)).map_or(0, |p| p.id)
     }
 
-    /// The partition a document belongs to. System tessellations are all in partition 0.
+    /// The partition a document of a user tessellation belongs to, by its slice. System
+    /// tessellations aren't placed by hash: see [`HexDBEngine::placement`].
     pub fn partition_of(&self, tessellation: &str, id: ulid::Ulid) -> u32 {
-        if tessellation.starts_with('_') {
-            return 0;
-        }
         self.partition_of_slice(crate::slicing::slice_of(tessellation, id))
     }
 
@@ -164,7 +162,46 @@ pub struct PartitionState {
     rejected: Mutex<Vec<String>>,
 }
 
+/// System tessellations whose records are written in the same commit as a user
+/// document (idempotency records, vault entries, the trash and delete history), or
+/// that hold what runs per partition (plugin, trigger and stream source cursors).
+/// Each record stays in the partition that wrote it, so a commit stays one commit in
+/// one partition's WAL (design/partitioning-stage-2.md).
+pub const PARTITION_LOCAL_TESSELLATIONS: &[&str] = &[
+    crate::engine::writes::IDEMPOTENCY_TESSELLATION,
+    crate::tokens::VAULT_TESSELLATION,
+    crate::engine::deletes::TRASH_TESSELLATION,
+    crate::engine::deletes::DELETES_TESSELLATION,
+    crate::files::TRASH_TESSELLATION,
+    crate::plugins::PLUGIN_CURSORS_TESSELLATION,
+    crate::triggers::TRIGGER_CURSORS_TESSELLATION,
+    crate::streams::STREAM_OFFSETS_TESSELLATION,
+];
+
+/// Where a record belongs in a partitioned lattice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// In this partition: a user document by its slice, or a lattice-wide system
+    /// record (users, roles, keys, the configuration...) in partition 0.
+    Partition(u32),
+    /// In whichever partition wrote it: see [`PARTITION_LOCAL_TESSELLATIONS`].
+    WithItsWrite,
+}
+
 impl HexDBEngine {
+    /// Where a record of `tessellation` with `id` belongs. System tessellations are
+    /// recognized as the engine does (the `_` prefix, `users` and `roles`, or a catalog
+    /// kind of `system`), never by hash.
+    pub fn placement(&self, tessellation: &str, id: ulid::Ulid) -> Placement {
+        if PARTITION_LOCAL_TESSELLATIONS.contains(&tessellation) {
+            Placement::WithItsWrite
+        } else if self.is_system_tessellation(tessellation) {
+            Placement::Partition(0)
+        } else {
+            Placement::Partition(self.partitions.map.read().unwrap().partition_of(tessellation, id))
+        }
+    }
+
     /// The partition map this hex routes by.
     pub fn partition_map(&self) -> PartitionMap {
         self.partitions.map.read().unwrap().clone()
@@ -239,6 +276,28 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn system_tessellations_are_never_placed_by_hash() {
+        let (engine, _dir) = crate::engine::test_engine().await;
+        let low: SliceMask = (1u64 << 32) - 1;
+        *engine.partitions.map.write().unwrap() = PartitionMap { epoch: 2, partitions: vec![Partition { id: 0, slices: low, hexes: vec![] }, Partition { id: 1, slices: !low, hexes: vec!["b".into()] }] };
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            let id = ulid::Ulid::generate();
+            // users and roles have no '_' prefix, but they're lattice-wide system tessellations.
+            for system in ["users", "roles", "_api_keys", "_config", "_partitions"] {
+                assert_eq!(engine.placement(system, id), Placement::Partition(0), "{}", system);
+            }
+            for local in PARTITION_LOCAL_TESSELLATIONS {
+                assert_eq!(engine.placement(local, id), Placement::WithItsWrite, "{}", local);
+            }
+            if let Placement::Partition(p) = engine.placement("orders", id) {
+                seen.insert(p);
+            }
+        }
+        assert_eq!(seen.len(), 2, "user documents spread over both partitions");
+    }
+
     #[test]
     fn the_implicit_map_puts_everything_in_partition_zero() {
         let map = PartitionMap::default();
@@ -260,8 +319,6 @@ mod tests {
             let id = ulid::Ulid::generate();
             let slice = crate::slicing::slice_of("orders", id);
             assert_eq!(map.partition_of("orders", id), u32::from(slice >= 32));
-            // System tessellations stay in partition 0 whatever their hash.
-            assert_eq!(map.partition_of("_users", id), 0);
         }
         assert_eq!(map.partition_of_hex("b"), Some(1));
         assert_eq!(map.partition_of_hex("c"), None);
