@@ -447,9 +447,10 @@ impl HexDBEngine {
         state.at.insert(id, Slot { ready_at: stored.ready_at, sent_at: stored.sent_at, leased: stored.lease.is_some() });
     }
 
-    async fn put_message(&self, tess: &str, id: Ulid, stored: &Stored, retention_hours: u64) -> Result<()> {
+    /// The document a message is stored as, to commit with others in one go.
+    fn message_document(tess: &str, id: Ulid, stored: &Stored, retention_hours: u64) -> Result<crate::document::Document> {
         let ttl = stored.sent_at + retention_hours as i64 * 3_600_000;
-        self.put_system_document(tess, id, serde_json::to_value(stored)?, Some(ttl)).await
+        Ok(crate::document::Document { id, tessellation: tess.to_string(), data: crate::document::infer_fields_from_json(&serde_json::to_value(stored)?), ttl: Some(ttl) })
     }
 
     /// Send messages; returns their IDs (none for de-duplicated ones).
@@ -477,15 +478,17 @@ impl HexDBEngine {
         self.load_queue(name, &mut state).await?;
         let now = now_ms();
         let mut ids = Vec::with_capacity(messages.len());
-        // Unloaded until the index is updated below (see the module comment).
-        state.loaded = false;
+        // One commit for the whole batch: every message (with its dedupe key) is stored, or
+        // none is, and it costs one write to the log instead of one per message.
+        let mut docs = Vec::with_capacity(messages.len());
+        let mut sent = Vec::with_capacity(messages.len());
+        let mut keys_in_batch = std::collections::HashSet::new();
         for m in messages {
             let id = self.stream_ids.lock().unwrap().generate().unwrap_or_else(|_| Ulid::generate());
             let stored = Stored { body: m.body, sent_at: now, sent_by: by.to_string(), ready_at: now + m.delay_seconds as i64 * 1000, lease: None, receives: 0, dead_from: None };
-            let ttl = stored.sent_at + config.retention_hours as i64 * 3_600_000;
-            let mut docs = vec![crate::document::Document { id, tessellation: tess.clone(), data: crate::document::infer_fields_from_json(&serde_json::to_value(&stored)?), ttl: Some(ttl) }];
             if let Some(key) = &m.dedupe_key {
-                if self.seen_dedupe_key(name, key, now).await? {
+                // Sent before, or earlier in this same batch (not committed yet).
+                if !keys_in_batch.insert(key.clone()) || self.seen_dedupe_key(name, key, now).await? {
                     ids.push(None);
                     continue;
                 }
@@ -498,9 +501,17 @@ impl HexDBEngine {
                     ttl: Some(now + DEDUPE_MS),
                 });
             }
-            self.commit_system(docs, Vec::new()).await?;
-            Self::index(&mut state, id, &stored);
+            docs.push(Self::message_document(&tess, id, &stored, config.retention_hours)?);
             ids.push(Some(id.to_string()));
+            sent.push((id, stored));
+        }
+        if !docs.is_empty() {
+            // Unloaded until the index is updated below (see the module comment).
+            state.loaded = false;
+            self.commit_system(docs, Vec::new()).await?;
+            for (id, stored) in &sent {
+                Self::index(&mut state, *id, stored);
+            }
         }
         state.loaded = true;
         drop(state);
@@ -556,10 +567,11 @@ impl HexDBEngine {
         // gone, delayed or dead are moved out of the way, so the next call goes further.
         let due: Vec<Ulid> = state.ready.iter().take_while(|(at, _)| *at <= now).take(max.saturating_mul(4).max(64)).map(|(_, id)| *id).collect();
         let mut out = Vec::new();
+        let (mut leases, mut granted) = (Vec::new(), Vec::new());
         // Unloaded until the index is updated below (see the module comment).
         state.loaded = false;
         for id in due {
-            if out.len() >= max {
+            if granted.len() >= max {
                 break;
             }
             let Some(doc) = self.get_system_document(&tess, id).await? else {
@@ -594,7 +606,15 @@ impl HexDBEngine {
             stored.lease = Some(nonce.clone());
             stored.receives += 1;
             stored.ready_at = now + visibility_ms;
-            self.put_message(&tess, id, &stored, config.retention_hours).await?;
+            leases.push(Self::message_document(&tess, id, &stored, config.retention_hours)?);
+            granted.push((id, nonce, stored));
+        }
+        // Every lease in one commit, and into the index only once it's stored: a failed commit
+        // leases nothing (the queue reloads its index from the messages at its next call).
+        if !leases.is_empty() {
+            self.commit_system(leases, Vec::new()).await?;
+        }
+        for (id, nonce, stored) in granted {
             Self::index(&mut state, id, &stored);
             out.push(Received { id: id.to_string(), receipt: format!("{}.{}", id, nonce), body: stored.body, receives: stored.receives, sent_at: stored.sent_at });
         }
@@ -660,17 +680,25 @@ impl HexDBEngine {
         let state = self.queues.state(name);
         let mut state = state.lock().await;
         self.load_queue(name, &mut state).await?;
-        let mut done = 0;
-        state.loaded = false;
+        // One commit deleting every message whose receipt is current (a receipt given twice counts once).
+        let tess = messages_tessellation(name);
+        let mut acked = Vec::new();
         for receipt in receipts.iter().take(MAX_BATCH) {
             if let Some((id, _)) = self.leased(name, receipt).await? {
-                self.delete_system_document(&messages_tessellation(name), id).await?;
-                Self::set_ready(&mut state, id, None);
-                done += 1;
+                if !acked.contains(&id) {
+                    acked.push(id);
+                }
+            }
+        }
+        if !acked.is_empty() {
+            state.loaded = false;
+            self.commit_system(Vec::new(), acked.iter().map(|id| (tess.clone(), *id)).collect()).await?;
+            for id in &acked {
+                Self::set_ready(&mut state, *id, None);
             }
         }
         state.loaded = true;
-        Ok(done)
+        Ok(acked.len())
     }
 
     /// Give messages back: ready again now, or after `delay_seconds`; or, with
@@ -685,17 +713,28 @@ impl HexDBEngine {
         let state = self.queues.state(name);
         let mut state = state.lock().await;
         self.load_queue(name, &mut state).await?;
-        let mut done = 0;
-        state.loaded = false;
+        // One commit for every message whose receipt is current (a receipt given twice counts once).
+        let ready_at = now_ms() + seconds as i64 * 1000;
+        let (mut docs, mut changed) = (Vec::new(), Vec::new());
         for receipt in receipts.iter().take(MAX_BATCH) {
             if let Some((id, mut stored)) = self.leased(name, receipt).await? {
-                stored.ready_at = now_ms() + seconds as i64 * 1000;
+                if changed.iter().any(|(seen, _)| *seen == id) {
+                    continue;
+                }
+                stored.ready_at = ready_at;
                 if !extend {
                     stored.lease = None;
                 }
-                self.put_message(&tess, id, &stored, config.retention_hours).await?;
-                Self::index(&mut state, id, &stored);
-                done += 1;
+                docs.push(Self::message_document(&tess, id, &stored, config.retention_hours)?);
+                changed.push((id, stored));
+            }
+        }
+        let done = changed.len();
+        if !docs.is_empty() {
+            state.loaded = false;
+            self.commit_system(docs, Vec::new()).await?;
+            for (id, stored) in &changed {
+                Self::index(&mut state, *id, stored);
             }
         }
         state.loaded = true;
@@ -1014,6 +1053,26 @@ mod tests {
         assert!(e.send_messages("a", vec![keyed()], "test").await.unwrap()[0].is_none());
         assert!(e.send_messages("b", vec![keyed()], "test").await.unwrap()[0].is_some());
         e.shutdown().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// A batch is one commit: a key repeated inside one send is skipped like one sent
+    /// before, and a receipt given twice is acknowledged (or released) once.
+    #[tokio::test]
+    async fn batches_commit_once_and_count_each_message_once() {
+        let (engine, dir) = crate::engine::test_engine().await;
+        let config = QueueConfig { name: "jobs".into(), description: String::new(), visibility_seconds: 60, max_receives: 5, dead_letter: None, retention_hours: 1, created: 0, created_by: String::new() };
+        engine.save_queue(config, "t", true).await.unwrap();
+        let keyed = |key: &str| NewQueueMessage { body: json!({}), delay_seconds: 0, dedupe_key: Some(key.into()) };
+        let ids = engine.send_messages("jobs", vec![keyed("a"), keyed("a"), keyed("b")], "t").await.unwrap();
+        assert_eq!((ids[0].is_some(), ids[1].is_some(), ids[2].is_some()), (true, false, true), "{ids:?}");
+        let got = engine.receive_messages("jobs", 10, None, Duration::ZERO).await.unwrap();
+        assert_eq!(got.len(), 2);
+        let first = got[0].receipt.clone();
+        assert_eq!(engine.release_messages("jobs", &[got[1].receipt.clone(), got[1].receipt.clone()], 60, true).await.unwrap(), 1);
+        assert_eq!(engine.ack_messages("jobs", &[first.clone(), first]).await.unwrap(), 1);
+        let stats = engine.queue_stats("jobs").await.unwrap();
+        assert_eq!((stats["ready"].as_u64(), stats["in_flight"].as_u64()), (Some(0), Some(1)), "{stats}");
+        engine.shutdown().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
